@@ -25,8 +25,11 @@ def fingerprint(path):
     return h.hexdigest()
 
 def fake_ai_score():
-    # placeholder until real AI model added
-    return 100
+    return 100  # placeholder until real AI model
+
+@app.get("/")
+def home():
+    return {"status": "VeriFYD API LIVE"}
 
 @app.post("/upload/")
 async def upload_video(file: UploadFile = File(...)):
@@ -38,9 +41,7 @@ async def upload_video(file: UploadFile = File(...)):
 
     score = fake_ai_score()
 
-    # ---------------------------
-    # PASS = AUTO CERTIFY
-    # ---------------------------
+    # PASS → auto certify
     if score >= CERTIFY_THRESHOLD:
         certified_path = f"{CERT_DIR}/{cert_id}_VeriFYD.mp4"
         shutil.copy(temp_path, certified_path)
@@ -53,9 +54,7 @@ async def upload_video(file: UploadFile = File(...)):
             "download": f"https://verifyd-backend.onrender.com/download/{cert_id}"
         }
 
-    # ---------------------------
-    # FAIL = PRIVATE REVIEW
-    # ---------------------------
+    # FAIL → private review
     review_path = f"{REVIEW_DIR}/{cert_id}_{file.filename}"
     shutil.move(temp_path, review_path)
 
