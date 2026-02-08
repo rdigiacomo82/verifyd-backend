@@ -8,10 +8,12 @@ from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
 
-UPLOAD_DIR = "videos"
-CERT_DIR = "certified"
-LOGO_PATH = "logo.png"
-DB_PATH = "certificates.db"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+UPLOAD_DIR = os.path.join(BASE_DIR, "videos")
+CERT_DIR = os.path.join(BASE_DIR, "certified")
+LOGO_PATH = os.path.join(BASE_DIR, "logo.png")
+DB_PATH = os.path.join(BASE_DIR, "certificates.db")
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(CERT_DIR, exist_ok=True)
@@ -70,16 +72,16 @@ def home():
 async def upload_video(file: UploadFile = File(...), email: str = Form(...)):
     cert_id = str(uuid.uuid4())
 
-    input_path = f"{UPLOAD_DIR}/{cert_id}_{file.filename}"
-    output_path = f"{CERT_DIR}/{cert_id}.mp4"
+    input_path = os.path.join(UPLOAD_DIR, f"{cert_id}_{file.filename}")
+    output_path = os.path.join(CERT_DIR, f"{cert_id}.mp4")
 
     with open(input_path, "wb") as f:
         f.write(await file.read())
 
-    # overlay logo
     if os.path.exists(LOGO_PATH):
         cmd = [
             "ffmpeg",
+            "-y",
             "-i", input_path,
             "-i", LOGO_PATH,
             "-filter_complex", "overlay=W-w-20:H-h-20",
@@ -105,10 +107,14 @@ async def upload_video(file: UploadFile = File(...), email: str = Form(...)):
 # ---------- DOWNLOAD ----------
 @app.get("/download/{cert_id}")
 def download(cert_id: str):
-    file_path = f"{CERT_DIR}/{cert_id}.mp4"
+    file_path = os.path.join(CERT_DIR, f"{cert_id}.mp4")
 
     if os.path.exists(file_path):
-        return FileResponse(file_path, media_type="video/mp4", filename=f"certified_{cert_id}.mp4")
+        return FileResponse(
+            file_path,
+            media_type="video/mp4",
+            filename=f"certified_{cert_id}.mp4"
+        )
 
     return JSONResponse({"error": "Not found"}, status_code=404)
 
@@ -116,6 +122,7 @@ def download(cert_id: str):
 @app.get("/verify/{cert_id}")
 def verify(cert_id: str):
     return {"status": "VALID CERTIFICATE", "id": cert_id}
+
 
 
 
