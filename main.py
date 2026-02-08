@@ -1,29 +1,23 @@
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import FileResponse
 import hashlib
 import os
 import uuid
-import subprocess
 import sqlite3
 from datetime import datetime
 
-app = FastAPI(title="VeriFYD API")
+app = FastAPI(title="VFVid API")
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
-UPLOAD_DIR = os.path.join(BASE_DIR, "videos")
-CERTIFIED_DIR = os.path.join(BASE_DIR, "certified")
-ASSETS_DIR = os.path.join(BASE_DIR, "assets")
-DB_FILE = os.path.join(BASE_DIR, "certificates.db")
+UPLOAD_DIR = "videos"
+CERTIFIED_DIR = "certified"
+DB_FILE = "certificates.db"
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(CERTIFIED_DIR, exist_ok=True)
 
-FFMPEG_PATH = "ffmpeg"   # ← Render-safe
-
-# =====================================================
-# DB
-# =====================================================
+# ==============================
+# DATABASE INIT
+# ==============================
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -31,10 +25,12 @@ def init_db():
     c.execute("""
     CREATE TABLE IF NOT EXISTS certificates (
         id TEXT PRIMARY KEY,
+        email TEXT,
         filename TEXT,
         fingerprint TEXT,
         certified_file TEXT,
-        created_at TEXT
+        created_at TEXT,
+        status TEXT
     )
     """)
 
@@ -43,130 +39,116 @@ def init_db():
 
 init_db()
 
-# =====================================================
-# HASH
-# =====================================================
+# ==============================
+# FINGERPRINT
+# ==============================
 def fingerprint(path):
     sha = hashlib.sha256()
-    with open(path,"rb") as f:
+    with open(path, "rb") as f:
         while chunk := f.read(8192):
             sha.update(chunk)
     return sha.hexdigest()
 
-# =====================================================
-# VIDEO STAMP
-# =====================================================
-def stamp_video(input_path, output_path, cert_id):
-
-    logo_path = os.path.join(ASSETS_DIR, "logo.png")
-
-    command = [
-        FFMPEG_PATH,
-        "-y",
-        "-i", input_path,
-        "-i", logo_path,
-        "-filter_complex",
-        "overlay=W-w-20:H-h-20,"
-        "drawtext=text='VeriFYD Certified':fontsize=28:fontcolor=white:x=20:y=H-th-20",
-        "-metadata", f"cert_id={cert_id}",
-        "-c:v","libx264",
-        "-preset","fast",
-        "-crf","23",
-        "-c:a","aac",
-        output_path
-    ]
-
-    result = subprocess.run(command, capture_output=True, text=True)
-
-    if result.returncode != 0:
-        print(result.stderr)
-        raise Exception("FFmpeg failed")
-
-# =====================================================
+# ==============================
 # UPLOAD
-# =====================================================
+# ==============================
 @app.post("/upload/")
-async def upload_video(file: UploadFile = File(...)):
-
+async def upload_video(
+    file: UploadFile = File(...),
+    email: str = Form(...)
+):
     ext = os.path.splitext(file.filename)[1].lower()
-    if ext not in [".mp4",".mov",".avi",".m4v"]:
-        return {"error":"Invalid format"}
+    if ext not in [".mp4", ".mov", ".avi", ".m4v"]:
+        return {"error": "Unsupported file type"}
 
-    raw_path = os.path.join(UPLOAD_DIR, f"{uuid.uuid4()}_{file.filename}")
+    upload_id = str(uuid.uuid4())
+    raw_path = os.path.join(UPLOAD_DIR, f"{upload_id}_{file.filename}")
 
-    with open(raw_path,"wb") as f:
-        f.write(await file.read())
+    with open(raw_path, "wb") as buffer:
+        buffer.write(await file.read())
 
     fp = fingerprint(raw_path)
-    cert_id = str(uuid.uuid4())
-    out_name = f"{cert_id}.mp4"
-    out_path = os.path.join(CERTIFIED_DIR, out_name)
 
-    stamp_video(raw_path, out_path, cert_id)
+    cert_id = str(uuid.uuid4())
+    certified_filename = f"{cert_id}.mp4"
+    certified_path = os.path.join(CERTIFIED_DIR, certified_filename)
+
+    # STABLE VERSION: just copy video (no ffmpeg)
+    with open(raw_path, "rb") as src, open(certified_path, "wb") as dst:
+        dst.write(src.read())
 
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
 
     c.execute("""
-    INSERT INTO certificates VALUES (?,?,?,?,?)
-    """,(cert_id,file.filename,fp,out_name,datetime.utcnow().isoformat()))
+        INSERT INTO certificates
+        (id, email, filename, fingerprint, certified_file, created_at, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (
+        cert_id,
+        email,
+        file.filename,
+        fp,
+        certified_filename,
+        datetime.utcnow().isoformat(),
+        "CERTIFIED"
+    ))
 
     conn.commit()
     conn.close()
 
-    base = "https://verifyd-backend.onrender.com"
-
     return {
-        "status":"CERTIFIED",
+        "status": "CERTIFIED",
         "certificate_id": cert_id,
-        "download": f"{base}/download/{cert_id}",
-        "verify": f"{base}/verify/{cert_id}"
+        "verify": f"https://verifyd-backend.onrender.com/verify/{cert_id}",
+        "download": f"https://verifyd-backend.onrender.com/download/{cert_id}"
     }
 
-# =====================================================
-# DOWNLOAD
-# =====================================================
-@app.get("/download/{cert_id}")
-def download(cert_id:str):
-
+# ==============================
+# VERIFY
+# ==============================
+@app.get("/verify/{cert_id}")
+def verify(cert_id: str):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute("SELECT certified_file FROM certificates WHERE id=?",(cert_id,))
+    c.execute("SELECT * FROM certificates WHERE id=?", (cert_id,))
     row = c.fetchone()
     conn.close()
 
     if not row:
-        return {"error":"not found"}
+        return {"error": "Not found"}
+
+    return {
+        "status": row[6],
+        "filename": row[2],
+        "fingerprint": row[3],
+        "issued": row[5]
+    }
+
+# ==============================
+# DOWNLOAD
+# ==============================
+@app.get("/download/{cert_id}")
+def download(cert_id: str):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT certified_file FROM certificates WHERE id=?", (cert_id,))
+    row = c.fetchone()
+    conn.close()
+
+    if not row:
+        return {"error": "Not found"}
 
     path = os.path.join(CERTIFIED_DIR, row[0])
-
     return FileResponse(path, media_type="video/mp4", filename=row[0])
 
-# =====================================================
-# VERIFY
-# =====================================================
-@app.get("/verify/{cert_id}")
-def verify(cert_id:str):
-
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT * FROM certificates WHERE id=?",(cert_id,))
-    row = c.fetchone()
-    conn.close()
-
-    if not row:
-        return {"status":"not found"}
-
-    return {
-        "status":"verified",
-        "certificate_id":row[0],
-        "file":row[1],
-        "fingerprint":row[2]
-    }
-
+# ==============================
+# ROOT
+# ==============================
 @app.get("/")
-def home():
-    return {"status":"VFVid API LIVE"}
+def root():
+    return {"status": "VFVid API LIVE"}
+
 
 
 
