@@ -1,14 +1,21 @@
+import os
+import uuid
+import sqlite3
+import subprocess
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-import shutil
-import os
-import uuid
-import subprocess
 
 app = FastAPI()
 
-# Allow website to talk to backend
+UPLOAD_DIR = "videos"
+CERT_DIR = "certified"
+LOGO_PATH = "logo.png"
+DB_PATH = "certificates.db"
+
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+os.makedirs(CERT_DIR, exist_ok=True)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -17,103 +24,98 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-BASE_URL = "https://verifyd-backend.onrender.com"
+# ---------- DATABASE ----------
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS usage (
+        email TEXT PRIMARY KEY,
+        uploads INTEGER
+    )
+    """)
+    conn.commit()
+    conn.close()
 
-UPLOAD_DIR = "videos"
-CERT_DIR = "certified"
+init_db()
 
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-os.makedirs(CERT_DIR, exist_ok=True)
+def get_usage(email):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT uploads FROM usage WHERE email=?", (email,))
+    row = c.fetchone()
+    if row:
+        count = row[0]
+    else:
+        count = 0
+        c.execute("INSERT INTO usage VALUES (?,?)", (email, 0))
+        conn.commit()
+    conn.close()
+    return count
 
-LOGO_PATH = "logo.png"   # put your logo.png in same folder
+def increment_usage(email):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("UPDATE usage SET uploads = uploads + 1 WHERE email=?", (email,))
+    conn.commit()
+    conn.close()
 
-
+# ---------- ROOT ----------
 @app.get("/")
 def home():
     return {"status": "VFVid API LIVE"}
 
-
-# =========================
-# VIDEO CERTIFICATION ENGINE
-# =========================
-def certify_video(input_path, output_path, cert_id):
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-i", input_path,
-        "-i", LOGO_PATH,
-        "-filter_complex",
-        "[1:v]scale=140:-1[logo];"
-        "[0:v][logo]overlay=W-w-20:H-h-20,"
-        "drawtext=text='VERIFIED AUTHENTIC':fontcolor=white:fontsize=40:x=20:y=20,"
-        f"drawtext=text='Certificate ID: {cert_id}':fontcolor=purple:fontsize=26:x=20:y=70",
-        "-codec:a", "copy",
-        output_path
-    ]
-
-    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-
-# =========================
-# UPLOAD VIDEO
-# =========================
+# ---------- UPLOAD ----------
 @app.post("/upload/")
 async def upload_video(file: UploadFile = File(...), email: str = Form(...)):
-
-    file_id = str(uuid.uuid4())
-    input_path = f"{UPLOAD_DIR}/{file_id}_{file.filename}"
-
-    with open(input_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-
     cert_id = str(uuid.uuid4())
-    output_path = f"{CERT_DIR}/certified_{file.filename}"
 
-    certify_video(input_path, output_path, cert_id)
+    input_path = f"{UPLOAD_DIR}/{cert_id}_{file.filename}"
+    output_path = f"{CERT_DIR}/{cert_id}.mp4"
+
+    with open(input_path, "wb") as f:
+        f.write(await file.read())
+
+    # overlay logo
+    if os.path.exists(LOGO_PATH):
+        cmd = [
+            "ffmpeg",
+            "-i", input_path,
+            "-i", LOGO_PATH,
+            "-filter_complex", "overlay=W-w-20:H-h-20",
+            "-codec:a", "copy",
+            output_path
+        ]
+        subprocess.run(cmd)
+    else:
+        os.rename(input_path, output_path)
+
+    increment_usage(email)
+    used = get_usage(email)
+    free_remaining = max(0, 10 - used)
 
     return {
         "status": "CERTIFIED",
         "certificate_id": cert_id,
-        "verify": f"{BASE_URL}/verify/{cert_id}",
-        "download": f"{BASE_URL}/download/{cert_id}",
-        "free_remaining": 9
+        "verify": f"https://verifyd-backend.onrender.com/verify/{cert_id}",
+        "download": f"https://verifyd-backend.onrender.com/download/{cert_id}",
+        "free_remaining": free_remaining
     }
 
-
-# =========================
-# DOWNLOAD VIDEO
-# =========================
+# ---------- DOWNLOAD ----------
 @app.get("/download/{cert_id}")
-def download_video(cert_id: str):
-    for file in os.listdir(CERT_DIR):
-        if file.startswith("certified_"):
-            return FileResponse(
-                path=f"{CERT_DIR}/{file}",
-                filename=file,
-                media_type="video/mp4"
-            )
+def download(cert_id: str):
+    file_path = f"{CERT_DIR}/{cert_id}.mp4"
+
+    if os.path.exists(file_path):
+        return FileResponse(file_path, media_type="video/mp4", filename=f"certified_{cert_id}.mp4")
+
     return JSONResponse({"error": "Not found"}, status_code=404)
 
-
-# =========================
-# VERIFY PAGE
-# =========================
+# ---------- VERIFY ----------
 @app.get("/verify/{cert_id}")
 def verify(cert_id: str):
-    return {
-        "status": "VERIFIED AUTHENTIC",
-        "certificate_id": cert_id,
-        "issuer": "VeriFYD",
-        "public_verify": True
-    }
-
-
-# =========================
-# PAYPAL SUBSCRIPTION ACTIVATE
-# =========================
-@app.post("/activate-subscription/")
-def activate_subscription(email: str = Form(...)):
-    return {"status": "subscription activated"}
+    return {"status": "VALID CERTIFICATE", "id": cert_id}
 
 
 
