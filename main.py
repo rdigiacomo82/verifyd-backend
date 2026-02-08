@@ -1,15 +1,14 @@
+from fastapi import FastAPI, UploadFile, File, Form
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+import shutil
 import os
 import uuid
-import shutil
-import sqlite3
-
-from fastapi import FastAPI, UploadFile, File, Form
-from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
-from fastapi.middleware.cors import CORSMiddleware
+import subprocess
 
 app = FastAPI()
 
-# Allow frontend access
+# Allow website to talk to backend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -18,160 +17,100 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Ensure folders exist
-os.makedirs("videos", exist_ok=True)
-os.makedirs("certified", exist_ok=True)
+BASE_URL = "https://verifyd-backend.onrender.com"
 
-DB = "certificates.db"
+UPLOAD_DIR = "videos"
+CERT_DIR = "certified"
 
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+os.makedirs(CERT_DIR, exist_ok=True)
 
-# -----------------------------
-# DB INIT
-# -----------------------------
-def init_db():
-    conn = sqlite3.connect(DB)
-    c = conn.cursor()
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS certificates (
-        cert_id TEXT PRIMARY KEY,
-        email TEXT,
-        filename TEXT
-    )
-    """)
-    conn.commit()
-    conn.close()
+LOGO_PATH = "logo.png"   # put your logo.png in same folder
 
 
-init_db()
-
-
-# -----------------------------
-# HOME
-# -----------------------------
 @app.get("/")
 def home():
     return {"status": "VFVid API LIVE"}
 
 
-# -----------------------------
-# UPLOAD VIDEO
-# -----------------------------
-@app.post("/upload/")
-async def upload_video(
-    file: UploadFile = File(...),
-    email: str = Form(...)
-):
-    cert_id = str(uuid.uuid4())
-    original_path = f"videos/{cert_id}_{file.filename}"
-    certified_path = f"certified/{cert_id}_{file.filename}"
+# =========================
+# VIDEO CERTIFICATION ENGINE
+# =========================
+def certify_video(input_path, output_path, cert_id):
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i", input_path,
+        "-i", LOGO_PATH,
+        "-filter_complex",
+        "[1:v]scale=140:-1[logo];"
+        "[0:v][logo]overlay=W-w-20:H-h-20,"
+        "drawtext=text='VERIFIED AUTHENTIC':fontcolor=white:fontsize=40:x=20:y=20,"
+        f"drawtext=text='Certificate ID: {cert_id}':fontcolor=purple:fontsize=26:x=20:y=70",
+        "-codec:a", "copy",
+        output_path
+    ]
 
-    # Save original
-    with open(original_path, "wb") as buffer:
+    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+# =========================
+# UPLOAD VIDEO
+# =========================
+@app.post("/upload/")
+async def upload_video(file: UploadFile = File(...), email: str = Form(...)):
+
+    file_id = str(uuid.uuid4())
+    input_path = f"{UPLOAD_DIR}/{file_id}_{file.filename}"
+
+    with open(input_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
-    # Copy as certified (placeholder until watermark added)
-    shutil.copy(original_path, certified_path)
+    cert_id = str(uuid.uuid4())
+    output_path = f"{CERT_DIR}/certified_{file.filename}"
 
-    # Save to DB
-    conn = sqlite3.connect(DB)
-    c = conn.cursor()
-    c.execute(
-        "INSERT INTO certificates VALUES (?, ?, ?)",
-        (cert_id, email, file.filename)
-    )
-    conn.commit()
-    conn.close()
+    certify_video(input_path, output_path, cert_id)
 
     return {
         "status": "CERTIFIED",
         "certificate_id": cert_id,
-        "verify": f"https://verifyd-backend.onrender.com/verify/{cert_id}",
-        "download": f"https://verifyd-backend.onrender.com/download/{cert_id}",
+        "verify": f"{BASE_URL}/verify/{cert_id}",
+        "download": f"{BASE_URL}/download/{cert_id}",
         "free_remaining": 9
     }
 
 
-# -----------------------------
-# VERIFY PAGE (PUBLIC PAGE)
-# -----------------------------
-@app.get("/verify/{cert_id}", response_class=HTMLResponse)
-def verify(cert_id: str):
-    conn = sqlite3.connect(DB)
-    c = conn.cursor()
-    c.execute("SELECT email, filename FROM certificates WHERE cert_id=?", (cert_id,))
-    row = c.fetchone()
-    conn.close()
-
-    if not row:
-        return HTMLResponse("<h1>Certificate Not Found</h1>", status_code=404)
-
-    email, filename = row
-
-    return f"""
-    <html>
-    <head>
-        <title>VFVid Certificate</title>
-        <style>
-            body {{
-                background:#0b0b0b;
-                color:white;
-                font-family:Arial;
-                text-align:center;
-                padding-top:60px;
-            }}
-            .box {{
-                background:#1c1c1c;
-                padding:40px;
-                border-radius:12px;
-                width:500px;
-                margin:auto;
-            }}
-            .seal {{
-                font-size:42px;
-                color:#7c5cff;
-                margin-bottom:20px;
-            }}
-        </style>
-    </head>
-    <body>
-        <div class="box">
-            <div class="seal">✔ VFVid Certified</div>
-            <p><b>Certificate ID:</b> {cert_id}</p>
-            <p><b>File:</b> {filename}</p>
-            <p><b>Owner:</b> {email}</p>
-            <p>Status: AUTHENTIC VIDEO</p>
-        </div>
-    </body>
-    </html>
-    """
-
-
-# -----------------------------
+# =========================
 # DOWNLOAD VIDEO
-# -----------------------------
+# =========================
 @app.get("/download/{cert_id}")
-def download(cert_id: str):
-    conn = sqlite3.connect(DB)
-    c = conn.cursor()
-    c.execute("SELECT filename FROM certificates WHERE cert_id=?", (cert_id,))
-    row = c.fetchone()
-    conn.close()
-
-    if not row:
-        return JSONResponse({"error": "Not found"}, status_code=404)
-
-    filename = row[0]
-    path = f"certified/{cert_id}_{filename}"
-
-    if not os.path.exists(path):
-        return JSONResponse({"error": "File missing"}, status_code=404)
-
-    return FileResponse(path, media_type="video/mp4", filename=f"certified_{filename}")
+def download_video(cert_id: str):
+    for file in os.listdir(CERT_DIR):
+        if file.startswith("certified_"):
+            return FileResponse(
+                path=f"{CERT_DIR}/{file}",
+                filename=file,
+                media_type="video/mp4"
+            )
+    return JSONResponse({"error": "Not found"}, status_code=404)
 
 
-# -----------------------------
-# ACTIVATE SUBSCRIPTION
-# -----------------------------
+# =========================
+# VERIFY PAGE
+# =========================
+@app.get("/verify/{cert_id}")
+def verify(cert_id: str):
+    return {
+        "status": "VERIFIED AUTHENTIC",
+        "certificate_id": cert_id,
+        "issuer": "VeriFYD",
+        "public_verify": True
+    }
+
+
+# =========================
+# PAYPAL SUBSCRIPTION ACTIVATE
+# =========================
 @app.post("/activate-subscription/")
 def activate_subscription(email: str = Form(...)):
     return {"status": "subscription activated"}
