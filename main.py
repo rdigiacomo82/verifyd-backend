@@ -1,134 +1,77 @@
-from fastapi import FastAPI, UploadFile, File, Form
-from fastapi.responses import FileResponse
-from fastapi.middleware.cors import CORSMiddleware
-import shutil
-import uuid
-import sqlite3
 import os
+import uuid
 import subprocess
+from fastapi import FastAPI, UploadFile, File
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 app = FastAPI()
 
-# CORS (allow your website)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
+# -----------------------------
+# FOLDERS
+# -----------------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-VIDEOS_DIR = os.path.join(BASE_DIR, "videos")
+VIDEO_DIR = os.path.join(BASE_DIR, "videos")
 CERT_DIR = os.path.join(BASE_DIR, "certified")
-DB_PATH = os.path.join(BASE_DIR, "certificates.db")
-LOGO_PATH = os.path.join(BASE_DIR, "logo.png")
+ASSETS_DIR = os.path.join(BASE_DIR, "assets")
 
-os.makedirs(VIDEOS_DIR, exist_ok=True)
+os.makedirs(VIDEO_DIR, exist_ok=True)
 os.makedirs(CERT_DIR, exist_ok=True)
 
-# ---------- DATABASE ----------
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS certs (
-        id TEXT PRIMARY KEY,
-        email TEXT,
-        filename TEXT
-    )
-    """)
-    conn.commit()
-    conn.close()
+# -----------------------------
+# SERVE STATIC FILES (THIS FIXES LOGO 404)
+# -----------------------------
+app.mount("/assets", StaticFiles(directory=ASSETS_DIR), name="assets")
 
-init_db()
-
-# ---------- HOME ----------
+# -----------------------------
+# STATUS CHECK
+# -----------------------------
 @app.get("/")
-def home():
+def root():
     return {"status": "VFVid API LIVE"}
 
-# ---------- UPLOAD ----------
+# -----------------------------
+# UPLOAD VIDEO
+# -----------------------------
 @app.post("/upload/")
-async def upload(file: UploadFile = File(...), email: str = Form(...)):
-    cert_id = str(uuid.uuid4())
-    input_path = os.path.join(VIDEOS_DIR, file.filename)
-    output_name = f"certified_{file.filename}"
-    output_path = os.path.join(CERT_DIR, output_name)
+async def upload_video(file: UploadFile = File(...)):
+    video_id = str(uuid.uuid4())
+    input_path = os.path.join(VIDEO_DIR, f"{video_id}.mp4")
+    output_path = os.path.join(CERT_DIR, f"certified_{video_id}.mp4")
 
-    # save original
-    with open(input_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+    with open(input_path, "wb") as f:
+        f.write(await file.read())
 
-    # ---------- ADD LOGO OVERLAY ----------
-    if os.path.exists(LOGO_PATH):
-        try:
-            subprocess.run([
-                "ffmpeg",
-                "-y",
-                "-i", input_path,
-                "-i", LOGO_PATH,
-                "-filter_complex", "overlay=W-w-20:H-h-20",
-                output_path
-            ], check=True)
-        except:
-            shutil.copy(input_path, output_path)
-    else:
-        shutil.copy(input_path, output_path)
+    logo_path = os.path.join(ASSETS_DIR, "logo.png")
 
-    # ---------- SAVE TO DB ----------
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("INSERT INTO certs VALUES (?, ?, ?)", (cert_id, email, output_name))
-    conn.commit()
-    conn.close()
+    # Overlay logo with ffmpeg
+    cmd = [
+        "ffmpeg",
+        "-i", input_path,
+        "-i", logo_path,
+        "-filter_complex", "overlay=W-w-20:H-h-20",
+        "-codec:a", "copy",
+        output_path
+    ]
+
+    subprocess.run(cmd)
 
     return {
-        "status": "CERTIFIED",
-        "certificate_id": cert_id,
-        "verify": f"https://verifyd-backend.onrender.com/verify/{cert_id}",
-        "download": f"https://verifyd-backend.onrender.com/download/{cert_id}",
-        "uploads_used": 1,
-        "free_remaining": 9
+        "certificate_id": video_id,
+        "download": f"/download/{video_id}"
     }
 
-# ---------- DOWNLOAD ----------
-@app.get("/download/{cert_id}")
-def download(cert_id: str):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT filename FROM certs WHERE id=?", (cert_id,))
-    row = c.fetchone()
-    conn.close()
+# -----------------------------
+# DOWNLOAD CERTIFIED VIDEO
+# -----------------------------
+@app.get("/download/{video_id}")
+def download(video_id: str):
+    file_path = os.path.join(CERT_DIR, f"certified_{video_id}.mp4")
 
-    if not row:
-        return {"error": "Not found"}
+    if os.path.exists(file_path):
+        return FileResponse(file_path, media_type="video/mp4")
 
-    file_path = os.path.join(CERT_DIR, row[0])
-
-    if not os.path.exists(file_path):
-        return {"error": "File missing"}
-
-    return FileResponse(file_path, media_type="video/mp4", filename=row[0])
-
-# ---------- VERIFY ----------
-@app.get("/verify/{cert_id}")
-def verify(cert_id: str):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT email, filename FROM certs WHERE id=?", (cert_id,))
-    row = c.fetchone()
-    conn.close()
-
-    if not row:
-        return {"error": "Not found"}
-
-    return {
-        "status": "verified",
-        "certificate_id": cert_id,
-        "owner": row[0],
-        "file": row[1]
-    }
+    return {"detail": "Not Found"}
 
 
 
