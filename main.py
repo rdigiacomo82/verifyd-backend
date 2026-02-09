@@ -62,7 +62,7 @@ def fingerprint(file_path):
     return sha256.hexdigest()
 
 # ============================================================
-# WATERMARK + ENCODE (TOP EDGE POSITION)
+# WATERMARK — FLUSH TO TOP BORDER
 # ============================================================
 def stamp_video(input_path, output_path, cert_id):
 
@@ -84,10 +84,10 @@ def stamp_video(input_path, output_path, cert_id):
         "-i", input_path,
         "-i", LOGO_PATH,
         "-filter_complex",
-        # logo at very top edge
-        f"[0:v][1:v] overlay=10:10,"
-        # text directly under logo
-        f"drawtext=text='{text}':x=10:y=55:fontsize=18:fontcolor=white:box=1:boxcolor=black@0.4",
+        # LOGO TOUCHING TOP BORDER
+        f"[0:v][1:v] overlay=0:0,"
+        # TEXT DIRECTLY BELOW LOGO
+        f"drawtext=text='{text}':x=10:y=40:fontsize=18:fontcolor=white:box=1:boxcolor=black@0.4",
         "-c:v","libx264","-preset","fast","-crf","23",
         "-c:a","aac","-b:a","128k",
         output_path
@@ -163,7 +163,7 @@ def verify(cid:str):
     }
 
 # ============================================================
-# DOWNLOAD
+# DOWNLOAD VIDEO
 # ============================================================
 @app.get("/download/{cid}")
 def download(cid:str):
