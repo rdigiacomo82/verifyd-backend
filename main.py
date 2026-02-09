@@ -8,10 +8,6 @@ import subprocess
 import sqlite3
 from datetime import datetime
 
-# ============================================================
-# VeriFYD Backend
-# ============================================================
-
 app = FastAPI(title="VeriFYD Video Certification Authority")
 
 # --- CORS ---
@@ -62,12 +58,11 @@ def fingerprint(file_path):
     return sha256.hexdigest()
 
 # ============================================================
-# WATERMARK — FLUSH TO TOP BORDER
+# WATERMARK — SMALLER + HIGHER + LEFT
 # ============================================================
 def stamp_video(input_path, output_path, cert_id):
 
     if not os.path.exists(LOGO_PATH):
-        # fallback encode if logo missing
         command = [
             "ffmpeg","-y","-i",input_path,
             "-c:v","libx264","-preset","fast","-crf","23",
@@ -77,17 +72,17 @@ def stamp_video(input_path, output_path, cert_id):
         subprocess.run(command, check=True)
         return
 
-    text = f"VeriFYD CERTIFIED {cert_id[:8]}"
+    text = f"VeriFYD {cert_id[:6]}"
 
     command = [
         "ffmpeg","-y",
         "-i", input_path,
         "-i", LOGO_PATH,
         "-filter_complex",
-        # LOGO TOUCHING TOP BORDER
+        # LOGO ALMOST TOUCHING TOP-LEFT EDGE
         f"[0:v][1:v] overlay=0:0,"
-        # TEXT DIRECTLY BELOW LOGO
-        f"drawtext=text='{text}':x=10:y=40:fontsize=18:fontcolor=white:box=1:boxcolor=black@0.4",
+        # SMALLER TEXT VERY CLOSE UNDER LOGO
+        f"drawtext=text='{text}':x=6:y=32:fontsize=14:fontcolor=white:box=1:boxcolor=black@0.35",
         "-c:v","libx264","-preset","fast","-crf","23",
         "-c:a","aac","-b:a","128k",
         output_path
@@ -96,7 +91,6 @@ def stamp_video(input_path, output_path, cert_id):
     try:
         subprocess.run(command, check=True)
     except:
-        # fallback encode if watermark fails
         command = [
             "ffmpeg","-y","-i",input_path,
             "-c:v","libx264","-preset","fast","-crf","23",
@@ -176,6 +170,7 @@ def download(cid:str):
 @app.get("/")
 def home():
     return {"status":"VeriFYD backend live"}
+
 
 
 
