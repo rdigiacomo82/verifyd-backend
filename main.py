@@ -1,22 +1,20 @@
 from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 import hashlib
 import os
 import uuid
 import subprocess
 import sqlite3
-import shutil
 from datetime import datetime
 
 # ============================================================
-# VeriFYD Video Certification Authority
+# VeriFYD Backend
 # ============================================================
 
 app = FastAPI(title="VeriFYD Video Certification Authority")
 
-# ------------------------------------------------------------
-# CORS (allows vfvid.com frontend to talk to backend)
-# ------------------------------------------------------------
+# --- CORS ---
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -34,12 +32,11 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(CERTIFIED_DIR, exist_ok=True)
 
 # ============================================================
-# Database Setup
+# DB
 # ============================================================
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-
     c.execute("""
     CREATE TABLE IF NOT EXISTS certificates (
         id TEXT PRIMARY KEY,
@@ -49,16 +46,15 @@ def init_db():
         created_at TEXT
     )
     """)
-
     conn.commit()
     conn.close()
 
 init_db()
 
 # ============================================================
-# Fingerprint Generator
+# Fingerprint
 # ============================================================
-def generate_fingerprint(file_path: str):
+def fingerprint(file_path):
     sha256 = hashlib.sha256()
     with open(file_path, "rb") as f:
         while chunk := f.read(8192):
@@ -66,138 +62,117 @@ def generate_fingerprint(file_path: str):
     return sha256.hexdigest()
 
 # ============================================================
-# BASIC ENCODE (fallback if watermark fails)
+# WATERMARK + ENCODE
 # ============================================================
-def basic_encode(input_path: str, output_path: str, cert_id: str):
-    command = [
-        "ffmpeg",
-        "-y",
-        "-i", input_path,
-        "-metadata", f"VeriFYD-CertID={cert_id}",
-        "-metadata", "VeriFYD-Status=CertifiedAuthentic",
-        "-c:v", "libx264",
-        "-preset", "fast",
-        "-crf", "23",
-        "-c:a", "aac",
-        "-b:a", "128k",
-        output_path
-    ]
-    subprocess.run(command, check=True)
+def stamp_video(input_path, output_path, cert_id):
 
-# ============================================================
-# WATERMARK + CERTIFICATION
-# ============================================================
-def stamp_video(input_path: str, output_path: str, cert_id: str):
-
-    # If logo missing → fallback
     if not os.path.exists(LOGO_PATH):
-        print("⚠ Logo not found — certifying without watermark")
-        return basic_encode(input_path, output_path, cert_id)
+        # fallback encode if logo missing
+        command = [
+            "ffmpeg","-y","-i",input_path,
+            "-c:v","libx264","-preset","fast","-crf","23",
+            "-c:a","aac","-b:a","128k",
+            output_path
+        ]
+        subprocess.run(command, check=True)
+        return
 
     text = f"VeriFYD CERTIFIED {cert_id[:8]}"
 
     command = [
-        "ffmpeg",
-        "-y",
+        "ffmpeg","-y",
         "-i", input_path,
         "-i", LOGO_PATH,
         "-filter_complex",
-        f"[0:v][1:v] overlay=20:20, drawtext=text='{text}':x=20:y=110:fontsize=18:fontcolor=white:box=1:boxcolor=black@0.4",
-        "-metadata", f"VeriFYD-CertID={cert_id}",
-        "-metadata", "VeriFYD-Status=CertifiedAuthentic",
-        "-c:v", "libx264",
-        "-preset", "fast",
-        "-crf", "23",
-        "-c:a", "aac",
-        "-b:a", "128k",
+        f"[0:v][1:v] overlay=20:20,drawtext=text='{text}':x=20:y=110:fontsize=18:fontcolor=white:box=1:boxcolor=black@0.4",
+        "-c:v","libx264","-preset","fast","-crf","23",
+        "-c:a","aac","-b:a","128k",
         output_path
     ]
 
     try:
         subprocess.run(command, check=True)
-        print("✅ Watermark applied")
-    except Exception as e:
-        print("❌ Watermark failed — fallback:", e)
-        basic_encode(input_path, output_path, cert_id)
+    except:
+        # fallback encode if watermark fails
+        command = [
+            "ffmpeg","-y","-i",input_path,
+            "-c:v","libx264","-preset","fast","-crf","23",
+            "-c:a","aac","-b:a","128k",
+            output_path
+        ]
+        subprocess.run(command, check=True)
 
 # ============================================================
-# Upload Endpoint
+# UPLOAD
 # ============================================================
 @app.post("/upload/")
-async def upload_video(file: UploadFile = File(...)):
+async def upload(file: UploadFile = File(...)):
 
-    upload_id = str(uuid.uuid4())
-    raw_path = os.path.join(UPLOAD_DIR, f"{upload_id}_{file.filename}")
-
-    with open(raw_path, "wb") as buffer:
-        buffer.write(await file.read())
-
-    fingerprint = generate_fingerprint(raw_path)
     cert_id = str(uuid.uuid4())
 
-    certified_filename = f"{cert_id}_VeriFYD.mp4"
-    certified_path = os.path.join(CERTIFIED_DIR, certified_filename)
+    raw_path = f"{UPLOAD_DIR}/{cert_id}_{file.filename}"
+    with open(raw_path,"wb") as buffer:
+        buffer.write(await file.read())
 
-    # Apply watermark safely
+    fp = fingerprint(raw_path)
+
+    certified_name = f"{cert_id}_VeriFYD.mp4"
+    certified_path = f"{CERTIFIED_DIR}/{certified_name}"
+
     stamp_video(raw_path, certified_path, cert_id)
 
-    # Store in DB
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute("""
-        INSERT INTO certificates (id, filename, fingerprint, certified_file, created_at)
-        VALUES (?, ?, ?, ?, ?)
-    """, (
-        cert_id,
-        file.filename,
-        fingerprint,
-        certified_filename,
-        datetime.utcnow().isoformat()
-    ))
+    c.execute("INSERT INTO certificates VALUES (?,?,?,?,?)",
+              (cert_id,file.filename,fp,certified_name,datetime.utcnow().isoformat()))
     conn.commit()
     conn.close()
 
+    base = "https://verifyd-backend.onrender.com"
+
     return {
-        "message": "✅ Video Certified Successfully by VeriFYD",
+        "status": "CERTIFIED",
         "certificate_id": cert_id,
-        "fingerprint": fingerprint,
-        "certified_video_file": certified_filename,
-        "verification_link": f"https://verifyd-backend.onrender.com/verify/{cert_id}"
+        "verify_url": f"{base}/verify/{cert_id}",
+        "download_url": f"{base}/download/{cert_id}",
+        "fingerprint": fp
     }
 
 # ============================================================
-# Verify Endpoint
+# VERIFY
 # ============================================================
-@app.get("/verify/{cert_id}")
-def verify_video(cert_id: str):
-
+@app.get("/verify/{cid}")
+def verify(cid:str):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute("SELECT * FROM certificates WHERE id=?", (cert_id,))
+    c.execute("SELECT * FROM certificates WHERE id=?", (cid,))
     row = c.fetchone()
     conn.close()
 
     if not row:
-        return {"status": "❌ Certificate Not Found"}
+        return {"status":"NOT FOUND"}
 
     return {
-        "status": "✅ Certified Authentic Video",
-        "certificate_id": row[0],
-        "original_filename": row[1],
-        "fingerprint": row[2],
-        "certified_file": row[3],
-        "issued_at": row[4]
+        "status":"VALID",
+        "certificate_id":cid,
+        "file":row[3],
+        "issued_at":row[4]
     }
 
 # ============================================================
-# Home
+# DOWNLOAD
+# ============================================================
+@app.get("/download/{cid}")
+def download(cid:str):
+    path = f"{CERTIFIED_DIR}/{cid}_VeriFYD.mp4"
+    if not os.path.exists(path):
+        return {"error":"file not found"}
+    return FileResponse(path, media_type="video/mp4", filename=f"VeriFYD_{cid}.mp4")
+
 # ============================================================
 @app.get("/")
 def home():
-    return {
-        "service": "VeriFYD Certification Authority",
-        "message": "Upload videos at /docs to certify authenticity."
-    }
+    return {"status":"VeriFYD backend live"}
 
 
 
