@@ -1,14 +1,14 @@
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-import hashlib, os, uuid, subprocess, sqlite3
+import os, uuid, shutil, sqlite3, subprocess, hashlib
 from datetime import datetime
 
-app = FastAPI(title="VeriFYD API")
+app = FastAPI()
 
-# ---------------------------
-# CORS
-# ---------------------------
+# --------------------------------------------------
+# CORS (keep exactly like your working version)
+# --------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -25,9 +25,9 @@ LOGO = "assets/logo.png"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(CERT_DIR, exist_ok=True)
 
-# ---------------------------
-# DB
-# ---------------------------
+# --------------------------------------------------
+# DATABASE
+# --------------------------------------------------
 def init_db():
     conn = sqlite3.connect(DB)
     c = conn.cursor()
@@ -35,7 +35,6 @@ def init_db():
     CREATE TABLE IF NOT EXISTS certs(
         id TEXT,
         filename TEXT,
-        fingerprint TEXT,
         created TEXT
     )
     """)
@@ -44,9 +43,9 @@ def init_db():
 
 init_db()
 
-# ---------------------------
-# FINGERPRINT
-# ---------------------------
+# --------------------------------------------------
+# FINGERPRINT (optional but safe)
+# --------------------------------------------------
 def fingerprint(path):
     h = hashlib.sha256()
     with open(path,"rb") as f:
@@ -54,12 +53,17 @@ def fingerprint(path):
             h.update(chunk)
     return h.hexdigest()
 
-# ---------------------------
-# WATERMARK
-# ---------------------------
+# --------------------------------------------------
+# SAFE WATERMARK (will NOT crash upload)
+# --------------------------------------------------
 def watermark(input_path, output_path, cid):
 
-    text = f"VeriFYD CERTIFIED {cid[:8]}"
+    # If logo missing → just copy
+    if not os.path.exists(LOGO):
+        shutil.copy(input_path, output_path)
+        return
+
+    text = f"VeriFYD {cid[:8]}"
 
     cmd = [
         "ffmpeg",
@@ -69,45 +73,45 @@ def watermark(input_path, output_path, cid):
         "-filter_complex",
         f"[0:v][1:v] overlay=20:20, drawtext=text='{text}':x=20:y=110:fontsize=18:fontcolor=white:box=1:boxcolor=black@0.4",
         "-c:v","libx264",
-        "-preset","fast",
+        "-preset","ultrafast",
         "-crf","23",
-        "-c:a","aac",
+        "-c:a","copy",
         output_path
     ]
 
     subprocess.run(cmd, check=True)
 
-# ---------------------------
+# --------------------------------------------------
 @app.get("/")
 def home():
-    return {"status":"VeriFYD LIVE"}
+    return {"status":"VFVid API LIVE"}
 
-# ---------------------------
-# UPLOAD
-# ---------------------------
+# --------------------------------------------------
+# UPLOAD (RESTORED + SAFE)
+# --------------------------------------------------
 @app.post("/upload/")
 async def upload(file: UploadFile = File(...), email: str = Form(None)):
 
     cid = str(uuid.uuid4())
-
     raw_path = f"{UPLOAD_DIR}/{cid}_{file.filename}"
+
     with open(raw_path,"wb") as buffer:
         buffer.write(await file.read())
 
-    # fingerprint
-    fp = fingerprint(raw_path)
-
-    # output path
     out_path = f"{CERT_DIR}/{cid}.mp4"
 
-    # watermark
-    watermark(raw_path, out_path, cid)
+    # -------- SAFE WATERMARK --------
+    try:
+        watermark(raw_path, out_path, cid)
+    except Exception as e:
+        print("Watermark failed:", e)
+        shutil.copy(raw_path, out_path)
 
-    # store
+    # store record
     conn = sqlite3.connect(DB)
     c = conn.cursor()
-    c.execute("INSERT INTO certs VALUES (?,?,?,?)",
-              (cid,file.filename,fp,datetime.utcnow().isoformat()))
+    c.execute("INSERT INTO certs VALUES (?,?,?)",
+              (cid,file.filename,datetime.utcnow().isoformat()))
     conn.commit()
     conn.close()
 
@@ -121,9 +125,9 @@ async def upload(file: UploadFile = File(...), email: str = Form(None)):
         "stream":f"{base}/stream/{cid}"
     }
 
-# ---------------------------
+# --------------------------------------------------
 # VERIFY
-# ---------------------------
+# --------------------------------------------------
 @app.get("/verify/{cid}")
 def verify(cid:str):
     conn = sqlite3.connect(DB)
@@ -133,18 +137,13 @@ def verify(cid:str):
     conn.close()
 
     if not row:
-        return {"status":"NOT FOUND"}
+        return {"error":"not found"}
 
-    return {
-        "status":"VALID",
-        "certificate_id":cid,
-        "fingerprint":row[2],
-        "issued":row[3]
-    }
+    return {"status":"VALID","certificate_id":cid}
 
-# ---------------------------
+# --------------------------------------------------
 # DOWNLOAD
-# ---------------------------
+# --------------------------------------------------
 @app.get("/download/{cid}")
 def download(cid:str):
     path = f"{CERT_DIR}/{cid}.mp4"
@@ -152,15 +151,16 @@ def download(cid:str):
         return {"error":"not found"}
     return FileResponse(path, media_type="video/mp4")
 
-# ---------------------------
+# --------------------------------------------------
 # STREAM
-# ---------------------------
+# --------------------------------------------------
 @app.get("/stream/{cid}")
 def stream(cid:str):
     path = f"{CERT_DIR}/{cid}.mp4"
     if not os.path.exists(path):
         return {"error":"not found"}
     return FileResponse(path, media_type="video/mp4")
+
 
 
 
