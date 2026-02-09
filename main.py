@@ -32,7 +32,7 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(CERTIFIED_DIR, exist_ok=True)
 
 # ============================================================
-# DB
+# DATABASE
 # ============================================================
 def init_db():
     conn = sqlite3.connect(DB_FILE)
@@ -52,7 +52,7 @@ def init_db():
 init_db()
 
 # ============================================================
-# Fingerprint
+# FINGERPRINT
 # ============================================================
 def fingerprint(file_path):
     sha256 = hashlib.sha256()
@@ -62,7 +62,7 @@ def fingerprint(file_path):
     return sha256.hexdigest()
 
 # ============================================================
-# WATERMARK + ENCODE
+# WATERMARK + ENCODE (TOP EDGE POSITION)
 # ============================================================
 def stamp_video(input_path, output_path, cert_id):
 
@@ -84,7 +84,10 @@ def stamp_video(input_path, output_path, cert_id):
         "-i", input_path,
         "-i", LOGO_PATH,
         "-filter_complex",
-        f"[0:v][1:v] overlay=20:20,drawtext=text='{text}':x=20:y=110:fontsize=18:fontcolor=white:box=1:boxcolor=black@0.4",
+        # logo at very top edge
+        f"[0:v][1:v] overlay=10:10,"
+        # text directly under logo
+        f"drawtext=text='{text}':x=10:y=55:fontsize=18:fontcolor=white:box=1:boxcolor=black@0.4",
         "-c:v","libx264","-preset","fast","-crf","23",
         "-c:a","aac","-b:a","128k",
         output_path
@@ -173,6 +176,7 @@ def download(cid:str):
 @app.get("/")
 def home():
     return {"status":"VeriFYD backend live"}
+
 
 
 
