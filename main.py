@@ -22,7 +22,6 @@ app.add_middleware(
 UPLOAD_DIR = "videos"
 CERTIFIED_DIR = "certified"
 DB_FILE = "certificates.db"
-LOGO_PATH = "assets/logo.png"
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(CERTIFIED_DIR, exist_ok=True)
@@ -58,31 +57,18 @@ def fingerprint(file_path):
     return sha256.hexdigest()
 
 # ============================================================
-# WATERMARK — SMALLER + HIGHER + LEFT
+# TEXT-ONLY WATERMARK (TOP-LEFT EDGE)
 # ============================================================
 def stamp_video(input_path, output_path, cert_id):
 
-    if not os.path.exists(LOGO_PATH):
-        command = [
-            "ffmpeg","-y","-i",input_path,
-            "-c:v","libx264","-preset","fast","-crf","23",
-            "-c:a","aac","-b:a","128k",
-            output_path
-        ]
-        subprocess.run(command, check=True)
-        return
-
-    text = f"VeriFYD {cert_id[:6]}"
+    text = f"VeriFYD • {cert_id[:6]}"
 
     command = [
         "ffmpeg","-y",
         "-i", input_path,
-        "-i", LOGO_PATH,
-        "-filter_complex",
-        # LOGO ALMOST TOUCHING TOP-LEFT EDGE
-        f"[0:v][1:v] overlay=0:0,"
-        # SMALLER TEXT VERY CLOSE UNDER LOGO
-        f"drawtext=text='{text}':x=6:y=32:fontsize=14:fontcolor=white:box=1:boxcolor=black@0.35",
+        "-vf",
+        # flush top-left corner, very small
+        f"drawtext=text='{text}':x=4:y=4:fontsize=14:fontcolor=white@0.85:box=1:boxcolor=black@0.25",
         "-c:v","libx264","-preset","fast","-crf","23",
         "-c:a","aac","-b:a","128k",
         output_path
@@ -91,6 +77,7 @@ def stamp_video(input_path, output_path, cert_id):
     try:
         subprocess.run(command, check=True)
     except:
+        # fallback encode if text fails
         command = [
             "ffmpeg","-y","-i",input_path,
             "-c:v","libx264","-preset","fast","-crf","23",
@@ -170,6 +157,7 @@ def download(cid:str):
 @app.get("/")
 def home():
     return {"status":"VeriFYD backend live"}
+
 
 
 
