@@ -29,23 +29,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ============================================================
-# DATABASE
-# ============================================================
+# ================= DATABASE =================
 
 def init_db():
     conn = sqlite3.connect(DB)
     c = conn.cursor()
-
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS certificates(
-        id TEXT,
-        filename TEXT,
-        fingerprint TEXT,
-        certified_file TEXT,
-        created TEXT
-    )
-    """)
 
     c.execute("""
     CREATE TABLE IF NOT EXISTS users(
@@ -61,14 +49,9 @@ def init_db():
 
 init_db()
 
-# ============================================================
-# USER UTIL
-# ============================================================
-
 def get_user(email):
     conn = sqlite3.connect(DB)
     c = conn.cursor()
-
     c.execute("SELECT * FROM users WHERE email=?", (email,))
     row = c.fetchone()
 
@@ -89,9 +72,7 @@ def increment_usage(email):
     conn.commit()
     conn.close()
 
-# ============================================================
-# AI DETECTION
-# ============================================================
+# ================= AI DETECTION =================
 
 def analyze_video_ai(path, max_seconds):
 
@@ -116,8 +97,7 @@ def analyze_video_ai(path, max_seconds):
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-        noise = np.std(gray)
-        if noise < 8:
+        if np.std(gray) < 8:
             anomaly += 2
 
         edges = cv2.Canny(gray,100,200)
@@ -133,22 +113,13 @@ def analyze_video_ai(path, max_seconds):
     else:
         return "AUTHENTIC VERIFIED", score
 
-# ============================================================
-# DOWNLOAD VIDEO FROM LINK
-# ============================================================
+# ================= DOWNLOAD =================
 
 def download_video(url, output_path):
-    cmd = [
-        "yt-dlp",
-        "-f","worst",
-        "-o", output_path,
-        url
-    ]
+    cmd = ["yt-dlp","-f","worst","-o",output_path,url]
     subprocess.run(cmd, check=True)
 
-# ============================================================
-# LINK ANALYSIS (FIXED RESPONSE FORMAT)
-# ============================================================
+# ================= LINK ANALYSIS =================
 
 @app.post("/analyze-link/")
 async def analyze_link(email: str = Form(...), video_url: str = Form(...)):
@@ -157,9 +128,11 @@ async def analyze_link(email: str = Form(...), video_url: str = Form(...)):
 
     if not user["is_paid"] and user["checks_used"] >= 10:
         return {
-            "status": "success",
-            "result": "LIMIT_REACHED",
-            "upgrade_url": PRICING_URL
+            "success": True,
+            "data": {
+                "result": "LIMIT_REACHED",
+                "upgrade_url": PRICING_URL
+            }
         }
 
     vid_id = str(uuid.uuid4())
@@ -168,13 +141,9 @@ async def analyze_link(email: str = Form(...), video_url: str = Form(...)):
     try:
         download_video(video_url, temp_file)
     except:
-        return {
-            "status": "success",
-            "result": "ERROR"
-        }
+        return {"success": True, "data": {"result":"ERROR"}}
 
     max_seconds = 300 if user["is_paid"] else 60
-
     result, score = analyze_video_ai(temp_file, max_seconds)
 
     try:
@@ -184,89 +153,18 @@ async def analyze_link(email: str = Form(...), video_url: str = Form(...)):
 
     increment_usage(email)
 
-    # 🔴 THIS IS THE KEY CHANGE
     return {
-        "status": "success",
-        "result": result,
-        "ai_score": score
-    }
-
-# ============================================================
-# CERTIFICATION PIPELINE (UNCHANGED)
-# ============================================================
-
-def fingerprint(path):
-    sha = hashlib.sha256()
-    with open(path,"rb") as f:
-        while chunk := f.read(8192):
-            sha.update(chunk)
-    return sha.hexdigest()
-
-def stamp_video(input_path, output_path, cert_id):
-    text = f"VeriFYD • {cert_id[:6]}"
-    cmd = [
-        "ffmpeg","-y",
-        "-i",input_path,
-        "-vf",f"drawtext=text='{text}':x=4:y=4:fontsize=14:fontcolor=white@0.85:box=1:boxcolor=black@0.25",
-        "-c:v","libx264","-preset","fast","-crf","23",
-        "-c:a","aac","-b:a","128k",
-        output_path
-    ]
-    subprocess.run(cmd, check=True)
-
-@app.post("/upload/")
-async def upload(file: UploadFile = File(...), email: str = Form(...)):
-
-    user = get_user(email)
-
-    if not user["is_paid"] and user["checks_used"] >= 10:
-        return {
-            "status":"LIMIT_REACHED",
-            "upgrade_url":PRICING_URL
+        "success": True,
+        "data": {
+            "result": result,
+            "ai_score": score
         }
-
-    cert_id = str(uuid.uuid4())
-    raw = f"{UPLOAD_DIR}/{cert_id}_{file.filename}"
-
-    with open(raw,"wb") as buffer:
-        buffer.write(await file.read())
-
-    fp = fingerprint(raw)
-
-    certified_name = f"{cert_id}_VeriFYD.mp4"
-    certified_path = f"{CERT_DIR}/{certified_name}"
-
-    stamp_video(raw, certified_path, cert_id)
-
-    conn = sqlite3.connect(DB)
-    c = conn.cursor()
-    c.execute("INSERT INTO certificates VALUES (?,?,?,?,?)",
-              (cert_id,file.filename,fp,certified_name,datetime.utcnow().isoformat()))
-    conn.commit()
-    conn.close()
-
-    increment_usage(email)
-
-    return {
-        "status":"CERTIFIED",
-        "certificate_id":cert_id,
-        "verify_url":f"{BASE_URL}/verify/{cert_id}",
-        "download_url":f"{BASE_URL}/download/{cert_id}"
     }
-
-# ============================================================
-@app.get("/download/{cid}")
-def download(cid:str):
-    path = f"{CERT_DIR}/{cid}_VeriFYD.mp4"
-    return FileResponse(path, media_type="video/mp4")
-
-@app.get("/verify/{cid}")
-def verify(cid:str):
-    return {"status":"VALID","certificate_id":cid}
 
 @app.get("/")
 def home():
-    return {"status":"VeriFYD backend live"}
+    return {"status":"live"}
+
 
 
 
