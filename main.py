@@ -1,3 +1,4 @@
+
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -128,11 +129,9 @@ async def analyze_link(email: str = Form(...), video_url: str = Form(...)):
 
     if not user["is_paid"] and user["checks_used"] >= 10:
         return {
-            "success": True,
-            "data": {
-                "result": "LIMIT_REACHED",
-                "upgrade_url": PRICING_URL
-            }
+            "status": "OK",
+            "result": "LIMIT_REACHED",
+            "upgrade_url": PRICING_URL
         }
 
     vid_id = str(uuid.uuid4())
@@ -141,7 +140,10 @@ async def analyze_link(email: str = Form(...), video_url: str = Form(...)):
     try:
         download_video(video_url, temp_file)
     except:
-        return {"success": True, "data": {"result":"ERROR"}}
+        return {
+            "status": "OK",
+            "result": "ERROR"
+        }
 
     max_seconds = 300 if user["is_paid"] else 60
     result, score = analyze_video_ai(temp_file, max_seconds)
@@ -154,17 +156,68 @@ async def analyze_link(email: str = Form(...), video_url: str = Form(...)):
     increment_usage(email)
 
     return {
-        "success": True,
-        "data": {
-            "result": result,
-            "ai_score": score
+        "status": "OK",
+        "result": result,
+        "ai_score": score
+    }
+
+# ================= UPLOAD CERTIFICATION =================
+
+def fingerprint(path):
+    sha = hashlib.sha256()
+    with open(path,"rb") as f:
+        while chunk := f.read(8192):
+            sha.update(chunk)
+    return sha.hexdigest()
+
+def stamp_video(input_path, output_path, cert_id):
+    text = f"VeriFYD • {cert_id[:6]}"
+    cmd = [
+        "ffmpeg","-y",
+        "-i",input_path,
+        "-vf",f"drawtext=text='{text}':x=4:y=4:fontsize=14:fontcolor=white@0.85:box=1:boxcolor=black@0.25",
+        "-c:v","libx264","-preset","fast","-crf","23",
+        "-c:a","aac","-b:a","128k",
+        output_path
+    ]
+    subprocess.run(cmd, check=True)
+
+@app.post("/upload/")
+async def upload(file: UploadFile = File(...), email: str = Form(...)):
+
+    user = get_user(email)
+
+    if not user["is_paid"] and user["checks_used"] >= 10:
+        return {
+            "status":"LIMIT_REACHED",
+            "upgrade_url":PRICING_URL
         }
+
+    cert_id = str(uuid.uuid4())
+    raw = f"{UPLOAD_DIR}/{cert_id}_{file.filename}"
+
+    with open(raw,"wb") as buffer:
+        buffer.write(await file.read())
+
+    fp = fingerprint(raw)
+
+    certified_name = f"{cert_id}_VeriFYD.mp4"
+    certified_path = f"{CERT_DIR}/{certified_name}"
+
+    stamp_video(raw, certified_path, cert_id)
+
+    increment_usage(email)
+
+    return {
+        "status":"CERTIFIED",
+        "certificate_id":cert_id,
+        "verify_url":f"{BASE_URL}/verify/{cert_id}",
+        "download_url":f"{BASE_URL}/download/{cert_id}"
     }
 
 @app.get("/")
 def home():
     return {"status":"live"}
-
 
 
 
