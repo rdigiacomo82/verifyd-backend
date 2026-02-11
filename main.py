@@ -138,18 +138,16 @@ def analyze_video_ai(path, max_seconds):
 # ============================================================
 
 def download_video(url, output_path):
-
     cmd = [
         "yt-dlp",
         "-f","worst",
         "-o", output_path,
         url
     ]
-
     subprocess.run(cmd, check=True)
 
 # ============================================================
-# LINK ANALYSIS
+# LINK ANALYSIS (FIXED RESPONSE FORMAT)
 # ============================================================
 
 @app.post("/analyze-link/")
@@ -159,8 +157,9 @@ async def analyze_link(email: str = Form(...), video_url: str = Form(...)):
 
     if not user["is_paid"] and user["checks_used"] >= 10:
         return {
-            "status":"LIMIT_REACHED",
-            "upgrade_url":PRICING_URL
+            "status": "success",
+            "result": "LIMIT_REACHED",
+            "upgrade_url": PRICING_URL
         }
 
     vid_id = str(uuid.uuid4())
@@ -169,7 +168,10 @@ async def analyze_link(email: str = Form(...), video_url: str = Form(...)):
     try:
         download_video(video_url, temp_file)
     except:
-        return {"status":"ERROR","message":"Could not download video"}
+        return {
+            "status": "success",
+            "result": "ERROR"
+        }
 
     max_seconds = 300 if user["is_paid"] else 60
 
@@ -182,13 +184,15 @@ async def analyze_link(email: str = Form(...), video_url: str = Form(...)):
 
     increment_usage(email)
 
+    # 🔴 THIS IS THE KEY CHANGE
     return {
-        "status": result,
+        "status": "success",
+        "result": result,
         "ai_score": score
     }
 
 # ============================================================
-# CERTIFICATION PIPELINE
+# CERTIFICATION PIPELINE (UNCHANGED)
 # ============================================================
 
 def fingerprint(path):
@@ -216,7 +220,10 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
     user = get_user(email)
 
     if not user["is_paid"] and user["checks_used"] >= 10:
-        return {"status":"LIMIT_REACHED","upgrade_url":PRICING_URL}
+        return {
+            "status":"LIMIT_REACHED",
+            "upgrade_url":PRICING_URL
+        }
 
     cert_id = str(uuid.uuid4())
     raw = f"{UPLOAD_DIR}/{cert_id}_{file.filename}"
