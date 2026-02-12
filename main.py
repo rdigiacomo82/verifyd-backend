@@ -29,17 +29,16 @@ app.add_middleware(
 
 @app.get("/")
 def home():
-    return {"status":"VeriFYD backend live"}
+    return {"status": "VeriFYD backend live"}
 
 # =========================================================
-# UPLOAD VIDEO (NO AI DETECTION YET)
+# UPLOAD VIDEO
 # =========================================================
 
 @app.post("/upload/")
 async def upload(file: UploadFile = File(...), email: str = Form(...)):
 
     cert_id = str(uuid.uuid4())
-
     raw_path = f"{UPLOAD_DIR}/{cert_id}_{file.filename}"
 
     with open(raw_path, "wb") as buffer:
@@ -47,7 +46,7 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
 
     certified_path = f"{CERT_DIR}/{cert_id}.mp4"
 
-    # For now just copy file (Hostinger stamping temporary)
+    # Temporary copy (Hostinger stamping for now)
     subprocess.run(["cp", raw_path, certified_path])
 
     return {
@@ -57,20 +56,44 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
     }
 
 # =========================================================
-# DOWNLOAD
+# DOWNLOAD CERTIFIED VIDEO
 # =========================================================
 
 @app.get("/download/{cid}")
-def download(cid:str):
+def download(cid: str):
     path = f"{CERT_DIR}/{cid}.mp4"
     return FileResponse(path, media_type="video/mp4")
 
 # =========================================================
-# ANALYZE LINK (RESTORED)
+# SAFE VIDEO DOWNLOAD FUNCTION
 # =========================================================
 
-def download_temp_video(url, output):
-    subprocess.run(["yt-dlp","-f","worst","-o",output,url])
+def download_temp_video(url, output_path):
+
+    try:
+        result = subprocess.run(
+            ["yt-dlp", "-f", "worst", "-o", output_path, url],
+            capture_output=True,
+            text=True
+        )
+
+        if result.returncode != 0:
+            print("yt-dlp failed:", result.stderr)
+            return False
+
+        if not os.path.exists(output_path):
+            print("Downloaded file missing")
+            return False
+
+        return True
+
+    except Exception as e:
+        print("Download exception:", e)
+        return False
+
+# =========================================================
+# ANALYZE LINK (STABLE VERSION)
+# =========================================================
 
 @app.post("/analyze-link/")
 async def analyze_link(email: str = Form(...), video_url: str = Form(...)):
@@ -78,17 +101,20 @@ async def analyze_link(email: str = Form(...), video_url: str = Form(...)):
     temp_id = str(uuid.uuid4())
     temp_path = f"{TMP_DIR}/{temp_id}.mp4"
 
-    try:
-        download_temp_video(video_url, temp_path)
-    except:
-        return {"result":"ERROR"}
+    success = download_temp_video(video_url, temp_path)
 
-    # For now: simple placeholder response
-    # We'll replace with AI detection next
+    if not success:
+        return {
+            "result": "DOWNLOAD_FAILED",
+            "message": "Could not download video from link."
+        }
+
+    # Placeholder result until detection added
     return {
         "result": "AUTHENTIC VERIFIED",
         "ai_score": 0
     }
+
 
 
 
