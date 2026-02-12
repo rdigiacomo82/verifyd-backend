@@ -4,6 +4,8 @@ from fastapi.responses import FileResponse
 import os, uuid, shutil
 import cv2
 import numpy as np
+import torch
+import timm
 
 BASE_URL = "https://verifyd-backend.onrender.com"
 
@@ -24,14 +26,31 @@ app.add_middleware(
 )
 
 # =========================================================
-# HOME
+# LOAD MODEL (lightweight vision transformer)
 # =========================================================
-@app.get("/")
-def home():
-    return {"status": "VeriFYD backend live"}
+
+model = timm.create_model("mobilenetv3_small_100", pretrained=True)
+model.eval()
 
 # =========================================================
-# FAST AI DETECTION ENGINE
+# FRAME MODEL ANALYSIS
+# =========================================================
+
+def analyze_frame_model(frame):
+
+    img = cv2.resize(frame, (224, 224))
+    img = img.astype(np.float32) / 255.0
+    img = np.transpose(img, (2, 0, 1))
+    img = torch.tensor(img).unsqueeze(0)
+
+    with torch.no_grad():
+        feat = model.forward_features(img)
+        score = float(torch.mean(feat))
+
+    return score
+
+# =========================================================
+# REAL DETECTION ENGINE
 # =========================================================
 
 def detect_ai_video(video_path):
@@ -39,11 +58,8 @@ def detect_ai_video(video_path):
     cap = cv2.VideoCapture(video_path)
 
     frame_count = 0
+    model_scores = []
     noise_scores = []
-    edge_scores = []
-    motion_scores = []
-
-    prev_gray = None
 
     while True:
         ret, frame = cap.read()
@@ -51,54 +67,38 @@ def detect_ai_video(video_path):
             break
 
         frame_count += 1
-        if frame_count > 150:
+        if frame_count > 120:
             break
 
-        if frame_count % 5 != 0:
+        if frame_count % 6 != 0:
             continue
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        noise_scores.append(np.std(gray))
 
-        # --- noise entropy ---
-        noise = np.std(gray)
-        noise_scores.append(noise)
-
-        # --- edge density ---
-        edges = cv2.Canny(gray, 100, 200)
-        edge_scores.append(np.mean(edges))
-
-        # --- motion realism ---
-        if prev_gray is not None:
-            diff = cv2.absdiff(gray, prev_gray)
-            motion_scores.append(np.mean(diff))
-
-        prev_gray = gray
+        model_score = analyze_frame_model(frame)
+        model_scores.append(model_score)
 
     cap.release()
 
-    if len(noise_scores) == 0:
+    if not model_scores:
         return False, 0
 
+    avg_model = np.mean(model_scores)
     avg_noise = np.mean(noise_scores)
-    avg_edge = np.mean(edge_scores)
-    avg_motion = np.mean(motion_scores) if motion_scores else 0
 
     ai_score = 0
 
-    # diffusion smoothing indicator
-    if avg_noise < 12:
-        ai_score += 35
+    # model feature anomaly
+    if avg_model < 0.25:
+        ai_score += 50
 
-    # soft edges indicator
-    if avg_edge < 6:
-        ai_score += 25
+    # diffusion smoothing
+    if avg_noise < 10:
+        ai_score += 30
 
-    # motion inconsistency
-    if avg_motion < 2:
-        ai_score += 20
-
-    # overly perfect consistency
-    if np.std(noise_scores) < 1.5:
+    # consistency
+    if np.std(model_scores) < 0.01:
         ai_score += 20
 
     if ai_score > 60:
@@ -107,9 +107,15 @@ def detect_ai_video(video_path):
         return False, int(ai_score)
 
 # =========================================================
+# HOME
+# =========================================================
+@app.get("/")
+def home():
+    return {"status":"VeriFYD backend live"}
+
+# =========================================================
 # UPLOAD → DETECT → CERTIFY
 # =========================================================
-
 @app.post("/upload/")
 async def upload(file: UploadFile = File(...), email: str = Form(...)):
 
@@ -141,22 +147,16 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
 # =========================================================
 # DOWNLOAD
 # =========================================================
-
 @app.get("/download/{cid}")
 def download(cid: str):
     path = f"{CERT_DIR}/{cid}.mp4"
     return FileResponse(path, media_type="video/mp4")
 
 # =========================================================
-# LINK ANALYSIS (FAST MODE)
+# LINK ANALYSIS (placeholder for now)
 # =========================================================
-
 @app.post("/analyze-link/")
 async def analyze_link(email: str = Form(...), video_url: str = Form(...)):
-
-    # For now we simulate detection
-    # Next phase we download + analyze frames
-
     return {
         "status": "OK",
         "result": "AUTHENTIC VERIFIED",
