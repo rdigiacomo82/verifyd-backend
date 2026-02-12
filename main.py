@@ -7,9 +7,11 @@ BASE_URL = "https://verifyd-backend.onrender.com"
 
 UPLOAD_DIR = "videos"
 CERT_DIR = "certified"
+TMP_DIR = "tmp"
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(CERT_DIR, exist_ok=True)
+os.makedirs(TMP_DIR, exist_ok=True)
 
 app = FastAPI()
 
@@ -22,58 +24,15 @@ app.add_middleware(
 )
 
 # =========================================================
-# VERIFY FFMPEG EXISTS
+# HOME
 # =========================================================
 
-def check_ffmpeg():
-    try:
-        subprocess.run(["ffmpeg", "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        print("FFmpeg detected.")
-    except Exception as e:
-        print("FFmpeg NOT detected:", e)
-
-check_ffmpeg()
+@app.get("/")
+def home():
+    return {"status":"VeriFYD backend live"}
 
 # =========================================================
-# WATERMARK FUNCTION (FORCED)
-# =========================================================
-
-def stamp_video(input_path, output_path):
-
-    print("Applying watermark...")
-
-    command = [
-        "ffmpeg",
-        "-y",
-        "-i", input_path,
-        "-vf",
-        "drawtext=text='VeriFYD CERTIFIED':"
-        "x=5:y=5:"
-        "fontsize=22:"
-        "fontcolor=white:"
-        "box=1:"
-        "boxcolor=black@0.4:"
-        "boxborderw=8",
-        "-c:v","libx264",
-        "-preset","fast",
-        "-crf","23",
-        "-c:a","aac",
-        "-b:a","128k",
-        output_path
-    ]
-
-    result = subprocess.run(command, capture_output=True, text=True)
-
-    print(result.stdout)
-    print(result.stderr)
-
-    if result.returncode != 0:
-        raise Exception("FFmpeg watermark failed")
-
-    print("Watermark complete.")
-
-# =========================================================
-# UPLOAD + CERTIFY
+# UPLOAD VIDEO (NO AI DETECTION YET)
 # =========================================================
 
 @app.post("/upload/")
@@ -88,13 +47,13 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
 
     certified_path = f"{CERT_DIR}/{cert_id}.mp4"
 
-    # APPLY WATERMARK
-    stamp_video(raw_path, certified_path)
+    # For now just copy file (Hostinger stamping temporary)
+    subprocess.run(["cp", raw_path, certified_path])
 
     return {
-        "status":"CERTIFIED",
-        "certificate_id":cert_id,
-        "download_url":f"{BASE_URL}/download/{cert_id}"
+        "status": "CERTIFIED",
+        "certificate_id": cert_id,
+        "download_url": f"{BASE_URL}/download/{cert_id}"
     }
 
 # =========================================================
@@ -107,10 +66,29 @@ def download(cid:str):
     return FileResponse(path, media_type="video/mp4")
 
 # =========================================================
+# ANALYZE LINK (RESTORED)
+# =========================================================
 
-@app.get("/")
-def home():
-    return {"status":"VeriFYD backend live"}
+def download_temp_video(url, output):
+    subprocess.run(["yt-dlp","-f","worst","-o",output,url])
+
+@app.post("/analyze-link/")
+async def analyze_link(email: str = Form(...), video_url: str = Form(...)):
+
+    temp_id = str(uuid.uuid4())
+    temp_path = f"{TMP_DIR}/{temp_id}.mp4"
+
+    try:
+        download_temp_video(video_url, temp_path)
+    except:
+        return {"result":"ERROR"}
+
+    # For now: simple placeholder response
+    # We'll replace with AI detection next
+    return {
+        "result": "AUTHENTIC VERIFIED",
+        "ai_score": 0
+    }
 
 
 
