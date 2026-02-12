@@ -8,6 +8,8 @@ torchvision
 timm
 scikit-image
 ffmpeg-python
+requests
+
 
 
 
