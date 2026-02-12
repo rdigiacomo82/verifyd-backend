@@ -1,10 +1,11 @@
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-import os, uuid, hashlib, sqlite3, shutil
+import os, uuid, hashlib, sqlite3, shutil, requests, tempfile
 from datetime import datetime
 
 from detector import detect_ai
+from external_detector import external_ai_score
 
 BASE_URL = "https://verifyd-backend.onrender.com"
 
@@ -54,6 +55,12 @@ def fingerprint(path):
             h.update(chunk)
     return h.hexdigest()
 
+# ================= SCORE COMBINER =================
+
+def combined_score(local_score, external_score):
+    # lower = more AI
+    return int((local_score * 0.4) + ((100 - external_score) * 0.6))
+
 # ================= UPLOAD =================
 
 @app.post("/upload/")
@@ -67,18 +74,25 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
 
     fp = fingerprint(raw_path)
 
-    # 🔍 RUN DETECTOR
-    score = detect_ai(raw_path)
+    # 🔍 RUN LOCAL DETECTOR
+    local_score = detect_ai(raw_path)
 
-    # ================= AI BLOCK =================
-    if score < 60:
+    # 🔍 RUN EXTERNAL DETECTOR
+    external_score = external_ai_score(raw_path)
+
+    final_score = combined_score(local_score, external_score)
+
+    print("LOCAL:", local_score)
+    print("EXTERNAL:", external_score)
+    print("FINAL:", final_score)
+
+    if final_score < 60:
         return {
             "status":"AI DETECTED",
-            "authenticity_score":score,
+            "authenticity_score":final_score,
             "message":"Video appears AI generated."
         }
 
-    # ================= CERTIFY =================
     certified_path = f"{CERT_DIR}/{cert_id}.mp4"
     shutil.copy(raw_path, certified_path)
 
@@ -86,14 +100,14 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
     c = conn.cursor()
     c.execute("""
     INSERT INTO certificates VALUES (?,?,?,?,?,?)
-    """,(cert_id,file.filename,fp,score,"CERTIFIED",datetime.utcnow().isoformat()))
+    """,(cert_id,file.filename,fp,final_score,"CERTIFIED",datetime.utcnow().isoformat()))
     conn.commit()
     conn.close()
 
     return {
         "status":"CERTIFIED REAL VIDEO",
         "certificate_id":cert_id,
-        "authenticity_score":score,
+        "authenticity_score":final_score,
         "verify_url":f"{BASE_URL}/verify/{cert_id}",
         "download_url":f"{BASE_URL}/download/{cert_id}"
     }
@@ -102,7 +116,6 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
 
 @app.get("/verify/{cid}")
 def verify(cid:str):
-
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("SELECT * FROM certificates WHERE id=?",(cid,))
@@ -130,10 +143,36 @@ def download(cid:str):
 
 @app.post("/analyze-link/")
 async def analyze_link(email: str = Form(...), video_url: str = Form(...)):
-    return {
-        "status":"UNDER REVIEW",
-        "message":"Link analysis pipeline installing"
-    }
+
+    try:
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+        temp_path = temp_file.name
+        temp_file.close()
+
+        r = requests.get(video_url, stream=True, timeout=30)
+        with open(temp_path, "wb") as f:
+            for chunk in r.iter_content(1024):
+                f.write(chunk)
+
+        local_score = detect_ai(temp_path)
+        external_score = external_ai_score(temp_path)
+        final_score = combined_score(local_score, external_score)
+
+        os.remove(temp_path)
+
+        if final_score < 60:
+            return {
+                "status":"AI DETECTED",
+                "authenticity_score":final_score
+            }
+
+        return {
+            "status":"LIKELY REAL",
+            "authenticity_score":final_score
+        }
+
+    except Exception as e:
+        return {"status":"ERROR", "message":str(e)}
 
 
 
