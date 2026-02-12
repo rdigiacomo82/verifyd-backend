@@ -1,11 +1,13 @@
 fastapi
 uvicorn
 python-multipart
-yt-dlp
 opencv-python-headless
 numpy
 torch
 torchvision
 timm
+scikit-image
+ffmpeg-python
+
 
 
