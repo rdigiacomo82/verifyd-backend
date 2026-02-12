@@ -25,6 +25,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ================= DB =================
+
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -43,12 +45,16 @@ def init_db():
 
 init_db()
 
+# ================= HASH =================
+
 def fingerprint(path):
     h = hashlib.sha256()
     with open(path,"rb") as f:
         while chunk := f.read(8192):
             h.update(chunk)
     return h.hexdigest()
+
+# ================= UPLOAD =================
 
 @app.post("/upload/")
 async def upload(file: UploadFile = File(...), email: str = Form(...)):
@@ -61,9 +67,10 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
 
     fp = fingerprint(raw_path)
 
-    # 🔍 DETECT AI
+    # 🔍 RUN DETECTOR
     score = detect_ai(raw_path)
 
+    # ================= AI BLOCK =================
     if score < 60:
         return {
             "status":"AI DETECTED",
@@ -71,6 +78,7 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
             "message":"Video appears AI generated."
         }
 
+    # ================= CERTIFY =================
     certified_path = f"{CERT_DIR}/{cert_id}.mp4"
     shutil.copy(raw_path, certified_path)
 
@@ -90,12 +98,15 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
         "download_url":f"{BASE_URL}/download/{cert_id}"
     }
 
+# ================= VERIFY =================
+
 @app.get("/verify/{cid}")
 def verify(cid:str):
+
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("SELECT * FROM certificates WHERE id=?",(cid,))
-    row=c.fetchone()
+    row = c.fetchone()
     conn.close()
 
     if not row:
@@ -108,10 +119,22 @@ def verify(cid:str):
         "created":row[5]
     }
 
+# ================= DOWNLOAD =================
+
 @app.get("/download/{cid}")
 def download(cid:str):
     path=f"{CERT_DIR}/{cid}.mp4"
     return FileResponse(path,media_type="video/mp4")
+
+# ================= LINK ANALYSIS =================
+
+@app.post("/analyze-link/")
+async def analyze_link(email: str = Form(...), video_url: str = Form(...)):
+    return {
+        "status":"UNDER REVIEW",
+        "message":"Link analysis pipeline installing"
+    }
+
 
 
 
