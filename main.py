@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ================= DB =================
+# ================= DATABASE =================
 
 def init_db():
     conn = sqlite3.connect(DB_FILE)
@@ -46,7 +46,7 @@ def init_db():
 
 init_db()
 
-# ================= HASH =================
+# ================= FINGERPRINT =================
 
 def fingerprint(path):
     h = hashlib.sha256()
@@ -58,7 +58,7 @@ def fingerprint(path):
 # ================= SCORE COMBINER =================
 
 def combined_score(local_score, external_score):
-    # lower = more AI
+    # external_score = AI probability
     return int((local_score * 0.4) + ((100 - external_score) * 0.6))
 
 # ================= UPLOAD =================
@@ -74,25 +74,24 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
 
     fp = fingerprint(raw_path)
 
-    # 🔍 RUN LOCAL DETECTOR
+    # RUN DETECTORS
     local_score = detect_ai(raw_path)
-
-    # 🔍 RUN EXTERNAL DETECTOR
     external_score = external_ai_score(raw_path)
-
     final_score = combined_score(local_score, external_score)
 
     print("LOCAL:", local_score)
     print("EXTERNAL:", external_score)
     print("FINAL:", final_score)
 
-    if final_score < 60:
+    # 🚨 AI BLOCK THRESHOLD (STRONGER)
+    if final_score < 85:
         return {
             "status":"AI DETECTED",
             "authenticity_score":final_score,
             "message":"Video appears AI generated."
         }
 
+    # CERTIFY
     certified_path = f"{CERT_DIR}/{cert_id}.mp4"
     shutil.copy(raw_path, certified_path)
 
@@ -160,19 +159,23 @@ async def analyze_link(email: str = Form(...), video_url: str = Form(...)):
 
         os.remove(temp_path)
 
-        if final_score < 60:
+        if final_score < 85:
             return {
                 "status":"AI DETECTED",
                 "authenticity_score":final_score
             }
 
         return {
-            "status":"LIKELY REAL",
+            "status":"CERTIFIED REAL VIDEO",
             "authenticity_score":final_score
         }
 
     except Exception as e:
-        return {"status":"ERROR", "message":str(e)}
+        return {
+            "status":"ERROR",
+            "message":str(e)
+        }
+
 
 
 
