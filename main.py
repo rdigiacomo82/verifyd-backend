@@ -9,11 +9,9 @@ BASE_URL = "https://verifyd-backend.onrender.com"
 
 UPLOAD_DIR = "videos"
 CERT_DIR = "certified"
-TMP_DIR = "tmp"
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(CERT_DIR, exist_ok=True)
-os.makedirs(TMP_DIR, exist_ok=True)
 
 app = FastAPI()
 
@@ -33,14 +31,19 @@ def home():
     return {"status": "VeriFYD backend live"}
 
 # =========================================================
-# AI DETECTION ENGINE (LIGHTWEIGHT FORENSIC)
+# FAST AI DETECTION ENGINE
 # =========================================================
 
 def detect_ai_video(video_path):
 
     cap = cv2.VideoCapture(video_path)
+
     frame_count = 0
-    anomaly_score = 0
+    noise_scores = []
+    edge_scores = []
+    motion_scores = []
+
+    prev_gray = None
 
     while True:
         ret, frame = cap.read()
@@ -48,36 +51,63 @@ def detect_ai_video(video_path):
             break
 
         frame_count += 1
-        if frame_count > 300:
+        if frame_count > 150:
             break
 
-        # sample every 10th frame
-        if frame_count % 10 != 0:
+        if frame_count % 5 != 0:
             continue
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-        # noise analysis
+        # --- noise entropy ---
         noise = np.std(gray)
-        if noise < 8:
-            anomaly_score += 2
+        noise_scores.append(noise)
 
-        # edge realism
+        # --- edge density ---
         edges = cv2.Canny(gray, 100, 200)
-        edge_mean = np.mean(edges)
+        edge_scores.append(np.mean(edges))
 
-        if edge_mean < 3:
-            anomaly_score += 1
+        # --- motion realism ---
+        if prev_gray is not None:
+            diff = cv2.absdiff(gray, prev_gray)
+            motion_scores.append(np.mean(diff))
+
+        prev_gray = gray
 
     cap.release()
 
-    if anomaly_score > 40:
-        return True, anomaly_score
+    if len(noise_scores) == 0:
+        return False, 0
+
+    avg_noise = np.mean(noise_scores)
+    avg_edge = np.mean(edge_scores)
+    avg_motion = np.mean(motion_scores) if motion_scores else 0
+
+    ai_score = 0
+
+    # diffusion smoothing indicator
+    if avg_noise < 12:
+        ai_score += 35
+
+    # soft edges indicator
+    if avg_edge < 6:
+        ai_score += 25
+
+    # motion inconsistency
+    if avg_motion < 2:
+        ai_score += 20
+
+    # overly perfect consistency
+    if np.std(noise_scores) < 1.5:
+        ai_score += 20
+
+    if ai_score > 60:
+        return True, int(ai_score)
     else:
-        return False, anomaly_score
+        return False, int(ai_score)
 
 # =========================================================
-# UPLOAD VIDEO → DETECT AI → CERTIFY
+# UPLOAD → DETECT → CERTIFY
 # =========================================================
 
 @app.post("/upload/")
@@ -89,7 +119,6 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
     with open(raw_path, "wb") as buffer:
         buffer.write(await file.read())
 
-    # 🔍 RUN AI DETECTION
     is_ai, score = detect_ai_video(raw_path)
 
     if is_ai:
@@ -110,7 +139,7 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
     }
 
 # =========================================================
-# DOWNLOAD CERTIFIED VIDEO
+# DOWNLOAD
 # =========================================================
 
 @app.get("/download/{cid}")
@@ -119,17 +148,15 @@ def download(cid: str):
     return FileResponse(path, media_type="video/mp4")
 
 # =========================================================
-# ANALYZE LINK (AI DETECTION)
+# LINK ANALYSIS (FAST MODE)
 # =========================================================
 
 @app.post("/analyze-link/")
 async def analyze_link(email: str = Form(...), video_url: str = Form(...)):
 
-    # NOTE:
-    # For now we simulate detection.
-    # Next phase we'll download video safely.
+    # For now we simulate detection
+    # Next phase we download + analyze frames
 
-    # Placeholder logic
     return {
         "status": "OK",
         "result": "AUTHENTIC VERIFIED",
