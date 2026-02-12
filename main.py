@@ -58,7 +58,6 @@ def fingerprint(path):
 # ================= SCORE COMBINER =================
 
 def combined_score(local_score, external_score):
-    # external_score = AI probability
     return int((local_score * 0.4) + ((100 - external_score) * 0.6))
 
 # ================= UPLOAD =================
@@ -74,7 +73,6 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
 
     fp = fingerprint(raw_path)
 
-    # RUN DETECTORS
     local_score = detect_ai(raw_path)
     external_score = external_ai_score(raw_path)
     final_score = combined_score(local_score, external_score)
@@ -83,15 +81,17 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
     print("EXTERNAL:", external_score)
     print("FINAL:", final_score)
 
-    # 🚨 AI BLOCK THRESHOLD (STRONGER)
-    if final_score < 85:
+    # 🔴 AGGRESSIVE AI BLOCK
+    if final_score < 98:
         return {
             "status":"AI DETECTED",
             "authenticity_score":final_score,
-            "message":"Video appears AI generated."
+            "certificate_id":None,
+            "verify_url":None,
+            "download_url":None
         }
 
-    # CERTIFY
+    # 🟢 CERTIFY
     certified_path = f"{CERT_DIR}/{cert_id}.mp4"
     shutil.copy(raw_path, certified_path)
 
@@ -159,23 +159,40 @@ async def analyze_link(email: str = Form(...), video_url: str = Form(...)):
 
         os.remove(temp_path)
 
-        if final_score < 85:
+        # 🔴 AI DETECTED
+        if final_score < 98:
             return {
                 "status":"AI DETECTED",
-                "authenticity_score":final_score
+                "authenticity_score":final_score,
+                "certificate_id":None,
+                "verify_url":None,
+                "download_url":None
             }
 
+        # 🟢 REAL LINK RESULT
         return {
             "status":"CERTIFIED REAL VIDEO",
-            "authenticity_score":final_score
+            "authenticity_score":final_score,
+            "certificate_id":"LINK_ANALYSIS",
+            "verify_url":None,
+            "download_url":None
         }
 
     except Exception as e:
         return {
             "status":"ERROR",
+            "authenticity_score":0,
+            "certificate_id":None,
+            "verify_url":None,
+            "download_url":None,
             "message":str(e)
         }
 
+# ================= HOME =================
+
+@app.get("/")
+def home():
+    return {"status":"VeriFYD API LIVE"}
 
 
 
