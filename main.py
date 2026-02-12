@@ -1,8 +1,7 @@
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-import os, uuid, hashlib, sqlite3, shutil, subprocess
-from datetime import datetime
+import os, uuid, shutil, subprocess, sqlite3, hashlib
 
 from detector import detect_ai
 from external_detector import external_ai_score
@@ -27,35 +26,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-DB_FILE = "certificates.db"
-
-def init_db():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS certificates(
-        id TEXT PRIMARY KEY,
-        filename TEXT,
-        fingerprint TEXT,
-        score INTEGER,
-        status TEXT,
-        created TEXT
-    )
-    """)
-    conn.commit()
-    conn.close()
-
-init_db()
-
-def fingerprint(path):
-    h = hashlib.sha256()
-    with open(path,"rb") as f:
-        while chunk := f.read(8192):
-            h.update(chunk)
-    return h.hexdigest()
-
-def combined_score(local_score, external_score):
-    return int((local_score * 0.4) + ((100 - external_score) * 0.6))
+def combined_score(local, external):
+    return int((local * 0.4) + ((100 - external) * 0.6))
 
 # ================= UPLOAD =================
 
@@ -74,10 +46,11 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
 
     if final_score < 98:
         return {
+            "status": "OK",
             "success": True,
             "data": {
-                "status": "AI DETECTED",
-                "authenticity_score": final_score
+                "result": "AI DETECTED",
+                "score": final_score
             }
         }
 
@@ -85,11 +58,12 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
     shutil.copy(raw_path, certified_path)
 
     return {
+        "status": "OK",
         "success": True,
         "data": {
-            "status": "CERTIFIED REAL VIDEO",
+            "result": "CERTIFIED REAL VIDEO",
+            "score": final_score,
             "certificate_id": cert_id,
-            "authenticity_score": final_score,
             "verify_url": f"{BASE_URL}/verify/{cert_id}",
             "download_url": f"{BASE_URL}/download/{cert_id}"
         }
@@ -112,14 +86,15 @@ async def analyze_link(email: str = Form(...), video_url: str = Form(...)):
             "--quiet",
             video_url
         ]
-        subprocess.run(cmd, timeout=60)
+        subprocess.run(cmd, timeout=90)
 
         if not os.path.exists(temp_path):
             return {
+                "status": "OK",
                 "success": True,
                 "data": {
-                    "status": "ERROR",
-                    "message": "Could not download video"
+                    "result": "ERROR",
+                    "score": 0
                 }
             }
 
@@ -131,33 +106,37 @@ async def analyze_link(email: str = Form(...), video_url: str = Form(...)):
 
         if final_score < 98:
             return {
+                "status": "OK",
                 "success": True,
                 "data": {
-                    "status": "AI DETECTED",
-                    "authenticity_score": final_score
+                    "result": "AI DETECTED",
+                    "score": final_score
                 }
             }
 
         return {
+            "status": "OK",
             "success": True,
             "data": {
-                "status": "CERTIFIED REAL VIDEO",
-                "authenticity_score": final_score
+                "result": "CERTIFIED REAL VIDEO",
+                "score": final_score
             }
         }
 
     except Exception as e:
         return {
+            "status": "OK",
             "success": True,
             "data": {
-                "status": "ERROR",
-                "message": str(e)
+                "result": "ERROR",
+                "score": 0
             }
         }
 
 @app.get("/")
 def home():
     return {"status": "VeriFYD API LIVE"}
+
 
 
 
