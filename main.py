@@ -1,16 +1,16 @@
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-import os, uuid, shutil
-import cv2
-import numpy as np
-import torch
-import timm
+import os, uuid, hashlib, sqlite3, shutil
+from datetime import datetime
+
+from detector import detect_ai  # <-- connects to detector.py
 
 BASE_URL = "https://verifyd-backend.onrender.com"
 
 UPLOAD_DIR = "videos"
 CERT_DIR = "certified"
+DB_FILE = "certificates.db"
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(CERT_DIR, exist_ok=True)
@@ -25,97 +25,43 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# =========================================================
-# LOAD MODEL (lightweight vision transformer)
-# =========================================================
+# ================= DATABASE =================
 
-model = timm.create_model("mobilenetv3_small_100", pretrained=True)
-model.eval()
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS certificates(
+        id TEXT PRIMARY KEY,
+        filename TEXT,
+        fingerprint TEXT,
+        score INTEGER,
+        status TEXT,
+        created TEXT
+    )
+    """)
+    conn.commit()
+    conn.close()
 
-# =========================================================
-# FRAME MODEL ANALYSIS
-# =========================================================
+init_db()
 
-def analyze_frame_model(frame):
+# ================= FINGERPRINT =================
 
-    img = cv2.resize(frame, (224, 224))
-    img = img.astype(np.float32) / 255.0
-    img = np.transpose(img, (2, 0, 1))
-    img = torch.tensor(img).unsqueeze(0)
+def generate_fingerprint(path):
+    sha256 = hashlib.sha256()
+    with open(path, "rb") as f:
+        while chunk := f.read(8192):
+            sha256.update(chunk)
+    return sha256.hexdigest()
 
-    with torch.no_grad():
-        feat = model.forward_features(img)
-        score = float(torch.mean(feat))
+# ================= HOME =================
 
-    return score
-
-# =========================================================
-# REAL DETECTION ENGINE
-# =========================================================
-
-def detect_ai_video(video_path):
-
-    cap = cv2.VideoCapture(video_path)
-
-    frame_count = 0
-    model_scores = []
-    noise_scores = []
-
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-
-        frame_count += 1
-        if frame_count > 120:
-            break
-
-        if frame_count % 6 != 0:
-            continue
-
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        noise_scores.append(np.std(gray))
-
-        model_score = analyze_frame_model(frame)
-        model_scores.append(model_score)
-
-    cap.release()
-
-    if not model_scores:
-        return False, 0
-
-    avg_model = np.mean(model_scores)
-    avg_noise = np.mean(noise_scores)
-
-    ai_score = 0
-
-    # model feature anomaly
-    if avg_model < 0.25:
-        ai_score += 50
-
-    # diffusion smoothing
-    if avg_noise < 10:
-        ai_score += 30
-
-    # consistency
-    if np.std(model_scores) < 0.01:
-        ai_score += 20
-
-    if ai_score > 60:
-        return True, int(ai_score)
-    else:
-        return False, int(ai_score)
-
-# =========================================================
-# HOME
-# =========================================================
 @app.get("/")
 def home():
-    return {"status":"VeriFYD backend live"}
+    return {"status":"VeriFYD AI detection server live"}
 
-# =========================================================
-# UPLOAD → DETECT → CERTIFY
-# =========================================================
+# ================= UPLOAD + DETECT =================
+
 @app.post("/upload/")
 async def upload(file: UploadFile = File(...), email: str = Form(...)):
 
@@ -125,43 +71,85 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
     with open(raw_path, "wb") as buffer:
         buffer.write(await file.read())
 
-    is_ai, score = detect_ai_video(raw_path)
+    fingerprint = generate_fingerprint(raw_path)
 
-    if is_ai:
+    # 🔍 RUN AI DETECTOR
+    score = detect_ai(raw_path)
+
+    # ================= AI BLOCK =================
+    if score < 50:
         return {
-            "status": "AI DETECTED",
-            "ai_score": score,
-            "message": "Video appears AI-generated and cannot be certified."
+            "status": "AI GENERATED",
+            "authenticity_score": score,
+            "message": "Video appears AI generated and cannot be certified."
         }
 
+    # ================= CERTIFY =================
     certified_path = f"{CERT_DIR}/{cert_id}.mp4"
     shutil.copy(raw_path, certified_path)
 
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("""
+    INSERT INTO certificates VALUES (?,?,?,?,?,?)
+    """, (
+        cert_id,
+        file.filename,
+        fingerprint,
+        score,
+        "CERTIFIED",
+        datetime.utcnow().isoformat()
+    ))
+    conn.commit()
+    conn.close()
+
     return {
-        "status": "CERTIFIED",
+        "status": "CERTIFIED REAL VIDEO",
         "certificate_id": cert_id,
-        "download_url": f"{BASE_URL}/download/{cert_id}",
-        "ai_score": score
+        "authenticity_score": score,
+        "verify_url": f"{BASE_URL}/verify/{cert_id}",
+        "download_url": f"{BASE_URL}/download/{cert_id}"
     }
 
-# =========================================================
-# DOWNLOAD
-# =========================================================
+# ================= VERIFY =================
+
+@app.get("/verify/{cid}")
+def verify(cid: str):
+
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT * FROM certificates WHERE id=?", (cid,))
+    row = c.fetchone()
+    conn.close()
+
+    if not row:
+        return {"status":"NOT FOUND"}
+
+    return {
+        "status":"VALID CERTIFICATE",
+        "certificate_id": row[0],
+        "filename": row[1],
+        "fingerprint": row[2],
+        "authenticity_score": row[3],
+        "created": row[5]
+    }
+
+# ================= DOWNLOAD =================
+
 @app.get("/download/{cid}")
 def download(cid: str):
     path = f"{CERT_DIR}/{cid}.mp4"
     return FileResponse(path, media_type="video/mp4")
 
-# =========================================================
-# LINK ANALYSIS (placeholder for now)
-# =========================================================
+# ================= LINK ANALYSIS =================
+
 @app.post("/analyze-link/")
 async def analyze_link(email: str = Form(...), video_url: str = Form(...)):
     return {
-        "status": "OK",
-        "result": "AUTHENTIC VERIFIED",
-        "ai_score": 0
+        "status":"UNDER REVIEW",
+        "message":"Link detection engine coming next phase"
     }
+
 
 
 
