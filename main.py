@@ -4,7 +4,7 @@ from fastapi.responses import FileResponse
 import os, uuid, hashlib, sqlite3, shutil
 from datetime import datetime
 
-from detector import detect_ai  # <-- connects to detector.py
+from detector import detect_ai
 
 BASE_URL = "https://verifyd-backend.onrender.com"
 
@@ -25,8 +25,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ================= DATABASE =================
-
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -45,22 +43,12 @@ def init_db():
 
 init_db()
 
-# ================= FINGERPRINT =================
-
-def generate_fingerprint(path):
-    sha256 = hashlib.sha256()
-    with open(path, "rb") as f:
+def fingerprint(path):
+    h = hashlib.sha256()
+    with open(path,"rb") as f:
         while chunk := f.read(8192):
-            sha256.update(chunk)
-    return sha256.hexdigest()
-
-# ================= HOME =================
-
-@app.get("/")
-def home():
-    return {"status":"VeriFYD AI detection server live"}
-
-# ================= UPLOAD + DETECT =================
+            h.update(chunk)
+    return h.hexdigest()
 
 @app.post("/upload/")
 async def upload(file: UploadFile = File(...), email: str = Form(...)):
@@ -68,23 +56,21 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
     cert_id = str(uuid.uuid4())
     raw_path = f"{UPLOAD_DIR}/{cert_id}_{file.filename}"
 
-    with open(raw_path, "wb") as buffer:
+    with open(raw_path,"wb") as buffer:
         buffer.write(await file.read())
 
-    fingerprint = generate_fingerprint(raw_path)
+    fp = fingerprint(raw_path)
 
-    # 🔍 RUN AI DETECTOR
+    # 🔍 DETECT AI
     score = detect_ai(raw_path)
 
-    # ================= AI BLOCK =================
-    if score < 50:
+    if score < 60:
         return {
-            "status": "AI GENERATED",
-            "authenticity_score": score,
-            "message": "Video appears AI generated and cannot be certified."
+            "status":"AI DETECTED",
+            "authenticity_score":score,
+            "message":"Video appears AI generated."
         }
 
-    # ================= CERTIFY =================
     certified_path = f"{CERT_DIR}/{cert_id}.mp4"
     shutil.copy(raw_path, certified_path)
 
@@ -92,34 +78,24 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
     c = conn.cursor()
     c.execute("""
     INSERT INTO certificates VALUES (?,?,?,?,?,?)
-    """, (
-        cert_id,
-        file.filename,
-        fingerprint,
-        score,
-        "CERTIFIED",
-        datetime.utcnow().isoformat()
-    ))
+    """,(cert_id,file.filename,fp,score,"CERTIFIED",datetime.utcnow().isoformat()))
     conn.commit()
     conn.close()
 
     return {
-        "status": "CERTIFIED REAL VIDEO",
-        "certificate_id": cert_id,
-        "authenticity_score": score,
-        "verify_url": f"{BASE_URL}/verify/{cert_id}",
-        "download_url": f"{BASE_URL}/download/{cert_id}"
+        "status":"CERTIFIED REAL VIDEO",
+        "certificate_id":cert_id,
+        "authenticity_score":score,
+        "verify_url":f"{BASE_URL}/verify/{cert_id}",
+        "download_url":f"{BASE_URL}/download/{cert_id}"
     }
 
-# ================= VERIFY =================
-
 @app.get("/verify/{cid}")
-def verify(cid: str):
-
+def verify(cid:str):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute("SELECT * FROM certificates WHERE id=?", (cid,))
-    row = c.fetchone()
+    c.execute("SELECT * FROM certificates WHERE id=?",(cid,))
+    row=c.fetchone()
     conn.close()
 
     if not row:
@@ -127,28 +103,15 @@ def verify(cid: str):
 
     return {
         "status":"VALID CERTIFICATE",
-        "certificate_id": row[0],
-        "filename": row[1],
-        "fingerprint": row[2],
-        "authenticity_score": row[3],
-        "created": row[5]
+        "certificate_id":row[0],
+        "score":row[3],
+        "created":row[5]
     }
-
-# ================= DOWNLOAD =================
 
 @app.get("/download/{cid}")
-def download(cid: str):
-    path = f"{CERT_DIR}/{cid}.mp4"
-    return FileResponse(path, media_type="video/mp4")
-
-# ================= LINK ANALYSIS =================
-
-@app.post("/analyze-link/")
-async def analyze_link(email: str = Form(...), video_url: str = Form(...)):
-    return {
-        "status":"UNDER REVIEW",
-        "message":"Link detection engine coming next phase"
-    }
+def download(cid:str):
+    path=f"{CERT_DIR}/{cid}.mp4"
+    return FileResponse(path,media_type="video/mp4")
 
 
 
