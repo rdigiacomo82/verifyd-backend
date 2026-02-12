@@ -4,3 +4,8 @@ python-multipart
 yt-dlp
 opencv-python-headless
 numpy
+torch
+torchvision
+timm
+
+
