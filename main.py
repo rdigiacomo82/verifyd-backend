@@ -1,7 +1,7 @@
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-import os, uuid, hashlib, sqlite3, shutil, requests, tempfile
+import os, uuid, hashlib, sqlite3, shutil, requests
 from datetime import datetime
 
 from detector import detect_ai
@@ -46,7 +46,7 @@ def init_db():
 
 init_db()
 
-# ================= FINGERPRINT =================
+# ================= HASH =================
 
 def fingerprint(path):
     h = hashlib.sha256()
@@ -55,7 +55,7 @@ def fingerprint(path):
             h.update(chunk)
     return h.hexdigest()
 
-# ================= SCORE COMBINER =================
+# ================= SCORE =================
 
 def combined_score(local_score, external_score):
     return int((local_score * 0.4) + ((100 - external_score) * 0.6))
@@ -77,11 +77,9 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
     external_score = external_ai_score(raw_path)
     final_score = combined_score(local_score, external_score)
 
-    print("LOCAL:", local_score)
-    print("EXTERNAL:", external_score)
-    print("FINAL:", final_score)
+    print("UPLOAD SCORE:", final_score)
 
-    # 🔴 AGGRESSIVE AI BLOCK
+    # 🔴 AGGRESSIVE BLOCK
     if final_score < 98:
         return {
             "status":"AI DETECTED",
@@ -144,22 +142,41 @@ def download(cid:str):
 async def analyze_link(email: str = Form(...), video_url: str = Form(...)):
 
     try:
-        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
-        temp_path = temp_file.name
-        temp_file.close()
+        print("LINK RECEIVED:", video_url)
 
-        r = requests.get(video_url, stream=True, timeout=30)
-        with open(temp_path, "wb") as f:
-            for chunk in r.iter_content(1024):
-                f.write(chunk)
+        temp_path = f"temp_{uuid.uuid4()}.mp4"
 
-        local_score = detect_ai(temp_path)
-        external_score = external_ai_score(temp_path)
-        final_score = combined_score(local_score, external_score)
+        # try downloading
+        try:
+            r = requests.get(video_url, stream=True, timeout=15)
+            with open(temp_path, "wb") as f:
+                for chunk in r.iter_content(1024):
+                    f.write(chunk)
+        except Exception as download_error:
+            print("DOWNLOAD FAILED:", download_error)
+            return {
+                "status":"ERROR",
+                "authenticity_score":0,
+                "certificate_id":None,
+                "verify_url":None,
+                "download_url":None,
+                "message":"Could not fetch video"
+            }
 
-        os.remove(temp_path)
+        # run detection
+        try:
+            local_score = detect_ai(temp_path)
+            external_score = external_ai_score(temp_path)
+            final_score = combined_score(local_score, external_score)
+        except Exception as detect_error:
+            print("DETECTION FAILED:", detect_error)
+            final_score = 0
 
-        # 🔴 AI DETECTED
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+
+        print("LINK SCORE:", final_score)
+
         if final_score < 98:
             return {
                 "status":"AI DETECTED",
@@ -169,7 +186,6 @@ async def analyze_link(email: str = Form(...), video_url: str = Form(...)):
                 "download_url":None
             }
 
-        # 🟢 REAL LINK RESULT
         return {
             "status":"CERTIFIED REAL VIDEO",
             "authenticity_score":final_score,
@@ -179,6 +195,7 @@ async def analyze_link(email: str = Form(...), video_url: str = Form(...)):
         }
 
     except Exception as e:
+        print("LINK CRASH:", str(e))
         return {
             "status":"ERROR",
             "authenticity_score":0,
@@ -193,6 +210,7 @@ async def analyze_link(email: str = Form(...), video_url: str = Form(...)):
 @app.get("/")
 def home():
     return {"status":"VeriFYD API LIVE"}
+
 
 
 
