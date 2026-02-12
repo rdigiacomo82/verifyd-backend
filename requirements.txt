@@ -9,6 +9,8 @@ timm
 scikit-image
 ffmpeg-python
 requests
+yt-dlp
+
 
 
 
