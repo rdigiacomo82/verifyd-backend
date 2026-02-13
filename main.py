@@ -1,7 +1,7 @@
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-import os, uuid, shutil, subprocess, sqlite3, hashlib
+import os, uuid, shutil, subprocess, hashlib, sqlite3
 
 from detector import detect_ai
 from external_detector import external_ai_score
@@ -18,6 +18,7 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 
 app = FastAPI()
 
+# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -26,10 +27,24 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ================================
+# UTILS
+# ================================
+
 def combined_score(local, external):
     return int((local * 0.4) + ((100 - external) * 0.6))
 
-# ================= UPLOAD =================
+# ================================
+# HOME
+# ================================
+
+@app.get("/")
+def home():
+    return {"status": "VeriFYD API LIVE"}
+
+# ================================
+# UPLOAD VIDEO
+# ================================
 
 @app.post("/upload/")
 async def upload(file: UploadFile = File(...), email: str = Form(...)):
@@ -44,40 +59,36 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
     external_score = external_ai_score(raw_path)
     final_score = combined_score(local_score, external_score)
 
+    # If AI detected → block certification
     if final_score < 98:
         return {
-            "status": "OK",
             "success": True,
-            "data": {
-                "result": "AI DETECTED",
-                "score": final_score
-            }
+            "message": f"AI DETECTED — Authenticity Score: {final_score}"
         }
 
+    # Otherwise certify
     certified_path = f"{CERT_DIR}/{cert_id}.mp4"
     shutil.copy(raw_path, certified_path)
 
     return {
-        "status": "OK",
         "success": True,
-        "data": {
-            "result": "CERTIFIED REAL VIDEO",
-            "score": final_score,
-            "certificate_id": cert_id,
-            "verify_url": f"{BASE_URL}/verify/{cert_id}",
-            "download_url": f"{BASE_URL}/download/{cert_id}"
-        }
+        "message": f"CERTIFIED REAL VIDEO — Authenticity Score: {final_score}",
+        "certificate_id": cert_id,
+        "verify_url": f"{BASE_URL}/verify/{cert_id}",
+        "download_url": f"{BASE_URL}/download/{cert_id}"
     }
 
-# ================= LINK =================
+# ================================
+# ANALYZE LINK (TikTok/YouTube/etc)
+# ================================
 
 @app.post("/analyze-link/")
 async def analyze_link(email: str = Form(...), video_url: str = Form(...)):
-
     try:
         temp_id = str(uuid.uuid4())
         temp_path = f"{TEMP_DIR}/{temp_id}.mp4"
 
+        # Download video using yt-dlp
         cmd = [
             "yt-dlp",
             "-f", "mp4",
@@ -90,52 +101,56 @@ async def analyze_link(email: str = Form(...), video_url: str = Form(...)):
 
         if not os.path.exists(temp_path):
             return {
-                "status": "OK",
                 "success": True,
-                "data": {
-                    "result": "ERROR",
-                    "score": 0
-                }
+                "message": "Could not download video."
             }
 
+        # Run detectors
         local_score = detect_ai(temp_path)
         external_score = external_ai_score(temp_path)
         final_score = combined_score(local_score, external_score)
 
         os.remove(temp_path)
 
+        # Return message Horizons will display
         if final_score < 98:
             return {
-                "status": "OK",
                 "success": True,
-                "data": {
-                    "result": "AI DETECTED",
-                    "score": final_score
-                }
+                "message": f"AI DETECTED — Authenticity Score: {final_score}"
             }
 
         return {
-            "status": "OK",
             "success": True,
-            "data": {
-                "result": "CERTIFIED REAL VIDEO",
-                "score": final_score
-            }
+            "message": f"CERTIFIED REAL VIDEO — Authenticity Score: {final_score}"
         }
 
     except Exception as e:
         return {
-            "status": "OK",
             "success": True,
-            "data": {
-                "result": "ERROR",
-                "score": 0
-            }
+            "message": "Error analyzing video."
         }
 
-@app.get("/")
-def home():
-    return {"status": "VeriFYD API LIVE"}
+# ================================
+# VERIFY CERTIFICATE
+# ================================
+
+@app.get("/verify/{cid}")
+def verify(cid: str):
+    path = f"{CERT_DIR}/{cid}.mp4"
+    if not os.path.exists(path):
+        return {"status":"not found"}
+    return {"status":"valid", "certificate_id":cid}
+
+# ================================
+# DOWNLOAD CERTIFIED VIDEO
+# ================================
+
+@app.get("/download/{cid}")
+def download(cid: str):
+    path = f"{CERT_DIR}/{cid}.mp4"
+    if not os.path.exists(path):
+        return {"error":"not found"}
+    return FileResponse(path, media_type="video/mp4")
 
 
 
