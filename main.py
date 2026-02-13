@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, Form, Request
+from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 import os, uuid, shutil
@@ -13,6 +13,7 @@ os.makedirs(CERT_DIR, exist_ok=True)
 
 app = FastAPI()
 
+# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -21,16 +22,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --------------------------------------------------
+# =========================================================
 # HOME
-# --------------------------------------------------
+# =========================================================
 @app.get("/")
 def home():
     return {"status": "VeriFYD API LIVE"}
 
-# --------------------------------------------------
-# UPLOAD VIDEO
-# --------------------------------------------------
+# =========================================================
+# UPLOAD
+# =========================================================
 @app.post("/upload/")
 async def upload(file: UploadFile = File(...), email: str = Form(...)):
     cert_id = str(uuid.uuid4())
@@ -48,57 +49,45 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
         "download_url": f"{BASE_URL}/download/{cert_id}"
     }
 
-# --------------------------------------------------
+# =========================================================
 # DOWNLOAD
-# --------------------------------------------------
+# =========================================================
 @app.get("/download/{cid}")
 def download(cid: str):
     path = f"{CERT_DIR}/{cid}.mp4"
     return FileResponse(path, media_type="video/mp4")
 
-# --------------------------------------------------
-# ANALYZE LINK (ACCEPTS ANY FRONTEND FORMAT)
-# --------------------------------------------------
+# =========================================================
+# ANALYZE LINK — FINAL STABLE VERSION
+# =========================================================
 @app.post("/analyze-link/")
-async def analyze_link(request: Request):
+async def analyze_link(email: str = Form(...), video_url: str = Form(...)):
 
-    try:
-        # Try form first
-        form = await request.form()
-        email = form.get("email")
-        video_url = form.get("video_url")
+    print("Analyze request received")
+    print("Email:", email)
+    print("URL:", video_url)
 
-        # If form empty, try JSON
-        if not email or not video_url:
-            data = await request.json()
-            email = data.get("email")
-            video_url = data.get("video_url")
+    # TEMP detection result (stable)
+    status = "AI DETECTED"
+    score = 78
 
-        print("Analyze request")
-        print("Email:", email)
-        print("URL:", video_url)
+    # 🔥 RETURN ALL FORMATS (so ANY frontend works)
+    return {
+        # simple format
+        "status": status,
+        "ai_score": score,
 
-        # ---- Detection placeholder ----
-        score = 78
-        status = "AI DETECTED" if score < 85 else "AUTHENTIC VERIFIED"
+        # compatibility format
+        "success": True,
+        "data": {
+            "status": status,
+            "authenticity_score": score
+        },
 
-        return {
-            "success": True,
-            "data": {
-                "status": status,
-                "authenticity_score": score
-            }
-        }
+        # optional display message
+        "message": f"{status} — Authenticity Score: {score}"
+    }
 
-    except Exception as e:
-        print("ANALYZE ERROR:", str(e))
-        return {
-            "success": False,
-            "data": {
-                "status": "ERROR",
-                "authenticity_score": 0
-            }
-        }
 
 
 
