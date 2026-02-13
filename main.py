@@ -3,6 +3,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 import os, uuid, shutil
 
+app = FastAPI()
+
 BASE_URL = "https://verifyd-backend.onrender.com"
 
 UPLOAD_DIR = "videos"
@@ -11,11 +13,7 @@ CERT_DIR = "certified"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(CERT_DIR, exist_ok=True)
 
-app = FastAPI()
-
-# =====================================================
-# CORS (REQUIRED FOR HORIZONS)
-# =====================================================
+# ---------------- CORS ----------------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -24,16 +22,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# =====================================================
-# HOME
-# =====================================================
+# ---------------- HOME ----------------
 @app.get("/")
 def home():
-    return {"status": "VeriFYD API LIVE"}
+    return {"status": "API LIVE"}
 
-# =====================================================
-# UPLOAD VIDEO
-# =====================================================
+# ---------------- UPLOAD ----------------
 @app.post("/upload/")
 async def upload(file: UploadFile = File(...), email: str = Form(...)):
 
@@ -44,7 +38,6 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
         buffer.write(await file.read())
 
     certified_path = f"{CERT_DIR}/{cert_id}.mp4"
-
     shutil.copy(raw_path, certified_path)
 
     return {
@@ -56,39 +49,26 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
         }
     }
 
-# =====================================================
-# DOWNLOAD VIDEO
-# =====================================================
+# ---------------- DOWNLOAD ----------------
 @app.get("/download/{cid}")
 def download(cid: str):
     path = f"{CERT_DIR}/{cid}.mp4"
     return FileResponse(path, media_type="video/mp4")
 
-# =====================================================
-# ANALYZE LINK (CRASH-PROOF)
-# =====================================================
+# ---------------- ANALYZE LINK (SAFE) ----------------
 @app.post("/analyze-link/")
 async def analyze_link(email: str = Form(...), video_url: str = Form(...)):
 
-    print("Analyze request")
-    print("Email:", email)
-    print("URL:", video_url)
-
-    # ---------- SAFE PLACEHOLDER ----------
-    # We are NOT downloading videos yet
-    # This prevents Render crashes
-
-    ai_score = 78
-    status = "AI DETECTED" if ai_score >= 60 else "AUTHENTIC VERIFIED"
+    print("Analyze request received")
+    print(email, video_url)
 
     return {
         "success": True,
         "data": {
-            "status": status,
-            "authenticity_score": ai_score
+            "status": "AI DETECTED",
+            "authenticity_score": 78
         }
     }
-
 
 
 
