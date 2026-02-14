@@ -1,7 +1,11 @@
-from fastapi import FastAPI, UploadFile, File, Form, Request
+from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
-import os, uuid, shutil
+from fastapi.responses import FileResponse, HTMLResponse
+import os, uuid, shutil, subprocess
+import cv2
+import numpy as np
+import requests
+import tempfile
 
 BASE_URL = "https://verifyd-backend.onrender.com"
 
@@ -13,9 +17,9 @@ os.makedirs(CERT_DIR, exist_ok=True)
 
 app = FastAPI()
 
-# ---------------------------------------------------
+# --------------------------------------------------
 # CORS
-# ---------------------------------------------------
+# --------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -24,16 +28,105 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ---------------------------------------------------
+# --------------------------------------------------
 # HOME
-# ---------------------------------------------------
+# --------------------------------------------------
 @app.get("/")
 def home():
     return {"status": "VeriFYD API LIVE"}
 
-# ---------------------------------------------------
-# UPLOAD VIDEO
-# ---------------------------------------------------
+# ==================================================
+# 🔬 REAL DETECTION ENGINE
+# ==================================================
+def analyze_video(file_path):
+
+    cap = cv2.VideoCapture(file_path)
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+    if frame_count == 0:
+        return 0
+
+    samples = []
+    step = max(frame_count // 25, 1)
+
+    for i in range(0, frame_count, step):
+        cap.set(cv2.CAP_PROP_POS_FRAMES, i)
+        ret, frame = cap.read()
+        if not ret:
+            continue
+
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        noise = np.std(gray)
+        edges = cv2.Laplacian(gray, cv2.CV_64F).var()
+
+        samples.append((noise, edges))
+
+        if len(samples) > 25:
+            break
+
+    cap.release()
+
+    if not samples:
+        return 0
+
+    noise_avg = np.mean([s[0] for s in samples])
+    edge_avg = np.mean([s[1] for s in samples])
+
+    score = 0
+
+    # natural camera noise
+    if noise_avg > 20:
+        score += 40
+    else:
+        score -= 20
+
+    # texture detail
+    if edge_avg > 30:
+        score += 40
+    else:
+        score -= 20
+
+    # randomness variation
+    variance = np.var([s[0] for s in samples])
+    if variance > 5:
+        score += 20
+
+    score = max(min(score + 50, 100), 0)
+
+    return int(score)
+
+# ==================================================
+# 🔊 STAMP VIDEO WITH AUDIO PRESERVED
+# ==================================================
+def stamp_video(input_path, output_path, cert_id):
+
+    command = [
+        "ffmpeg",
+        "-y",
+        "-i", input_path,
+
+        "-vf",
+        f"drawtext=text='VeriFYD CERTIFIED':"
+        "x=10:y=10:fontsize=18:fontcolor=white@0.8",
+
+        "-c:v", "libx264",
+        "-preset", "fast",
+        "-crf", "23",
+
+        # 🔊 KEEP AUDIO
+        "-c:a", "aac",
+        "-b:a", "192k",
+        "-map", "0:v",
+        "-map", "0:a?",
+
+        output_path
+    ]
+
+    subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+# ==================================================
+# 📤 UPLOAD VIDEO
+# ==================================================
 @app.post("/upload/")
 async def upload(file: UploadFile = File(...), email: str = Form(...)):
 
@@ -43,115 +136,73 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
     with open(raw_path, "wb") as buffer:
         buffer.write(await file.read())
 
+    # 🔬 run detection
+    score = analyze_video(raw_path)
+
+    if score < 40:
+        return {
+            "status": "AI DETECTED",
+            "authenticity_score": score
+        }
+
     certified_path = f"{CERT_DIR}/{cert_id}.mp4"
-    shutil.copy(raw_path, certified_path)
+
+    stamp_video(raw_path, certified_path, cert_id)
 
     return {
-        "status": "CERTIFIED",
+        "status": "CERTIFIED REAL VIDEO",
         "certificate_id": cert_id,
+        "authenticity_score": score,
         "download_url": f"{BASE_URL}/download/{cert_id}"
     }
 
-# ---------------------------------------------------
-# DOWNLOAD VIDEO
-# ---------------------------------------------------
+# ==================================================
+# 📥 DOWNLOAD
+# ==================================================
 @app.get("/download/{cid}")
 def download(cid: str):
     path = f"{CERT_DIR}/{cid}.mp4"
     return FileResponse(path, media_type="video/mp4")
 
-# ---------------------------------------------------
-# ANALYZE LINK (BYPASS HORIZONS — ALWAYS WORKS)
-# ---------------------------------------------------
-@app.api_route("/analyze-link/", methods=["GET","POST"])
-async def analyze_link(request: Request):
+# ==================================================
+# 🔗 ANALYZE LINK
+# ==================================================
+@app.post("/analyze-link/")
+async def analyze_link(email: str = Form(...), video_url: str = Form(...)):
 
-    email = None
-    video_url = None
+    try:
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+        r = requests.get(video_url, stream=True, timeout=15)
 
-    # ---- Get POST form ----
-    if request.method == "POST":
-        try:
-            form = await request.form()
-            email = form.get("email")
-            video_url = form.get("video_url")
-        except:
-            pass
+        for chunk in r.iter_content(1024):
+            tmp.write(chunk)
 
-    # ---- Get GET params ----
-    if request.method == "GET":
-        email = request.query_params.get("email")
-        video_url = request.query_params.get("video_url")
+        tmp.close()
 
-    print("Analyze request:", email, video_url)
+        score = analyze_video(tmp.name)
 
-    # ------------------------------------------------
-    # TEMP AI DETECTION RESULT (STABLE PLACEHOLDER)
-    # ------------------------------------------------
-    status = "AI DETECTED"
-    score = 78
+        os.unlink(tmp.name)
 
-    # ------------------------------------------------
-    # IF request expects JSON → return JSON
-    # ------------------------------------------------
-    if "application/json" in request.headers.get("accept",""):
-        return JSONResponse({
-            "status": status,
-            "ai_score": score,
-            "success": True,
-            "data": {
-                "status": status,
-                "authenticity_score": score
-            }
-        })
+        if score < 40:
+            result = "AI DETECTED"
+        else:
+            result = "REAL VIDEO"
 
-    # ------------------------------------------------
-    # OTHERWISE → RETURN RESULT PAGE
-    # ------------------------------------------------
-    html = f"""
-    <html>
-    <head>
-        <title>VeriFYD Result</title>
-        <style>
-            body {{
-                font-family: Arial;
-                background: #0b0b0b;
-                color: white;
-                text-align: center;
-                padding-top: 120px;
-            }}
-            .box {{
-                background: #111;
-                padding: 50px;
-                border-radius: 12px;
-                display: inline-block;
-                box-shadow: 0 0 30px rgba(0,255,140,0.2);
-            }}
-            h1 {{
-                color: #00ff9c;
-                font-size: 42px;
-            }}
-            h2 {{
-                font-size: 28px;
-                margin-top: 20px;
-            }}
-            p {{
-                margin-top: 20px;
-                color: #aaa;
-            }}
-        </style>
-    </head>
-    <body>
-        <div class="box">
-            <h1>{status}</h1>
-            <h2>Authenticity Score: {score}</h2>
-            <p>Analyzed by VeriFYD</p>
-        </div>
-    </body>
-    </html>
-    """
+        html = f"""
+        <html>
+        <body style="background:#0b0b0b;color:white;text-align:center;padding-top:120px;font-family:Arial">
+        <h1>{result}</h1>
+        <h2>Authenticity Score: {score}</h2>
+        <p>Analyzed by VeriFYD</p>
+        </body>
+        </html>
+        """
 
-    return HTMLResponse(content=html)
+        return HTMLResponse(html)
+
+    except Exception as e:
+        return {"error": str(e)}
+
 
 
 
