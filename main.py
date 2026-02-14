@@ -1,6 +1,6 @@
-from fastapi import FastAPI, UploadFile, File, Form
+from fastapi import FastAPI, UploadFile, File, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 import os, uuid, subprocess, tempfile, requests
 import cv2
 import numpy as np
@@ -34,7 +34,7 @@ def home():
     return {"status": "VeriFYD API LIVE"}
 
 # ==================================================
-# 🔬 IMPROVED AI DETECTION ENGINE
+# 🔬 DETECTION ENGINE
 # ==================================================
 def analyze_video(file_path):
 
@@ -67,28 +67,22 @@ def analyze_video(file_path):
 
     cap.release()
 
-    if not noise_vals:
-        return 0
-
     noise = np.mean(noise_vals)
     edges = np.mean(edge_vals)
     brightness_var = np.var(brightness_vals)
 
     score = 50
 
-    # real camera noise
     if noise > 18:
         score += 20
     else:
         score -= 25
 
-    # texture detail
     if edges > 25:
         score += 20
     else:
         score -= 25
 
-    # lighting variation
     if brightness_var > 10:
         score += 10
     else:
@@ -98,7 +92,7 @@ def analyze_video(file_path):
     return int(score)
 
 # ==================================================
-# 🎬 STAMP VIDEO (WITH AUDIO PRESERVED)
+# 🎬 STAMP VIDEO (AUDIO FIXED)
 # ==================================================
 def stamp_video(input_path, output_path):
 
@@ -114,11 +108,9 @@ def stamp_video(input_path, output_path):
         "-preset", "fast",
         "-crf", "23",
 
-        # 🔊 KEEP AUDIO
-        "-c:a", "aac",
-        "-b:a", "192k",
-        "-map", "0:v",
-        "-map", "0:a?",
+        # 🔊 FIX AUDIO
+        "-c:a", "copy",
+        "-map", "0",
 
         output_path
     ]
@@ -126,7 +118,7 @@ def stamp_video(input_path, output_path):
     subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
 # ==================================================
-# 📤 UPLOAD VIDEO
+# 📤 UPLOAD
 # ==================================================
 @app.post("/upload/")
 async def upload(file: UploadFile = File(...), email: str = Form(...)):
@@ -139,7 +131,6 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
 
     score = analyze_video(raw_path)
 
-    # 🚨 BLOCK AI
     if score < 50:
         return {
             "status": "AI DETECTED",
@@ -157,7 +148,7 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
     }
 
 # ==================================================
-# 📥 DOWNLOAD
+# DOWNLOAD
 # ==================================================
 @app.get("/download/{cid}")
 def download(cid: str):
@@ -165,10 +156,21 @@ def download(cid: str):
     return FileResponse(path, media_type="video/mp4")
 
 # ==================================================
-# 🔗 ANALYZE LINK
+# 🔗 ANALYZE LINK (GET + POST SAFE)
 # ==================================================
-@app.post("/analyze-link/")
-async def analyze_link(email: str = Form(...), video_url: str = Form(...)):
+@app.api_route("/analyze-link/", methods=["GET","POST"])
+async def analyze_link(request: Request):
+
+    if request.method == "POST":
+        form = await request.form()
+        email = form.get("email")
+        video_url = form.get("video_url")
+    else:
+        email = request.query_params.get("email")
+        video_url = request.query_params.get("video_url")
+
+    if not video_url:
+        return JSONResponse({"error": "Missing video_url"}, status_code=400)
 
     try:
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
@@ -182,10 +184,7 @@ async def analyze_link(email: str = Form(...), video_url: str = Form(...)):
         score = analyze_video(tmp.name)
         os.unlink(tmp.name)
 
-        if score < 50:
-            result = "AI DETECTED"
-        else:
-            result = "REAL VIDEO"
+        result = "AI DETECTED" if score < 50 else "REAL VIDEO"
 
         html = f"""
         <html>
@@ -200,7 +199,8 @@ async def analyze_link(email: str = Form(...), video_url: str = Form(...)):
         return HTMLResponse(html)
 
     except Exception as e:
-        return {"error": str(e)}
+        return JSONResponse({"error": str(e)}, status_code=500)
+
 
 
 
