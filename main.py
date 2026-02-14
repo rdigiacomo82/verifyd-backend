@@ -1,9 +1,9 @@
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-import os, uuid, subprocess, cv2, numpy as np
+import os, uuid, subprocess
 
-print("🚨 NEW BUILD LOADED 🚨")
+print("🚨 VERIFYD BUILD LOADED 🚨")
 
 BASE_URL = "https://verifyd-backend.onrender.com"
 
@@ -29,26 +29,22 @@ app.add_middleware(
 def home():
     return {"status": "VeriFYD LIVE"}
 
-# --------------------------------------------------
-# Simple detection placeholder
-# --------------------------------------------------
-def analyze_video(path):
-    cap = cv2.VideoCapture(path)
-    frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    cap.release()
-    return 75 if frames > 0 else 50
-
-# --------------------------------------------------
-# AUDIO-SAFE STAMP FUNCTION WITH LOGGING
-# --------------------------------------------------
+# ==================================================
+# 🔊 FINAL AUDIO-SAFE STAMP FUNCTION
+# ==================================================
 def stamp_video(input_path, output_path, cert_id):
 
-    print("🎬 STAMP START")
+    print("\n===========================")
+    print("STAMP START")
     print("INPUT:", input_path)
+    print("===========================\n")
 
+    # TEMP REMUX FILE
     temp_mux = f"{TMP_DIR}/{cert_id}_mux.mp4"
 
-    # --- STEP 1: REMUX ONLY (COPY AUDIO EXACTLY) ---
+    # --------------------------------------------------
+    # STEP 1: REMUX (COPY AUDIO EXACTLY)
+    # --------------------------------------------------
     remux_cmd = [
         "ffmpeg",
         "-y",
@@ -59,12 +55,12 @@ def stamp_video(input_path, output_path, cert_id):
         temp_mux
     ]
 
-    print("RUNNING REMUX:", " ".join(remux_cmd))
+    print("REMUX CMD:", " ".join(remux_cmd))
     subprocess.run(remux_cmd)
 
-    print("REMUX COMPLETE")
-
-    # --- STEP 2: APPLY STATIC WATERMARK ---
+    # --------------------------------------------------
+    # STEP 2: APPLY WATERMARK (STATIC TEXT)
+    # --------------------------------------------------
     watermark = (
         f"drawtext=text='VeriFYD ID {cert_id}':"
         "x=w-tw-20:y=h-th-20:"
@@ -77,31 +73,38 @@ def stamp_video(input_path, output_path, cert_id):
         "-y",
         "-i", temp_mux,
         "-vf", watermark,
+
         "-map", "0:v",
         "-map", "0:a?",
+
         "-c:v", "libx264",
         "-preset", "fast",
         "-crf", "23",
+
         "-c:a", "aac",
         "-b:a", "192k",
+        "-ac", "2",
+        "-ar", "44100",
         "-af", "aresample=async=1",
+
         "-shortest",
         "-movflags", "+faststart",
+
         output_path
     ]
 
-    print("RUNNING FINAL:", " ".join(final_cmd))
+    print("FINAL CMD:", " ".join(final_cmd))
     subprocess.run(final_cmd)
 
     print("STAMP COMPLETE:", output_path)
 
-# --------------------------------------------------
-# UPLOAD ROUTE
-# --------------------------------------------------
+# ==================================================
+# 📤 UPLOAD ROUTE
+# ==================================================
 @app.post("/upload/")
 async def upload(file: UploadFile = File(...), email: str = Form(...)):
 
-    print("📤 UPLOAD HIT")
+    print("\n📤 UPLOAD HIT\n")
 
     cert_id = str(uuid.uuid4())
     raw_path = f"{UPLOAD_DIR}/{cert_id}_{file.filename}"
@@ -111,28 +114,27 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
 
     print("FILE SAVED:", raw_path)
 
-    score = analyze_video(raw_path)
-
     certified_path = f"{CERT_DIR}/{cert_id}.mp4"
+
     stamp_video(raw_path, certified_path, cert_id)
 
-    print("UPLOAD COMPLETE")
+    print("UPLOAD COMPLETE\n")
 
     return {
         "status": "CERTIFIED REAL VIDEO",
         "certificate_id": cert_id,
-        "authenticity_score": score,
         "download_url": f"{BASE_URL}/download/{cert_id}"
     }
 
-# --------------------------------------------------
-# DOWNLOAD
-# --------------------------------------------------
+# ==================================================
+# 📥 DOWNLOAD
+# ==================================================
 @app.get("/download/{cid}")
 def download(cid: str):
     path = f"{CERT_DIR}/{cid}.mp4"
-    print("DOWNLOAD REQUEST:", path)
+    print("DOWNLOAD:", path)
     return FileResponse(path, media_type="video/mp4")
+
 
 
 
