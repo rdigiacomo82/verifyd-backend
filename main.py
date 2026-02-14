@@ -1,10 +1,12 @@
-from fastapi import FastAPI, UploadFile, File, Form
+from fastapi import FastAPI, UploadFile, File, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 import os, uuid, subprocess, tempfile
 import cv2
 import numpy as np
-import requests
+import yt_dlp
+
+print("🔥 VERIFYD MAIN.PY LOADED 🔥")
 
 BASE_URL = "https://verifyd-backend.onrender.com"
 
@@ -16,9 +18,6 @@ os.makedirs(CERT_DIR, exist_ok=True)
 
 app = FastAPI()
 
-# --------------------------------------------------
-# CORS
-# --------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -27,16 +26,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --------------------------------------------------
-# HOME
-# --------------------------------------------------
 @app.get("/")
 def home():
     return {"status": "VeriFYD API LIVE"}
 
-# ==================================================
-# 🔬 AI DETECTION ENGINE (basic but stable)
-# ==================================================
+# --------------------------------------------------
+# DETECTOR
+# --------------------------------------------------
 def analyze_video(file_path):
 
     cap = cv2.VideoCapture(file_path)
@@ -46,7 +42,7 @@ def analyze_video(file_path):
         return 0
 
     samples = []
-    step = max(frame_count // 25, 1)
+    step = max(frame_count // 30, 1)
 
     for i in range(0, frame_count, step):
         cap.set(cv2.CAP_PROP_POS_FRAMES, i)
@@ -60,7 +56,7 @@ def analyze_video(file_path):
 
         samples.append((noise, edges))
 
-        if len(samples) > 25:
+        if len(samples) >= 30:
             break
 
     cap.release()
@@ -83,12 +79,11 @@ def analyze_video(file_path):
     else:
         score -= 20
 
-    score = max(min(score, 99), 0)
-    return int(score)
+    return max(min(score, 99), 0)
 
-# ==================================================
-# 🎬 STAMP VIDEO WITH AUDIO PRESERVED
-# ==================================================
+# --------------------------------------------------
+# STAMP VIDEO
+# --------------------------------------------------
 def stamp_video(input_path, output_path, cert_id):
 
     vf = (
@@ -100,30 +95,24 @@ def stamp_video(input_path, output_path, cert_id):
         "ffmpeg",
         "-y",
         "-i", input_path,
-
         "-vf", vf,
-
-        # preserve audio
         "-map", "0:v:0",
         "-map", "0:a?",
-
         "-c:v", "libx264",
         "-preset", "fast",
         "-crf", "23",
-
         "-c:a", "aac",
         "-b:a", "192k",
-
+        "-ac", "2",
         "-movflags", "+faststart",
-
         output_path
     ]
 
     subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
-# ==================================================
-# 📤 UPLOAD VIDEO
-# ==================================================
+# --------------------------------------------------
+# UPLOAD
+# --------------------------------------------------
 @app.post("/upload/")
 async def upload(file: UploadFile = File(...), email: str = Form(...)):
 
@@ -135,11 +124,8 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
 
     score = analyze_video(raw_path)
 
-    if score < 45:
-        return {
-            "status": "AI DETECTED",
-            "authenticity_score": score
-        }
+    if score < 55:
+        return {"status": "AI DETECTED", "authenticity_score": score}
 
     certified_path = f"{CERT_DIR}/{cert_id}.mp4"
     stamp_video(raw_path, certified_path, cert_id)
@@ -151,40 +137,55 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
         "download_url": f"{BASE_URL}/download/{cert_id}"
     }
 
-# ==================================================
-# 📥 DOWNLOAD
-# ==================================================
+# --------------------------------------------------
+# DOWNLOAD
+# --------------------------------------------------
 @app.get("/download/{cid}")
 def download(cid: str):
-    path = f"{CERT_DIR}/{cid}.mp4"
-    return FileResponse(path, media_type="video/mp4")
+    return FileResponse(f"{CERT_DIR}/{cid}.mp4", media_type="video/mp4")
 
-# ==================================================
-# 🔗 ANALYZE LINK (FIXED — NO MORE 405)
-# ==================================================
-@app.post("/analyze-link/")
-async def analyze_link(email: str = Form(...), video_url: str = Form(...)):
+# --------------------------------------------------
+# LINK ANALYZER (NO 405 POSSIBLE)
+# --------------------------------------------------
+@app.api_route("/analyze-link", methods=["GET","POST"])
+@app.api_route("/analyze-link/", methods=["GET","POST"])
+async def analyze_link(request: Request):
+
+    print("📡 ANALYZE LINK HIT")
+
+    if request.method == "POST":
+        form = await request.form()
+        video_url = form.get("video_url")
+    else:
+        video_url = request.query_params.get("video_url")
+
+    if not video_url:
+        return {"error": "Missing video_url"}
 
     try:
-        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+        temp_video = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+        temp_video.close()
 
-        r = requests.get(video_url, stream=True, timeout=25)
-        for chunk in r.iter_content(1024):
-            tmp.write(chunk)
+        ydl_opts = {
+            'outtmpl': temp_video.name,
+            'format': 'mp4',
+            'quiet': True,
+            'noplaylist': True
+        }
 
-        tmp.close()
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([video_url])
 
-        score = analyze_video(tmp.name)
-        os.unlink(tmp.name)
+        score = analyze_video(temp_video.name)
+        os.unlink(temp_video.name)
 
-        result = "AI DETECTED" if score < 45 else "REAL VIDEO"
+        result = "AI DETECTED" if score < 55 else "REAL VIDEO"
 
         html = f"""
         <html>
         <body style="background:#0b0b0b;color:white;text-align:center;padding-top:120px;font-family:Arial">
         <h1>{result}</h1>
         <h2>Authenticity Score: {score}</h2>
-        <p>Analyzed by VeriFYD</p>
         </body>
         </html>
         """
@@ -193,6 +194,7 @@ async def analyze_link(email: str = Form(...), video_url: str = Form(...)):
 
     except Exception as e:
         return {"error": str(e)}
+
 
 
 
