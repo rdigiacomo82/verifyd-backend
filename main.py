@@ -1,11 +1,9 @@
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
-import os, uuid, shutil, subprocess
+import os, uuid, subprocess, tempfile, requests
 import cv2
 import numpy as np
-import requests
-import tempfile
 
 BASE_URL = "https://verifyd-backend.onrender.com"
 
@@ -36,18 +34,21 @@ def home():
     return {"status": "VeriFYD API LIVE"}
 
 # ==================================================
-# 🔬 REAL DETECTION ENGINE
+# 🔬 IMPROVED AI DETECTION ENGINE
 # ==================================================
 def analyze_video(file_path):
 
     cap = cv2.VideoCapture(file_path)
     frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-    if frame_count == 0:
+    if frame_count < 10:
         return 0
 
-    samples = []
-    step = max(frame_count // 25, 1)
+    noise_vals = []
+    edge_vals = []
+    brightness_vals = []
+
+    step = max(frame_count // 30, 1)
 
     for i in range(0, frame_count, step):
         cap.set(cv2.CAP_PROP_POS_FRAMES, i)
@@ -56,49 +57,50 @@ def analyze_video(file_path):
             continue
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        noise = np.std(gray)
-        edges = cv2.Laplacian(gray, cv2.CV_64F).var()
 
-        samples.append((noise, edges))
+        noise_vals.append(np.std(gray))
+        edge_vals.append(cv2.Laplacian(gray, cv2.CV_64F).var())
+        brightness_vals.append(np.mean(gray))
 
-        if len(samples) > 25:
+        if len(noise_vals) > 30:
             break
 
     cap.release()
 
-    if not samples:
+    if not noise_vals:
         return 0
 
-    noise_avg = np.mean([s[0] for s in samples])
-    edge_avg = np.mean([s[1] for s in samples])
+    noise = np.mean(noise_vals)
+    edges = np.mean(edge_vals)
+    brightness_var = np.var(brightness_vals)
 
-    score = 0
+    score = 50
 
-    # natural camera noise
-    if noise_avg > 20:
-        score += 40
+    # real camera noise
+    if noise > 18:
+        score += 20
     else:
-        score -= 20
+        score -= 25
 
     # texture detail
-    if edge_avg > 30:
-        score += 40
-    else:
-        score -= 20
-
-    # randomness variation
-    variance = np.var([s[0] for s in samples])
-    if variance > 5:
+    if edges > 25:
         score += 20
+    else:
+        score -= 25
 
-    score = max(min(score + 50, 100), 0)
+    # lighting variation
+    if brightness_var > 10:
+        score += 10
+    else:
+        score -= 10
 
+    score = max(min(score, 100), 0)
     return int(score)
 
 # ==================================================
-# 🔊 STAMP VIDEO WITH AUDIO PRESERVED
+# 🎬 STAMP VIDEO (WITH AUDIO PRESERVED)
 # ==================================================
-def stamp_video(input_path, output_path, cert_id):
+def stamp_video(input_path, output_path):
 
     command = [
         "ffmpeg",
@@ -106,8 +108,7 @@ def stamp_video(input_path, output_path, cert_id):
         "-i", input_path,
 
         "-vf",
-        f"drawtext=text='VeriFYD CERTIFIED':"
-        "x=10:y=10:fontsize=18:fontcolor=white@0.8",
+        "drawtext=text='VeriFYD CERTIFIED':x=10:y=10:fontsize=18:fontcolor=white@0.8",
 
         "-c:v", "libx264",
         "-preset", "fast",
@@ -136,18 +137,17 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
     with open(raw_path, "wb") as buffer:
         buffer.write(await file.read())
 
-    # 🔬 run detection
     score = analyze_video(raw_path)
 
-    if score < 40:
+    # 🚨 BLOCK AI
+    if score < 50:
         return {
             "status": "AI DETECTED",
             "authenticity_score": score
         }
 
     certified_path = f"{CERT_DIR}/{cert_id}.mp4"
-
-    stamp_video(raw_path, certified_path, cert_id)
+    stamp_video(raw_path, certified_path)
 
     return {
         "status": "CERTIFIED REAL VIDEO",
@@ -172,18 +172,17 @@ async def analyze_link(email: str = Form(...), video_url: str = Form(...)):
 
     try:
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
-        r = requests.get(video_url, stream=True, timeout=15)
 
+        r = requests.get(video_url, stream=True, timeout=20)
         for chunk in r.iter_content(1024):
             tmp.write(chunk)
 
         tmp.close()
 
         score = analyze_video(tmp.name)
-
         os.unlink(tmp.name)
 
-        if score < 40:
+        if score < 50:
             result = "AI DETECTED"
         else:
             result = "REAL VIDEO"
@@ -202,6 +201,7 @@ async def analyze_link(email: str = Form(...), video_url: str = Form(...)):
 
     except Exception as e:
         return {"error": str(e)}
+
 
 
 
