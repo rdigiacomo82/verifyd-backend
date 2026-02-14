@@ -1,9 +1,11 @@
-from fastapi import FastAPI, UploadFile, File, Form, Request
+from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
-import os, uuid, subprocess, tempfile, requests
+from fastapi.responses import FileResponse, HTMLResponse
+import os, uuid, shutil, subprocess
 import cv2
 import numpy as np
+import requests
+import tempfile
 
 BASE_URL = "https://verifyd-backend.onrender.com"
 
@@ -26,77 +28,100 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# --------------------------------------------------
+# HOME
+# --------------------------------------------------
 @app.get("/")
 def home():
     return {"status": "VeriFYD API LIVE"}
 
 # ==================================================
-# DETECTION ENGINE
+# 🔬 AI DETECTION ENGINE
 # ==================================================
 def analyze_video(file_path):
 
     cap = cv2.VideoCapture(file_path)
-    frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-    if frames < 10:
+    if frame_count == 0:
         return 0
 
-    noise_vals = []
-    edge_vals = []
+    samples = []
+    step = max(frame_count // 25, 1)
 
-    step = max(frames // 25, 1)
-
-    for i in range(0, frames, step):
+    for i in range(0, frame_count, step):
         cap.set(cv2.CAP_PROP_POS_FRAMES, i)
         ret, frame = cap.read()
         if not ret:
             continue
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        noise_vals.append(np.std(gray))
-        edge_vals.append(cv2.Laplacian(gray, cv2.CV_64F).var())
 
-        if len(noise_vals) > 25:
+        noise = np.std(gray)
+        edges = cv2.Laplacian(gray, cv2.CV_64F).var()
+        brightness = np.mean(gray)
+
+        samples.append((noise, edges, brightness))
+
+        if len(samples) > 25:
             break
 
     cap.release()
 
-    noise = np.mean(noise_vals)
-    edges = np.mean(edge_vals)
+    if not samples:
+        return 0
+
+    noise_avg = np.mean([s[0] for s in samples])
+    edge_avg = np.mean([s[1] for s in samples])
+    brightness_var = np.var([s[2] for s in samples])
 
     score = 50
 
-    if noise > 18:
-        score += 25
+    # natural sensor noise
+    if noise_avg > 18:
+        score += 20
     else:
-        score -= 25
+        score -= 20
 
-    if edges > 25:
-        score += 25
+    # texture detail
+    if edge_avg > 25:
+        score += 20
     else:
-        score -= 25
+        score -= 20
 
-    score = max(min(score, 100), 0)
+    # lighting variance
+    if brightness_var > 2:
+        score += 10
+    else:
+        score -= 10
+
+    score = max(min(score, 99), 0)
     return int(score)
 
 # ==================================================
-# VIDEO STAMP WITH AUDIO FIX
+# 🔊 WATERMARK + AUDIO PRESERVED
 # ==================================================
-def stamp_video(input_path, output_path):
+def stamp_video(input_path, output_path, cert_id):
+
+    drawtext_main = "drawtext=text='VeriFYD':x=10:y=10:fontsize=22:fontcolor=white@0.85"
+    drawtext_id = f"drawtext=text='ID:{cert_id}':x=w-tw-20:y=h-th-20:fontsize=16:fontcolor=white@0.7"
+
+    vf = f"{drawtext_main},{drawtext_id}"
 
     command = [
         "ffmpeg",
         "-y",
         "-i", input_path,
 
-        "-vf",
-        "drawtext=text='VeriFYD CERTIFIED':x=10:y=10:fontsize=18:fontcolor=white@0.8",
+        "-vf", vf,
+
+        "-map", "0:v:0",
+        "-map", "0:a?",
 
         "-c:v", "libx264",
         "-preset", "fast",
         "-crf", "23",
 
-        # 🔊 FORCE AUDIO ENCODE (FIXES ALL SILENT VIDEO BUGS)
         "-c:a", "aac",
         "-b:a", "192k",
 
@@ -108,7 +133,7 @@ def stamp_video(input_path, output_path):
     subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
 # ==================================================
-# UPLOAD
+# 📤 UPLOAD VIDEO
 # ==================================================
 @app.post("/upload/")
 async def upload(file: UploadFile = File(...), email: str = Form(...)):
@@ -121,14 +146,14 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
 
     score = analyze_video(raw_path)
 
-    if score < 50:
+    if score < 45:
         return {
             "status": "AI DETECTED",
             "authenticity_score": score
         }
 
     certified_path = f"{CERT_DIR}/{cert_id}.mp4"
-    stamp_video(raw_path, certified_path)
+    stamp_video(raw_path, certified_path, cert_id)
 
     return {
         "status": "CERTIFIED REAL VIDEO",
@@ -138,7 +163,7 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
     }
 
 # ==================================================
-# DOWNLOAD
+# 📥 DOWNLOAD
 # ==================================================
 @app.get("/download/{cid}")
 def download(cid: str):
@@ -146,24 +171,13 @@ def download(cid: str):
     return FileResponse(path, media_type="video/mp4")
 
 # ==================================================
-# ANALYZE LINK (GET + POST SAFE)
+# 🔗 ANALYZE LINK
 # ==================================================
-@app.api_route("/analyze-link/", methods=["GET","POST"])
-async def analyze_link(request: Request):
-
-    if request.method == "POST":
-        form = await request.form()
-        video_url = form.get("video_url")
-    else:
-        video_url = request.query_params.get("video_url")
-
-    if not video_url:
-        return {"error": "Missing video_url"}
+@app.post("/analyze-link/")
+async def analyze_link(email: str = Form(...), video_url: str = Form(...)):
 
     try:
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
-
-        # IMPORTANT: some platforms block direct download
         r = requests.get(video_url, stream=True, timeout=20)
 
         for chunk in r.iter_content(1024):
@@ -174,7 +188,7 @@ async def analyze_link(request: Request):
         score = analyze_video(tmp.name)
         os.unlink(tmp.name)
 
-        result = "AI DETECTED" if score < 50 else "REAL VIDEO"
+        result = "AI DETECTED" if score < 45 else "REAL VIDEO"
 
         html = f"""
         <html>
@@ -190,6 +204,7 @@ async def analyze_link(request: Request):
 
     except Exception as e:
         return {"error": str(e)}
+
 
 
 
