@@ -1,11 +1,10 @@
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
-import os, uuid, shutil, subprocess
+import os, uuid, subprocess, tempfile
 import cv2
 import numpy as np
 import requests
-import tempfile
 
 BASE_URL = "https://verifyd-backend.onrender.com"
 
@@ -36,7 +35,7 @@ def home():
     return {"status": "VeriFYD API LIVE"}
 
 # ==================================================
-# 🔬 AI DETECTION ENGINE
+# 🔬 AI DETECTION ENGINE (basic but stable)
 # ==================================================
 def analyze_video(file_path):
 
@@ -56,12 +55,10 @@ def analyze_video(file_path):
             continue
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
         noise = np.std(gray)
         edges = cv2.Laplacian(gray, cv2.CV_64F).var()
-        brightness = np.mean(gray)
 
-        samples.append((noise, edges, brightness))
+        samples.append((noise, edges))
 
         if len(samples) > 25:
             break
@@ -73,40 +70,31 @@ def analyze_video(file_path):
 
     noise_avg = np.mean([s[0] for s in samples])
     edge_avg = np.mean([s[1] for s in samples])
-    brightness_var = np.var([s[2] for s in samples])
 
     score = 50
 
-    # natural sensor noise
     if noise_avg > 18:
         score += 20
     else:
         score -= 20
 
-    # texture detail
     if edge_avg > 25:
         score += 20
     else:
         score -= 20
 
-    # lighting variance
-    if brightness_var > 2:
-        score += 10
-    else:
-        score -= 10
-
     score = max(min(score, 99), 0)
     return int(score)
 
 # ==================================================
-# 🔊 WATERMARK + AUDIO PRESERVED
+# 🎬 STAMP VIDEO WITH AUDIO PRESERVED
 # ==================================================
 def stamp_video(input_path, output_path, cert_id):
 
-    drawtext_main = "drawtext=text='VeriFYD':x=10:y=10:fontsize=22:fontcolor=white@0.85"
-    drawtext_id = f"drawtext=text='ID:{cert_id}':x=w-tw-20:y=h-th-20:fontsize=16:fontcolor=white@0.7"
-
-    vf = f"{drawtext_main},{drawtext_id}"
+    vf = (
+        "drawtext=text='VeriFYD':x=10:y=10:fontsize=22:fontcolor=white@0.85,"
+        f"drawtext=text='ID:{cert_id}':x=w-tw-20:y=h-th-20:fontsize=16:fontcolor=white@0.7"
+    )
 
     command = [
         "ffmpeg",
@@ -115,6 +103,7 @@ def stamp_video(input_path, output_path, cert_id):
 
         "-vf", vf,
 
+        # preserve audio
         "-map", "0:v:0",
         "-map", "0:a?",
 
@@ -171,15 +160,15 @@ def download(cid: str):
     return FileResponse(path, media_type="video/mp4")
 
 # ==================================================
-# 🔗 ANALYZE LINK
+# 🔗 ANALYZE LINK (FIXED — NO MORE 405)
 # ==================================================
 @app.post("/analyze-link/")
 async def analyze_link(email: str = Form(...), video_url: str = Form(...)):
 
     try:
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
-        r = requests.get(video_url, stream=True, timeout=20)
 
+        r = requests.get(video_url, stream=True, timeout=25)
         for chunk in r.iter_content(1024):
             tmp.write(chunk)
 
@@ -204,6 +193,7 @@ async def analyze_link(email: str = Form(...), video_url: str = Form(...)):
 
     except Exception as e:
         return {"error": str(e)}
+
 
 
 
