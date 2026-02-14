@@ -1,3 +1,4 @@
+print("🚨 NEW BUILD LOADED 🚨")
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
