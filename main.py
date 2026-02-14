@@ -26,73 +26,61 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --------------------------------------------------
-# HOME
-# --------------------------------------------------
 @app.get("/")
 def home():
     return {"status": "VeriFYD API LIVE"}
 
 # ==================================================
-# 🔬 DETECTION ENGINE
+# DETECTION ENGINE
 # ==================================================
 def analyze_video(file_path):
 
     cap = cv2.VideoCapture(file_path)
-    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-    if frame_count < 10:
+    if frames < 10:
         return 0
 
     noise_vals = []
     edge_vals = []
-    brightness_vals = []
 
-    step = max(frame_count // 30, 1)
+    step = max(frames // 25, 1)
 
-    for i in range(0, frame_count, step):
+    for i in range(0, frames, step):
         cap.set(cv2.CAP_PROP_POS_FRAMES, i)
         ret, frame = cap.read()
         if not ret:
             continue
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
         noise_vals.append(np.std(gray))
         edge_vals.append(cv2.Laplacian(gray, cv2.CV_64F).var())
-        brightness_vals.append(np.mean(gray))
 
-        if len(noise_vals) > 30:
+        if len(noise_vals) > 25:
             break
 
     cap.release()
 
     noise = np.mean(noise_vals)
     edges = np.mean(edge_vals)
-    brightness_var = np.var(brightness_vals)
 
     score = 50
 
     if noise > 18:
-        score += 20
+        score += 25
     else:
         score -= 25
 
     if edges > 25:
-        score += 20
+        score += 25
     else:
         score -= 25
-
-    if brightness_var > 10:
-        score += 10
-    else:
-        score -= 10
 
     score = max(min(score, 100), 0)
     return int(score)
 
 # ==================================================
-# 🎬 STAMP VIDEO (AUDIO FIXED)
+# VIDEO STAMP WITH AUDIO FIX
 # ==================================================
 def stamp_video(input_path, output_path):
 
@@ -108,9 +96,11 @@ def stamp_video(input_path, output_path):
         "-preset", "fast",
         "-crf", "23",
 
-        # 🔊 FIX AUDIO
-        "-c:a", "copy",
-        "-map", "0",
+        # 🔊 FORCE AUDIO ENCODE (FIXES ALL SILENT VIDEO BUGS)
+        "-c:a", "aac",
+        "-b:a", "192k",
+
+        "-movflags", "+faststart",
 
         output_path
     ]
@@ -118,7 +108,7 @@ def stamp_video(input_path, output_path):
     subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
 # ==================================================
-# 📤 UPLOAD
+# UPLOAD
 # ==================================================
 @app.post("/upload/")
 async def upload(file: UploadFile = File(...), email: str = Form(...)):
@@ -156,26 +146,26 @@ def download(cid: str):
     return FileResponse(path, media_type="video/mp4")
 
 # ==================================================
-# 🔗 ANALYZE LINK (GET + POST SAFE)
+# ANALYZE LINK (GET + POST SAFE)
 # ==================================================
 @app.api_route("/analyze-link/", methods=["GET","POST"])
 async def analyze_link(request: Request):
 
     if request.method == "POST":
         form = await request.form()
-        email = form.get("email")
         video_url = form.get("video_url")
     else:
-        email = request.query_params.get("email")
         video_url = request.query_params.get("video_url")
 
     if not video_url:
-        return JSONResponse({"error": "Missing video_url"}, status_code=400)
+        return {"error": "Missing video_url"}
 
     try:
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
 
+        # IMPORTANT: some platforms block direct download
         r = requests.get(video_url, stream=True, timeout=20)
+
         for chunk in r.iter_content(1024):
             tmp.write(chunk)
 
@@ -199,7 +189,8 @@ async def analyze_link(request: Request):
         return HTMLResponse(html)
 
     except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
+        return {"error": str(e)}
+
 
 
 
