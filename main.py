@@ -30,15 +30,16 @@ def home():
     return {"status": "VeriFYD LIVE"}
 
 # ==================================================
-# AUDIO-SAFE STAMP
+# STAMP FUNCTION WITH STRICT ERROR CHECKING
 # ==================================================
 def stamp_video(input_path, output_path, cert_id):
 
-    print("STAMP START:", input_path)
+    print("\n==== STAMP START ====")
+    print("INPUT:", input_path)
 
     temp_mux = f"{TMP_DIR}/{cert_id}_mux.mp4"
 
-    # STEP 1: REMUX ONLY
+    # --- REMUX ---
     remux_cmd = [
         "ffmpeg",
         "-y",
@@ -48,9 +49,10 @@ def stamp_video(input_path, output_path, cert_id):
         temp_mux
     ]
 
-    subprocess.run(remux_cmd)
+    remux = subprocess.run(remux_cmd, capture_output=True, text=True)
+    print(remux.stderr)
 
-    # STEP 2: WATERMARK
+    # --- FINAL ENCODE ---
     watermark = (
         f"drawtext=text='VeriFYD ID {cert_id}':"
         "x=w-tw-20:y=h-th-20:"
@@ -71,13 +73,17 @@ def stamp_video(input_path, output_path, cert_id):
         "-c:a", "aac",
         "-b:a", "192k",
         "-af", "aresample=async=1",
-        "-shortest",
         output_path
     ]
 
-    subprocess.run(final_cmd)
+    final = subprocess.run(final_cmd, capture_output=True, text=True)
+    print(final.stderr)
 
-    print("STAMP COMPLETE:", output_path)
+    print("==== STAMP END ====")
+
+    if not os.path.exists(output_path):
+        print("❌ OUTPUT VIDEO NOT CREATED")
+        raise RuntimeError("FFmpeg failed to create output")
 
 # ==================================================
 # UPLOAD
@@ -90,16 +96,12 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
     cert_id = str(uuid.uuid4())
     raw_path = f"{UPLOAD_DIR}/{cert_id}_{file.filename}"
 
-    # write file
     with open(raw_path, "wb") as buffer:
         content = await file.read()
         buffer.write(content)
         buffer.flush()
         os.fsync(buffer.fileno())
 
-    print("FILE WRITTEN:", raw_path)
-
-    # 🔴 CRITICAL FIX: wait for disk
     time.sleep(1.5)
 
     certified_path = f"{CERT_DIR}/{cert_id}.mp4"
@@ -114,7 +116,9 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
 
 @app.get("/download/{cid}")
 def download(cid: str):
-    return FileResponse(f"{CERT_DIR}/{cid}.mp4", media_type="video/mp4")
+    path = f"{CERT_DIR}/{cid}.mp4"
+    return FileResponse(path, media_type="video/mp4")
+
 
 
 
