@@ -6,8 +6,6 @@ import cv2
 import numpy as np
 import yt_dlp
 
-print("🔥 VERIFYD MAIN.PY LOADED 🔥")
-
 BASE_URL = "https://verifyd-backend.onrender.com"
 
 UPLOAD_DIR = "videos"
@@ -18,6 +16,9 @@ os.makedirs(CERT_DIR, exist_ok=True)
 
 app = FastAPI()
 
+# --------------------------------------------------
+# CORS
+# --------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -30,72 +31,100 @@ app.add_middleware(
 def home():
     return {"status": "VeriFYD API LIVE"}
 
-# --------------------------------------------------
-# DETECTOR
-# --------------------------------------------------
+# ==================================================
+# DETECTION ENGINE (LIGHT + STABLE)
+# ==================================================
 def analyze_video(file_path):
 
     cap = cv2.VideoCapture(file_path)
-    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-    if frame_count == 0:
-        return 0
+    if frames == 0:
+        return 50
 
-    samples = []
-    step = max(frame_count // 30, 1)
+    noise_vals = []
+    edge_vals = []
 
-    for i in range(0, frame_count, step):
+    step = max(frames // 25, 1)
+
+    for i in range(0, frames, step):
         cap.set(cv2.CAP_PROP_POS_FRAMES, i)
         ret, frame = cap.read()
         if not ret:
             continue
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        noise = np.std(gray)
-        edges = cv2.Laplacian(gray, cv2.CV_64F).var()
+        noise_vals.append(np.std(gray))
+        edge_vals.append(cv2.Laplacian(gray, cv2.CV_64F).var())
 
-        samples.append((noise, edges))
-
-        if len(samples) >= 30:
+        if len(noise_vals) >= 25:
             break
 
     cap.release()
 
-    if not samples:
-        return 0
+    if not noise_vals:
+        return 50
 
-    noise_avg = np.mean([s[0] for s in samples])
-    edge_avg = np.mean([s[1] for s in samples])
+    noise = np.mean(noise_vals)
+    edges = np.mean(edge_vals)
 
-    score = 50
+    score = 60
 
-    if noise_avg > 18:
-        score += 20
+    if noise > 16:
+        score += 15
     else:
-        score -= 20
+        score -= 15
 
-    if edge_avg > 25:
-        score += 20
+    if edges > 22:
+        score += 15
     else:
-        score -= 20
+        score -= 15
 
-    return max(min(score, 99), 0)
+    return max(min(score, 95), 5)
 
-# --------------------------------------------------
-# STAMP VIDEO
-# --------------------------------------------------
+# ==================================================
+# VIDEO STAMP WITH PERMANENT AUDIO FIX
+# ==================================================
 def stamp_video(input_path, output_path, cert_id):
 
-    vf = (
+    print("🔊 stamping video:", input_path)
+
+    # STATIC watermark text (no dynamic updates)
+    watermark = (
         "drawtext=text='VeriFYD':x=10:y=10:fontsize=22:fontcolor=white@0.85,"
-        f"drawtext=text='ID:{cert_id}':x=w-tw-20:y=h-th-20:fontsize=16:fontcolor=white@0.7"
+        f"drawtext=text='ID\\:{cert_id}':x=w-tw-20:y=h-th-20:fontsize=16:fontcolor=white@0.7"
     )
 
-    command = [
+    # PASS 1 — TRY AUDIO COPY
+    cmd_copy = [
         "ffmpeg",
         "-y",
         "-i", input_path,
-        "-vf", vf,
+        "-vf", watermark,
+        "-map", "0:v:0",
+        "-map", "0:a?",
+        "-c:v", "libx264",
+        "-preset", "fast",
+        "-crf", "23",
+        "-c:a", "copy",
+        "-movflags", "+faststart",
+        output_path
+    ]
+
+    result = subprocess.run(cmd_copy, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    if os.path.exists(output_path) and os.path.getsize(output_path) > 50000:
+        print("✅ audio copy succeeded")
+        return
+
+    print("⚠️ copy failed → forcing audio re-encode")
+
+    # PASS 2 — FORCE AUDIO ENCODE
+    cmd_encode = [
+        "ffmpeg",
+        "-y",
+        "-i", input_path,
+        "-vf", watermark,
         "-map", "0:v:0",
         "-map", "0:a?",
         "-c:v", "libx264",
@@ -104,15 +133,18 @@ def stamp_video(input_path, output_path, cert_id):
         "-c:a", "aac",
         "-b:a", "192k",
         "-ac", "2",
+        "-ar", "44100",
+        "-shortest",
         "-movflags", "+faststart",
         output_path
     ]
 
-    subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(cmd_encode, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    print("✅ audio re-encode complete")
 
-# --------------------------------------------------
+# ==================================================
 # UPLOAD
-# --------------------------------------------------
+# ==================================================
 @app.post("/upload/")
 async def upload(file: UploadFile = File(...), email: str = Form(...)):
 
@@ -124,8 +156,11 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
 
     score = analyze_video(raw_path)
 
-    if score < 55:
-        return {"status": "AI DETECTED", "authenticity_score": score}
+    if score < 50:
+        return {
+            "status": "AI DETECTED",
+            "authenticity_score": score
+        }
 
     certified_path = f"{CERT_DIR}/{cert_id}.mp4"
     stamp_video(raw_path, certified_path, cert_id)
@@ -137,21 +172,19 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
         "download_url": f"{BASE_URL}/download/{cert_id}"
     }
 
-# --------------------------------------------------
+# ==================================================
 # DOWNLOAD
-# --------------------------------------------------
+# ==================================================
 @app.get("/download/{cid}")
 def download(cid: str):
     return FileResponse(f"{CERT_DIR}/{cid}.mp4", media_type="video/mp4")
 
-# --------------------------------------------------
-# LINK ANALYZER (NO 405 POSSIBLE)
-# --------------------------------------------------
+# ==================================================
+# LINK ANALYZER (NO MORE 405)
+# ==================================================
 @app.api_route("/analyze-link", methods=["GET","POST"])
 @app.api_route("/analyze-link/", methods=["GET","POST"])
 async def analyze_link(request: Request):
-
-    print("📡 ANALYZE LINK HIT")
 
     if request.method == "POST":
         form = await request.form()
@@ -179,13 +212,14 @@ async def analyze_link(request: Request):
         score = analyze_video(temp_video.name)
         os.unlink(temp_video.name)
 
-        result = "AI DETECTED" if score < 55 else "REAL VIDEO"
+        result = "AI DETECTED" if score < 50 else "REAL VIDEO"
 
         html = f"""
         <html>
         <body style="background:#0b0b0b;color:white;text-align:center;padding-top:120px;font-family:Arial">
         <h1>{result}</h1>
         <h2>Authenticity Score: {score}</h2>
+        <p>Analyzed by VeriFYD</p>
         </body>
         </html>
         """
@@ -194,6 +228,7 @@ async def analyze_link(request: Request):
 
     except Exception as e:
         return {"error": str(e)}
+
 
 
 
