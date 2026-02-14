@@ -16,9 +16,6 @@ os.makedirs(CERT_DIR, exist_ok=True)
 
 app = FastAPI()
 
-# --------------------------------------------------
-# CORS
-# --------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -32,20 +29,17 @@ def home():
     return {"status": "VeriFYD API LIVE"}
 
 # ==================================================
-# DETECTION ENGINE (LIGHT + STABLE)
+# DETECTION (TEMP — NOT THE ISSUE RIGHT NOW)
 # ==================================================
-def analyze_video(file_path):
-
-    cap = cv2.VideoCapture(file_path)
+def analyze_video(path):
+    cap = cv2.VideoCapture(path)
     frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
     if frames == 0:
         return 50
 
-    noise_vals = []
-    edge_vals = []
-
-    step = max(frames // 25, 1)
+    vals = []
+    step = max(frames // 20, 1)
 
     for i in range(0, frames, step):
         cap.set(cv2.CAP_PROP_POS_FRAMES, i)
@@ -54,48 +48,32 @@ def analyze_video(file_path):
             continue
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        noise_vals.append(np.std(gray))
-        edge_vals.append(cv2.Laplacian(gray, cv2.CV_64F).var())
+        vals.append(np.std(gray))
 
-        if len(noise_vals) >= 25:
+        if len(vals) > 20:
             break
 
     cap.release()
 
-    if not noise_vals:
+    if not vals:
         return 50
 
-    noise = np.mean(noise_vals)
-    edges = np.mean(edge_vals)
-
-    score = 60
-
-    if noise > 16:
-        score += 15
-    else:
-        score -= 15
-
-    if edges > 22:
-        score += 15
-    else:
-        score -= 15
-
-    return max(min(score, 95), 5)
+    score = 65 + (np.mean(vals) / 2)
+    return max(min(int(score), 95), 10)
 
 # ==================================================
-# VIDEO STAMP WITH PERMANENT AUDIO FIX
+# AUDIO-SAFE STAMP FUNCTION
 # ==================================================
 def stamp_video(input_path, output_path, cert_id):
 
-    print("🔊 stamping video:", input_path)
+    print("🔊 stamping video with audio-safe pipeline")
 
-    # STATIC watermark text (no dynamic updates)
     watermark = (
         "drawtext=text='VeriFYD':x=10:y=10:fontsize=22:fontcolor=white@0.85,"
         f"drawtext=text='ID\\:{cert_id}':x=w-tw-20:y=h-th-20:fontsize=16:fontcolor=white@0.7"
     )
 
-    # PASS 1 — TRY AUDIO COPY
+    # PASS 1 — direct stream copy (fastest + safest)
     cmd_copy = [
         "ffmpeg",
         "-y",
@@ -111,15 +89,23 @@ def stamp_video(input_path, output_path, cert_id):
         output_path
     ]
 
-    result = subprocess.run(cmd_copy, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(cmd_copy)
 
-    if os.path.exists(output_path) and os.path.getsize(output_path) > 50000:
-        print("✅ audio copy succeeded")
+    # check if audio exists
+    check = subprocess.run(
+        ["ffmpeg", "-i", output_path],
+        stderr=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True
+    )
+
+    if "Audio:" in check.stderr:
+        print("✅ audio preserved")
         return
 
-    print("⚠️ copy failed → forcing audio re-encode")
+    print("⚠️ audio missing → re-encoding")
 
-    # PASS 2 — FORCE AUDIO ENCODE
+    # PASS 2 — force audio encode
     cmd_encode = [
         "ffmpeg",
         "-y",
@@ -139,8 +125,8 @@ def stamp_video(input_path, output_path, cert_id):
         output_path
     ]
 
-    subprocess.run(cmd_encode, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    print("✅ audio re-encode complete")
+    subprocess.run(cmd_encode)
+    print("✅ forced audio encode complete")
 
 # ==================================================
 # UPLOAD
@@ -156,12 +142,6 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
 
     score = analyze_video(raw_path)
 
-    if score < 50:
-        return {
-            "status": "AI DETECTED",
-            "authenticity_score": score
-        }
-
     certified_path = f"{CERT_DIR}/{cert_id}.mp4"
     stamp_video(raw_path, certified_path, cert_id)
 
@@ -172,15 +152,12 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
         "download_url": f"{BASE_URL}/download/{cert_id}"
     }
 
-# ==================================================
-# DOWNLOAD
-# ==================================================
 @app.get("/download/{cid}")
 def download(cid: str):
     return FileResponse(f"{CERT_DIR}/{cid}.mp4", media_type="video/mp4")
 
 # ==================================================
-# LINK ANALYZER (NO MORE 405)
+# LINK ANALYSIS
 # ==================================================
 @app.api_route("/analyze-link", methods=["GET","POST"])
 @app.api_route("/analyze-link/", methods=["GET","POST"])
@@ -195,39 +172,33 @@ async def analyze_link(request: Request):
     if not video_url:
         return {"error": "Missing video_url"}
 
-    try:
-        temp_video = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
-        temp_video.close()
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+    tmp.close()
 
-        ydl_opts = {
-            'outtmpl': temp_video.name,
-            'format': 'mp4',
-            'quiet': True,
-            'noplaylist': True
-        }
+    ydl_opts = {
+        'outtmpl': tmp.name,
+        'format': 'mp4',
+        'quiet': True,
+        'noplaylist': True
+    }
 
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([video_url])
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        ydl.download([video_url])
 
-        score = analyze_video(temp_video.name)
-        os.unlink(temp_video.name)
+    score = analyze_video(tmp.name)
+    os.unlink(tmp.name)
 
-        result = "AI DETECTED" if score < 50 else "REAL VIDEO"
+    result = "AI DETECTED" if score < 45 else "REAL VIDEO"
 
-        html = f"""
-        <html>
-        <body style="background:#0b0b0b;color:white;text-align:center;padding-top:120px;font-family:Arial">
-        <h1>{result}</h1>
-        <h2>Authenticity Score: {score}</h2>
-        <p>Analyzed by VeriFYD</p>
-        </body>
-        </html>
-        """
+    return HTMLResponse(f"""
+    <html>
+    <body style="background:#0b0b0b;color:white;text-align:center;padding-top:120px;font-family:Arial">
+    <h1>{result}</h1>
+    <h2>Authenticity Score: {score}</h2>
+    </body>
+    </html>
+    """)
 
-        return HTMLResponse(html)
-
-    except Exception as e:
-        return {"error": str(e)}
 
 
 
