@@ -31,6 +31,7 @@ REVIEW_DIR  = os.getenv("REVIEW_DIR", "review")
 TMP_DIR     = os.getenv("TMP_DIR", "tmp")
 FFMPEG_BIN  = os.getenv("FFMPEG_BIN", "ffmpeg")
 FFPROBE_BIN = os.getenv("FFPROBE_BIN", "ffprobe")
+LOGO_PATH   = os.path.join(os.path.dirname(__file__) or ".", "assets", "logo.png")
 
 MAX_UPLOAD_MB    = int(os.getenv("MAX_UPLOAD_MB", "500"))
 ALLOWED_EXTS     = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v"}
@@ -145,8 +146,8 @@ def analyze_video(path: str) -> dict:
 
 def stamp_video(input_path: str, output_path: str, cert_id: str):
     """
-    Two-pass stamp: remux (preserve streams) → watermark + re-encode.
-    Raises on FFmpeg failure. Cleans up temp files.
+    Stamp video with logo overlay (top-left) + cert text (bottom-right).
+    Preserves audio via stream copy. Cleans up temp files.
     """
     log.info("🎬 Stamping %s → %s", input_path, output_path)
 
@@ -158,7 +159,7 @@ def stamp_video(input_path: str, output_path: str, cert_id: str):
         audio_present = has_audio(probe)
         log.info("   Audio detected: %s", audio_present)
 
-        # --- STEP 1: Remux (copy all streams) ---
+        # --- STEP 1: Remux (normalize container, copy all streams) ---
         remux_cmd = [
             FFMPEG_BIN, "-y",
             "-i", input_path,
@@ -169,31 +170,47 @@ def stamp_video(input_path: str, output_path: str, cert_id: str):
         ]
         _run_ffmpeg(remux_cmd, "remux")
 
-        # --- STEP 2: Watermark + re-encode ---
+        # --- STEP 2: Video filter (logo + text), audio COPY ---
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-        watermark = (
-            f"drawtext=text='VeriFYD  |  {cert_id[:8]}  |  {timestamp}':"
-            "x=w-tw-20:y=h-th-20:"
-            "fontsize=16:"
-            "fontcolor=white@0.85:"
-            "box=1:boxcolor=black@0.4:boxborderw=4"
-        )
 
-        final_cmd = [
-            FFMPEG_BIN, "-y",
-            "-i", temp_mux,
-            "-vf", watermark,
-            "-map", "0:v",
-        ]
+        # Build video filter chain
+        # Logo: scale to 80px height, place at top-left with padding
+        # Text: cert ID + timestamp at bottom-right with background box
+        use_logo = os.path.exists(LOGO_PATH)
+        log.info("   Logo available: %s (%s)", use_logo, LOGO_PATH)
 
+        if use_logo:
+            vf = (
+                "[1:v]scale=-1:50,format=rgba,colorchannelmixer=aa=0.7[logo];"
+                "[0:v][logo]overlay=10:10,"
+                f"drawtext=text='VeriFYD  |  {cert_id[:8]}  |  {timestamp}':"
+                "x=w-tw-20:y=h-th-20:"
+                "fontsize=16:"
+                "fontcolor=white@0.85:"
+                "box=1:boxcolor=black@0.4:boxborderw=4"
+            )
+        else:
+            vf = (
+                f"drawtext=text='VeriFYD  |  {cert_id[:8]}  |  {timestamp}':"
+                "x=w-tw-20:y=h-th-20:"
+                "fontsize=16:"
+                "fontcolor=white@0.85:"
+                "box=1:boxcolor=black@0.4:boxborderw=4"
+            )
+
+        final_cmd = [FFMPEG_BIN, "-y", "-i", temp_mux]
+
+        if use_logo:
+            final_cmd += ["-i", LOGO_PATH]
+            final_cmd += ["-filter_complex", vf]
+        else:
+            final_cmd += ["-vf", vf]
+
+        # Audio: COPY directly (no re-encode = no quality loss, preserves original)
         if audio_present:
-            final_cmd += [
-                "-map", "0:a",
-                "-c:a", "aac",
-                "-b:a", "192k",
-                "-af", "aresample=async=1",
-            ]
+            final_cmd += ["-map", "0:a", "-c:a", "copy"]
 
+        # Video: re-encode with watermark applied
         final_cmd += [
             "-c:v", "libx264",
             "-preset", "fast",
@@ -202,6 +219,7 @@ def stamp_video(input_path: str, output_path: str, cert_id: str):
             "-movflags", "+faststart",
             output_path,
         ]
+
         _run_ffmpeg(final_cmd, "watermark")
 
         log.info("🎬 Stamp complete: %s", output_path)
