@@ -1,33 +1,26 @@
 # ============================================================
-# VeriFYD – main.py (STABLE AUDIO + LINK ANALYSIS + DOWNLOAD)
+# VeriFYD – STABLE CORE (Audio + Upload + Analyze Link FIXED)
 # ============================================================
 
-import os, uuid, subprocess, json, hashlib, tempfile
-from datetime import datetime, timezone
-
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
+import os, uuid, subprocess, tempfile
+from fastapi import FastAPI, UploadFile, File, Form, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
-
-import cv2
-import numpy as np
+import requests
 
 from detector import detect_ai
 from external_detector import external_ai_score
-import database as db
 
 BASE_URL = "https://verifyd-backend.onrender.com"
 
 UPLOAD_DIR = "videos"
 CERT_DIR   = "certified"
-REVIEW_DIR = "review"
 TMP_DIR    = "tmp"
 
-for d in (UPLOAD_DIR, CERT_DIR, REVIEW_DIR, TMP_DIR):
+for d in (UPLOAD_DIR, CERT_DIR, TMP_DIR):
     os.makedirs(d, exist_ok=True)
 
 app = FastAPI()
-db.init_db()
 
 app.add_middleware(
     CORSMiddleware,
@@ -42,33 +35,36 @@ app.add_middleware(
 # ============================================================
 
 def analyze_video(path):
+
     primary = detect_ai(path)
     secondary = external_ai_score(path)
 
-    combined_ai = (primary * 0.7) + (secondary * 0.3)
-    authenticity = max(0, min(100, 100 - int(combined_ai)))
+    ai_likelihood = int((primary * 0.7) + (secondary * 0.3))
+    authenticity  = max(0, min(100, 100 - ai_likelihood))
 
     return {
         "authenticity_score": authenticity,
+        "ai_likelihood": ai_likelihood,
         "primary": primary,
-        "secondary": secondary,
-        "ai_likelihood": int(combined_ai)
+        "secondary": secondary
     }
 
 # ============================================================
-# STAMP VIDEO (AUDIO FIXED)
+# SAFE STAMP VIDEO (NO MORE CRASHES)
 # ============================================================
 
 def stamp_video(input_path, output_path, cert_id):
 
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    safe_id = cert_id[:8]
 
     vf = (
-        f"drawtext=text='VeriFYD | {cert_id[:8]} | {timestamp}':"
+        f"drawtext=text='VeriFYD_{safe_id}':"
         "x=w-tw-20:y=h-th-20:"
-        "fontsize=16:"
-        "fontcolor=white@0.85:"
-        "box=1:boxcolor=black@0.4:boxborderw=4"
+        "fontsize=18:"
+        "fontcolor=white@0.9:"
+        "box=1:"
+        "boxcolor=black@0.5:"
+        "boxborderw=5"
     )
 
     cmd = [
@@ -81,7 +77,7 @@ def stamp_video(input_path, output_path, cert_id):
         "-preset","fast",
         "-crf","23",
 
-        # 🔊 ALWAYS RE-ENCODE AUDIO
+        # AUDIO (ALWAYS RE-ENCODE)
         "-c:a","aac",
         "-b:a","192k",
 
@@ -90,8 +86,10 @@ def stamp_video(input_path, output_path, cert_id):
     ]
 
     r = subprocess.run(cmd, capture_output=True, text=True)
+
     if r.returncode != 0:
-        raise RuntimeError(r.stderr[-400:])
+        print("FFMPEG ERROR:", r.stderr)
+        raise RuntimeError("Stamp failed")
 
 # ============================================================
 # UPLOAD
@@ -103,33 +101,21 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
     cert_id = str(uuid.uuid4())
     raw_path = f"{UPLOAD_DIR}/{cert_id}_{file.filename}"
 
-    with open(raw_path,"wb") as f:
+    with open(raw_path, "wb") as f:
         f.write(await file.read())
 
     detection = analyze_video(raw_path)
     score = detection["authenticity_score"]
 
-    # TEMP: certify anything >= 50 so we can test audio
+    # TEMP: allow certification so we can test audio
     if score >= 50:
         status = "CERTIFIED"
-        certified_path = f"{CERT_DIR}/{cert_id}.mp4"
-        stamp_video(raw_path, certified_path, cert_id)
+        out_path = f"{CERT_DIR}/{cert_id}.mp4"
+        stamp_video(raw_path, out_path, cert_id)
         download_url = f"{BASE_URL}/download/{cert_id}"
     else:
         status = "UNDER_REVIEW"
         download_url = None
-
-    db.insert_certificate(
-        cert_id=cert_id,
-        email=email,
-        original_file=file.filename,
-        status=status,
-        authenticity=score,
-        ai_likelihood=detection["ai_likelihood"],
-        primary_score=detection["primary"],
-        secondary_score=detection["secondary"],
-        sha256=None,
-    )
 
     return {
         "status": status,
@@ -144,13 +130,16 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
 
 @app.get("/download/{cid}")
 def download(cid: str):
+
     path = f"{CERT_DIR}/{cid}.mp4"
+
     if not os.path.exists(path):
-        raise HTTPException(404,"Not found")
+        raise HTTPException(404, "Not found")
+
     return FileResponse(path, media_type="video/mp4")
 
 # ============================================================
-# ANALYZE LINK (RESTORED)
+# ANALYZE LINK (DIRECT MP4 ONLY FOR NOW)
 # ============================================================
 
 @app.api_route("/analyze-link/", methods=["GET","POST"])
@@ -168,10 +157,11 @@ async def analyze_link(request: Request):
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
 
     try:
-        import requests
         r = requests.get(video_url, stream=True, timeout=20)
+
         for chunk in r.iter_content(1024):
             tmp.write(chunk)
+
         tmp.close()
 
         detection = analyze_video(tmp.name)
@@ -179,16 +169,17 @@ async def analyze_link(request: Request):
 
         result = "REAL VIDEO" if score >= 50 else "AI DETECTED"
 
-        html = f"""
+        return HTMLResponse(f"""
         <html>
         <body style="background:black;color:white;text-align:center;padding-top:120px;font-family:Arial">
         <h1>{result}</h1>
         <h2>Authenticity Score: {score}</h2>
         </body>
         </html>
-        """
+        """)
 
-        return HTMLResponse(html)
+    except Exception as e:
+        return {"error": str(e)}
 
     finally:
         try:
@@ -196,7 +187,10 @@ async def analyze_link(request: Request):
         except:
             pass
 
+# ============================================================
+
 @app.get("/")
 def home():
     return {"status":"VeriFYD LIVE"}
+
 
