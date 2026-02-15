@@ -8,12 +8,10 @@ services:
       - key: BASE_URL
         value: https://verifyd-backend.onrender.com
       - key: FFMPEG_BIN
-        value: ffmpeg
+        value: /opt/render/project/.render/ffmpeg/ffmpeg
       - key: FFPROBE_BIN
-        value: ffprobe
+        value: /opt/render/project/.render/ffmpeg/ffprobe
       - key: MAX_UPLOAD_MB
         value: "500"
-    disk:
-      name: verifyd-data
-      mountPath: /data
-      sizeGB: 10
+      - key: PATH
+        value: /opt/render/project/.render/ffmpeg:/usr/local/bin:/usr/bin:/bin

@@ -3,9 +3,20 @@ set -e
 
 echo "=== VeriFYD Build ==="
 
-# System deps
-apt-get update -qq
-apt-get install -y -qq ffmpeg
+# Install ffmpeg via static binary (no apt-get needed)
+if ! command -v ffmpeg &> /dev/null; then
+    echo "Installing ffmpeg..."
+    curl -sL https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz -o /tmp/ffmpeg.tar.xz
+    tar -xf /tmp/ffmpeg.tar.xz -C /tmp
+    mkdir -p /opt/render/project/.render/ffmpeg
+    cp /tmp/ffmpeg-*-amd64-static/ffmpeg /opt/render/project/.render/ffmpeg/
+    cp /tmp/ffmpeg-*-amd64-static/ffprobe /opt/render/project/.render/ffmpeg/
+    rm -rf /tmp/ffmpeg*
+    echo "ffmpeg installed"
+fi
+
+export PATH="/opt/render/project/.render/ffmpeg:$PATH"
+ffmpeg -version | head -1
 
 # Python deps
 pip install --upgrade pip
