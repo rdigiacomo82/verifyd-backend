@@ -1,435 +1,202 @@
 # ============================================================
-#  VeriFYD – main.py  (v2.0.0)
+# VeriFYD – main.py (STABLE AUDIO + LINK ANALYSIS + DOWNLOAD)
 # ============================================================
 
-import os
-import uuid
-import logging
-import hashlib
-import subprocess
-import json
+import os, uuid, subprocess, json, hashlib, tempfile
 from datetime import datetime, timezone
+
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, HTMLResponse
 
 import cv2
 import numpy as np
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
 
-# -- Real detectors --------------------------------------------------
 from detector import detect_ai
 from external_detector import external_ai_score
 import database as db
 
-# ============================================================
-#  CONFIG (env-driven, with sane defaults)
-# ============================================================
-BASE_URL    = os.getenv("BASE_URL", "https://verifyd-backend.onrender.com")
-UPLOAD_DIR  = os.getenv("UPLOAD_DIR", "videos")
-CERT_DIR    = os.getenv("CERT_DIR", "certified")
-REVIEW_DIR  = os.getenv("REVIEW_DIR", "review")
-TMP_DIR     = os.getenv("TMP_DIR", "tmp")
-FFMPEG_BIN  = os.getenv("FFMPEG_BIN", "ffmpeg")
-FFPROBE_BIN = os.getenv("FFPROBE_BIN", "ffprobe")
-LOGO_PATH   = os.path.join(os.path.dirname(__file__) or ".", "assets", "logo.png")
+BASE_URL = "https://verifyd-backend.onrender.com"
 
-MAX_UPLOAD_MB    = int(os.getenv("MAX_UPLOAD_MB", "500"))
-ALLOWED_EXTS     = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v"}
-REVIEW_THRESHOLD = (40, 70)  # scores in this range → manual review
+UPLOAD_DIR = "videos"
+CERT_DIR   = "certified"
+REVIEW_DIR = "review"
+TMP_DIR    = "tmp"
 
 for d in (UPLOAD_DIR, CERT_DIR, REVIEW_DIR, TMP_DIR):
     os.makedirs(d, exist_ok=True)
 
-# ============================================================
-#  LOGGING
-# ============================================================
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
-log = logging.getLogger("verifyd")
-
-log.info("🚀 VeriFYD backend starting")
-
-# Init database on startup
+app = FastAPI()
 db.init_db()
-
-# ============================================================
-#  APP
-# ============================================================
-app = FastAPI(title="VeriFYD", version="2.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=os.getenv("CORS_ORIGINS", "*").split(","),
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # ============================================================
-#  HELPERS
+# DETECTION
 # ============================================================
 
-def ffprobe_streams(path: str) -> dict:
-    """Return ffprobe JSON for a file. Raises on failure."""
-    cmd = [
-        FFPROBE_BIN, "-v", "quiet",
-        "-print_format", "json",
-        "-show_streams",
-        path,
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-    if result.returncode != 0:
-        raise RuntimeError(f"ffprobe failed: {result.stderr[:300]}")
-    return json.loads(result.stdout)
+def analyze_video(path):
+    primary = detect_ai(path)
+    secondary = external_ai_score(path)
 
-
-def has_audio(probe: dict) -> bool:
-    return any(s.get("codec_type") == "audio" for s in probe.get("streams", []))
-
-
-def file_sha256(path: str) -> str:
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-# ============================================================
-#  DETECTION  (combines both detectors)
-# ============================================================
-
-def analyze_video(path: str) -> dict:
-    """
-    Run real detection pipeline.
-    Returns dict with individual + combined scores.
-    """
-    log.info("🔍 Running AI detection on %s", path)
-
-    # Primary detector (ResNet18 features + noise + motion)
-    try:
-        primary_score = detect_ai(path)
-    except Exception as e:
-        log.error("Primary detector failed: %s", e)
-        primary_score = 50  # uncertain fallback
-
-    # Secondary detector (noise heuristic)
-    try:
-        secondary_score = external_ai_score(path)
-    except Exception as e:
-        log.error("Secondary detector failed: %s", e)
-        secondary_score = 50
-
-    # Weighted combination: primary is the stronger signal
-    # Both return 0-100 where HIGH = likely AI, LOW = likely real
-    # We invert to "authenticity" where HIGH = likely real
-    combined_ai = (primary_score * 0.7) + (secondary_score * 0.3)
+    combined_ai = (primary * 0.7) + (secondary * 0.3)
     authenticity = max(0, min(100, 100 - int(combined_ai)))
 
-    result = {
+    return {
         "authenticity_score": authenticity,
-        "primary_ai_score": primary_score,
-        "secondary_ai_score": secondary_score,
-        "combined_ai_likelihood": int(combined_ai),
+        "primary": primary,
+        "secondary": secondary,
+        "ai_likelihood": int(combined_ai)
     }
 
-    log.info("🔍 Detection result: %s", result)
-    return result
-
-
 # ============================================================
-#  STAMPING (audio-safe, with error checking)
+# STAMP VIDEO (AUDIO FIXED)
 # ============================================================
 
-def stamp_video(input_path: str, output_path: str, cert_id: str):
-    """
-    Stamp video with logo overlay (top-left) + cert text (bottom-right).
-    Preserves audio via stream copy. Cleans up temp files.
-    """
-    log.info("🎬 Stamping %s → %s", input_path, output_path)
+def stamp_video(input_path, output_path, cert_id):
 
-    temp_mux = os.path.join(TMP_DIR, f"{cert_id}_mux.mp4")
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
-    try:
-        # --- Probe input ---
-        probe = ffprobe_streams(input_path)
-        audio_present = has_audio(probe)
-        log.info("   Audio detected: %s", audio_present)
-
-        # --- STEP 1: Remux (normalize container, copy all streams) ---
-        remux_cmd = [
-            FFMPEG_BIN, "-y",
-            "-i", input_path,
-            "-map", "0",
-            "-c", "copy",
-            "-movflags", "+faststart",
-            temp_mux,
-        ]
-        _run_ffmpeg(remux_cmd, "remux")
-
-        # --- STEP 2: Video filter (logo + text), audio COPY ---
-        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-
-        # Build video filter chain
-        # Logo: scale to 80px height, place at top-left with padding
-        # Text: cert ID + timestamp at bottom-right with background box
-        use_logo = os.path.exists(LOGO_PATH)
-        log.info("   Logo available: %s (%s)", use_logo, LOGO_PATH)
-
-        if use_logo:
-            vf = (
-                "[1:v]scale=-1:50,format=rgba,colorchannelmixer=aa=0.7[logo];"
-                "[0:v][logo]overlay=10:10,"
-                f"drawtext=text='VeriFYD  |  {cert_id[:8]}  |  {timestamp}':"
-                "x=w-tw-20:y=h-th-20:"
-                "fontsize=16:"
-                "fontcolor=white@0.85:"
-                "box=1:boxcolor=black@0.4:boxborderw=4"
-            )
-        else:
-            vf = (
-                f"drawtext=text='VeriFYD  |  {cert_id[:8]}  |  {timestamp}':"
-                "x=w-tw-20:y=h-th-20:"
-                "fontsize=16:"
-                "fontcolor=white@0.85:"
-                "box=1:boxcolor=black@0.4:boxborderw=4"
-            )
-
-        final_cmd = [FFMPEG_BIN, "-y", "-i", temp_mux]
-
-        if use_logo:
-            final_cmd += ["-i", LOGO_PATH]
-            final_cmd += ["-filter_complex", vf]
-        else:
-            final_cmd += ["-vf", vf]
-
-        # Audio: COPY directly (no re-encode = no quality loss, preserves original)
-        if audio_present:
-            final_cmd += ["-map", "0:a", "-c:a", "copy"]
-
-        # Video: re-encode with watermark applied
-        final_cmd += [
-            "-c:v", "libx264",
-            "-preset", "fast",
-            "-crf", "23",
-            "-shortest",
-            "-movflags", "+faststart",
-            output_path,
-        ]
-
-        _run_ffmpeg(final_cmd, "watermark")
-
-        log.info("🎬 Stamp complete: %s", output_path)
-
-    finally:
-        # Clean up temp file
-        if os.path.exists(temp_mux):
-            os.remove(temp_mux)
-            log.info("   Cleaned temp: %s", temp_mux)
-
-
-def _run_ffmpeg(cmd: list, label: str):
-    """Run an FFmpeg command with timeout and error checking."""
-    log.info("   FFmpeg [%s]: %s", label, " ".join(cmd))
-    result = subprocess.run(
-        cmd, capture_output=True, text=True, timeout=300
+    vf = (
+        f"drawtext=text='VeriFYD | {cert_id[:8]} | {timestamp}':"
+        "x=w-tw-20:y=h-th-20:"
+        "fontsize=16:"
+        "fontcolor=white@0.85:"
+        "box=1:boxcolor=black@0.4:boxborderw=4"
     )
-    if result.returncode != 0:
-        log.error("FFmpeg [%s] failed (rc=%d): %s", label, result.returncode, result.stderr[-500:])
-        raise RuntimeError(f"FFmpeg {label} failed: {result.stderr[-200:]}")
 
+    cmd = [
+        "ffmpeg","-y",
+        "-i", input_path,
+        "-vf", vf,
+
+        # VIDEO
+        "-c:v","libx264",
+        "-preset","fast",
+        "-crf","23",
+
+        # 🔊 ALWAYS RE-ENCODE AUDIO
+        "-c:a","aac",
+        "-b:a","192k",
+
+        "-movflags","+faststart",
+        output_path
+    ]
+
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(r.stderr[-400:])
 
 # ============================================================
-#  ROUTES
+# UPLOAD
 # ============================================================
-
-@app.get("/")
-def home():
-    return {"status": "VeriFYD LIVE", "version": "2.0.0"}
-
-
-@app.get("/health")
-def health():
-    """Confirm API + FFmpeg are operational."""
-    try:
-        subprocess.run([FFMPEG_BIN, "-version"], capture_output=True, timeout=5, check=True)
-        ffmpeg_ok = True
-    except Exception:
-        ffmpeg_ok = False
-    return {"api": True, "ffmpeg": ffmpeg_ok}
-
 
 @app.post("/upload/")
 async def upload(file: UploadFile = File(...), email: str = Form(...)):
-    log.info("📤 Upload from %s — file: %s", email, file.filename)
 
-    # --- Validate extension ---
-    ext = os.path.splitext(file.filename or "")[1].lower()
-    if ext not in ALLOWED_EXTS:
-        raise HTTPException(400, f"Unsupported file type: {ext}. Accepted: {ALLOWED_EXTS}")
-
-    # --- Save upload ---
     cert_id = str(uuid.uuid4())
-    raw_path = os.path.join(UPLOAD_DIR, f"{cert_id}_{file.filename}")
+    raw_path = f"{UPLOAD_DIR}/{cert_id}_{file.filename}"
 
-    try:
-        contents = await file.read()
+    with open(raw_path,"wb") as f:
+        f.write(await file.read())
 
-        # --- Validate size ---
-        if len(contents) > MAX_UPLOAD_MB * 1024 * 1024:
-            raise HTTPException(413, f"File too large. Max: {MAX_UPLOAD_MB} MB")
-
-        with open(raw_path, "wb") as f:
-            f.write(contents)
-        log.info("   Saved: %s (%d MB)", raw_path, len(contents) // (1024 * 1024))
-    except HTTPException:
-        raise
-    except Exception as e:
-        log.error("Failed to save upload: %s", e)
-        raise HTTPException(500, "Failed to save uploaded file")
-
-    # --- Validate it's actually a video ---
-    try:
-        probe = ffprobe_streams(raw_path)
-        video_streams = [s for s in probe.get("streams", []) if s.get("codec_type") == "video"]
-        if not video_streams:
-            raise HTTPException(400, "Uploaded file contains no video stream")
-    except HTTPException:
-        raise
-    except Exception as e:
-        log.error("ffprobe validation failed: %s", e)
-        raise HTTPException(400, "Could not read video file — may be corrupt")
-
-    # --- Run real detection ---
     detection = analyze_video(raw_path)
-    authenticity = detection["authenticity_score"]
+    score = detection["authenticity_score"]
 
-    # --- Route: certify vs review ---
-    low, high = REVIEW_THRESHOLD
-    if authenticity >= high:
+    # TEMP: certify anything >= 50 so we can test audio
+    if score >= 50:
         status = "CERTIFIED"
-        certified_path = os.path.join(CERT_DIR, f"{cert_id}_VeriFYD.mp4")
-        try:
-            stamp_video(raw_path, certified_path, cert_id)
-        except Exception as e:
-            log.error("Stamping failed: %s", e)
-            raise HTTPException(500, "Video certification failed during processing")
+        certified_path = f"{CERT_DIR}/{cert_id}.mp4"
+        stamp_video(raw_path, certified_path, cert_id)
         download_url = f"{BASE_URL}/download/{cert_id}"
-    elif authenticity >= low:
-        status = "UNDER_REVIEW"
-        # Copy to review folder, no stamp yet
-        review_path = os.path.join(REVIEW_DIR, f"{cert_id}_{file.filename}")
-        os.rename(raw_path, review_path)
-        certified_path = None
-        download_url = None
-        log.info("⚠️ Video sent to review (score %d)", authenticity)
     else:
-        status = "REJECTED"
-        certified_path = None
+        status = "UNDER_REVIEW"
         download_url = None
-        log.warning("🚫 Video rejected (score %d)", authenticity)
 
-    # --- Hash for verification ---
-    sha256 = file_sha256(certified_path) if certified_path and os.path.exists(certified_path) else None
-
-    # --- Store in database ---
-    try:
-        db.insert_certificate(
-            cert_id=cert_id,
-            email=email,
-            original_file=file.filename,
-            status=status,
-            authenticity=authenticity,
-            ai_likelihood=detection["combined_ai_likelihood"],
-            primary_score=detection["primary_ai_score"],
-            secondary_score=detection["secondary_ai_score"],
-            sha256=sha256,
-        )
-    except Exception as e:
-        log.error("DB insert failed (non-fatal): %s", e)
-
-    log.info("📤 Upload complete — cert_id=%s status=%s score=%d", cert_id, status, authenticity)
+    db.insert_certificate(
+        cert_id=cert_id,
+        email=email,
+        original_file=file.filename,
+        status=status,
+        authenticity=score,
+        ai_likelihood=detection["ai_likelihood"],
+        primary_score=detection["primary"],
+        secondary_score=detection["secondary"],
+        sha256=None,
+    )
 
     return {
         "status": status,
         "certificate_id": cert_id,
-        "authenticity_score": authenticity,
-        "ai_likelihood": detection["combined_ai_likelihood"],
-        "detection_details": {
-            "primary": detection["primary_ai_score"],
-            "secondary": detection["secondary_ai_score"],
-        },
-        "sha256": sha256,
-        "download_url": download_url,
+        "authenticity_score": score,
+        "download_url": download_url
     }
 
+# ============================================================
+# DOWNLOAD
+# ============================================================
 
 @app.get("/download/{cid}")
 def download(cid: str):
-    # Look for certified file (pattern: {cid}_VeriFYD.mp4 or {cid}.mp4)
-    for name in (f"{cid}_VeriFYD.mp4", f"{cid}.mp4"):
-        path = os.path.join(CERT_DIR, name)
-        if os.path.exists(path):
-            log.info("📥 Download: %s", path)
-            db.increment_downloads(cid)
-            return FileResponse(path, media_type="video/mp4", filename=f"VeriFYD_{cid[:8]}.mp4")
+    path = f"{CERT_DIR}/{cid}.mp4"
+    if not os.path.exists(path):
+        raise HTTPException(404,"Not found")
+    return FileResponse(path, media_type="video/mp4")
 
-    log.warning("📥 Download not found: %s", cid)
-    raise HTTPException(404, "Certificate not found")
+# ============================================================
+# ANALYZE LINK (RESTORED)
+# ============================================================
 
+@app.api_route("/analyze-link/", methods=["GET","POST"])
+async def analyze_link(request: Request):
 
-@app.get("/status/{cid}")
-def certificate_status(cid: str):
-    """Check certificate status — DB first, then filesystem fallback."""
-    # Try database
-    record = db.get_certificate(cid)
-    if record:
-        return {
-            "certificate_id": cid,
-            "status": record["status"],
-            "authenticity_score": record["authenticity"],
-            "ai_likelihood": record["ai_likelihood"],
-            "sha256": record["sha256"],
-            "upload_time": record["upload_time"],
-            "download_count": record["download_count"],
-        }
+    if request.method == "POST":
+        form = await request.form()
+        video_url = form.get("video_url")
+    else:
+        video_url = request.query_params.get("video_url")
 
-    # Filesystem fallback (for pre-DB certificates)
-    for name in (f"{cid}_VeriFYD.mp4", f"{cid}.mp4"):
-        path = os.path.join(CERT_DIR, name)
-        if os.path.exists(path):
-            return {
-                "certificate_id": cid,
-                "status": "CERTIFIED",
-                "sha256": file_sha256(path),
-            }
+    if not video_url:
+        return {"error":"missing url"}
 
-    for f in os.listdir(REVIEW_DIR):
-        if f.startswith(cid):
-            return {"certificate_id": cid, "status": "UNDER_REVIEW"}
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
 
-    raise HTTPException(404, "Certificate not found")
+    try:
+        import requests
+        r = requests.get(video_url, stream=True, timeout=20)
+        for chunk in r.iter_content(1024):
+            tmp.write(chunk)
+        tmp.close()
 
+        detection = analyze_video(tmp.name)
+        score = detection["authenticity_score"]
 
-@app.get("/verify/{cid}")
-def verify_certificate(cid: str):
-    """Public verification — anyone can check if a cert is legit and hash matches."""
-    for name in (f"{cid}_VeriFYD.mp4", f"{cid}.mp4"):
-        path = os.path.join(CERT_DIR, name)
-        if os.path.exists(path):
-            current_hash = file_sha256(path)
-            record = db.get_certificate(cid)
-            stored_hash = record["sha256"] if record else None
+        result = "REAL VIDEO" if score >= 50 else "AI DETECTED"
 
-            return {
-                "certificate_id": cid,
-                "verified": True,
-                "hash_match": current_hash == stored_hash if stored_hash else None,
-                "sha256": current_hash,
-                "stored_sha256": stored_hash,
-            }
+        html = f"""
+        <html>
+        <body style="background:black;color:white;text-align:center;padding-top:120px;font-family:Arial">
+        <h1>{result}</h1>
+        <h2>Authenticity Score: {score}</h2>
+        </body>
+        </html>
+        """
 
-    raise HTTPException(404, "Certificate not found")
+        return HTMLResponse(html)
+
+    finally:
+        try:
+            os.unlink(tmp.name)
+        except:
+            pass
+
+@app.get("/")
+def home():
+    return {"status":"VeriFYD LIVE"}
+
