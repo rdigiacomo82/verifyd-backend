@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: verifyd-backend
+    runtime: python
+    buildCommand: bash build.sh
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: BASE_URL
+        value: https://verifyd-backend.onrender.com
+      - key: FFMPEG_BIN
+        value: ffmpeg
+      - key: FFPROBE_BIN
+        value: ffprobe
+      - key: MAX_UPLOAD_MB
+        value: "500"
+    disk:
+      name: verifyd-data
+      mountPath: /data
+      sizeGB: 10

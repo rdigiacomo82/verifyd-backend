@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
-apt-get update
-apt-get install -y ffmpeg
+set -e
+
+echo "=== VeriFYD Build ==="
+
+# System deps
+apt-get update -qq
+apt-get install -y -qq ffmpeg
+
+# Python deps
+pip install --upgrade pip
 pip install -r requirements.txt
 
-
+echo "=== Build Complete ==="
