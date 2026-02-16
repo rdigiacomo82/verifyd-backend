@@ -3,9 +3,9 @@ set -e
 
 echo "=== VeriFYD Build ==="
 
-# --------------------------------------------------
+# -----------------------------
 # Install FFmpeg (static build)
-# --------------------------------------------------
+# -----------------------------
 if ! command -v ffmpeg &> /dev/null; then
     echo "Installing ffmpeg..."
     curl -sL https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz -o /tmp/ffmpeg.tar.xz
@@ -19,25 +19,15 @@ fi
 export PATH="/opt/render/project/.render/ffmpeg:$PATH"
 ffmpeg -version | head -1
 
-# --------------------------------------------------
-# Install Python deps
-# --------------------------------------------------
+# -----------------------------
+# Python deps
+# -----------------------------
 pip install --upgrade pip
 pip install -r requirements.txt
 
-# --------------------------------------------------
-# Install yt-dlp CLI binary (CRITICAL)
-# --------------------------------------------------
-echo "Installing yt-dlp binary..."
-
-curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp \
-  -o /opt/render/project/.render/ffmpeg/yt-dlp
-
-chmod +x /opt/render/project/.render/ffmpeg/yt-dlp
-
-export PATH="/opt/render/project/.render/ffmpeg:$PATH"
-
-yt-dlp --version
+# Install yt-dlp (python version)
+pip install yt-dlp
 
 echo "=== Build Complete ==="
+
 
