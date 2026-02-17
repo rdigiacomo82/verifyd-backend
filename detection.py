@@ -1,11 +1,12 @@
 import cv2
 import numpy as np
-import random
 
-# ----------------------------------------------------
-# Core AI detection tuned for:
-# phone video vs AI social clips
-# ----------------------------------------------------
+# ============================================================
+# VeriFYD Advanced Detector v1
+# Returns AUTHENTICITY score (0–100)
+# 100 = real camera
+# 0 = AI generated
+# ============================================================
 
 def run_detection(video_path):
     cap = cv2.VideoCapture(video_path)
@@ -13,110 +14,102 @@ def run_detection(video_path):
     if not cap.isOpened():
         return 50, "UNDETERMINED"
 
-    noise_vals = []
-    motion_vals = []
-    brightness_vals = []
-    edge_vals = []
-
-    prev_gray = None
     frame_count = 0
+    prev_gray = None
 
+    motion_vals = []
+    jitter_vals = []
+    detail_vals = []
+    brightness_vals = []
+
+    # only analyze first ~10 seconds (≈300 frames max)
     while True:
         ret, frame = cap.read()
         if not ret:
             break
 
         frame_count += 1
-
-        # analyze only first ~10 seconds
         if frame_count > 300:
             break
 
-        if frame_count % 5 != 0:
-            continue
-
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-        # --- noise ---
-        noise = cv2.Laplacian(gray, cv2.CV_64F).var()
-        noise_vals.append(noise)
+        # --- detail (real cameras have more high-freq noise)
+        lap = cv2.Laplacian(gray, cv2.CV_64F).var()
+        detail_vals.append(lap)
 
-        # --- brightness variation ---
+        # --- brightness variation (real cameras fluctuate)
         brightness_vals.append(np.mean(gray))
 
-        # --- edges ---
-        edges = cv2.Canny(gray, 50, 150)
-        edge_vals.append(np.mean(edges))
-
-        # --- motion ---
         if prev_gray is not None:
             diff = cv2.absdiff(gray, prev_gray)
             motion_vals.append(np.mean(diff))
+
+            # micro jitter (phone shake)
+            shift = np.sum(diff) / (diff.shape[0] * diff.shape[1])
+            jitter_vals.append(shift)
 
         prev_gray = gray
 
     cap.release()
 
-    if not noise_vals:
+    if not motion_vals:
         return 50, "UNDETERMINED"
 
-    avg_noise = np.mean(noise_vals)
-    avg_motion = np.mean(motion_vals) if motion_vals else 0
-    motion_var = np.var(motion_vals) if len(motion_vals) > 1 else 0
+    avg_motion = np.mean(motion_vals)
+    motion_var = np.var(motion_vals)
+    avg_detail = np.mean(detail_vals)
     brightness_var = np.var(brightness_vals)
-    avg_edges = np.mean(edge_vals)
+    jitter = np.mean(jitter_vals)
 
-    # ----------------------------------------------------
-    # AI likelihood score (0–100 where HIGH = AI)
-    # ----------------------------------------------------
-    ai_score = 50
+    # ============================================================
+    # AUTHENTICITY SCORE (start neutral at 50)
+    # ============================================================
 
-    # --- SENSOR NOISE ---
-    if avg_noise < 80:
-        ai_score += 25   # too clean = AI
-    elif avg_noise > 300:
-        ai_score -= 20   # real camera noise
+    score = 50
 
-    # --- MOTION ---
-    if avg_motion < 1.5:
-        ai_score += 20   # too stable
-    elif avg_motion > 6:
-        ai_score -= 15   # real handheld motion
+    # ---- real camera motion randomness
+    if motion_var > 5:
+        score += 15
+    else:
+        score -= 15
 
-    # motion variance
-    if motion_var < 0.5:
-        ai_score += 15
+    # ---- micro camera shake (very strong real signal)
+    if jitter > 2:
+        score += 15
+    else:
+        score -= 15
 
-    # --- BRIGHTNESS variation ---
-    if brightness_var < 10:
-        ai_score += 15   # lighting too perfect
-    elif brightness_var > 40:
-        ai_score -= 10
+    # ---- real cameras have natural detail/noise
+    if avg_detail > 200:
+        score += 10
+    else:
+        score -= 10
 
-    # --- EDGE DETAIL ---
-    if avg_edges < 8:
-        ai_score += 10
-    elif avg_edges > 25:
-        ai_score -= 10
+    # ---- brightness fluctuation
+    if brightness_var > 2:
+        score += 10
+    else:
+        score -= 10
+
+    # ---- extremely smooth motion → AI
+    if avg_motion < 1:
+        score -= 15
 
     # clamp
-    ai_score = max(0, min(100, ai_score))
+    score = int(max(0, min(100, score)))
 
-    # small randomness to avoid identical results
-    ai_score += random.randint(-3, 3)
-    ai_score = max(0, min(100, ai_score))
+    # ============================================================
+    # CLASSIFICATION
+    # ============================================================
 
-    # ----------------------------------------------------
-    # Convert to REAL score
-    # ----------------------------------------------------
-    real_score = 100 - ai_score
-
-    if real_score >= 65:
-        return real_score, "REAL"
-    elif real_score >= 40:
-        return real_score, "UNDETERMINED"
+    if score >= 85:
+        return score, "REAL"
+    elif score >= 60:
+        return score, "UNDETERMINED"
     else:
-        return real_score, "AI"
+        return score, "AI"
+
 
 
 
