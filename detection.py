@@ -1,29 +1,23 @@
 import cv2
 import numpy as np
 
-# ============================================================
-# VeriFYD Detection Engine v2 (Balanced + Stable)
-# ============================================================
+# ---------------------------------------------------
+# CORE DETECTOR
+# ---------------------------------------------------
 
 def run_detection(video_path):
-    """
-    Returns:
-        authenticity_score (0–100)
-        label: REAL / UNDETERMINED / AI
-    """
-
     cap = cv2.VideoCapture(video_path)
 
     if not cap.isOpened():
-        # If video can't be read, assume uncertain
         return 50, "UNDETERMINED"
 
-    frame_count = 0
     noise_vals = []
     motion_vals = []
     edge_vals = []
+    entropy_vals = []
 
     prev_gray = None
+    frame_count = 0
 
     while True:
         ret, frame = cap.read()
@@ -32,30 +26,37 @@ def run_detection(video_path):
 
         frame_count += 1
 
-        # Only analyze first ~10 seconds worth of frames
-        if frame_count > 300:
-            break
-
+        # sample every 5th frame, max 120 frames
         if frame_count % 5 != 0:
             continue
+        if frame_count > 600:
+            break
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-        # -------------------------
-        # SENSOR NOISE
-        # -------------------------
+        # ---------------------------------------------------
+        # 1. SENSOR NOISE (REAL CAMERAS HAVE MORE)
+        # ---------------------------------------------------
         noise = cv2.Laplacian(gray, cv2.CV_64F).var()
         noise_vals.append(noise)
 
-        # -------------------------
-        # EDGE DETAIL
-        # -------------------------
+        # ---------------------------------------------------
+        # 2. EDGE COMPLEXITY
+        # ---------------------------------------------------
         edges = cv2.Canny(gray, 50, 150)
         edge_vals.append(np.mean(edges))
 
-        # -------------------------
-        # MOTION
-        # -------------------------
+        # ---------------------------------------------------
+        # 3. ENTROPY (AI tends to be too uniform)
+        # ---------------------------------------------------
+        hist = cv2.calcHist([gray], [0], None, [256], [0,256])
+        hist = hist / hist.sum()
+        entropy = -np.sum(hist * np.log2(hist + 1e-7))
+        entropy_vals.append(entropy)
+
+        # ---------------------------------------------------
+        # 4. MOTION INSTABILITY (real cameras shake slightly)
+        # ---------------------------------------------------
         if prev_gray is not None:
             diff = cv2.absdiff(gray, prev_gray)
             motion_vals.append(np.mean(diff))
@@ -68,54 +69,50 @@ def run_detection(video_path):
         return 50, "UNDETERMINED"
 
     avg_noise = np.mean(noise_vals)
-    avg_edges = np.mean(edge_vals)
     avg_motion = np.mean(motion_vals) if motion_vals else 0
+    avg_edges = np.mean(edge_vals)
+    avg_entropy = np.mean(entropy_vals)
 
-    # =========================================================
-    # AI LIKELIHOOD SCORE (higher = more likely AI)
-    # =========================================================
+    # ---------------------------------------------------
+    # SCORING (AI likelihood)
+    # start at 50
+    # ---------------------------------------------------
     ai_score = 50
 
-    # Low sensor noise → AI
-    if avg_noise < 120:
+    # ---------- NOISE ----------
+    if avg_noise < 80:       # too clean → AI
         ai_score += 25
-    elif avg_noise > 400:
-        ai_score -= 15
+    elif avg_noise > 300:    # real camera
+        ai_score -= 20
 
-    # Weak edges → AI
-    if avg_edges < 12:
-        ai_score += 15
-    elif avg_edges > 35:
+    # ---------- MOTION ----------
+    if avg_motion < 1.5:     # too stable → AI
+        ai_score += 20
+    elif avg_motion > 5:
         ai_score -= 10
 
-    # Too smooth motion → AI
-    if avg_motion < 1.2:
+    # ---------- EDGES ----------
+    if avg_edges < 5:        # too smooth
         ai_score += 15
-    elif avg_motion > 6:
+    elif avg_edges > 25:
         ai_score -= 10
 
-    ai_score = max(0, min(100, ai_score))
+    # ---------- ENTROPY ----------
+    if avg_entropy < 5.0:
+        ai_score += 15
+    elif avg_entropy > 6.5:
+        ai_score -= 10
 
-    # =========================================================
-    # CONVERT TO AUTHENTICITY
-    # =========================================================
-    authenticity = 100 - ai_score
+    ai_score = max(0, min(100, int(ai_score)))
 
-    # Slight realism boost
-    if authenticity > 70 and avg_noise > 250:
-        authenticity += 5
-
-    authenticity = max(0, min(100, authenticity))
-
-    # =========================================================
-    # FINAL LABEL
-    # =========================================================
-    if authenticity >= 85:
-        label = "REAL"
-    elif authenticity >= 60:
-        label = "UNDETERMINED"
+    # ---------------------------------------------------
+    # FINAL CLASSIFICATION
+    # ---------------------------------------------------
+    if ai_score >= 70:
+        return ai_score, "AI"
+    elif ai_score >= 45:
+        return ai_score, "UNDETERMINED"
     else:
-        label = "AI"
+        return ai_score, "REAL"
 
-    return int(authenticity), label
 
