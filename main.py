@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 import os, uuid, subprocess, requests, tempfile
 
-from detection import run_detection  # ← uses your detection.py
+from detection import run_detection
 
 app = FastAPI(title="VeriFYD STABLE")
 
@@ -40,7 +40,20 @@ def health():
     return {"status": "ok"}
 
 # ---------------------------------------------------
-# CLIP FIRST 10 SECONDS (for speed)
+# SAFE SCORE EXTRACTION
+# ---------------------------------------------------
+def extract_score(result):
+    """
+    run_detection() might return:
+    - score
+    - (score, label)
+    """
+    if isinstance(result, tuple):
+        return result[0]
+    return result
+
+# ---------------------------------------------------
+# CLIP FIRST 10 SECONDS
 # ---------------------------------------------------
 def clip_first_10_seconds(input_path):
     out = os.path.join(TMP_DIR, f"clip_{uuid.uuid4()}.mp4")
@@ -59,12 +72,11 @@ def clip_first_10_seconds(input_path):
     return out
 
 # ---------------------------------------------------
-# SCORE INTERPRETATION
+# SCORE INTERPRET
 # ---------------------------------------------------
 def interpret_score(score):
 
-    # clamp score
-    score = max(0, min(100, int(score)))
+    score = int(score)
 
     if score >= 85:
         return "REAL VIDEO VERIFIED", "green", "REAL"
@@ -99,13 +111,10 @@ def stamp_video(input_path, output_path, cert_id):
         output_path
     ]
 
-    r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-
-    if r.returncode != 0:
-        raise RuntimeError(r.stderr.decode()[-300:])
+    subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
 # ---------------------------------------------------
-# UPLOAD VIDEO
+# UPLOAD
 # ---------------------------------------------------
 @app.post("/upload/")
 async def upload(file: UploadFile = File(...), email: str = Form(...)):
@@ -116,14 +125,13 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
     with open(raw_path, "wb") as f:
         f.write(await file.read())
 
-    # analyze only first 10 seconds
     clip = clip_first_10_seconds(raw_path)
 
-    score = run_detection(clip)  # detection.py returns number
+    result = run_detection(clip)
+    score = extract_score(result)
 
     text, color, label = interpret_score(score)
 
-    # CERTIFY ONLY IF ≥85
     if label == "REAL":
 
         certified_path = f"{CERT_DIR}/{cid}.mp4"
@@ -157,7 +165,7 @@ def download(cid: str):
     return FileResponse(path, media_type="video/mp4")
 
 # ---------------------------------------------------
-# ANALYZE LINK (HTML RESULT PAGE)
+# ANALYZE LINK
 # ---------------------------------------------------
 @app.get("/analyze-link/", response_class=HTMLResponse)
 def analyze_link(video_url: str):
@@ -179,7 +187,9 @@ def analyze_link(video_url: str):
                 f.write(chunk)
 
         clip = clip_first_10_seconds(path)
-        score = run_detection(clip)
+
+        result = run_detection(clip)
+        score = extract_score(result)
 
         text, color, label = interpret_score(score)
 
