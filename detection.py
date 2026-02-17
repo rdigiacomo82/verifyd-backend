@@ -1,21 +1,26 @@
 import cv2
 import numpy as np
 
-def run_detection(video_path: str):
+# ============================================================
+# VeriFYD Detection Engine v3 (Tuned for Phone vs AI Avatar)
+# ============================================================
+
+def run_detection(video_path):
     """
     Returns:
-        authenticity_score (0-100)
-        label
+        score (0-100)
+        label ("REAL", "AI", "UNDETERMINED")
     """
 
     cap = cv2.VideoCapture(video_path)
+
     if not cap.isOpened():
         return 50, "UNDETERMINED"
 
     noise_vals = []
-    edge_vals = []
     motion_vals = []
-    temporal_vals = []
+    brightness_vals = []
+    edge_vals = []
 
     prev_gray = None
     frame_count = 0
@@ -27,88 +32,120 @@ def run_detection(video_path: str):
 
         frame_count += 1
 
-        if frame_count % 4 != 0:
+        # sample every 5th frame (first ~10 sec)
+        if frame_count % 5 != 0:
             continue
-        if frame_count > 240:
+
+        if frame_count > 300:
             break
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-        # --- SENSOR NOISE ---
+        # -----------------------
+        # SENSOR NOISE
+        # -----------------------
         noise = cv2.Laplacian(gray, cv2.CV_64F).var()
         noise_vals.append(noise)
 
-        # --- EDGE DETAIL ---
+        # -----------------------
+        # EDGE DETAIL
+        # -----------------------
         edges = cv2.Canny(gray, 50, 150)
         edge_vals.append(np.mean(edges))
 
-        # --- MOTION ---
+        # -----------------------
+        # BRIGHTNESS VARIATION
+        # real cameras fluctuate
+        # AI often stable
+        # -----------------------
+        brightness_vals.append(np.mean(gray))
+
+        # -----------------------
+        # MOTION
+        # -----------------------
         if prev_gray is not None:
             diff = cv2.absdiff(gray, prev_gray)
             motion_vals.append(np.mean(diff))
-
-        # --- TEMPORAL VARIATION ---
-        if prev_gray is not None:
-            hist1 = cv2.calcHist([gray],[0],None,[64],[0,256])
-            hist2 = cv2.calcHist([prev_gray],[0],None,[64],[0,256])
-            temporal_vals.append(np.mean(np.abs(hist1-hist2)))
 
         prev_gray = gray
 
     cap.release()
 
-    if not noise_vals:
+    if len(noise_vals) == 0:
         return 50, "UNDETERMINED"
 
     avg_noise = np.mean(noise_vals)
-    avg_edge = np.mean(edge_vals)
+    noise_var = np.var(noise_vals)
+
     avg_motion = np.mean(motion_vals) if motion_vals else 0
-    temporal = np.mean(temporal_vals) if temporal_vals else 0
+    motion_var = np.var(motion_vals) if len(motion_vals) > 1 else 0
 
-    # -------------------------------------------------
-    # AI LIKELIHOOD SCORING
-    # -------------------------------------------------
-    ai_score = 50
+    brightness_var = np.var(brightness_vals)
+    avg_edges = np.mean(edge_vals)
 
-    # AI videos usually too smooth
-    if avg_noise < 120:
-        ai_score += 25
+    # ============================================================
+    # REAL SCORE START
+    # ============================================================
+    real_score = 50
+
+    # ------------------------------------------------------------
+    # NOISE (phone cameras always noisy)
+    # ------------------------------------------------------------
+    if avg_noise > 300:
+        real_score += 20
+    elif avg_noise < 120:
+        real_score -= 25
+
+    # noise variance (real fluctuates)
+    if noise_var > 200:
+        real_score += 10
     else:
-        ai_score -= 10
+        real_score -= 10
 
-    # AI edges too clean
-    if avg_edge < 12:
-        ai_score += 20
+    # ------------------------------------------------------------
+    # MOTION
+    # ------------------------------------------------------------
+    if avg_motion > 5:
+        real_score += 15
+    elif avg_motion < 2:
+        real_score -= 20
+
+    if motion_var > 2:
+        real_score += 10
     else:
-        ai_score -= 10
+        real_score -= 10
 
-    # Motion too consistent
-    if avg_motion < 2:
-        ai_score += 15
+    # ------------------------------------------------------------
+    # BRIGHTNESS FLUCTUATION
+    # real outdoor video changes constantly
+    # ------------------------------------------------------------
+    if brightness_var > 20:
+        real_score += 15
     else:
-        ai_score -= 10
+        real_score -= 15
 
-    # Temporal too stable
-    if temporal < 2:
-        ai_score += 20
+    # ------------------------------------------------------------
+    # EDGE DETAIL
+    # AI often too smooth
+    # ------------------------------------------------------------
+    if avg_edges > 20:
+        real_score += 10
+    elif avg_edges < 8:
+        real_score -= 15
+
+    # clamp
+    real_score = max(0, min(100, int(real_score)))
+
+    # ============================================================
+    # LABEL
+    # ============================================================
+    if real_score >= 85:
+        return real_score, "REAL"
+    elif real_score >= 60:
+        return real_score, "UNDETERMINED"
     else:
-        ai_score -= 10
+        return real_score, "AI"
 
-    ai_score = max(0, min(100, ai_score))
-
-    # Convert to authenticity
-    authenticity = 100 - ai_score
-
-    if authenticity >= 85:
-        label = "REAL"
-    elif authenticity >= 60:
-        label = "UNDETERMINED"
-    else:
-        label = "AI"
-
-    print("AI SCORE:", ai_score, "AUTH:", authenticity)
-
-    return authenticity, label
 
 
 
