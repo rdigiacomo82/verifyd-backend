@@ -3,18 +3,19 @@ import numpy as np
 
 def run_detection(video_path: str):
     """
-    Returns REAL score 0–100
-    HIGH = real
-    LOW = AI
+    Returns:
+        authenticity_score (0-100)
+        label
     """
 
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
-        return 50, "Undetermined"
+        return 50, "UNDETERMINED"
 
     noise_vals = []
+    edge_vals = []
     motion_vals = []
-    exposure_vals = []
+    temporal_vals = []
 
     prev_gray = None
     frame_count = 0
@@ -25,6 +26,7 @@ def run_detection(video_path: str):
             break
 
         frame_count += 1
+
         if frame_count % 4 != 0:
             continue
         if frame_count > 240:
@@ -32,59 +34,82 @@ def run_detection(video_path: str):
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-        # sensor noise
+        # --- SENSOR NOISE ---
         noise = cv2.Laplacian(gray, cv2.CV_64F).var()
         noise_vals.append(noise)
 
-        # exposure variation
-        exposure_vals.append(np.std(gray))
+        # --- EDGE DETAIL ---
+        edges = cv2.Canny(gray, 50, 150)
+        edge_vals.append(np.mean(edges))
 
-        # motion
+        # --- MOTION ---
         if prev_gray is not None:
             diff = cv2.absdiff(gray, prev_gray)
             motion_vals.append(np.mean(diff))
+
+        # --- TEMPORAL VARIATION ---
+        if prev_gray is not None:
+            hist1 = cv2.calcHist([gray],[0],None,[64],[0,256])
+            hist2 = cv2.calcHist([prev_gray],[0],None,[64],[0,256])
+            temporal_vals.append(np.mean(np.abs(hist1-hist2)))
 
         prev_gray = gray
 
     cap.release()
 
     if not noise_vals:
-        return 50, "Undetermined"
+        return 50, "UNDETERMINED"
 
     avg_noise = np.mean(noise_vals)
+    avg_edge = np.mean(edge_vals)
     avg_motion = np.mean(motion_vals) if motion_vals else 0
-    avg_exposure = np.mean(exposure_vals)
+    temporal = np.mean(temporal_vals) if temporal_vals else 0
 
-    real_score = 50
+    # -------------------------------------------------
+    # AI LIKELIHOOD SCORING
+    # -------------------------------------------------
+    ai_score = 50
 
-    # real cameras = noise
-    if avg_noise > 150:
-        real_score += 25
-    elif avg_noise < 60:
-        real_score -= 25
+    # AI videos usually too smooth
+    if avg_noise < 120:
+        ai_score += 25
+    else:
+        ai_score -= 10
 
-    # real cameras = motion
-    if avg_motion > 3:
-        real_score += 25
-    elif avg_motion < 1:
-        real_score -= 25
+    # AI edges too clean
+    if avg_edge < 12:
+        ai_score += 20
+    else:
+        ai_score -= 10
 
-    # real cameras = exposure variation
-    if avg_exposure > 25:
-        real_score += 20
-    elif avg_exposure < 12:
-        real_score -= 20
+    # Motion too consistent
+    if avg_motion < 2:
+        ai_score += 15
+    else:
+        ai_score -= 10
 
-    real_score = max(0, min(100, int(real_score)))
+    # Temporal too stable
+    if temporal < 2:
+        ai_score += 20
+    else:
+        ai_score -= 10
 
-    if real_score >= 85:
+    ai_score = max(0, min(100, ai_score))
+
+    # Convert to authenticity
+    authenticity = 100 - ai_score
+
+    if authenticity >= 85:
         label = "REAL"
-    elif real_score >= 60:
-        label = "Undetermined"
+    elif authenticity >= 60:
+        label = "UNDETERMINED"
     else:
         label = "AI"
 
-    return real_score, label
+    print("AI SCORE:", ai_score, "AUTH:", authenticity)
+
+    return authenticity, label
+
 
 
 
