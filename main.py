@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 import os, uuid, subprocess, requests, tempfile
 
-from detection import run_detection   # uses detection.py
+from detection import run_detection  # ← uses your detection.py
 
 app = FastAPI(title="VeriFYD STABLE")
 
@@ -40,9 +40,32 @@ def health():
     return {"status": "ok"}
 
 # ---------------------------------------------------
+# CLIP FIRST 10 SECONDS (for speed)
+# ---------------------------------------------------
+def clip_first_10_seconds(input_path):
+    out = os.path.join(TMP_DIR, f"clip_{uuid.uuid4()}.mp4")
+
+    cmd = [
+        "ffmpeg","-y",
+        "-i", input_path,
+        "-t","10",
+        "-c:v","libx264",
+        "-preset","ultrafast",
+        "-c:a","copy",
+        out
+    ]
+
+    subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    return out
+
+# ---------------------------------------------------
 # SCORE INTERPRETATION
 # ---------------------------------------------------
-def interpret_score(score: int):
+def interpret_score(score):
+
+    # clamp score
+    score = max(0, min(100, int(score)))
+
     if score >= 85:
         return "REAL VIDEO VERIFIED", "green", "REAL"
     elif score >= 60:
@@ -51,35 +74,15 @@ def interpret_score(score: int):
         return "AI DETECTED", "red", "AI"
 
 # ---------------------------------------------------
-# ANALYZE ONLY FIRST 10 SECONDS (prevents timeouts)
-# ---------------------------------------------------
-def clip_first_10_seconds(input_path):
-    clipped = f"{TMP_DIR}/{uuid.uuid4()}.mp4"
-
-    cmd = [
-        "ffmpeg","-y",
-        "-i", input_path,
-        "-t","10",
-        "-c:v","libx264",
-        "-preset","fast",
-        "-crf","23",
-        "-c:a","copy",
-        clipped
-    ]
-
-    subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    return clipped
-
-# ---------------------------------------------------
-# VIDEO STAMP (safe)
+# VIDEO STAMP
 # ---------------------------------------------------
 def stamp_video(input_path, output_path, cert_id):
 
     vf = (
-        "drawtext=text='VeriFYD':x=10:y=10:fontsize=24:"
-        "fontcolor=white:box=1:boxcolor=black@0.4:boxborderw=4,"
-        f"drawtext=text='ID\\:{cert_id}':x=w-tw-20:y=h-th-20:fontsize=16:"
-        "fontcolor=white:box=1:boxcolor=black@0.4:boxborderw=4"
+        f"drawtext=text='VeriFYD':x=10:y=10:fontsize=24:"
+        f"fontcolor=white@0.85:box=1:boxcolor=black@0.4:boxborderw=4,"
+        f"drawtext=text='ID:{cert_id}':x=w-tw-20:y=h-th-20:fontsize=16:"
+        f"fontcolor=white@0.85:box=1:boxcolor=black@0.4:boxborderw=4"
     )
 
     cmd = [
@@ -99,10 +102,10 @@ def stamp_video(input_path, output_path, cert_id):
     r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
     if r.returncode != 0:
-        raise RuntimeError(r.stderr.decode()[-400:])
+        raise RuntimeError(r.stderr.decode()[-300:])
 
 # ---------------------------------------------------
-# UPLOAD
+# UPLOAD VIDEO
 # ---------------------------------------------------
 @app.post("/upload/")
 async def upload(file: UploadFile = File(...), email: str = Form(...)):
@@ -113,16 +116,16 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
     with open(raw_path, "wb") as f:
         f.write(await file.read())
 
-    # analyze only first 10s
-    clip_path = clip_first_10_seconds(raw_path)
+    # analyze only first 10 seconds
+    clip = clip_first_10_seconds(raw_path)
 
-    # FIX: unpack tuple
-    score, _ = run_detection(clip_path)
+    score = run_detection(clip)  # detection.py returns number
 
     text, color, label = interpret_score(score)
 
-    # CERTIFY ONLY ≥85
-    if score >= 85:
+    # CERTIFY ONLY IF ≥85
+    if label == "REAL":
+
         certified_path = f"{CERT_DIR}/{cid}.mp4"
         stamp_video(raw_path, certified_path, cid)
 
@@ -145,6 +148,7 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
 # ---------------------------------------------------
 @app.get("/download/{cid}")
 def download(cid: str):
+
     path = f"{CERT_DIR}/{cid}.mp4"
 
     if not os.path.exists(path):
@@ -153,7 +157,7 @@ def download(cid: str):
     return FileResponse(path, media_type="video/mp4")
 
 # ---------------------------------------------------
-# LINK ANALYSIS PAGE
+# ANALYZE LINK (HTML RESULT PAGE)
 # ---------------------------------------------------
 @app.get("/analyze-link/", response_class=HTMLResponse)
 def analyze_link(video_url: str):
@@ -165,7 +169,7 @@ def analyze_link(video_url: str):
     path = temp.name
 
     try:
-        r = requests.get(video_url, stream=True, timeout=25)
+        r = requests.get(video_url, stream=True, timeout=20)
 
         if r.status_code != 200:
             return HTMLResponse("<h2>Could not download video</h2>")
@@ -175,9 +179,9 @@ def analyze_link(video_url: str):
                 f.write(chunk)
 
         clip = clip_first_10_seconds(path)
-        score, _ = run_detection(clip)
+        score = run_detection(clip)
 
-        text, color, _ = interpret_score(score)
+        text, color, label = interpret_score(score)
 
         html = f"""
         <html>
