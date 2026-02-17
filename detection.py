@@ -1,30 +1,29 @@
-# ============================================================
-# VeriFYD Detection Engine (stable upgrade)
-# Keeps your current backend working exactly the same
-# but dramatically improves AI detection accuracy
-# ============================================================
-
 import cv2
 import numpy as np
 
+# ============================================================
+# VeriFYD Detection Engine v2 (Balanced + Stable)
+# ============================================================
 
-def run_detection(path: str):
+def run_detection(video_path):
     """
     Returns:
-        score (0–100)
-        label ("REAL", "UNDETERMINED", "AI")
+        authenticity_score (0–100)
+        label: REAL / UNDETERMINED / AI
     """
 
-    cap = cv2.VideoCapture(path)
+    cap = cv2.VideoCapture(video_path)
+
     if not cap.isOpened():
+        # If video can't be read, assume uncertain
         return 50, "UNDETERMINED"
 
+    frame_count = 0
     noise_vals = []
     motion_vals = []
     edge_vals = []
 
     prev_gray = None
-    frame_count = 0
 
     while True:
         ret, frame = cap.read()
@@ -33,12 +32,12 @@ def run_detection(path: str):
 
         frame_count += 1
 
-        # sample every 5th frame
+        # Only analyze first ~10 seconds worth of frames
+        if frame_count > 300:
+            break
+
         if frame_count % 5 != 0:
             continue
-
-        if frame_count > 250:
-            break
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
@@ -69,42 +68,54 @@ def run_detection(path: str):
         return 50, "UNDETERMINED"
 
     avg_noise = np.mean(noise_vals)
-    avg_edge = np.mean(edge_vals)
+    avg_edges = np.mean(edge_vals)
     avg_motion = np.mean(motion_vals) if motion_vals else 0
 
-    # --------------------------------------------------
-    # SCORING MODEL
-    # Start neutral and adjust
-    # --------------------------------------------------
-    score = 70
+    # =========================================================
+    # AI LIKELIHOOD SCORE (higher = more likely AI)
+    # =========================================================
+    ai_score = 50
 
-    # ----- Noise (real cameras have sensor noise)
-    if avg_noise < 80:
-        score -= 25
-    elif avg_noise > 300:
-        score += 10
+    # Low sensor noise → AI
+    if avg_noise < 120:
+        ai_score += 25
+    elif avg_noise > 400:
+        ai_score -= 15
 
-    # ----- Edge sharpness
-    if avg_edge < 8:
-        score -= 15
-    elif avg_edge > 25:
-        score += 10
+    # Weak edges → AI
+    if avg_edges < 12:
+        ai_score += 15
+    elif avg_edges > 35:
+        ai_score -= 10
 
-    # ----- Motion realism
-    if avg_motion < 1:
-        score -= 20
-    elif avg_motion > 5:
-        score += 10
+    # Too smooth motion → AI
+    if avg_motion < 1.2:
+        ai_score += 15
+    elif avg_motion > 6:
+        ai_score -= 10
 
-    score = int(max(0, min(100, score)))
+    ai_score = max(0, min(100, ai_score))
 
-    # --------------------------------------------------
-    # FINAL CLASSIFICATION
-    # --------------------------------------------------
-    if score >= 85:
-        return score, "REAL"
-    elif score >= 60:
-        return score, "UNDETERMINED"
+    # =========================================================
+    # CONVERT TO AUTHENTICITY
+    # =========================================================
+    authenticity = 100 - ai_score
+
+    # Slight realism boost
+    if authenticity > 70 and avg_noise > 250:
+        authenticity += 5
+
+    authenticity = max(0, min(100, authenticity))
+
+    # =========================================================
+    # FINAL LABEL
+    # =========================================================
+    if authenticity >= 85:
+        label = "REAL"
+    elif authenticity >= 60:
+        label = "UNDETERMINED"
     else:
-        return score, "AI"
+        label = "AI"
+
+    return int(authenticity), label
 
