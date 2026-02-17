@@ -3,8 +3,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 import os, uuid, subprocess, requests, tempfile
 
-# IMPORTANT: this must point to detection.py
-from detection import run_detection
+# 🔥 IMPORTANT: use new detector
+from detection import run_detection   # must return AI score 0-100 (HIGH = AI)
 
 app = FastAPI(title="VeriFYD STABLE")
 
@@ -34,53 +34,39 @@ app.add_middleware(
 # ---------------------------------------------------
 @app.get("/")
 def home():
-    return {"status": "VeriFYD LIVE"}
+    return {"status": "VeriFYD API LIVE"}
 
 @app.get("/health")
 def health():
     return {"status": "ok"}
 
 # ---------------------------------------------------
-# SCORE INTERPRETATION
+# INTERPRET SCORE (AI → AUTHENTICITY)
 # ---------------------------------------------------
-def interpret_score(score: int):
-    score = max(0, min(100, int(score)))
+def interpret_score(ai_score: int):
+    """
+    ai_score: 0-100 (HIGH = AI)
+    convert → authenticity score (HIGH = REAL)
+    """
 
-    if score >= 85:
-        return "REAL VIDEO VERIFIED", "green", "REAL"
-    elif score >= 60:
-        return "VIDEO UNDETERMINED", "blue", "UNDETERMINED"
+    authenticity = 100 - int(ai_score)
+
+    if authenticity >= 65:
+        return authenticity, "REAL VIDEO VERIFIED", "green", True
+    elif authenticity >= 40:
+        return authenticity, "VIDEO UNDETERMINED", "blue", False
     else:
-        return "AI DETECTED", "red", "AI"
+        return authenticity, "AI DETECTED", "red", False
 
 # ---------------------------------------------------
-# CLIP FIRST 10 SECONDS (prevents timeouts)
-# ---------------------------------------------------
-def clip_first_10_seconds(input_path):
-    clipped = f"{TMP_DIR}/{uuid.uuid4()}.mp4"
-
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-i", input_path,
-        "-t", "10",
-        "-c:v", "libx264",
-        "-c:a", "aac",
-        clipped
-    ]
-
-    subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    return clipped
-
-# ---------------------------------------------------
-# STAMP VIDEO (only for certified)
+# VIDEO STAMP
 # ---------------------------------------------------
 def stamp_video(input_path, output_path, cert_id):
 
     vf = (
-        f"drawtext=text='VeriFYD VERIFIED':x=10:y=10:fontsize=24:"
+        f"drawtext=text='VeriFYD':x=10:y=10:fontsize=24:"
         f"fontcolor=white@0.85:box=1:boxcolor=black@0.4:boxborderw=4,"
-        f"drawtext=text='ID\\:{cert_id}':x=w-tw-20:y=h-th-20:fontsize=16:"
+        f"drawtext=text='ID:{cert_id}':x=w-tw-20:y=h-th-20:fontsize=16:"
         f"fontcolor=white@0.85:box=1:boxcolor=black@0.4:boxborderw=4"
     )
 
@@ -101,7 +87,25 @@ def stamp_video(input_path, output_path, cert_id):
     r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
     if r.returncode != 0:
-        print("FFMPEG ERROR:", r.stderr.decode())
+        print(r.stderr.decode())
+        raise RuntimeError("FFMPEG FAILED")
+
+# ---------------------------------------------------
+# CLIP FIRST 10 SECONDS
+# ---------------------------------------------------
+def clip_first_10_seconds(input_path):
+    clipped = f"{TMP_DIR}/{uuid.uuid4()}.mp4"
+
+    cmd = [
+        "ffmpeg","-y",
+        "-i", input_path,
+        "-t","10",
+        "-c","copy",
+        clipped
+    ]
+
+    subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    return clipped
 
 # ---------------------------------------------------
 # UPLOAD VIDEO
@@ -109,51 +113,44 @@ def stamp_video(input_path, output_path, cert_id):
 @app.post("/upload/")
 async def upload(file: UploadFile = File(...), email: str = Form(...)):
 
-    try:
-        cid = str(uuid.uuid4())
-        raw_path = f"{UPLOAD_DIR}/{cid}_{file.filename}"
+    cid = str(uuid.uuid4())
+    raw_path = f"{UPLOAD_DIR}/{cid}_{file.filename}"
 
-        with open(raw_path, "wb") as f:
-            f.write(await file.read())
+    with open(raw_path, "wb") as f:
+        f.write(await file.read())
 
-        # analyze only first 10 seconds
-        clip_path = clip_first_10_seconds(raw_path)
+    # analyze only first 10s
+    clip_path = clip_first_10_seconds(raw_path)
 
-        score, label = run_detection(clip_path)
-        print("DETECTOR SCORE:", score, label)
+    ai_score = run_detection(clip_path)  # MUST return single int
+    score, text, color, certify = interpret_score(ai_score)
 
-        text, color, status_label = interpret_score(score)
-
-        # ONLY CERTIFY IF ≥85
-        if score >= 85:
-
-            certified_path = f"{CERT_DIR}/{cid}.mp4"
-            stamp_video(raw_path, certified_path, cid)
-
-            return {
-                "status": text,
-                "authenticity_score": score,
-                "certificate_id": cid,
-                "download_url": f"{BASE_URL}/download/{cid}",
-                "color": color
-            }
+    # --------------------------
+    # CERTIFY ONLY IF REAL
+    # --------------------------
+    if certify:
+        certified_path = f"{CERT_DIR}/{cid}.mp4"
+        stamp_video(raw_path, certified_path, cid)
 
         return {
             "status": text,
             "authenticity_score": score,
+            "certificate_id": cid,
+            "download_url": f"{BASE_URL}/download/{cid}",
             "color": color
         }
 
-    except Exception as e:
-        print("UPLOAD ERROR:", str(e))
-        return JSONResponse({
-            "status": "ANALYSIS FAILED",
-            "authenticity_score": 0,
-            "color": "red"
-        })
+    # --------------------------
+    # NO CERTIFICATION
+    # --------------------------
+    return {
+        "status": text,
+        "authenticity_score": score,
+        "color": color
+    }
 
 # ---------------------------------------------------
-# DOWNLOAD CERTIFIED VIDEO
+# DOWNLOAD
 # ---------------------------------------------------
 @app.get("/download/{cid}")
 def download(cid: str):
@@ -172,7 +169,7 @@ def download(cid: str):
 def analyze_link(video_url: str):
 
     if not video_url.startswith("http"):
-        return HTMLResponse("<h2>Invalid video URL</h2>")
+        return HTMLResponse("<h2>Invalid URL</h2>")
 
     temp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
     path = temp.name
@@ -188,9 +185,9 @@ def analyze_link(video_url: str):
                 f.write(chunk)
 
         clip_path = clip_first_10_seconds(path)
-        score, label = run_detection(clip_path)
 
-        text, color, _ = interpret_score(score)
+        ai_score = run_detection(clip_path)
+        score, text, color, _ = interpret_score(ai_score)
 
         html = f"""
         <html>
@@ -210,6 +207,7 @@ def analyze_link(video_url: str):
     finally:
         if os.path.exists(path):
             os.remove(path)
+
 
 
 
