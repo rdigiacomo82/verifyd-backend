@@ -3,8 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 import os, uuid, subprocess, requests, tempfile
 
-# 🔥 IMPORTANT: use new detector
-from detection import run_detection   # must return AI score 0-100 (HIGH = AI)
+from detection import run_detection  # your detector
 
 app = FastAPI(title="VeriFYD STABLE")
 
@@ -41,15 +40,16 @@ def health():
     return {"status": "ok"}
 
 # ---------------------------------------------------
-# INTERPRET SCORE (AI → AUTHENTICITY)
+# INTERPRET SCORE
 # ---------------------------------------------------
-def interpret_score(ai_score: int):
-    """
-    ai_score: 0-100 (HIGH = AI)
-    convert → authenticity score (HIGH = REAL)
-    """
+def interpret_score(ai_score):
 
-    authenticity = 100 - int(ai_score)
+    # 🔥 HANDLE TUPLE OR INT
+    if isinstance(ai_score, tuple):
+        ai_score = ai_score[0]
+
+    ai_score = int(ai_score)
+    authenticity = 100 - ai_score
 
     if authenticity >= 65:
         return authenticity, "REAL VIDEO VERIFIED", "green", True
@@ -64,10 +64,10 @@ def interpret_score(ai_score: int):
 def stamp_video(input_path, output_path, cert_id):
 
     vf = (
-        f"drawtext=text='VeriFYD':x=10:y=10:fontsize=24:"
-        f"fontcolor=white@0.85:box=1:boxcolor=black@0.4:boxborderw=4,"
+        "drawtext=text='VeriFYD':x=10:y=10:fontsize=24:"
+        "fontcolor=white@0.85:box=1:boxcolor=black@0.4:boxborderw=4,"
         f"drawtext=text='ID:{cert_id}':x=w-tw-20:y=h-th-20:fontsize=16:"
-        f"fontcolor=white@0.85:box=1:boxcolor=black@0.4:boxborderw=4"
+        "fontcolor=white@0.85:box=1:boxcolor=black@0.4:boxborderw=4"
     )
 
     cmd = [
@@ -119,15 +119,11 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
     with open(raw_path, "wb") as f:
         f.write(await file.read())
 
-    # analyze only first 10s
     clip_path = clip_first_10_seconds(raw_path)
 
-    ai_score = run_detection(clip_path)  # MUST return single int
+    ai_score = run_detection(clip_path)
     score, text, color, certify = interpret_score(ai_score)
 
-    # --------------------------
-    # CERTIFY ONLY IF REAL
-    # --------------------------
     if certify:
         certified_path = f"{CERT_DIR}/{cid}.mp4"
         stamp_video(raw_path, certified_path, cid)
@@ -140,9 +136,6 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
             "color": color
         }
 
-    # --------------------------
-    # NO CERTIFICATION
-    # --------------------------
     return {
         "status": text,
         "authenticity_score": score,
@@ -207,6 +200,7 @@ def analyze_link(video_url: str):
     finally:
         if os.path.exists(path):
             os.remove(path)
+
 
 
 
