@@ -2,194 +2,230 @@ import os
 import uuid
 import shutil
 import subprocess
-import tempfile
-from datetime import datetime
-
-from fastapi import FastAPI, UploadFile, File, Form
+import requests
+from fastapi import FastAPI, UploadFile, File
 from fastapi.responses import FileResponse, JSONResponse
-from fastapi.middleware.cors import CORSMiddleware
 
 from detector import detect_ai
-from external_detector import external_ai_score
 
-BASE = os.getcwd()
-VIDEOS = os.path.join(BASE, "videos")
-CERT = os.path.join(BASE, "certified")
-ASSETS = os.path.join(BASE, "assets")
+app = FastAPI(title="VeriFYD 5.0")
 
-os.makedirs(VIDEOS, exist_ok=True)
-os.makedirs(CERT, exist_ok=True)
+BASE_URL = "https://verifyd-backend.onrender.com"
 
-LOGO = os.path.join(ASSETS, "logo.png")
+UPLOAD_DIR = "videos"
+CERT_DIR = "certified"
+TMP_DIR = "tmp"
+ASSETS_DIR = "assets"
 
-app = FastAPI(title="VeriFYD 4.2")
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+os.makedirs(CERT_DIR, exist_ok=True)
+os.makedirs(TMP_DIR, exist_ok=True)
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# -----------------------------
-# UTIL: SCORE → STATUS
-# -----------------------------
-def score_to_status(score: int):
-    if score >= 70:
-        return "REAL VIDEO VERIFIED", "green"
-    if score >= 50:
-        return "FURTHER REVIEW NEEDED", "blue"
-    return "AI DETECTED", "red"
+LOGO_PATH = os.path.join(ASSETS_DIR, "logo.png")
 
 
-# -----------------------------
-# STAMP VIDEO WITH LOGO + AUDIO
-# -----------------------------
-def stamp_video(input_path, output_path, cert_id):
-    """
-    Adds logo overlay AND keeps audio untouched
-    """
-
-    if not os.path.exists(LOGO):
-        # fallback if logo missing
-        shutil.copy(input_path, output_path)
-        return
-
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-i", input_path,
-        "-i", LOGO,
-        "-filter_complex",
-        "overlay=W-w-20:20",
-        "-c:v", "libx264",
-        "-crf", "23",
-        "-preset", "veryfast",
-        "-c:a", "copy",
-        output_path
-    ]
-
-    r = subprocess.run(cmd, capture_output=True, text=True)
-
-    if r.returncode != 0:
-        raise RuntimeError(r.stderr[-400:])
-
-
-# -----------------------------
-# HOME
-# -----------------------------
-@app.get("/")
-def home():
-    return {"status": "VeriFYD running"}
-
-
+# =========================================================
+# HEALTH
+# =========================================================
 @app.get("/health")
 def health():
-    return {"ok": True}
+    return {"status": "ok"}
 
 
-# -----------------------------
+# =========================================================
+# STAMP VIDEO WITH LOGO + AUDIO PRESERVED
+# =========================================================
+def stamp_video(input_path, output_path, cert_id):
+
+    temp_norm = os.path.join(TMP_DIR, f"{cert_id}_norm.mp4")
+
+    # Normalize video first
+    cmd_norm = [
+        "ffmpeg", "-y",
+        "-i", input_path,
+        "-vf", "scale=720:-2",
+        "-c:v", "libx264",
+        "-preset", "fast",
+        "-crf", "23",
+        "-c:a", "aac",
+        "-movflags", "+faststart",
+        temp_norm
+    ]
+    subprocess.run(cmd_norm, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    # If logo exists → overlay
+    if os.path.exists(LOGO_PATH):
+        cmd_stamp = [
+            "ffmpeg", "-y",
+            "-i", temp_norm,
+            "-i", LOGO_PATH,
+            "-filter_complex",
+            "overlay=10:10",
+            "-c:v", "libx264",
+            "-preset", "fast",
+            "-crf", "23",
+            "-c:a", "copy",
+            "-movflags", "+faststart",
+            output_path
+        ]
+    else:
+        cmd_stamp = [
+            "ffmpeg", "-y",
+            "-i", temp_norm,
+            "-c:v", "libx264",
+            "-preset", "fast",
+            "-crf", "23",
+            "-c:a", "copy",
+            "-movflags", "+faststart",
+            output_path
+        ]
+
+    result = subprocess.run(cmd_stamp, capture_output=True)
+
+    if result.returncode != 0:
+        raise RuntimeError("Video encode failed")
+
+    os.remove(temp_norm)
+
+
+# =========================================================
 # UPLOAD VIDEO
-# -----------------------------
+# =========================================================
 @app.post("/upload/")
-async def upload(file: UploadFile = File(...), email: str = Form(...)):
-    cid = str(uuid.uuid4())
+async def upload(file: UploadFile = File(...), email: str = "guest"):
 
-    raw_path = os.path.join(VIDEOS, f"{cid}_{file.filename}")
-    with open(raw_path, "wb") as f:
-        f.write(await file.read())
+    cert_id = str(uuid.uuid4())
+    raw_path = os.path.join(UPLOAD_DIR, f"{cert_id}_{file.filename}")
 
-    # --------- AI DETECTION ----------
-    primary = detect_ai(raw_path)
-    secondary = external_ai_score(raw_path)
+    with open(raw_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
 
-    authenticity = int((100 - primary) * 0.6 + (100 - secondary) * 0.4)
+    # Run detection
+    score = detect_ai(raw_path)
 
-    status, color = score_to_status(authenticity)
+    # ================================
+    # REAL VIDEO VERIFIED
+    # ================================
+    if score >= 70:
 
-    # --------- CERTIFY IF REAL ----------
-    if authenticity >= 70:
-        certified_path = os.path.join(CERT, f"{cid}.mp4")
-        stamp_video(raw_path, certified_path, cid)
+        certified_path = os.path.join(CERT_DIR, f"{cert_id}.mp4")
+
+        try:
+            stamp_video(raw_path, certified_path, cert_id)
+        except Exception:
+            return JSONResponse({
+                "status": "PROCESSING ERROR",
+                "authenticity_score": score,
+                "color": "red"
+            })
 
         return {
-            "status": status,
-            "authenticity_score": authenticity,
-            "certificate_id": cid,
-            "download_url": f"https://verifyd-backend.onrender.com/download/{cid}",
-            "verify_url": f"https://verifyd-backend.onrender.com/verify/{cid}",
-            "color": color
+            "status": "REAL VIDEO VERIFIED",
+            "authenticity_score": score,
+            "certificate_id": cert_id,
+            "download_url": f"{BASE_URL}/download/{cert_id}",
+            "color": "green"
         }
 
-    return {
-        "status": status,
-        "authenticity_score": authenticity,
-        "color": color
-    }
+    # ================================
+    # UNDETERMINED
+    # ================================
+    elif score >= 50:
+        return {
+            "status": "UNDETERMINED",
+            "authenticity_score": score,
+            "color": "blue"
+        }
+
+    # ================================
+    # AI DETECTED
+    # ================================
+    else:
+        return {
+            "status": "AI DETECTED",
+            "authenticity_score": score,
+            "color": "red"
+        }
 
 
-# -----------------------------
+# =========================================================
 # DOWNLOAD CERTIFIED VIDEO
-# -----------------------------
+# =========================================================
 @app.get("/download/{cid}")
 def download(cid: str):
-    path = os.path.join(CERT, f"{cid}.mp4")
+
+    path = os.path.join(CERT_DIR, f"{cid}.mp4")
 
     if not os.path.exists(path):
-        return JSONResponse({"error": "not found"}, status_code=404)
+        return JSONResponse({"error": "not found"})
 
-    return FileResponse(path, media_type="video/mp4")
-
-
-# -----------------------------
-# VERIFY PAGE LINK
-# -----------------------------
-@app.get("/verify/{cid}")
-def verify(cid: str):
-    path = os.path.join(CERT, f"{cid}.mp4")
-
-    if not os.path.exists(path):
-        return {"status": "NOT FOUND"}
-
-    return {
-        "status": "VERIFIED BY VERIFYD",
-        "certificate_id": cid,
-        "verified": True,
-        "timestamp": datetime.utcnow().isoformat()
-    }
+    return FileResponse(
+        path,
+        media_type="video/mp4",
+        filename="verified_video.mp4"
+    )
 
 
-# -----------------------------
-# ANALYZE SOCIAL LINK
-# -----------------------------
+# =========================================================
+# ANALYZE VIDEO LINK
+# =========================================================
 @app.get("/analyze-link/")
-def analyze_link(video_url: str):
+def analyze_link(video_url: str, email: str = "guest"):
+
+    if not video_url.startswith("http"):
+        return {"error": "Invalid URL"}
+
+    tmp_path = os.path.join(TMP_DIR, f"{uuid.uuid4()}.mp4")
+
     try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
-            tmp_path = tmp.name
+        # Try direct download
+        r = requests.get(video_url, stream=True, timeout=10)
 
-        subprocess.run([
-            "yt-dlp",
-            "-o", tmp_path,
-            "-f", "mp4",
-            video_url
-        ], capture_output=True)
+        if r.status_code == 200 and "video" in r.headers.get("content-type", ""):
+            with open(tmp_path, "wb") as f:
+                for chunk in r.iter_content(8192):
+                    f.write(chunk)
 
-        primary = detect_ai(tmp_path)
-        secondary = external_ai_score(tmp_path)
+        else:
+            # Use yt-dlp for social links
+            subprocess.run([
+                "yt-dlp",
+                "-o", tmp_path,
+                video_url
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        authenticity = int((100 - primary) * 0.6 + (100 - secondary) * 0.4)
-        status, color = score_to_status(authenticity)
-
-        return {
-            "status": status,
-            "authenticity_score": authenticity,
-            "color": color
-        }
+        score = detect_ai(tmp_path)
 
     except Exception as e:
         return {"error": str(e)}
+
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+    # ================================
+    # RESULTS
+    # ================================
+    if score >= 70:
+        return {
+            "status": "REAL VIDEO VERIFIED",
+            "authenticity_score": score,
+            "color": "green"
+        }
+
+    elif score >= 50:
+        return {
+            "status": "UNDETERMINED",
+            "authenticity_score": score,
+            "color": "blue"
+        }
+
+    else:
+        return {
+            "status": "AI DETECTED",
+            "authenticity_score": score,
+            "color": "red"
+        }
 
 
 
