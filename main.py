@@ -3,7 +3,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 import os, uuid, subprocess, requests, tempfile
 
-app = FastAPI(title="VeriFYD STABLE")
+# IMPORT REAL DETECTOR
+from detection import run_detection
+
+app = FastAPI(title="VeriFYD BALANCED")
 
 BASE_URL = "https://verifyd-backend.onrender.com"
 
@@ -38,21 +41,7 @@ def health():
     return {"status": "ok"}
 
 # ---------------------------------------------------
-# DETECTION (TEMP CALIBRATION)
-# ---------------------------------------------------
-def run_detection(path):
-    import random
-    score = random.randint(60, 95)
-
-    if score >= 80:
-        return score, "REAL"
-    elif score >= 60:
-        return score, "UNDETERMINED"
-    else:
-        return score, "AI"
-
-# ---------------------------------------------------
-# VIDEO STAMP (AUDIO SAFE)
+# VIDEO STAMP (SAFE VERSION)
 # ---------------------------------------------------
 def stamp_video(input_path, output_path, cert_id):
 
@@ -80,10 +69,22 @@ def stamp_video(input_path, output_path, cert_id):
     r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
     if r.returncode != 0:
-        raise RuntimeError(r.stderr.decode()[-300:])
+        raise RuntimeError(r.stderr.decode()[-400:])
 
 # ---------------------------------------------------
-# UPLOAD
+# STATUS MAPPING (BALANCED)
+# ---------------------------------------------------
+def interpret_score(score):
+
+    if score >= 85:
+        return "REAL VIDEO VERIFIED", "green", "REAL"
+    elif score >= 60:
+        return "VIDEO UNDETERMINED", "blue", "UNDETERMINED"
+    else:
+        return "AI DETECTED", "red", "AI"
+
+# ---------------------------------------------------
+# UPLOAD VIDEO
 # ---------------------------------------------------
 @app.post("/upload/")
 async def upload(file: UploadFile = File(...), email: str = Form(...)):
@@ -94,22 +95,22 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
     with open(raw_path, "wb") as f:
         f.write(await file.read())
 
-    score, status = run_detection(raw_path)
+    score = run_detection(raw_path)
+    text, color, label = interpret_score(score)
 
-    if status == "REAL":
-        color = "green"
-        text = "REAL VIDEO VERIFIED"
-    elif status == "UNDETERMINED":
-        color = "blue"
-        text = "VIDEO UNDETERMINED"
-    else:
-        color = "red"
-        text = "AI DETECTED"
-
-    # CERTIFY ≥80
-    if score >= 80:
+    # CERTIFY ONLY STRONG REAL
+    if score >= 85:
         certified_path = f"{CERT_DIR}/{cid}.mp4"
-        stamp_video(raw_path, certified_path, cid)
+
+        try:
+            stamp_video(raw_path, certified_path, cid)
+        except Exception as e:
+            return {
+                "status": "STAMP ERROR",
+                "error": str(e),
+                "authenticity_score": score,
+                "color": "red"
+            }
 
         return {
             "status": text,
@@ -119,11 +120,10 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
             "color": color
         }
 
-    # ALWAYS return null download_url (prevents popup)
+    # ALWAYS RETURN RESULT (NO POPUPS)
     return {
         "status": text,
         "authenticity_score": score,
-        "download_url": None,
         "color": color
     }
 
@@ -132,6 +132,7 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
 # ---------------------------------------------------
 @app.get("/download/{cid}")
 def download(cid: str):
+
     path = f"{CERT_DIR}/{cid}.mp4"
 
     if not os.path.exists(path):
@@ -140,7 +141,7 @@ def download(cid: str):
     return FileResponse(path, media_type="video/mp4")
 
 # ---------------------------------------------------
-# ANALYZE LINK PAGE
+# ANALYZE LINK (HTML RESULT PAGE)
 # ---------------------------------------------------
 @app.get("/analyze-link/", response_class=HTMLResponse)
 def analyze_link(video_url: str):
@@ -152,7 +153,7 @@ def analyze_link(video_url: str):
     path = temp.name
 
     try:
-        r = requests.get(video_url, stream=True, timeout=20)
+        r = requests.get(video_url, stream=True, timeout=25)
 
         if r.status_code != 200:
             return HTMLResponse("<h2>Could not download video</h2>")
@@ -161,17 +162,8 @@ def analyze_link(video_url: str):
             for chunk in r.iter_content(1024):
                 f.write(chunk)
 
-        score, status = run_detection(path)
-
-        if status == "REAL":
-            color = "green"
-            text = "REAL VIDEO VERIFIED"
-        elif status == "UNDETERMINED":
-            color = "blue"
-            text = "VIDEO UNDETERMINED"
-        else:
-            color = "red"
-            text = "AI DETECTED"
+        score = run_detection(path)
+        text, color, label = interpret_score(score)
 
         html = f"""
         <html>
@@ -191,6 +183,7 @@ def analyze_link(video_url: str):
     finally:
         if os.path.exists(path):
             os.remove(path)
+
 
 
 
