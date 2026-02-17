@@ -1,19 +1,13 @@
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
-import os, uuid, subprocess, requests, tempfile
+import uuid, requests, tempfile, os
+
+from config import BASE_URL, UPLOAD_DIR, CERT_DIR, TMP_DIR
+from detection import run_detection
+from video import stamp_video
 
 app = FastAPI(title="VeriFYD 4.1")
-
-BASE_URL = "https://verifyd-backend.onrender.com"
-
-UPLOAD_DIR = "videos"
-CERT_DIR = "certified"
-TMP_DIR = "tmp"
-
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-os.makedirs(CERT_DIR, exist_ok=True)
-os.makedirs(TMP_DIR, exist_ok=True)
 
 # ---------------------------------------------------
 # CORS
@@ -38,53 +32,6 @@ def health():
     return {"status": "ok"}
 
 # ---------------------------------------------------
-# AI DETECTION (CALIBRATED FOR REAL VIDEOS)
-# ---------------------------------------------------
-def run_detection(path):
-
-    # Real-world calibrated scoring
-    import random
-    score = random.randint(55, 90)
-
-    if score >= 70:
-        return score, "REAL"
-    elif score >= 45:
-        return score, "REVIEW"
-    else:
-        return score, "AI"
-
-# ---------------------------------------------------
-# VIDEO STAMP WITH AUDIO PRESERVED
-# ---------------------------------------------------
-def stamp_video(input_path, output_path, cert_id):
-
-    vf = (
-        f"drawtext=text='VeriFYD':x=10:y=10:fontsize=24:"
-        f"fontcolor=white@0.85:box=1:boxcolor=black@0.4:boxborderw=4,"
-        f"drawtext=text='ID:{cert_id}':x=w-tw-20:y=h-th-20:fontsize=16:"
-        f"fontcolor=white@0.85:box=1:boxcolor=black@0.4:boxborderw=4"
-    )
-
-    cmd = [
-        "ffmpeg","-y",
-        "-i", input_path,
-        "-vf", vf,
-        "-map","0:v:0",
-        "-map","0:a?",
-        "-c:v","libx264",
-        "-preset","fast",
-        "-crf","23",
-        "-c:a","copy",
-        "-movflags","+faststart",
-        output_path
-    ]
-
-    r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-
-    if r.returncode != 0:
-        raise RuntimeError(r.stderr.decode()[-300:])
-
-# ---------------------------------------------------
 # UPLOAD VIDEO
 # ---------------------------------------------------
 @app.post("/upload/")
@@ -98,7 +45,6 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
 
     score, status = run_detection(raw_path)
 
-    # COLOR STATUS
     if status == "REAL":
         color = "green"
         text = "REAL VIDEO VERIFIED"
@@ -109,9 +55,7 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
         color = "red"
         text = "AI DETECTED"
 
-    # ONLY CERTIFY IF >= 70
     if score >= 70:
-
         certified_path = f"{CERT_DIR}/{cid}.mp4"
         stamp_video(raw_path, certified_path, cid)
 
@@ -130,7 +74,7 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
     }
 
 # ---------------------------------------------------
-# DOWNLOAD CERTIFIED VIDEO
+# DOWNLOAD
 # ---------------------------------------------------
 @app.get("/download/{cid}")
 def download(cid: str):
@@ -143,7 +87,7 @@ def download(cid: str):
     return FileResponse(path, media_type="video/mp4")
 
 # ---------------------------------------------------
-# ANALYZE VIDEO LINK (VISUAL PAGE)
+# ANALYZE VIDEO LINK
 # ---------------------------------------------------
 @app.get("/analyze-link/", response_class=HTMLResponse)
 def analyze_link(video_url: str):
@@ -194,6 +138,7 @@ def analyze_link(video_url: str):
     finally:
         if os.path.exists(path):
             os.remove(path)
+
 
 
 
