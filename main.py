@@ -3,10 +3,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 import os, uuid, subprocess, requests, tempfile
 
-# IMPORT REAL DETECTOR
 from detection import run_detection
 
-app = FastAPI(title="VeriFYD BALANCED")
+app = FastAPI(title="VeriFYD AI Engine")
 
 BASE_URL = "https://verifyd-backend.onrender.com"
 
@@ -41,7 +40,26 @@ def health():
     return {"status": "ok"}
 
 # ---------------------------------------------------
-# VIDEO STAMP (SAFE VERSION)
+# TRIM FIRST 10 SECONDS FOR ANALYSIS
+# ---------------------------------------------------
+def create_analysis_clip(input_path):
+
+    temp_clip = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4").name
+
+    cmd = [
+        "ffmpeg","-y",
+        "-i", input_path,
+        "-t","10",
+        "-c","copy",
+        temp_clip
+    ]
+
+    subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    return temp_clip
+
+# ---------------------------------------------------
+# VIDEO STAMP
 # ---------------------------------------------------
 def stamp_video(input_path, output_path, cert_id):
 
@@ -72,7 +90,7 @@ def stamp_video(input_path, output_path, cert_id):
         raise RuntimeError(r.stderr.decode()[-400:])
 
 # ---------------------------------------------------
-# STATUS MAPPING (BALANCED)
+# SCORE INTERPRETATION
 # ---------------------------------------------------
 def interpret_score(score):
 
@@ -95,7 +113,13 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
     with open(raw_path, "wb") as f:
         f.write(await file.read())
 
-    score = run_detection(raw_path)
+    # 🔥 Analyze first 10 seconds only
+    clip = create_analysis_clip(raw_path)
+    score = run_detection(clip)
+
+    if os.path.exists(clip):
+        os.remove(clip)
+
     text, color, label = interpret_score(score)
 
     # CERTIFY ONLY STRONG REAL
@@ -120,7 +144,6 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
             "color": color
         }
 
-    # ALWAYS RETURN RESULT (NO POPUPS)
     return {
         "status": text,
         "authenticity_score": score,
@@ -141,7 +164,7 @@ def download(cid: str):
     return FileResponse(path, media_type="video/mp4")
 
 # ---------------------------------------------------
-# ANALYZE LINK (HTML RESULT PAGE)
+# ANALYZE LINK
 # ---------------------------------------------------
 @app.get("/analyze-link/", response_class=HTMLResponse)
 def analyze_link(video_url: str):
@@ -162,7 +185,12 @@ def analyze_link(video_url: str):
             for chunk in r.iter_content(1024):
                 f.write(chunk)
 
-        score = run_detection(path)
+        clip = create_analysis_clip(path)
+        score = run_detection(clip)
+
+        if os.path.exists(clip):
+            os.remove(clip)
+
         text, color, label = interpret_score(score)
 
         html = f"""
