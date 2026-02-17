@@ -38,27 +38,30 @@ def health():
     return {"status": "ok"}
 
 # ---------------------------------------------------
-# DETECTION
+# AI DETECTION (RECALIBRATED THRESHOLDS)
 # ---------------------------------------------------
 def run_detection(path):
 
-    score = random.randint(55, 90)
+    # TEMP scoring (until full detector wired in)
+    score = random.randint(55, 95)
 
-    if score >= 70:
+    if score >= 85:
         return score, "REAL"
-    elif score >= 45:
+    elif score >= 60:
         return score, "UNDETERMINED"
     else:
         return score, "AI"
 
 # ---------------------------------------------------
-# SAFE VIDEO STAMP (NO CRASH)
+# VIDEO STAMP (AUDIO SAFE)
 # ---------------------------------------------------
 def stamp_video(input_path, output_path, cert_id):
 
     vf = (
         "drawtext=text='VeriFYD':x=10:y=10:fontsize=24:"
-        "fontcolor=white:box=1:boxcolor=black@0.4:boxborderw=4"
+        "fontcolor=white@0.85:box=1:boxcolor=black@0.4:boxborderw=4,"
+        f"drawtext=text='ID\\:{cert_id}':x=w-tw-20:y=h-th-20:fontsize=16:"
+        "fontcolor=white@0.85:box=1:boxcolor=black@0.4:boxborderw=4"
     )
 
     cmd = [
@@ -75,10 +78,13 @@ def stamp_video(input_path, output_path, cert_id):
         output_path
     ]
 
-    subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    if r.returncode != 0:
+        raise RuntimeError(r.stderr.decode()[-300:])
 
 # ---------------------------------------------------
-# UPLOAD
+# UPLOAD VIDEO
 # ---------------------------------------------------
 @app.post("/upload/")
 async def upload(file: UploadFile = File(...), email: str = Form(...)):
@@ -91,7 +97,6 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
 
     score, status = run_detection(raw_path)
 
-    # COLORS
     if status == "REAL":
         color = "green"
         text = "REAL VIDEO VERIFIED"
@@ -102,8 +107,9 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
         color = "red"
         text = "AI DETECTED"
 
-    # ONLY CERTIFY REAL
-    if score >= 70:
+    # CERTIFY ONLY IF ≥85
+    if score >= 85:
+
         certified_path = f"{CERT_DIR}/{cid}.mp4"
         stamp_video(raw_path, certified_path, cid)
 
@@ -115,7 +121,7 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
             "color": color
         }
 
-    # IMPORTANT: ALWAYS RETURN RESULT
+    # Always return result — never popup
     return {
         "status": text,
         "authenticity_score": score,
@@ -123,7 +129,7 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
     }
 
 # ---------------------------------------------------
-# DOWNLOAD CERTIFIED
+# DOWNLOAD CERTIFIED VIDEO
 # ---------------------------------------------------
 @app.get("/download/{cid}")
 def download(cid: str):
@@ -136,7 +142,7 @@ def download(cid: str):
     return FileResponse(path, media_type="video/mp4")
 
 # ---------------------------------------------------
-# ANALYZE LINK (VISUAL PAGE)
+# ANALYZE VIDEO LINK (VISUAL PAGE)
 # ---------------------------------------------------
 @app.get("/analyze-link/", response_class=HTMLResponse)
 def analyze_link(video_url: str):
@@ -159,15 +165,15 @@ def analyze_link(video_url: str):
 
         score, status = run_detection(path)
 
-        if status == "AI":
-            color = "red"
-            text = "AI DETECTED"
+        if status == "REAL":
+            color = "green"
+            text = "REAL VIDEO VERIFIED"
         elif status == "UNDETERMINED":
             color = "blue"
             text = "VIDEO UNDETERMINED"
         else:
-            color = "green"
-            text = "REAL VIDEO VERIFIED"
+            color = "red"
+            text = "AI DETECTED"
 
         html = f"""
         <html>
@@ -187,6 +193,7 @@ def analyze_link(video_url: str):
     finally:
         if os.path.exists(path):
             os.remove(path)
+
 
 
 
