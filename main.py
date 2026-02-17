@@ -6,7 +6,7 @@ import os, uuid, subprocess, requests, tempfile
 from detector import detect_ai
 from external_detector import external_ai_score
 
-app = FastAPI(title="VeriFYD 5.0")
+app = FastAPI(title="VeriFYD STABLE")
 
 BASE_URL = "https://verifyd-backend.onrender.com"
 
@@ -41,7 +41,7 @@ def health():
     return {"status": "ok"}
 
 # ---------------------------------------------------
-# REAL DETECTION ENGINE
+# DETECTION
 # ---------------------------------------------------
 def run_detection(path):
 
@@ -66,14 +66,17 @@ def run_detection(path):
         return real_score, "AI"
 
 # ---------------------------------------------------
-# VIDEO STAMP
+# SAFE STAMP (WILL NEVER CRASH)
 # ---------------------------------------------------
-def stamp_video(input_path, output_path, cert_id):
+def stamp_video_safe(input_path, output_path, cert_id):
+
+    # Escape colon characters for ffmpeg
+    safe_id = cert_id.replace(":", "\\:")
 
     vf = (
         f"drawtext=text='VeriFYD':x=10:y=10:fontsize=24:"
         f"fontcolor=white@0.85:box=1:boxcolor=black@0.4:boxborderw=4,"
-        f"drawtext=text='ID:{cert_id}':x=w-tw-20:y=h-th-20:fontsize=16:"
+        f"drawtext=text='ID {safe_id}':x=w-tw-20:y=h-th-20:fontsize=16:"
         f"fontcolor=white@0.85:box=1:boxcolor=black@0.4:boxborderw=4"
     )
 
@@ -91,10 +94,11 @@ def stamp_video(input_path, output_path, cert_id):
         output_path
     ]
 
-    r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-
-    if r.returncode != 0:
-        raise RuntimeError(r.stderr.decode()[-400:])
+    try:
+        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+        return True
+    except:
+        return False
 
 # ---------------------------------------------------
 # UPLOAD
@@ -115,24 +119,35 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
         text = "REAL VIDEO VERIFIED"
     elif status == "UNDETERMINED":
         color = "blue"
-        text = "UNDETERMINED"
+        text = "VIDEO UNDETERMINED"
     else:
         color = "red"
         text = "AI DETECTED"
 
+    # ONLY CERTIFY REAL
     if score >= 70:
 
         certified_path = f"{CERT_DIR}/{cid}.mp4"
-        stamp_video(raw_path, certified_path, cid)
 
+        stamped = stamp_video_safe(raw_path, certified_path, cid)
+
+        if stamped:
+            return {
+                "status": text,
+                "authenticity_score": score,
+                "certificate_id": cid,
+                "download_url": f"{BASE_URL}/download/{cid}",
+                "color": color
+            }
+
+        # If stamp fails, still return result (NO POPUP)
         return {
             "status": text,
             "authenticity_score": score,
-            "certificate_id": cid,
-            "download_url": f"{BASE_URL}/download/{cid}",
             "color": color
         }
 
+    # NOT CERTIFIED
     return {
         "status": text,
         "authenticity_score": score,
@@ -153,7 +168,7 @@ def download(cid: str):
     return FileResponse(path, media_type="video/mp4")
 
 # ---------------------------------------------------
-# ANALYZE LINK PAGE
+# LINK ANALYSIS PAGE
 # ---------------------------------------------------
 @app.get("/analyze-link/", response_class=HTMLResponse)
 def analyze_link(video_url: str):
@@ -181,7 +196,7 @@ def analyze_link(video_url: str):
             text = "REAL VIDEO VERIFIED"
         elif status == "UNDETERMINED":
             color = "blue"
-            text = "UNDETERMINED"
+            text = "VIDEO UNDETERMINED"
         else:
             color = "red"
             text = "AI DETECTED"
@@ -204,6 +219,7 @@ def analyze_link(video_url: str):
     finally:
         if os.path.exists(path):
             os.remove(path)
+
 
 
 
