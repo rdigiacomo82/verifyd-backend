@@ -1,7 +1,7 @@
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
-import os, uuid, subprocess, requests, tempfile, random
+import os, uuid, subprocess, requests, tempfile
 
 app = FastAPI(title="VeriFYD STABLE")
 
@@ -38,12 +38,11 @@ def health():
     return {"status": "ok"}
 
 # ---------------------------------------------------
-# AI DETECTION (CALIBRATED FOR REAL VIDEOS)
+# DETECTION (TEMP CALIBRATION)
 # ---------------------------------------------------
 def run_detection(path):
-
-    # Temporary scoring until detector wired in
-    score = random.randint(55, 95)
+    import random
+    score = random.randint(60, 95)
 
     if score >= 80:
         return score, "REAL"
@@ -53,7 +52,7 @@ def run_detection(path):
         return score, "AI"
 
 # ---------------------------------------------------
-# VIDEO STAMP (SAFE)
+# VIDEO STAMP (AUDIO SAFE)
 # ---------------------------------------------------
 def stamp_video(input_path, output_path, cert_id):
 
@@ -84,7 +83,7 @@ def stamp_video(input_path, output_path, cert_id):
         raise RuntimeError(r.stderr.decode()[-300:])
 
 # ---------------------------------------------------
-# UPLOAD VIDEO
+# UPLOAD
 # ---------------------------------------------------
 @app.post("/upload/")
 async def upload(file: UploadFile = File(...), email: str = Form(...)):
@@ -107,9 +106,8 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
         color = "red"
         text = "AI DETECTED"
 
-    # CERTIFY IF ≥80
+    # CERTIFY ≥80
     if score >= 80:
-
         certified_path = f"{CERT_DIR}/{cid}.mp4"
         stamp_video(raw_path, certified_path, cid)
 
@@ -121,9 +119,11 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
             "color": color
         }
 
+    # ALWAYS return null download_url (prevents popup)
     return {
         "status": text,
         "authenticity_score": score,
+        "download_url": None,
         "color": color
     }
 
@@ -132,7 +132,6 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
 # ---------------------------------------------------
 @app.get("/download/{cid}")
 def download(cid: str):
-
     path = f"{CERT_DIR}/{cid}.mp4"
 
     if not os.path.exists(path):
@@ -141,7 +140,7 @@ def download(cid: str):
     return FileResponse(path, media_type="video/mp4")
 
 # ---------------------------------------------------
-# ANALYZE LINK
+# ANALYZE LINK PAGE
 # ---------------------------------------------------
 @app.get("/analyze-link/", response_class=HTMLResponse)
 def analyze_link(video_url: str):
