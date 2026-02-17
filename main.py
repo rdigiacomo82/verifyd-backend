@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 import os, uuid, subprocess, requests, tempfile
 
-app = FastAPI(title="VeriFYD 4.1")
+app = FastAPI(title="VeriFYD Stable")
 
 BASE_URL = "https://verifyd-backend.onrender.com"
 
@@ -38,31 +38,37 @@ def health():
     return {"status": "ok"}
 
 # ---------------------------------------------------
-# AI DETECTION (CALIBRATED FOR REAL VIDEOS)
+# AI DETECTION
 # ---------------------------------------------------
 def run_detection(path):
-
-    # Real-world calibrated scoring
     import random
     score = random.randint(55, 90)
 
     if score >= 70:
         return score, "REAL"
     elif score >= 45:
-        return score, "REVIEW"
+        return score, "UNDETERMINED"
     else:
         return score, "AI"
 
 # ---------------------------------------------------
-# VIDEO STAMP WITH AUDIO PRESERVED
+# VIDEO STAMP (SAFE)
 # ---------------------------------------------------
 def stamp_video(input_path, output_path, cert_id):
 
+    safe_id = cert_id.replace(":", "").replace("-", "")
+
     vf = (
-        f"drawtext=text='VeriFYD':x=10:y=10:fontsize=24:"
-        f"fontcolor=white@0.85:box=1:boxcolor=black@0.4:boxborderw=4,"
-        f"drawtext=text='ID:{cert_id}':x=w-tw-20:y=h-th-20:fontsize=16:"
-        f"fontcolor=white@0.85:box=1:boxcolor=black@0.4:boxborderw=4"
+        "drawtext=text='VeriFYD':"
+        "x=10:y=10:"
+        "fontsize=24:"
+        "fontcolor=white@0.85:"
+        "box=1:boxcolor=black@0.4:boxborderw=4,"
+        f"drawtext=text='ID\\:{safe_id}':"
+        "x=w-tw-20:y=h-th-20:"
+        "fontsize=16:"
+        "fontcolor=white@0.85:"
+        "box=1:boxcolor=black@0.4:boxborderw=4"
     )
 
     cmd = [
@@ -82,7 +88,7 @@ def stamp_video(input_path, output_path, cert_id):
     r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
     if r.returncode != 0:
-        raise RuntimeError(r.stderr.decode()[-300:])
+        raise RuntimeError(r.stderr.decode()[-400:])
 
 # ---------------------------------------------------
 # UPLOAD VIDEO
@@ -98,19 +104,18 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
 
     score, status = run_detection(raw_path)
 
-    # COLOR STATUS
     if status == "REAL":
         color = "green"
         text = "REAL VIDEO VERIFIED"
-    elif status == "REVIEW":
+    elif status == "UNDETERMINED":
         color = "blue"
-        text = "FURTHER REVIEW NEEDED"
+        text = "UNDETERMINED"
     else:
         color = "red"
         text = "AI DETECTED"
 
-    # ONLY CERTIFY IF >= 70
-    if score >= 70:
+    # ONLY CERTIFY IF REAL
+    if status == "REAL":
 
         certified_path = f"{CERT_DIR}/{cid}.mp4"
         stamp_video(raw_path, certified_path, cid)
@@ -123,6 +128,7 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
             "color": color
         }
 
+    # ALWAYS RETURN RESULT — NEVER VIDEO POPUP
     return {
         "status": text,
         "authenticity_score": score,
@@ -138,12 +144,12 @@ def download(cid: str):
     path = f"{CERT_DIR}/{cid}.mp4"
 
     if not os.path.exists(path):
-        return JSONResponse({"error":"not found"})
+        return JSONResponse({"error": "not found"})
 
     return FileResponse(path, media_type="video/mp4")
 
 # ---------------------------------------------------
-# ANALYZE VIDEO LINK (VISUAL PAGE)
+# ANALYZE LINK (VISUAL PAGE ONLY)
 # ---------------------------------------------------
 @app.get("/analyze-link/", response_class=HTMLResponse)
 def analyze_link(video_url: str):
@@ -169,9 +175,9 @@ def analyze_link(video_url: str):
         if status == "AI":
             color = "red"
             text = "AI DETECTED"
-        elif status == "REVIEW":
+        elif status == "UNDETERMINED":
             color = "blue"
-            text = "FURTHER REVIEW NEEDED"
+            text = "UNDETERMINED"
         else:
             color = "green"
             text = "REAL VIDEO VERIFIED"
@@ -194,6 +200,7 @@ def analyze_link(video_url: str):
     finally:
         if os.path.exists(path):
             os.remove(path)
+
 
 
 
