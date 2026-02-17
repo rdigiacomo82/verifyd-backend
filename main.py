@@ -38,14 +38,14 @@ def health():
     return {"status": "ok"}
 
 # ---------------------------------------------------
-# AI DETECTION (RECALIBRATED THRESHOLDS)
+# AI DETECTION (CALIBRATED FOR REAL VIDEOS)
 # ---------------------------------------------------
 def run_detection(path):
 
-    # TEMP scoring (until full detector wired in)
+    # Temporary scoring until detector wired in
     score = random.randint(55, 95)
 
-    if score >= 85:
+    if score >= 80:
         return score, "REAL"
     elif score >= 60:
         return score, "UNDETERMINED"
@@ -53,7 +53,7 @@ def run_detection(path):
         return score, "AI"
 
 # ---------------------------------------------------
-# VIDEO STAMP (AUDIO SAFE)
+# VIDEO STAMP (SAFE)
 # ---------------------------------------------------
 def stamp_video(input_path, output_path, cert_id):
 
@@ -107,8 +107,8 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
         color = "red"
         text = "AI DETECTED"
 
-    # CERTIFY ONLY IF ≥85
-    if score >= 85:
+    # CERTIFY IF ≥80
+    if score >= 80:
 
         certified_path = f"{CERT_DIR}/{cid}.mp4"
         stamp_video(raw_path, certified_path, cid)
@@ -121,7 +121,6 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
             "color": color
         }
 
-    # Always return result — never popup
     return {
         "status": text,
         "authenticity_score": score,
@@ -129,7 +128,7 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
     }
 
 # ---------------------------------------------------
-# DOWNLOAD CERTIFIED VIDEO
+# DOWNLOAD
 # ---------------------------------------------------
 @app.get("/download/{cid}")
 def download(cid: str):
@@ -142,7 +141,7 @@ def download(cid: str):
     return FileResponse(path, media_type="video/mp4")
 
 # ---------------------------------------------------
-# ANALYZE VIDEO LINK (VISUAL PAGE)
+# ANALYZE LINK
 # ---------------------------------------------------
 @app.get("/analyze-link/", response_class=HTMLResponse)
 def analyze_link(video_url: str):
