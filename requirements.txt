@@ -1,6 +1,20 @@
+# ============================================================
+#  VeriFYD — requirements.txt
+#
+#  All third-party dependencies for the project.
+#  stdlib modules (os, uuid, sqlite3, subprocess, hashlib,
+#  logging, contextlib, datetime, typing, tempfile) are NOT
+#  listed here — they ship with Python.
+# ============================================================
+
+# Web framework
 fastapi>=0.100.0
 uvicorn>=0.23.0
-python-multipart>=0.0.6
+python-multipart>=0.0.6   # required for Form() / UploadFile in FastAPI
+
+# Computer vision & numeric (detector.py)
 opencv-python-headless>=4.8.0
 numpy>=1.24.0
+
+# HTTP client (analyze-link route)
 requests>=2.31.0

@@ -1,44 +1,27 @@
-import cv2
-import numpy as np
+# ============================================================
+#  VeriFYD — external_detector.py
+#
+#  External / third-party detector interface.
+#
+#  Previously a standalone stub with its own scoring logic.
+#  Now delegates to the main detection pipeline so there is
+#  exactly ONE engine across the entire project.
+#
+#  If you later integrate a third-party forensic API or a
+#  PyTorch model, replace the body of external_ai_score()
+#  here without touching detection.py or detector.py.
+# ============================================================
 
-def external_ai_score(video_path):
+from detection import run_detection
+
+
+def external_ai_score(video_path: str) -> int:
     """
-    Hybrid detector placeholder.
-    Will later connect to real forensic model.
+    Returns an AI score 0–100 (HIGH = likely AI) for the given video.
+
+    Currently delegates to the main VeriFYD detection engine.
+    Replace the body of this function to integrate a third-party
+    forensic model or API without affecting the rest of the system.
     """
-
-    cap = cv2.VideoCapture(video_path)
-
-    frames = []
-    count = 0
-
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-
-        count += 1
-        if count % 30 == 0:
-            frames.append(frame)
-
-        if len(frames) >= 6:
-            break
-
-    cap.release()
-
-    if not frames:
-        return 50
-
-    scores = []
-    for f in frames:
-        gray = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY)
-        noise = np.std(gray)
-        scores.append(noise)
-
-    avg = np.mean(scores)
-
-    if avg < 8:
-        return 80   # likely AI
-    if avg < 15:
-        return 50
-    return 10       # likely real
+    authenticity, label, detail = run_detection(video_path)
+    return detail["ai_score"]

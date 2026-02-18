@@ -1,25 +1,54 @@
+# ============================================================
+#  VeriFYD — main.py
+#
+#  FastAPI application entry point.
+#
+#  Detection pipeline:
+#    upload / analyze-link
+#      → clip_first_10_seconds()
+#        → run_detection()          (detection.py)
+#          → detect_ai()            (detector.py)
+#            → authenticity, label, detail
+#              → certify / respond
+# ============================================================
+
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
-import os, uuid, subprocess, requests, tempfile
+import os, uuid, requests, tempfile, logging, hashlib
 
-from detection import run_detection  # your detector
+from detection import run_detection   # returns (authenticity, label, detail)
+from config import (                  # single source of truth for all settings
+    BASE_URL,
+    UPLOAD_DIR, CERT_DIR, TMP_DIR,
+)
+from database import init_db, insert_certificate, increment_downloads
+from video import clip_first_10_seconds, stamp_video
 
-app = FastAPI(title="VeriFYD STABLE")
+log = logging.getLogger("verifyd.main")
 
-BASE_URL = "https://verifyd-backend.onrender.com"
+app = FastAPI(title="VeriFYD")
+# Directories are created on import inside config.py — no makedirs needed here
 
-UPLOAD_DIR = "videos"
-CERT_DIR = "certified"
-TMP_DIR = "tmp"
+@app.on_event("startup")
+def startup():
+    init_db()
+    log.info("VeriFYD startup complete")
 
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-os.makedirs(CERT_DIR, exist_ok=True)
-os.makedirs(TMP_DIR, exist_ok=True)
+# ─────────────────────────────────────────────
+#  Label → UI display mapping
+#  Keep presentation logic here, detection
+#  thresholds stay in detection.py.
+# ─────────────────────────────────────────────
+LABEL_UI = {
+    "REAL":          ("REAL VIDEO VERIFIED", "green",  True),
+    "UNDETERMINED":  ("VIDEO UNDETERMINED",  "blue",   False),
+    "AI":            ("AI DETECTED",         "red",    False),
+}
 
-# ---------------------------------------------------
-# CORS
-# ---------------------------------------------------
+# ─────────────────────────────────────────────
+#  CORS
+# ─────────────────────────────────────────────
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -28,9 +57,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ---------------------------------------------------
-# HEALTH
-# ---------------------------------------------------
+# ─────────────────────────────────────────────
+#  Health
+# ─────────────────────────────────────────────
 @app.get("/")
 def home():
     return {"status": "VeriFYD API LIVE"}
@@ -39,186 +68,140 @@ def home():
 def health():
     return {"status": "ok"}
 
-# ---------------------------------------------------
-# INTERPRET SCORE
-# ---------------------------------------------------
-def interpret_score(ai_score):
+# ─────────────────────────────────────────────
+#  Helpers
+# ─────────────────────────────────────────────
 
-    # 🔥 HANDLE TUPLE OR INT
-    if isinstance(ai_score, tuple):
-        ai_score = ai_score[0]
 
-    ai_score = int(ai_score)
-    authenticity = 100 - ai_score
+def _sha256(path: str) -> str:
+    """Return the SHA-256 hex digest of a file."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
-    if authenticity >= 65:
-        return authenticity, "REAL VIDEO VERIFIED", "green", True
-    elif authenticity >= 40:
-        return authenticity, "VIDEO UNDETERMINED", "blue", False
-    else:
-        return authenticity, "AI DETECTED", "red", False
 
-# ---------------------------------------------------
-# VIDEO STAMP
-# ---------------------------------------------------
-def stamp_video(input_path, output_path, cert_id):
+def _run_analysis(source_path: str) -> tuple:
+    """
+    Clip → detect → return (authenticity, label, detail, ui_text, color, certify).
+    Cleans up the temp clip automatically.
+    """
+    clip_path = clip_first_10_seconds(source_path)
+    try:
+        authenticity, label, detail = run_detection(clip_path)
+    finally:
+        if os.path.exists(clip_path):
+            os.remove(clip_path)
 
-    vf = (
-        "drawtext=text='VeriFYD':x=10:y=10:fontsize=24:"
-        "fontcolor=white@0.85:box=1:boxcolor=black@0.4:boxborderw=4,"
-        f"drawtext=text='ID:{cert_id}':x=w-tw-20:y=h-th-20:fontsize=16:"
-        "fontcolor=white@0.85:box=1:boxcolor=black@0.4:boxborderw=4"
+    ui_text, color, certify = LABEL_UI.get(label, ("UNKNOWN", "grey", False))
+    log.info(
+        "Analysis: label=%s authenticity=%d ai_score=%d",
+        label, authenticity, detail["ai_score"],
     )
+    return authenticity, label, detail, ui_text, color, certify
 
-    cmd = [
-        "ffmpeg","-y",
-        "-i", input_path,
-        "-vf", vf,
-        "-map","0:v:0",
-        "-map","0:a?",
-        "-c:v","libx264",
-        "-preset","fast",
-        "-crf","23",
-        "-c:a","copy",
-        "-movflags","+faststart",
-        output_path
-    ]
 
-    r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-
-    if r.returncode != 0:
-        print(r.stderr.decode())
-        raise RuntimeError("FFMPEG FAILED")
-
-# ---------------------------------------------------
-# CLIP FIRST 10 SECONDS
-# ---------------------------------------------------
-def clip_first_10_seconds(input_path):
-    clipped = f"{TMP_DIR}/{uuid.uuid4()}.mp4"
-
-    cmd = [
-        "ffmpeg","-y",
-        "-i", input_path,
-        "-t","10",
-        "-c","copy",
-        clipped
-    ]
-
-    subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    return clipped
-
-# ---------------------------------------------------
-# UPLOAD VIDEO
-# ---------------------------------------------------
+# ─────────────────────────────────────────────
+#  Routes
+# ─────────────────────────────────────────────
 @app.post("/upload/")
 async def upload(file: UploadFile = File(...), email: str = Form(...)):
-
-    cid = str(uuid.uuid4())
+    cid      = str(uuid.uuid4())
     raw_path = f"{UPLOAD_DIR}/{cid}_{file.filename}"
 
     with open(raw_path, "wb") as f:
         f.write(await file.read())
 
-    clip_path = clip_first_10_seconds(raw_path)
+    sha256 = _sha256(raw_path)
 
-    ai_score = run_detection(clip_path)
-    score, text, color, certify = interpret_score(ai_score)
+    try:
+        authenticity, label, detail, ui_text, color, certify = _run_analysis(raw_path)
+    except Exception as e:
+        log.exception("Detection failed for %s", raw_path)
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+    # Persist every result — certified or not
+    insert_certificate(
+        cert_id       = cid,
+        email         = email,
+        original_file = file.filename,
+        label         = label,
+        authenticity  = authenticity,
+        ai_score      = detail["ai_score"],
+        sha256        = sha256,
+    )
 
     if certify:
         certified_path = f"{CERT_DIR}/{cid}.mp4"
-        stamp_video(raw_path, certified_path, cid)
+        try:
+            stamp_video(raw_path, certified_path, cid)
+        except RuntimeError as e:
+            log.error("Stamping failed: %s", e)
+            return JSONResponse({"error": "Video certification failed"}, status_code=500)
 
         return {
-            "status": text,
-            "authenticity_score": score,
-            "certificate_id": cid,
-            "download_url": f"{BASE_URL}/download/{cid}",
-            "color": color
+            "status":             ui_text,
+            "authenticity_score": authenticity,
+            "certificate_id":     cid,
+            "download_url":       f"{BASE_URL}/download/{cid}",
+            "color":              color,
         }
 
     return {
-        "status": text,
-        "authenticity_score": score,
-        "color": color
+        "status":             ui_text,
+        "authenticity_score": authenticity,
+        "color":              color,
     }
 
-# ---------------------------------------------------
-# DOWNLOAD
-# ---------------------------------------------------
+
 @app.get("/download/{cid}")
 def download(cid: str):
-
     path = f"{CERT_DIR}/{cid}.mp4"
-
     if not os.path.exists(path):
-        return JSONResponse({"error":"not found"})
-
+        return JSONResponse({"error": "Certificate not found"}, status_code=404)
+    increment_downloads(cid)
     return FileResponse(path, media_type="video/mp4")
 
-# ---------------------------------------------------
-# ANALYZE LINK
-# ---------------------------------------------------
+
 @app.get("/analyze-link/", response_class=HTMLResponse)
 def analyze_link(video_url: str):
-
     if not video_url.startswith("http"):
-        return HTMLResponse("<h2>Invalid URL</h2>")
+        return HTMLResponse("<h2>Invalid URL — must start with http</h2>", status_code=400)
 
-    temp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
-    path = temp.name
+    tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+    tmp_path = tmp_file.name
+    tmp_file.close()
 
     try:
         r = requests.get(video_url, stream=True, timeout=20)
-
         if r.status_code != 200:
-            return HTMLResponse("<h2>Could not download video</h2>")
+            return HTMLResponse(f"<h2>Could not download video (HTTP {r.status_code})</h2>")
 
-        with open(path, "wb") as f:
-            for chunk in r.iter_content(1024):
+        with open(tmp_path, "wb") as f:
+            for chunk in r.iter_content(8192):
                 f.write(chunk)
 
-        clip_path = clip_first_10_seconds(path)
-
-        ai_score = run_detection(clip_path)
-        score, text, color, _ = interpret_score(ai_score)
+        authenticity, label, detail, ui_text, color, _ = _run_analysis(tmp_path)
 
         html = f"""
         <html>
-        <body style="background:black;color:white;text-align:center;padding-top:120px;font-family:Arial">
-        <h1 style="color:{color};font-size:48px">{text}</h1>
-        <h2>Authenticity Score: {score}</h2>
-        <p>Analyzed by VeriFYD</p>
+        <body style="background:black;color:white;text-align:center;
+                     padding-top:120px;font-family:Arial">
+          <h1 style="color:{color};font-size:48px">{ui_text}</h1>
+          <h2>Authenticity Score: {authenticity}/100</h2>
+          <p style="color:#aaa">AI Signal Score: {detail['ai_score']}/100</p>
+          <p>Analyzed by VeriFYD</p>
         </body>
         </html>
         """
-
         return HTMLResponse(html)
 
     except Exception as e:
-        return HTMLResponse(f"<h2>Error: {str(e)}</h2>")
+        log.exception("analyze-link failed for %s", video_url)
+        return HTMLResponse(f"<h2>Error: {str(e)}</h2>", status_code=500)
 
     finally:
-        if os.path.exists(path):
-            os.remove(path)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
 

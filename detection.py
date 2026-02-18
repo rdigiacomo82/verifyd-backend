@@ -1,114 +1,87 @@
-import cv2
-import numpy as np
-
 # ============================================================
-# VeriFYD Advanced Detector v1
-# Returns AUTHENTICITY score (0–100)
-# 100 = real camera
-# 0 = AI generated
+#  VeriFYD — detection.py
+#
+#  Public-facing detection interface for the VeriFYD system.
+#
+#  This module is intentionally thin. All signal analysis lives
+#  in detector.py. This file owns:
+#    - run_detection()  → called by the rest of your system
+#    - Label thresholds (tune here without touching the engine)
+#    - Optional result packaging / logging
+#
+#  Usage:
+#    from detection import run_detection
+#    score, label, detail = run_detection("path/to/video.mp4")
 # ============================================================
 
-def run_detection(video_path):
-    cap = cv2.VideoCapture(video_path)
+import logging
+from detector import detect_ai          # ← full advanced engine
 
-    if not cap.isOpened():
-        return 50, "UNDETERMINED"
+log = logging.getLogger("verifyd.detection")
 
-    frame_count = 0
-    prev_gray = None
+# ─────────────────────────────────────────────
+#  Label thresholds  (authenticity scale 0–100)
+#
+#  Authenticity = 100 − AI score, so:
+#    100 = definitely real      0 = definitely AI
+#
+#  Adjust these without touching the engine in detector.py.
+# ─────────────────────────────────────────────
+THRESHOLD_REAL          = 85   # authenticity ≥ this → REAL       (was 75)
+THRESHOLD_UNDETERMINED  = 60   # authenticity ≥ this → UNDETERMINED (was 50)
+                               # authenticity <  this → AI
 
-    motion_vals = []
-    jitter_vals = []
-    detail_vals = []
-    brightness_vals = []
 
-    # only analyze first ~10 seconds (≈300 frames max)
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
+def run_detection(video_path: str) -> tuple:
+    """
+    Analyze a video file and return an authenticity verdict.
 
-        frame_count += 1
-        if frame_count > 300:
-            break
+    Parameters
+    ----------
+    video_path : str
+        Absolute or relative path to the video file.
 
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    Returns
+    -------
+    authenticity_score : int
+        0–100.  Higher = more likely real.
+    label : str
+        One of "REAL", "UNDETERMINED", or "AI".
+    detail : dict
+        Additional metadata useful for logging or UI display.
 
-        # --- detail (real cameras have more high-freq noise)
-        lap = cv2.Laplacian(gray, cv2.CV_64F).var()
-        detail_vals.append(lap)
+    Examples
+    --------
+    >>> score, label, detail = run_detection("clip.mp4")
+    >>> print(f"{label}  ({score}/100)")
+    AI  (55/100)
+    """
+    ai_score = detect_ai(video_path)
+    authenticity = 100 - ai_score
 
-        # --- brightness variation (real cameras fluctuate)
-        brightness_vals.append(np.mean(gray))
-
-        if prev_gray is not None:
-            diff = cv2.absdiff(gray, prev_gray)
-            motion_vals.append(np.mean(diff))
-
-            # micro jitter (phone shake)
-            shift = np.sum(diff) / (diff.shape[0] * diff.shape[1])
-            jitter_vals.append(shift)
-
-        prev_gray = gray
-
-    cap.release()
-
-    if not motion_vals:
-        return 50, "UNDETERMINED"
-
-    avg_motion = np.mean(motion_vals)
-    motion_var = np.var(motion_vals)
-    avg_detail = np.mean(detail_vals)
-    brightness_var = np.var(brightness_vals)
-    jitter = np.mean(jitter_vals)
-
-    # ============================================================
-    # AUTHENTICITY SCORE (start neutral at 50)
-    # ============================================================
-
-    score = 50
-
-    # ---- real camera motion randomness
-    if motion_var > 5:
-        score += 15
+    if authenticity >= THRESHOLD_REAL:
+        label = "REAL"
+    elif authenticity >= THRESHOLD_UNDETERMINED:
+        label = "UNDETERMINED"
     else:
-        score -= 15
+        label = "AI"
 
-    # ---- micro camera shake (very strong real signal)
-    if jitter > 2:
-        score += 15
-    else:
-        score -= 15
+    detail = {
+        "ai_score":         ai_score,
+        "authenticity":     authenticity,
+        "label":            label,
+        "threshold_real":   THRESHOLD_REAL,
+        "threshold_undet":  THRESHOLD_UNDETERMINED,
+    }
 
-    # ---- real cameras have natural detail/noise
-    if avg_detail > 200:
-        score += 10
-    else:
-        score -= 10
+    log.info(
+        "Detection complete | file=%s  ai_score=%d  authenticity=%d  label=%s",
+        video_path, ai_score, authenticity, label,
+    )
 
-    # ---- brightness fluctuation
-    if brightness_var > 2:
-        score += 10
-    else:
-        score -= 10
+    return authenticity, label, detail
 
-    # ---- extremely smooth motion → AI
-    if avg_motion < 1:
-        score -= 15
 
-    # clamp
-    score = int(max(0, min(100, score)))
-
-    # ============================================================
-    # CLASSIFICATION
-    # ============================================================
-
-    if score >= 85:
-        return score, "REAL"
-    elif score >= 60:
-        return score, "UNDETERMINED"
-    else:
-        return score, "AI"
 
 
 
