@@ -9,10 +9,10 @@ uvicorn>=0.23.0
 # Required for Form() and UploadFile in FastAPI
 python-multipart>=0.0.6
 
-# Computer vision — pinned to guarantee pre-built wheel on Render
-# (avoids compiling from source which can OOM or timeout)
-opencv-python-headless==4.9.0.80
-numpy>=1.24.0
+# Computer vision — cp37-abi3 wheel covers Python 3.7–3.13+
+# 4.13.0.92 is the first release with Python 3.13 support
+opencv-python-headless==4.13.0.92
+numpy>=2.0.0
 
 # HTTP client for direct .mp4 URLs
 requests>=2.31.0
