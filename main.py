@@ -168,6 +168,28 @@ def download(cid: str):
     return FileResponse(path, media_type="video/mp4")
 
 
+def _proxy_coming_soon_html(video_url: str) -> str:
+    platform = "TikTok" if "tiktok.com" in video_url else "Instagram"
+    return f"""
+    <html>
+    <body style="background:black;color:white;text-align:center;
+                 padding-top:100px;font-family:Arial;padding-left:20px;padding-right:20px">
+      <h1 style="color:#f0a500;font-size:36px">&#128274; {platform} Link Analysis</h1>
+      <p style="font-size:18px;max-width:560px;margin:30px auto;line-height:1.6">
+        {platform} blocks downloads from cloud servers.<br>
+        Full support is <strong>coming soon</strong> to VeriFYD.
+      </p>
+      <p style="font-size:16px;max-width:560px;margin:0 auto;color:#ccc">
+        In the meantime, download the video to your device and use the
+        <strong>Upload</strong> button — it works perfectly and gives you
+        a full AI analysis.
+      </p>
+      <p style="color:#555;margin-top:60px;font-size:14px">Analyzed by VeriFYD</p>
+    </body>
+    </html>
+    """
+
+
 def _error_html(message: str, color: str = "orange") -> str:
     return f"""
     <html>
@@ -181,12 +203,44 @@ def _error_html(message: str, color: str = "orange") -> str:
     """
 
 
-# Platforms supported via yt-dlp (not exhaustive — yt-dlp supports 1000+)
-YTDLP_DOMAINS = (
-    "tiktok.com", "instagram.com", "youtube.com", "youtu.be",
-    "facebook.com", "twitter.com", "x.com", "reddit.com",
-    "twitch.tv", "vimeo.com", "dailymotion.com",
+# ── Platform routing ─────────────────────────────────────────────────────────
+#
+# PROXY_REQUIRED: TikTok and Instagram actively block cloud/datacenter IPs.
+#   These work once RESIDENTIAL_PROXY_URL is set in Render env vars.
+#   During testing we return a clean "coming soon" message instead of crashing.
+#
+# YTDLP_DOMAINS: All other platforms yt-dlp can handle from a cloud IP.
+#   YouTube, Vimeo, Reddit, Twitter/X, Facebook, Twitch, Dailymotion, etc.
+#
+# DIRECT_DOWNLOAD: Plain .mp4 / video file URLs — just requests.get().
+
+PROXY_REQUIRED_DOMAINS = (
+    "tiktok.com",
+    "instagram.com",
 )
+
+YTDLP_DOMAINS = (
+    "youtube.com", "youtu.be",
+    "facebook.com", "fb.watch",
+    "twitter.com", "x.com", "t.co",
+    "reddit.com", "v.redd.it",
+    "twitch.tv", "clips.twitch.tv",
+    "vimeo.com",
+    "dailymotion.com",
+    "streamable.com",
+    "gfycat.com",
+    "imgur.com",
+    "bilibili.com",
+    "rumble.com",
+    "odysee.com",
+    "ok.ru",
+    "vk.com",
+)
+
+
+def _proxy_configured() -> bool:
+    """Return True if a residential proxy URL has been set."""
+    return bool(os.environ.get("RESIDENTIAL_PROXY_URL", "").strip())
 
 
 @app.get("/analyze-link/", response_class=HTMLResponse)
@@ -194,19 +248,30 @@ def analyze_link(video_url: str):
     if not video_url.startswith("http"):
         return HTMLResponse(_error_html("Invalid URL — must start with http."), status_code=400)
 
+    # ── TikTok / Instagram: need residential proxy ────────────────────────────
+    if any(d in video_url for d in PROXY_REQUIRED_DOMAINS):
+        if not _proxy_configured():
+            return HTMLResponse(
+                _proxy_coming_soon_html(video_url),
+                status_code=200   # not an error — just not ready yet
+            )
+        # Proxy is configured — fall through to yt-dlp below
+
     tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
     tmp_path = tmp_file.name
     tmp_file.close()
 
     try:
-        use_ytdlp = any(d in video_url for d in YTDLP_DOMAINS)
+        use_ytdlp = (
+            any(d in video_url for d in PROXY_REQUIRED_DOMAINS) or
+            any(d in video_url for d in YTDLP_DOMAINS)
+        )
 
         if use_ytdlp:
-            # ── Social / platform URL → use yt-dlp ──────────────────
             log.info("Using yt-dlp for: %s", video_url)
             download_video_ytdlp(video_url, tmp_path)
         else:
-            # ── Direct file URL → use requests ──────────────────────
+            # ── Direct .mp4 / CDN URL → requests ─────────────────────────────
             log.info("Using direct download for: %s", video_url)
             r = requests.get(video_url, stream=True, timeout=30, headers={
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
@@ -220,8 +285,8 @@ def analyze_link(video_url: str):
             if "text/html" in content_type:
                 return HTMLResponse(_error_html(
                     "The URL returned a webpage, not a video file. "
-                    "Please provide a direct link to an .mp4 file, or paste "
-                    "a TikTok / Instagram / YouTube URL."
+                    "Paste a direct .mp4 link, or a URL from YouTube, Vimeo, "
+                    "Reddit, Twitter/X, Facebook, Twitch, or Dailymotion."
                 ), status_code=400)
             with open(tmp_path, "wb") as f:
                 for chunk in r.iter_content(8192):
@@ -229,7 +294,8 @@ def analyze_link(video_url: str):
 
         if os.path.getsize(tmp_path) < 1024:
             return HTMLResponse(_error_html(
-                "Downloaded file is too small to be a valid video."
+                "Downloaded file is too small to be a valid video. "
+                "The platform may have blocked the download."
             ), status_code=400)
 
         authenticity, label, detail, ui_text, color, _ = _run_analysis(tmp_path)
@@ -248,7 +314,6 @@ def analyze_link(video_url: str):
         return HTMLResponse(html)
 
     except RuntimeError as e:
-        # Clean user-facing errors from download_video_ytdlp()
         return HTMLResponse(_error_html(str(e)), status_code=400)
 
     except ValueError as e:
