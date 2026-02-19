@@ -24,7 +24,7 @@ from config import (                  # single source of truth for all settings
     UPLOAD_DIR, CERT_DIR, TMP_DIR,
 )
 from database import init_db, insert_certificate, increment_downloads
-from video import clip_first_10_seconds, stamp_video
+from video import clip_first_10_seconds, stamp_video, download_video_ytdlp
 
 log = logging.getLogger("verifyd.main")
 
@@ -181,9 +181,12 @@ def _error_html(message: str, color: str = "orange") -> str:
     """
 
 
-# Short-link redirects that never resolve to a raw video file.
-# These are redirect-only URLs — not the platform domain itself.
-SHORTLINK_PATTERNS = ("tiktok.com/t/", "vm.tiktok.com", "vt.tiktok.com")
+# Platforms supported via yt-dlp (not exhaustive — yt-dlp supports 1000+)
+YTDLP_DOMAINS = (
+    "tiktok.com", "instagram.com", "youtube.com", "youtu.be",
+    "facebook.com", "twitter.com", "x.com", "reddit.com",
+    "twitch.tv", "vimeo.com", "dailymotion.com",
+)
 
 
 @app.get("/analyze-link/", response_class=HTMLResponse)
@@ -191,42 +194,39 @@ def analyze_link(video_url: str):
     if not video_url.startswith("http"):
         return HTMLResponse(_error_html("Invalid URL — must start with http."), status_code=400)
 
-    # Only block known short-redirect patterns, not entire platforms.
-    # Full platform URLs (e.g. tiktok.com/@user/video/123) may still work
-    # via yt-dlp in a future update.
-    if any(p in video_url for p in SHORTLINK_PATTERNS):
-        return HTMLResponse(_error_html(
-            "Short share links (e.g. tiktok.com/t/...) cannot be downloaded directly. "
-            "Try copying the full video URL from the browser address bar instead."
-        ), status_code=400)
-
     tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
     tmp_path = tmp_file.name
     tmp_file.close()
 
     try:
-        r = requests.get(video_url, stream=True, timeout=30, headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        })
-        if r.status_code != 200:
-            return HTMLResponse(_error_html(
-                f"Could not download video (HTTP {r.status_code}). "
-                "Make sure the URL points directly to an .mp4 file."
-            ))
+        use_ytdlp = any(d in video_url for d in YTDLP_DOMAINS)
 
-        # If the server returns HTML it means we got a webpage, not a video
-        content_type = r.headers.get("content-type", "")
-        if "text/html" in content_type:
-            return HTMLResponse(_error_html(
-                "The URL returned a webpage, not a video file. "
-                "Please provide a direct link to an .mp4 or video file."
-            ), status_code=400)
+        if use_ytdlp:
+            # ── Social / platform URL → use yt-dlp ──────────────────
+            log.info("Using yt-dlp for: %s", video_url)
+            download_video_ytdlp(video_url, tmp_path)
+        else:
+            # ── Direct file URL → use requests ──────────────────────
+            log.info("Using direct download for: %s", video_url)
+            r = requests.get(video_url, stream=True, timeout=30, headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            })
+            if r.status_code != 200:
+                return HTMLResponse(_error_html(
+                    f"Could not download video (HTTP {r.status_code}). "
+                    "Make sure the URL points directly to a video file."
+                ))
+            content_type = r.headers.get("content-type", "")
+            if "text/html" in content_type:
+                return HTMLResponse(_error_html(
+                    "The URL returned a webpage, not a video file. "
+                    "Please provide a direct link to an .mp4 file, or paste "
+                    "a TikTok / Instagram / YouTube URL."
+                ), status_code=400)
+            with open(tmp_path, "wb") as f:
+                for chunk in r.iter_content(8192):
+                    f.write(chunk)
 
-        with open(tmp_path, "wb") as f:
-            for chunk in r.iter_content(8192):
-                f.write(chunk)
-
-        # Sanity-check file size
         if os.path.getsize(tmp_path) < 1024:
             return HTMLResponse(_error_html(
                 "Downloaded file is too small to be a valid video."
@@ -247,15 +247,20 @@ def analyze_link(video_url: str):
         """
         return HTMLResponse(html)
 
+    except RuntimeError as e:
+        # Clean user-facing errors from download_video_ytdlp()
+        return HTMLResponse(_error_html(str(e)), status_code=400)
+
     except ValueError as e:
         return HTMLResponse(_error_html(str(e)), status_code=400)
 
     except Exception as e:
         log.exception("analyze-link failed for %s", video_url)
         return HTMLResponse(_error_html(
-            "Could not process this video. Please try a direct .mp4 URL."
+            "Could not process this video. Please try again."
         ), status_code=500)
 
     finally:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
+

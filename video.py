@@ -6,6 +6,7 @@ import os
 import uuid
 import subprocess
 import logging
+import yt_dlp
 
 from config import FFMPEG_BIN, FFPROBE_BIN, TMP_DIR
 
@@ -27,6 +28,52 @@ def is_valid_video(path: str) -> bool:
     r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     output = r.stdout.decode().strip()
     return r.returncode == 0 and output == "video"
+
+
+def download_video_ytdlp(url: str, output_path: str) -> None:
+    """
+    Download a video from any yt-dlp supported platform
+    (TikTok, Instagram, YouTube, Facebook, Twitter/X, and 1000+ more).
+
+    Downloads the best available MP4 up to 1080p directly to output_path.
+    Raises RuntimeError with a clean message on failure.
+    """
+    ydl_opts = {
+        "format":           "bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4][height<=1080]/best",
+        "outtmpl":          output_path,
+        "quiet":            True,
+        "no_warnings":      True,
+        "merge_output_format": "mp4",
+        # Respect platform rate limits
+        "sleep_interval":   1,
+        "max_sleep_interval": 3,
+        # Don't write any extra files
+        "writethumbnail":   False,
+        "writeinfojson":    False,
+        "writesubtitles":   False,
+        # Use ffmpeg from our configured path for merging
+        "ffmpeg_location":  os.path.dirname(FFMPEG_BIN),
+    }
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+    except yt_dlp.utils.DownloadError as e:
+        msg = str(e)
+        # Translate common yt-dlp errors into user-friendly messages
+        if "Private video" in msg or "private" in msg.lower():
+            raise RuntimeError("This video is private and cannot be analyzed.")
+        if "login" in msg.lower() or "sign in" in msg.lower():
+            raise RuntimeError("This video requires a login and cannot be accessed.")
+        if "not available" in msg.lower() or "unavailable" in msg.lower():
+            raise RuntimeError("This video is unavailable or has been removed.")
+        if "Unsupported URL" in msg:
+            raise RuntimeError(
+                "This URL is not supported. Please try a direct .mp4 link or "
+                "a URL from TikTok, Instagram, YouTube, or similar platforms."
+            )
+        log.error("yt-dlp download error: %s", msg)
+        raise RuntimeError(f"Could not download video: {msg[:200]}")
 
 
 def clip_first_10_seconds(input_path: str) -> str:
@@ -89,5 +136,4 @@ def stamp_video(input_path: str, output_path: str, cert_id: str) -> None:
     if r.returncode != 0:
         log.error("stamp failed: %s", r.stderr.decode()[-300:])
         raise RuntimeError(f"ffmpeg stamp failed: {r.stderr.decode()[-300:]}")
-
 

@@ -1,20 +1,21 @@
 # ============================================================
 #  VeriFYD — requirements.txt
-#
-#  All third-party dependencies for the project.
-#  stdlib modules (os, uuid, sqlite3, subprocess, hashlib,
-#  logging, contextlib, datetime, typing, tempfile) are NOT
-#  listed here — they ship with Python.
 # ============================================================
 
 # Web framework
 fastapi>=0.100.0
 uvicorn>=0.23.0
-python-multipart>=0.0.6   # required for Form() / UploadFile in FastAPI
 
-# Computer vision & numeric (detector.py)
-opencv-python-headless>=4.8.0
+# Required for Form() and UploadFile in FastAPI
+python-multipart>=0.0.6
+
+# Computer vision — pinned to guarantee pre-built wheel on Render
+# (avoids compiling from source which can OOM or timeout)
+opencv-python-headless==4.9.0.80
 numpy>=1.24.0
 
-# HTTP client (analyze-link route)
+# HTTP client for direct .mp4 URLs
 requests>=2.31.0
+
+# Video downloader — supports TikTok, Instagram, YouTube, and 1000+ platforms
+yt-dlp>=2024.1.1
