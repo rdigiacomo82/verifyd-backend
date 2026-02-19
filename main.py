@@ -238,24 +238,10 @@ YTDLP_DOMAINS = (
 )
 
 
-def _proxy_configured() -> bool:
-    """Return True if a residential proxy URL has been set."""
-    return bool(os.environ.get("RESIDENTIAL_PROXY_URL", "").strip())
-
-
 @app.get("/analyze-link/", response_class=HTMLResponse)
 def analyze_link(video_url: str):
     if not video_url.startswith("http"):
         return HTMLResponse(_error_html("Invalid URL — must start with http."), status_code=400)
-
-    # ── TikTok / Instagram: need residential proxy ────────────────────────────
-    if any(d in video_url for d in PROXY_REQUIRED_DOMAINS):
-        if not _proxy_configured():
-            return HTMLResponse(
-                _proxy_coming_soon_html(video_url),
-                status_code=200   # not an error — just not ready yet
-            )
-        # Proxy is configured — fall through to yt-dlp below
 
     tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
     tmp_path = tmp_file.name
