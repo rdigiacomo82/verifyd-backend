@@ -16,6 +16,7 @@ from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 import os, uuid, requests, tempfile, logging, hashlib
+from contextlib import asynccontextmanager
 
 from detection import run_detection   # returns (authenticity, label, detail)
 from config import (                  # single source of truth for all settings
@@ -23,17 +24,20 @@ from config import (                  # single source of truth for all settings
     UPLOAD_DIR, CERT_DIR, TMP_DIR,
 )
 from database import init_db, insert_certificate, increment_downloads
-from video import clip_first_10_seconds, stamp_video
+from video import clip_first_10_seconds, stamp_video, is_supported_url
 
 log = logging.getLogger("verifyd.main")
 
-app = FastAPI(title="VeriFYD")
-# Directories are created on import inside config.py — no makedirs needed here
-
-@app.on_event("startup")
-def startup():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
     init_db()
     log.info("VeriFYD startup complete")
+    yield
+    # Shutdown (add cleanup here if needed)
+
+app = FastAPI(title="VeriFYD", lifespan=lifespan)
+# Directories are created on import inside config.py — no makedirs needed here
 
 # ─────────────────────────────────────────────
 #  Label → UI display mapping
@@ -164,23 +168,63 @@ def download(cid: str):
     return FileResponse(path, media_type="video/mp4")
 
 
+def _error_html(message: str, color: str = "orange") -> str:
+    return f"""
+    <html>
+    <body style="background:black;color:white;text-align:center;
+                 padding-top:120px;font-family:Arial;padding-left:20px;padding-right:20px">
+      <h1 style="color:{color};font-size:36px">⚠️ Cannot Analyze Link</h1>
+      <p style="font-size:18px;max-width:600px;margin:auto">{message}</p>
+      <p style="color:#aaa;margin-top:40px">Analyzed by VeriFYD</p>
+    </body>
+    </html>
+    """
+
+
 @app.get("/analyze-link/", response_class=HTMLResponse)
 def analyze_link(video_url: str):
     if not video_url.startswith("http"):
-        return HTMLResponse("<h2>Invalid URL — must start with http</h2>", status_code=400)
+        return HTMLResponse(_error_html("Invalid URL — must start with http."), status_code=400)
+
+    # Block social platforms early — they serve redirect pages, not raw video
+    if not is_supported_url(video_url):
+        return HTMLResponse(_error_html(
+            "TikTok, Instagram, YouTube, and other social platforms "
+            "do not allow direct video download. "
+            "Please upload a direct .mp4 file URL instead."
+        ), status_code=400)
 
     tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
     tmp_path = tmp_file.name
     tmp_file.close()
 
     try:
-        r = requests.get(video_url, stream=True, timeout=20)
+        r = requests.get(video_url, stream=True, timeout=30, headers={
+            "User-Agent": "Mozilla/5.0"
+        })
         if r.status_code != 200:
-            return HTMLResponse(f"<h2>Could not download video (HTTP {r.status_code})</h2>")
+            return HTMLResponse(_error_html(
+                f"Could not download video (HTTP {r.status_code}). "
+                "Make sure the URL points directly to an .mp4 file."
+            ))
+
+        # Check content-type before saving
+        content_type = r.headers.get("content-type", "")
+        if "html" in content_type:
+            return HTMLResponse(_error_html(
+                "The URL returned a webpage, not a video file. "
+                "Please provide a direct link to an .mp4 file."
+            ), status_code=400)
 
         with open(tmp_path, "wb") as f:
             for chunk in r.iter_content(8192):
                 f.write(chunk)
+
+        # Check file has actual content
+        if os.path.getsize(tmp_path) < 1024:
+            return HTMLResponse(_error_html(
+                "Downloaded file is too small to be a valid video."
+            ), status_code=400)
 
         authenticity, label, detail, ui_text, color, _ = _run_analysis(tmp_path)
 
@@ -190,18 +234,23 @@ def analyze_link(video_url: str):
                      padding-top:120px;font-family:Arial">
           <h1 style="color:{color};font-size:48px">{ui_text}</h1>
           <h2>Authenticity Score: {authenticity}/100</h2>
-          <p style="color:#aaa">AI Signal Score: {detail['ai_score']}/100</p>
+          <p style="color:#aaa">AI Signal Score: {detail["ai_score"]}/100</p>
           <p>Analyzed by VeriFYD</p>
         </body>
         </html>
         """
         return HTMLResponse(html)
 
+    except ValueError as e:
+        # Clean user-facing error from is_valid_video() check
+        return HTMLResponse(_error_html(str(e)), status_code=400)
+
     except Exception as e:
         log.exception("analyze-link failed for %s", video_url)
-        return HTMLResponse(f"<h2>Error: {str(e)}</h2>", status_code=500)
+        return HTMLResponse(_error_html(
+            "An unexpected error occurred. Please try again with a direct .mp4 URL."
+        ), status_code=500)
 
     finally:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
-
