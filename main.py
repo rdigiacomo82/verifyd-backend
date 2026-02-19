@@ -24,7 +24,7 @@ from config import (                  # single source of truth for all settings
     UPLOAD_DIR, CERT_DIR, TMP_DIR,
 )
 from database import init_db, insert_certificate, increment_downloads
-from video import clip_first_10_seconds, stamp_video, is_supported_url
+from video import clip_first_10_seconds, stamp_video
 
 log = logging.getLogger("verifyd.main")
 
@@ -173,7 +173,7 @@ def _error_html(message: str, color: str = "orange") -> str:
     <html>
     <body style="background:black;color:white;text-align:center;
                  padding-top:120px;font-family:Arial;padding-left:20px;padding-right:20px">
-      <h1 style="color:{color};font-size:36px">⚠️ Cannot Analyze Link</h1>
+      <h1 style="color:{color};font-size:36px">Cannot Analyze Link</h1>
       <p style="font-size:18px;max-width:600px;margin:auto">{message}</p>
       <p style="color:#aaa;margin-top:40px">Analyzed by VeriFYD</p>
     </body>
@@ -181,17 +181,23 @@ def _error_html(message: str, color: str = "orange") -> str:
     """
 
 
+# Short-link redirects that never resolve to a raw video file.
+# These are redirect-only URLs — not the platform domain itself.
+SHORTLINK_PATTERNS = ("tiktok.com/t/", "vm.tiktok.com", "vt.tiktok.com")
+
+
 @app.get("/analyze-link/", response_class=HTMLResponse)
 def analyze_link(video_url: str):
     if not video_url.startswith("http"):
         return HTMLResponse(_error_html("Invalid URL — must start with http."), status_code=400)
 
-    # Block social platforms early — they serve redirect pages, not raw video
-    if not is_supported_url(video_url):
+    # Only block known short-redirect patterns, not entire platforms.
+    # Full platform URLs (e.g. tiktok.com/@user/video/123) may still work
+    # via yt-dlp in a future update.
+    if any(p in video_url for p in SHORTLINK_PATTERNS):
         return HTMLResponse(_error_html(
-            "TikTok, Instagram, YouTube, and other social platforms "
-            "do not allow direct video download. "
-            "Please upload a direct .mp4 file URL instead."
+            "Short share links (e.g. tiktok.com/t/...) cannot be downloaded directly. "
+            "Try copying the full video URL from the browser address bar instead."
         ), status_code=400)
 
     tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
@@ -200,7 +206,7 @@ def analyze_link(video_url: str):
 
     try:
         r = requests.get(video_url, stream=True, timeout=30, headers={
-            "User-Agent": "Mozilla/5.0"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         })
         if r.status_code != 200:
             return HTMLResponse(_error_html(
@@ -208,19 +214,19 @@ def analyze_link(video_url: str):
                 "Make sure the URL points directly to an .mp4 file."
             ))
 
-        # Check content-type before saving
+        # If the server returns HTML it means we got a webpage, not a video
         content_type = r.headers.get("content-type", "")
-        if "html" in content_type:
+        if "text/html" in content_type:
             return HTMLResponse(_error_html(
                 "The URL returned a webpage, not a video file. "
-                "Please provide a direct link to an .mp4 file."
+                "Please provide a direct link to an .mp4 or video file."
             ), status_code=400)
 
         with open(tmp_path, "wb") as f:
             for chunk in r.iter_content(8192):
                 f.write(chunk)
 
-        # Check file has actual content
+        # Sanity-check file size
         if os.path.getsize(tmp_path) < 1024:
             return HTMLResponse(_error_html(
                 "Downloaded file is too small to be a valid video."
@@ -242,13 +248,12 @@ def analyze_link(video_url: str):
         return HTMLResponse(html)
 
     except ValueError as e:
-        # Clean user-facing error from is_valid_video() check
         return HTMLResponse(_error_html(str(e)), status_code=400)
 
     except Exception as e:
         log.exception("analyze-link failed for %s", video_url)
         return HTMLResponse(_error_html(
-            "An unexpected error occurred. Please try again with a direct .mp4 URL."
+            "Could not process this video. Please try a direct .mp4 URL."
         ), status_code=500)
 
     finally:

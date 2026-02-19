@@ -11,19 +11,6 @@ from config import FFMPEG_BIN, FFPROBE_BIN, TMP_DIR
 
 log = logging.getLogger("verifyd.video")
 
-# Social/platform URLs that serve redirect pages, not raw video.
-# Attempting to download these will always produce an invalid file.
-UNSUPPORTED_DOMAINS = (
-    "tiktok.com", "instagram.com", "facebook.com",
-    "twitter.com", "x.com", "youtube.com", "youtu.be",
-)
-
-
-def is_supported_url(url: str) -> bool:
-    """Return False for social platform URLs that block direct download."""
-    return not any(domain in url for domain in UNSUPPORTED_DOMAINS)
-
-
 def is_valid_video(path: str) -> bool:
     """
     Use ffprobe to verify the file is a readable video before processing.
@@ -102,4 +89,5 @@ def stamp_video(input_path: str, output_path: str, cert_id: str) -> None:
     if r.returncode != 0:
         log.error("stamp failed: %s", r.stderr.decode()[-300:])
         raise RuntimeError(f"ffmpeg stamp failed: {r.stderr.decode()[-300:]}")
+
 
