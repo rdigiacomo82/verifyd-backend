@@ -243,6 +243,14 @@ def analyze_link(video_url: str):
     if not video_url.startswith("http"):
         return HTMLResponse(_error_html("Invalid URL — must start with http."), status_code=400)
 
+    # ── TikTok / Instagram: proxy required ───────────────────────────────────
+    # Render's datacenter IP is blocked by TikTok/Instagram CDN.
+    # Show a clean holding page until RESIDENTIAL_PROXY_URL is configured.
+    if any(d in video_url for d in PROXY_REQUIRED_DOMAINS):
+        if not os.environ.get("RESIDENTIAL_PROXY_URL", "").strip():
+            return HTMLResponse(_proxy_coming_soon_html(video_url), status_code=200)
+        # Proxy configured — fall through to yt-dlp
+
     tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
     tmp_path = tmp_file.name
     tmp_file.close()
