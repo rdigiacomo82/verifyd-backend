@@ -28,7 +28,7 @@ log = logging.getLogger("verifyd.detection")
 #  Adjust these without touching the engine in detector.py.
 # ─────────────────────────────────────────────
 THRESHOLD_REAL          = 85   # authenticity ≥ this → REAL       (was 75)
-THRESHOLD_UNDETERMINED  = 60   # authenticity ≥ this → UNDETERMINED (was 50)
+THRESHOLD_UNDETERMINED  = 45   # authenticity ≥ this → UNDETERMINED (lowered from 60)
                                # authenticity <  this → AI
 
 
