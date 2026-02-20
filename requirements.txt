@@ -18,4 +18,4 @@ numpy>=2.0.0
 requests>=2.31.0
 
 # Video downloader — supports TikTok, Instagram, YouTube, and 1000+ platforms
-yt-dlp>=2024.1.1
+yt-dlp>=2025.1.1
