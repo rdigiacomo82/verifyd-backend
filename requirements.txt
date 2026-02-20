@@ -19,3 +19,5 @@ requests>=2.31.0
 
 # Video downloader — supports TikTok, Instagram, YouTube, and 1000+ platforms
 yt-dlp>=2025.1.1
+# curl-cffi 0.14+ supports Python 3.13 and is required by yt-dlp for TikTok
+curl-cffi>=0.14.0

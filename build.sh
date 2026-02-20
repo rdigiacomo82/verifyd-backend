@@ -44,7 +44,7 @@ pip install -r requirements.txt
 pip install --upgrade yt-dlp
 
 # Smoke-test key imports
-python -c "import cv2, numpy, fastapi, uvicorn, yt_dlp; print('Python deps OK')"
+python -c "import cv2, numpy, fastapi, uvicorn, yt_dlp, curl_cffi; print('Python deps OK')"
 
 # Verify yt-dlp CLI is available
 yt-dlp --version && echo "yt-dlp OK" || { echo "ERROR: yt-dlp not found"; exit 1; }
