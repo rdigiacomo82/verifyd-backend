@@ -5,14 +5,14 @@
 #
 #  Detection pipeline:
 #    upload / analyze-link
-#      → clip_first_10_seconds()
+#      → clip_first_6_seconds()
 #        → run_detection()          (detection.py)
 #          → detect_ai()            (detector.py)
 #            → authenticity, label, detail
 #              → certify / respond
 # ============================================================
 
-from fastapi import FastAPI, UploadFile, File, Form
+from fastapi import FastAPI, UploadFile, File, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 import os, uuid, requests, tempfile, logging, hashlib
@@ -24,7 +24,7 @@ from config import (                  # single source of truth for all settings
     UPLOAD_DIR, CERT_DIR, TMP_DIR,
 )
 from database import init_db, insert_certificate, increment_downloads
-from video import clip_first_10_seconds, stamp_video, download_video_ytdlp
+from video import clip_first_6_seconds, stamp_video, download_video_ytdlp
 
 log = logging.getLogger("verifyd.main")
 
@@ -38,6 +38,21 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="VeriFYD", lifespan=lifespan)
 # Directories are created on import inside config.py — no makedirs needed here
+
+# ─────────────────────────────────────────────
+#  File upload size — no hard limit on backend.
+#  FastAPI streams the file directly to disk so
+#  memory usage stays flat regardless of size.
+#  Frontend should accept any size too (no JS
+#  file size validation that blocks large files).
+# ─────────────────────────────────────────────
+from fastapi import Request
+from starlette.middleware.base import BaseHTTPMiddleware
+
+class NoSizeLimitMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        request._body_size_limit = None   # disable Starlette's default cap
+        return await call_next(request)
 
 # ─────────────────────────────────────────────
 #  Label → UI display mapping
@@ -91,7 +106,7 @@ def _run_analysis(source_path: str) -> tuple:
     Clip → detect → return (authenticity, label, detail, ui_text, color, certify).
     Cleans up the temp clip automatically.
     """
-    clip_path = clip_first_10_seconds(source_path)
+    clip_path = clip_first_6_seconds(source_path)
     try:
         authenticity, label, detail = run_detection(clip_path)
     finally:
@@ -114,8 +129,10 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
     cid      = str(uuid.uuid4())
     raw_path = f"{UPLOAD_DIR}/{cid}_{file.filename}"
 
+    # Stream directly to disk — no memory limit regardless of file size
     with open(raw_path, "wb") as f:
-        f.write(await file.read())
+        while chunk := await file.read(1024 * 1024):  # 1MB chunks
+            f.write(chunk)
 
     sha256 = _sha256(raw_path)
 

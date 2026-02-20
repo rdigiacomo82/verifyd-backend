@@ -3,7 +3,7 @@ services:
     name: verifyd-backend
     runtime: python
     buildCommand: bash build.sh
-    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT --timeout-keep-alive 120
     envVars:
       - key: BASE_URL
         value: https://verifyd-backend.onrender.com
@@ -12,6 +12,24 @@ services:
       - key: FFPROBE_BIN
         value: /opt/render/project/.render/ffmpeg/ffprobe
       - key: MAX_UPLOAD_MB
-        value: "500"
+        value: "0"   # 0 = no limit — backend streams to disk in 1MB chunks
       - key: PATH
         value: /opt/render/project/.render/ffmpeg:/usr/local/bin:/usr/bin:/bin
+      - key: DB_PATH
+        value: /var/data/certificates.db
+      - key: DATA_ROOT
+        value: /var/data
+      # Residential proxy for TikTok/Instagram downloads.
+      # Format: http://user:password@gate.smartproxy.com:10000
+      # Get one at: smartproxy.com or decodo.com (pay-per-GB, ~$4-8/GB)
+      # Leave empty to skip proxy (TikTok will fail from Render's datacenter IP).
+      - key: RESIDENTIAL_PROXY_URL
+        value: ""   # <-- fill this in after signing up
+
+    # Persistent disk — prevents videos/, certified/, and the
+    # SQLite database from being wiped on every deploy/restart.
+    # Requires Render Standard plan or above.
+    disk:
+      name: verifyd-data
+      mountPath: /var/data
+      sizeGB: 10

@@ -37,13 +37,35 @@ def download_video_ytdlp(url: str, output_path: str) -> None:
 
     Downloads the best available MP4 up to 1080p directly to output_path.
     Raises RuntimeError with a clean message on failure.
+
+    TikTok and some other platforms block datacenter IPs (like Render's).
+    Set RESIDENTIAL_PROXY_URL in your Render environment variables to route
+    downloads through a residential proxy (Smartproxy / Decodo recommended).
+    Format: http://user:password@gate.smartproxy.com:10000
     """
+    # Read proxy from environment — set this in Render dashboard
+    proxy_url = os.environ.get("RESIDENTIAL_PROXY_URL")
+
     ydl_opts = {
         "format":           "bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4][height<=1080]/best",
         "outtmpl":          output_path,
         "quiet":            True,
         "no_warnings":      True,
         "merge_output_format": "mp4",
+        # Mobile User-Agent — TikTok is more permissive with mobile requests
+        "http_headers": {
+            "User-Agent": (
+                "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+                "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+                "Version/17.0 Mobile/15E148 Safari/604.1"
+            ),
+        },
+        # Browser impersonation — required for TikTok bot detection bypass.
+        # curl_cffi must be installed (in requirements.txt).
+        "impersonate":      "chrome",
+        # Residential proxy — bypasses TikTok's datacenter IP blocking.
+        # Only applied when RESIDENTIAL_PROXY_URL env var is set.
+        **({"proxy": proxy_url} if proxy_url else {}),
         # Respect platform rate limits
         "sleep_interval":   1,
         "max_sleep_interval": 3,
@@ -76,9 +98,9 @@ def download_video_ytdlp(url: str, output_path: str) -> None:
         raise RuntimeError(f"Could not download video: {msg[:200]}")
 
 
-def clip_first_10_seconds(input_path: str) -> str:
+def clip_first_6_seconds(input_path: str) -> str:
     """
-    Stream-copy the first 10 seconds of input_path into a temp file.
+    Stream-copy the first 6 seconds of input_path into a temp file.
     Returns the path to the clipped file.
     Caller is responsible for deleting it after use.
     Raises ValueError (not RuntimeError) if the input file is not valid video.
@@ -95,7 +117,7 @@ def clip_first_10_seconds(input_path: str) -> str:
     cmd = [
         FFMPEG_BIN, "-y",
         "-i", input_path,
-        "-t", "10",
+        "-t", "6",
         "-c", "copy",
         "-movflags", "+faststart",
         clipped,
