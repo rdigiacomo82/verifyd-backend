@@ -7,7 +7,6 @@ import uuid
 import subprocess
 import logging
 import yt_dlp
-from yt_dlp.networking.impersonate import ImpersonateTarget
 
 from config import FFMPEG_BIN, FFPROBE_BIN, TMP_DIR
 
@@ -65,7 +64,7 @@ def download_video_ytdlp(url: str, output_path: str) -> None:
         # Only applied when RESIDENTIAL_PROXY_URL env var is set.
         # Browser impersonation — required for TikTok bot detection bypass.
         # curl-cffi>=0.14.0 supports Python 3.13 (in requirements.txt).
-        "impersonate": ImpersonateTarget("chrome", "126"),
+        "impersonate": "chrome131",  # confirmed in curl_cffi 0.14 target list
         **({"proxy": proxy_url} if proxy_url else {}),
         # Respect platform rate limits
         "sleep_interval":   1,
