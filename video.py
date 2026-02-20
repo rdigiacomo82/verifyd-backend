@@ -83,6 +83,11 @@ def download_video_ytdlp(url: str, output_path: str) -> None:
         "js_runtimes":      {"node": {"path": "/opt/render/project/.render/node/bin/node"}},
     }
 
+    # Remove temp file if it exists — yt-dlp skips download if file already exists
+    # even if it's 0 bytes from a previous failed attempt
+    if os.path.exists(output_path):
+        os.remove(output_path)
+
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
