@@ -43,8 +43,11 @@ def download_video_ytdlp(url: str, output_path: str) -> None:
     downloads through a residential proxy (Smartproxy / Decodo recommended).
     Format: http://user:password@gate.smartproxy.com:10000
     """
-    # Read proxy from environment — set this in Render dashboard
-    proxy_url = os.environ.get("RESIDENTIAL_PROXY_URL")
+    # Read proxy from environment — only apply for platforms that need it
+    # YouTube, Reddit, X etc. work fine without proxy and shouldn't use bandwidth
+    PROXY_DOMAINS = ("tiktok.com", "instagram.com")
+    needs_proxy = any(d in url for d in PROXY_DOMAINS)
+    proxy_url = os.environ.get("RESIDENTIAL_PROXY_URL") if needs_proxy else None
 
     ydl_opts = {
         "format":           "bestvideo[ext=mp4][height<=480]+bestaudio[ext=m4a]/best[ext=mp4][height<=480]/best[height<=480]/best",

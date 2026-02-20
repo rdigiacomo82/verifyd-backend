@@ -23,8 +23,12 @@ for _dir in (UPLOAD_DIR, CERT_DIR, TMP_DIR):
     os.makedirs(_dir, exist_ok=True)
 
 # ── ffmpeg binaries ──────────────────────────────────────────
-FFMPEG_BIN  = os.environ.get("FFMPEG_BIN",  "ffmpeg")
-FFPROBE_BIN = os.environ.get("FFPROBE_BIN", "ffprobe")
+# build.sh installs ffmpeg to /opt/render/project/.render/ffmpeg/
+# Fall back to system ffmpeg if that path doesn't exist (local dev)
+_RENDER_FFMPEG = "/opt/render/project/.render/ffmpeg/ffmpeg"
+_RENDER_FFPROBE = "/opt/render/project/.render/ffmpeg/ffprobe"
+FFMPEG_BIN  = os.environ.get("FFMPEG_BIN",  _RENDER_FFMPEG if os.path.exists(_RENDER_FFMPEG) else "ffmpeg")
+FFPROBE_BIN = os.environ.get("FFPROBE_BIN", _RENDER_FFPROBE if os.path.exists(_RENDER_FFPROBE) else "ffprobe")
 
 # ── Upload limits ─────────────────────────────────────────────
 MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "500"))
