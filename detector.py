@@ -1,4 +1,4 @@
-# ============================================================
+## ============================================================
 #  VeriFYD — detector.py  (recalibrated v2)
 #
 #  Recalibration based on real test data:
@@ -378,6 +378,41 @@ def detect_ai(video_path: str) -> int:
         ai_score += 4
     elif residual_var_of_var > 50000:
         ai_score -= 4
+
+    # ── AUTHENTICITY BOOSTERS ─────────────────────────────────────────────────
+    # These signals reward clear real-camera characteristics.
+    # They push genuine real videos UP (lower ai_score) without pulling AI up.
+
+    # Booster A: Inter-frame residual variance-of-variance (rvov)
+    # Real cameras produce irregular frame-to-frame residuals due to natural
+    # sensor noise, micro-motion, and lighting flicker.
+    # Real: 10k–60k   AI (static): ~5k   AI (complex): can be high too
+    # Only use as a strong negative signal for clearly real-looking values.
+    if residual_var_of_var > 40000:
+        ai_score -= 12   # very chaotic inter-frame residuals = real camera
+    elif residual_var_of_var > 10000:
+        ai_score -= 7    # moderately chaotic = likely real
+
+    # Booster B: Motion variance (mvar)
+    # AI Cat showed extremely HIGH mvar (147) — erratic AI motion.
+    # Real handheld: moderate and consistent (9–50).
+    # Already partially handled above; add a downward push for natural range.
+    if motion_var > 100:
+        ai_score += 10   # erratic motion = AI artifact
+    elif 0 < motion_var < 15:
+        ai_score -= 10   # very consistent, low motion = real static shot
+    elif motion_var < 60:
+        ai_score -= 4    # natural moderate motion range = real
+
+    # Booster C: Histogram temporal jitter (scene content change)
+    # Real videos: richer scene change (0.15–0.25+)
+    # AI videos:   smoother transitions, lower jitter (0.05–0.12)
+    if avg_temporal_jitter > 0.18:
+        ai_score -= 10   # active real-world scene content change
+    elif avg_temporal_jitter > 0.12:
+        ai_score -= 5
+    elif avg_temporal_jitter < 0.05 and len(temporal_diffs) > 3:
+        ai_score += 6    # suspiciously smooth = AI temporal blending
 
     ai_score = max(0.0, min(100.0, ai_score))
     log.info("Primary AI score: %.0f", ai_score)
