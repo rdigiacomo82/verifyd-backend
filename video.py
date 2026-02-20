@@ -47,7 +47,7 @@ def download_video_ytdlp(url: str, output_path: str) -> None:
     proxy_url = os.environ.get("RESIDENTIAL_PROXY_URL")
 
     ydl_opts = {
-        "format":           "worst[ext=mp4]/worstvideo[ext=mp4]+worstaudio/best[ext=mp4][height<=480]/best",  # low quality = fast
+        "format":           "bestvideo[ext=mp4][height<=480]+bestaudio[ext=m4a]/best[ext=mp4][height<=480]/best[height<=480]/best",
         "outtmpl":          output_path,
         "quiet":            True,
         "no_warnings":      True,
