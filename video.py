@@ -60,9 +60,6 @@ def download_video_ytdlp(url: str, output_path: str) -> None:
                 "Version/17.0 Mobile/15E148 Safari/604.1"
             ),
         },
-        # Browser impersonation — required for TikTok bot detection bypass.
-        # curl_cffi must be installed (in requirements.txt).
-        "impersonate":      "chrome",
         # Residential proxy — bypasses TikTok's datacenter IP blocking.
         # Only applied when RESIDENTIAL_PROXY_URL env var is set.
         **({"proxy": proxy_url} if proxy_url else {}),
