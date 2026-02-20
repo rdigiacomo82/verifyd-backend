@@ -40,8 +40,8 @@ echo "ffprobe OK: $(ffprobe -version 2>&1 | head -1)"
 # ── Python dependencies ───────────────────────────────────────
 pip install --upgrade pip
 pip install -r requirements.txt
-# Force latest yt-dlp — TikTok extractor breaks frequently with old versions
-pip install --upgrade yt-dlp
+# Install yt-dlp with curl-cffi extra so impersonation handler is registered
+pip install --upgrade "yt-dlp[default,curl-cffi]"
 
 # Smoke-test key imports
 python -c "import cv2, numpy, fastapi, uvicorn, yt_dlp, curl_cffi; print('Python deps OK')"

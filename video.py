@@ -62,9 +62,8 @@ def download_video_ytdlp(url: str, output_path: str) -> None:
         },
         # Residential proxy — bypasses TikTok's datacenter IP blocking.
         # Only applied when RESIDENTIAL_PROXY_URL env var is set.
-        # Browser impersonation — required for TikTok bot detection bypass.
-        # curl-cffi>=0.14.0 supports Python 3.13 (in requirements.txt).
-        "impersonate": "chrome131",  # confirmed in curl_cffi 0.14 target list
+        # curl_cffi is installed via yt-dlp[default,curl-cffi] extra in build.sh
+        # so yt-dlp's TikTok extractor auto-uses it for impersonation.
         **({"proxy": proxy_url} if proxy_url else {}),
         # Respect platform rate limits
         "sleep_interval":   1,
