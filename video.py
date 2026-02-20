@@ -54,6 +54,7 @@ def download_video_ytdlp(url: str, output_path: str) -> None:
         "outtmpl":          output_path,
         "quiet":            False,
         "no_warnings":      False,
+        "no_cache_dir":     True,   # prevent stale cached downloads
         "verbose":          True,
         "merge_output_format": "mp4",
         # Mobile User-Agent — TikTok is more permissive with mobile requests
