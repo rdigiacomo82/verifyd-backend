@@ -47,7 +47,7 @@ def download_video_ytdlp(url: str, output_path: str) -> None:
     proxy_url = os.environ.get("RESIDENTIAL_PROXY_URL")
 
     ydl_opts = {
-        "format":           "bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4][height<=1080]/best",
+        "format":           "worst[ext=mp4]/worstvideo[ext=mp4]+worstaudio/best[ext=mp4][height<=480]/best",  # low quality = fast
         "outtmpl":          output_path,
         "quiet":            True,
         "no_warnings":      True,
@@ -76,46 +76,18 @@ def download_video_ytdlp(url: str, output_path: str) -> None:
         "ffmpeg_location":  os.path.dirname(FFMPEG_BIN),
     }
 
-    # Build list of proxy URLs to try — rotate ports on 502 errors
-    proxy_attempts = [proxy_url] if proxy_url else [None]
-    if proxy_url:
-        # Add fallback ports in case one gateway node is down
-        base = proxy_url.rsplit(":", 1)[0]  # strip port
-        for port in ["10000", "10002", "10003"]:
-            alt = f"{base}:{port}"
-            if alt != proxy_url:
-                proxy_attempts.append(alt)
-
-    last_error = None
-    for attempt_proxy in proxy_attempts:
-        attempt_opts = {**ydl_opts}
-        if attempt_proxy:
-            attempt_opts["proxy"] = attempt_proxy
-        elif "proxy" in attempt_opts:
-            del attempt_opts["proxy"]
-
-        try:
-            with yt_dlp.YoutubeDL(attempt_opts) as ydl:
-                ydl.download([url])
-            return  # success
-        except yt_dlp.utils.DownloadError as e:
-            msg = str(e)
-            # Don't retry on non-proxy errors
-            if "502" not in msg and "407" not in msg and "proxy" not in msg.lower():
-                last_error = msg
-                break
-            last_error = msg
-            log.warning("Proxy attempt failed (%s), trying next...", attempt_proxy)
-            continue
-
-    msg = last_error or "Unknown error"
-    # Translate common yt-dlp errors into user-friendly messages
-    if "Private video" in msg or "private" in msg.lower():
-        raise RuntimeError("This video is private and cannot be analyzed.")
-    if "login" in msg.lower() or "sign in" in msg.lower():
-        raise RuntimeError("This video requires a login and cannot be accessed.")
-    if "not available" in msg.lower() or "unavailable" in msg.lower():
-        raise RuntimeError("This video is unavailable or has been removed.")
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+    except yt_dlp.utils.DownloadError as e:
+        msg = str(e)
+        # Translate common yt-dlp errors into user-friendly messages
+        if "Private video" in msg or "private" in msg.lower():
+            raise RuntimeError("This video is private and cannot be analyzed.")
+        if "login" in msg.lower() or "sign in" in msg.lower():
+            raise RuntimeError("This video requires a login and cannot be accessed.")
+        if "not available" in msg.lower() or "unavailable" in msg.lower():
+            raise RuntimeError("This video is unavailable or has been removed.")
         if "Unsupported URL" in msg:
             raise RuntimeError(
                 "This URL is not supported. Please try a direct .mp4 link or "
