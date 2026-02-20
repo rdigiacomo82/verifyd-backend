@@ -87,6 +87,20 @@ def home():
 def health():
     return {"status": "ok"}
 
+@app.get("/debug-proxy")
+def debug_proxy():
+    import re
+    raw = os.environ.get("RESIDENTIAL_PROXY_URL", "NOT SET")
+    masked = re.sub(r':(.*?)@', ':***@', raw)
+    return {
+        "raw_length":        len(raw),
+        "masked":            masked,
+        "has_at_sign":       "@" in raw,
+        "has_plus":          "+" in raw,
+        "has_encoded_plus":  "%2B" in raw,
+        "starts_with_http":  raw.startswith("http"),
+    }
+
 # ─────────────────────────────────────────────
 #  Helpers
 # ─────────────────────────────────────────────
@@ -339,4 +353,3 @@ def analyze_link(video_url: str):
     finally:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
-
