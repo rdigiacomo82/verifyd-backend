@@ -49,8 +49,9 @@ def download_video_ytdlp(url: str, output_path: str) -> None:
     ydl_opts = {
         "format":           "bestvideo[ext=mp4][height<=480]+bestaudio[ext=m4a]/best[ext=mp4][height<=480]/best[height<=480]/best",
         "outtmpl":          output_path,
-        "quiet":            True,
-        "no_warnings":      True,
+        "quiet":            False,
+        "no_warnings":      False,
+        "verbose":          True,
         "merge_output_format": "mp4",
         # Mobile User-Agent — TikTok is more permissive with mobile requests
         "http_headers": {
