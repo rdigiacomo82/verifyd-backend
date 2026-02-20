@@ -78,6 +78,8 @@ def download_video_ytdlp(url: str, output_path: str) -> None:
         "writesubtitles":   False,
         # Use ffmpeg from our configured path for merging
         "ffmpeg_location":  os.path.dirname(FFMPEG_BIN),
+        # Node.js for YouTube JS challenge solving (installed by build.sh)
+        "js_runtimes":      {"node": {"path": "/opt/render/project/.render/node/bin/node"}},
     }
 
     try:
@@ -161,3 +163,4 @@ def stamp_video(input_path: str, output_path: str, cert_id: str) -> None:
     if r.returncode != 0:
         log.error("stamp failed: %s", r.stderr.decode()[-300:])
         raise RuntimeError(f"ffmpeg stamp failed: {r.stderr.decode()[-300:]}")
+

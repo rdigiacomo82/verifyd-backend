@@ -37,11 +37,29 @@ if ! command -v ffprobe &> /dev/null; then
 fi
 echo "ffprobe OK: $(ffprobe -version 2>&1 | head -1)"
 
+# ── Node.js (required for YouTube JS challenge solving) ──────
+NODE_DIR="/opt/render/project/.render/node"
+if [ ! -f "$NODE_DIR/bin/node" ]; then
+    echo "Installing Node.js..."
+    mkdir -p "$NODE_DIR"
+    curl -sL "https://nodejs.org/dist/v20.19.0/node-v20.19.0-linux-x64.tar.xz"         -o /tmp/node.tar.xz
+    tar -xf /tmp/node.tar.xz -C /tmp
+    cp -r /tmp/node-v20.19.0-linux-x64/* "$NODE_DIR/"
+    rm -rf /tmp/node*
+    echo "Node.js installed: $($NODE_DIR/bin/node --version)"
+else
+    echo "Node.js already present — skipping"
+fi
+export PATH="$NODE_DIR/bin:$PATH"
+echo "node OK: $(node --version)"
+
 # ── Python dependencies ───────────────────────────────────────
 pip install --upgrade pip
 pip install -r requirements.txt
 # Install yt-dlp with curl-cffi extra so impersonation handler is registered
 pip install --upgrade "yt-dlp[default,curl-cffi]"
+# Install yt-dlp-ejs for YouTube JS challenge solving (requires node)
+pip install --upgrade yt-dlp-ejs
 
 # Smoke-test key imports
 python -c "import cv2, numpy, fastapi, uvicorn, yt_dlp, curl_cffi; print('Python deps OK')"
