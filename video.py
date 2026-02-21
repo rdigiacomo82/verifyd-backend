@@ -33,43 +33,31 @@ def is_valid_video(path: str) -> bool:
 def download_video_ytdlp(url: str, output_path: str) -> None:
     """
     Download a video from any yt-dlp supported platform
-    (TikTok, Instagram, YouTube, Facebook, Twitter/X, and 1000+ more).
+    (YouTube, Facebook, Twitter/X, Reddit, Vimeo, and 1000+ more).
 
-    Downloads the best available MP4 up to 1080p directly to output_path.
+    Downloads the best available MP4 up to 480p directly to output_path.
     Raises RuntimeError with a clean message on failure.
 
-    TikTok and some other platforms block datacenter IPs (like Render's).
-    Set RESIDENTIAL_PROXY_URL in your Render environment variables to route
-    downloads through a residential proxy (Smartproxy / Decodo recommended).
-    Format: http://user:password@gate.smartproxy.com:10000
+    TikTok and Instagram block datacenter IPs (like Render's) and require
+    a residential proxy — handled separately via RESIDENTIAL_PROXY_URL env var.
     """
-    # Read proxy from environment — only apply for platforms that need it
-    # YouTube, Reddit, X etc. work fine without proxy and shouldn't use bandwidth
+    # Proxy: only apply for platforms that actually need it
     PROXY_DOMAINS = ("tiktok.com", "instagram.com")
     needs_proxy = any(d in url for d in PROXY_DOMAINS)
-    proxy_url = os.environ.get("RESIDENTIAL_PROXY_URL") if needs_proxy else None
+    proxy_url = os.environ.get("RESIDENTIAL_PROXY_URL", "").strip() if needs_proxy else None
 
     ydl_opts = {
+        # Best quality up to 480p — good balance of speed and signal quality.
+        # Falls back progressively to ensure something always downloads.
         "format":           "bestvideo[ext=mp4][height<=480]+bestaudio[ext=m4a]/best[ext=mp4][height<=480]/best[height<=480]/best",
         "outtmpl":          output_path,
         "quiet":            False,
         "no_warnings":      False,
-        "no_cache_dir":     True,   # prevent stale cached downloads
-        "verbose":          True,
+        "no_cache_dir":     True,      # Prevent stale 0-byte cached files
+        "verbose":          True,      # Keep on for diagnostics — turn off once stable
         "merge_output_format": "mp4",
-        # Mobile User-Agent — TikTok is more permissive with mobile requests
-        "http_headers": {
-            "User-Agent": (
-                "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
-                "AppleWebKit/605.1.15 (KHTML, like Gecko) "
-                "Version/17.0 Mobile/15E148 Safari/604.1"
-            ),
-        },
-        # Residential proxy — bypasses TikTok's datacenter IP blocking.
-        # Only applied when RESIDENTIAL_PROXY_URL env var is set.
-        # curl_cffi is installed via yt-dlp[default,curl-cffi] extra in build.sh
-        # so yt-dlp's TikTok extractor auto-uses it for impersonation.
-        **({"proxy": proxy_url} if proxy_url else {}),
+        # Socket timeout — prevents hung downloads from blocking the server
+        "socket_timeout":   30,
         # Respect platform rate limits
         "sleep_interval":   1,
         "max_sleep_interval": 3,
@@ -77,14 +65,16 @@ def download_video_ytdlp(url: str, output_path: str) -> None:
         "writethumbnail":   False,
         "writeinfojson":    False,
         "writesubtitles":   False,
-        # Use ffmpeg from our configured path for merging
+        # Use ffmpeg from our configured path for merging separate video+audio streams
         "ffmpeg_location":  os.path.dirname(FFMPEG_BIN),
         # Node.js for YouTube JS challenge solving (installed by build.sh)
         "js_runtimes":      {"node": {"path": "/opt/render/project/.render/node/bin/node"}},
+        # Proxy only applied when RESIDENTIAL_PROXY_URL is set AND platform needs it
+        **({"proxy": proxy_url} if proxy_url else {}),
     }
 
-    # Remove temp file if it exists — yt-dlp skips download if file already exists
-    # even if it's 0 bytes from a previous failed attempt
+    # Delete temp file if it exists from a previous failed request.
+    # yt-dlp sees the file, assumes it's already downloaded, and returns 0 bytes.
     if os.path.exists(output_path):
         os.remove(output_path)
 
@@ -103,7 +93,7 @@ def download_video_ytdlp(url: str, output_path: str) -> None:
         if "Unsupported URL" in msg:
             raise RuntimeError(
                 "This URL is not supported. Please try a direct .mp4 link or "
-                "a URL from TikTok, Instagram, YouTube, or similar platforms."
+                "a URL from YouTube, Twitter/X, Reddit, Vimeo, or similar platforms."
             )
         log.error("yt-dlp download error: %s", msg)
         raise RuntimeError(f"Could not download video: {msg[:200]}")
