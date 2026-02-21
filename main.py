@@ -92,13 +92,13 @@ def debug_proxy():
     import re
     raw = os.environ.get("RESIDENTIAL_PROXY_URL", "NOT SET")
     masked = re.sub(r':(.*?)@', ':***@', raw)
+    rapidapi_key = os.environ.get("RAPIDAPI_KEY", "")
     return {
-        "raw_length":        len(raw),
-        "masked":            masked,
-        "has_at_sign":       "@" in raw,
-        "has_plus":          "+" in raw,
-        "has_encoded_plus":  "%2B" in raw,
-        "starts_with_http":  raw.startswith("http"),
+        "proxy_raw_length":   len(raw),
+        "proxy_masked":       masked,
+        "rapidapi_key_set":   bool(rapidapi_key),
+        "rapidapi_key_length": len(rapidapi_key),
+        "rapidapi_key_preview": rapidapi_key[:8] + "..." if rapidapi_key else "NOT SET",
     }
 
 # ─────────────────────────────────────────────
@@ -353,3 +353,4 @@ def analyze_link(video_url: str):
     finally:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
+
