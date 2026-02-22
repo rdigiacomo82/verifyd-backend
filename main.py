@@ -447,3 +447,134 @@ def analyze_link(video_url: str, email: str = ""):
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
 
+
+# ─────────────────────────────────────────────
+#  PayPal Webhook Handler
+#
+#  Listens for subscription events from PayPal
+#  and upgrades the user's plan automatically.
+#
+#  Register this URL in PayPal Developer Dashboard:
+#  https://verifyd-backend.onrender.com/paypal-webhook/
+#
+#  Events to subscribe to:
+#    - BILLING.SUBSCRIPTION.ACTIVATED
+#    - BILLING.SUBSCRIPTION.RENEWED
+#    - BILLING.SUBSCRIPTION.CANCELLED
+#    - BILLING.SUBSCRIPTION.EXPIRED
+# ─────────────────────────────────────────────
+
+from database import upgrade_user_plan, reset_period_uses
+
+# Map PayPal plan IDs → VeriFYD plan names
+def _get_plan_map() -> dict:
+    return {
+        os.environ.get("PAYPAL_PLAN_ID",     ""): "creator",
+        os.environ.get("PAYPAL_PLAN_ID_PRO", ""): "pro",
+    }
+
+
+async def _verify_paypal_webhook(request: Request) -> bool:
+    """
+    Verify the webhook came from PayPal using their verification API.
+    Returns True if valid, False if suspect.
+    """
+    try:
+        client_id  = os.environ.get("PAYPAL_CLIENT_ID", "")
+        secret     = os.environ.get("PAYPAL_SECRET", "")
+        mode       = os.environ.get("PAYPAL_MODE", "live")
+        base_url   = "https://api.paypal.com" if mode == "live" else "https://api.sandbox.paypal.com"
+
+        # Get access token
+        token_resp = requests.post(
+            f"{base_url}/v1/oauth2/token",
+            auth=(client_id, secret),
+            data={"grant_type": "client_credentials"},
+            timeout=10,
+        )
+        access_token = token_resp.json().get("access_token", "")
+        if not access_token:
+            log.warning("PayPal webhook: could not get access token")
+            return False
+
+        body = await request.body()
+        headers = request.headers
+
+        verify_resp = requests.post(
+            f"{base_url}/v1/notifications/verify-webhook-signature",
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type":  "application/json",
+            },
+            json={
+                "transmission_id":   headers.get("paypal-transmission-id", ""),
+                "transmission_time": headers.get("paypal-transmission-time", ""),
+                "cert_url":          headers.get("paypal-cert-url", ""),
+                "auth_algo":         headers.get("paypal-auth-algo", ""),
+                "transmission_sig":  headers.get("paypal-transmission-sig", ""),
+                "webhook_id":        os.environ.get("PAYPAL_WEBHOOK_ID", ""),
+                "webhook_event":     body.decode("utf-8"),
+            },
+            timeout=10,
+        )
+        result = verify_resp.json().get("verification_status", "")
+        return result == "SUCCESS"
+
+    except Exception as e:
+        log.warning("PayPal webhook verification error: %s", e)
+        return False
+
+
+@app.post("/paypal-webhook/")
+async def paypal_webhook(request: Request):
+    """
+    Receives PayPal subscription lifecycle events and updates user plans.
+    """
+    # Verify signature (skip if PAYPAL_WEBHOOK_ID not set yet)
+    webhook_id = os.environ.get("PAYPAL_WEBHOOK_ID", "")
+    if webhook_id:
+        valid = await _verify_paypal_webhook(request)
+        if not valid:
+            log.warning("PayPal webhook: invalid signature — rejected")
+            return JSONResponse({"error": "invalid signature"}, status_code=400)
+
+    try:
+        payload    = await request.json()
+        event_type = payload.get("event_type", "")
+        resource   = payload.get("resource", {})
+        plan_id    = resource.get("plan_id", "")
+        sub_id     = resource.get("id", "")
+
+        # Extract subscriber email
+        subscriber = resource.get("subscriber", {})
+        email      = subscriber.get("email_address", "")
+
+        log.info("PayPal webhook: %s  plan=%s  sub=%s  email=%s",
+                 event_type, plan_id, sub_id, email)
+
+        plan_map = _get_plan_map()
+        plan_name = plan_map.get(plan_id, "")
+
+        if event_type in ("BILLING.SUBSCRIPTION.ACTIVATED", "BILLING.SUBSCRIPTION.RENEWED"):
+            if not email:
+                log.warning("PayPal webhook: no email in payload")
+                return JSONResponse({"status": "no email"}, status_code=200)
+
+            if not plan_name:
+                log.warning("PayPal webhook: unknown plan_id %s", plan_id)
+                return JSONResponse({"status": "unknown plan"}, status_code=200)
+
+            upgrade_user_plan(email, plan_name, paypal_sub_id=sub_id)
+            log.info("Upgraded %s to %s (sub: %s)", email, plan_name, sub_id)
+
+        elif event_type in ("BILLING.SUBSCRIPTION.CANCELLED", "BILLING.SUBSCRIPTION.EXPIRED"):
+            if email:
+                upgrade_user_plan(email, "free")
+                log.info("Downgraded %s to free (sub cancelled/expired)", email)
+
+        return JSONResponse({"status": "ok"}, status_code=200)
+
+    except Exception as e:
+        log.exception("PayPal webhook processing error: %s", e)
+        return JSONResponse({"error": "processing error"}, status_code=500)
+
