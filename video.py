@@ -13,19 +13,29 @@ from config import FFMPEG_BIN, FFPROBE_BIN, TMP_DIR
 
 log = logging.getLogger("verifyd.video")
 
-# ── RapidAPI config ───────────────────────────────────────────
+# ── SMVD RapidAPI config ──────────────────────────────────────
+# Social Media Video Downloader by Emmanuel David
 RAPIDAPI_KEY  = os.environ.get("RAPIDAPI_KEY", "")
-RAPIDAPI_HOST = "popular-video-downloader.p.rapidapi.com"
-RAPIDAPI_PREMIUM_URL = "https://popular-video-downloader.p.rapidapi.com/premium"
-RAPIDAPI_GENERAL_URL = "https://popular-video-downloader.p.rapidapi.com/general"
+SMVD_HOST     = "social-media-video-downloader.p.rapidapi.com"
+SMVD_BASE     = "https://social-media-video-downloader.p.rapidapi.com"
 
-# Platforms RapidAPI handles — everything else falls through to yt-dlp
-RAPIDAPI_DOMAINS = (
+# Platforms SMVD handles
+SMVD_DOMAINS = (
     "youtube.com", "youtu.be",
     "tiktok.com",
     "instagram.com",
-    "twitter.com", "x.com", "t.co",
     "facebook.com", "fb.watch",
+)
+
+# yt-dlp handles these without issues
+YTDLP_DOMAINS = (
+    "twitter.com", "x.com", "t.co",
+    "reddit.com", "v.redd.it",
+    "twitch.tv",
+    "vimeo.com",
+    "dailymotion.com",
+    "streamable.com",
+    "rumble.com",
 )
 
 
@@ -53,103 +63,325 @@ def _download_from_url(direct_url: str, output_path: str) -> None:
     r = requests.get(direct_url, stream=True, timeout=60, headers=headers)
     r.raise_for_status()
     with open(output_path, "wb") as f:
-        for chunk in r.iter_content(chunk_size=8192):
-            f.write(chunk)
+        for chunk in r.iter_content(chunk_size=65536):
+            if chunk:
+                f.write(chunk)
 
 
-def _try_rapidapi(url: str, output_path: str) -> bool:
+def _extract_video_id(url: str) -> str:
+    """Extract YouTube video ID from various URL formats."""
+    import re
+    patterns = [
+        r'(?:v=|youtu\.be/|shorts/)([a-zA-Z0-9_-]{11})',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    return ""
+
+
+def _try_smvd_youtube(url: str, output_path: str) -> bool:
     """
-    Try to download via RapidAPI Popular Video Downloader.
-    Tries Premium endpoint first, falls back to General.
-    Returns True on success, False if RapidAPI couldn't handle it.
-    Raises RuntimeError on a clean platform error (private, unavailable etc).
+    Download YouTube video via SMVD API.
+    Returns True on success, False on failure.
     """
-    if not RAPIDAPI_KEY:
-        log.warning("RAPIDAPI_KEY not set — skipping RapidAPI")
+    video_id = _extract_video_id(url)
+    if not video_id:
+        log.warning("SMVD: could not extract YouTube video ID from %s", url)
         return False
 
     headers = {
         "x-rapidapi-key":  RAPIDAPI_KEY,
-        "x-rapidapi-host": RAPIDAPI_HOST,
-        "Content-Type":    "application/json",
+        "x-rapidapi-host": SMVD_HOST,
     }
-    payload = {"url": url}
 
-    # Try Premium first, then General
-    for endpoint, label in [
-        (RAPIDAPI_PREMIUM_URL, "premium"),
-        (RAPIDAPI_GENERAL_URL, "general"),
-    ]:
+    # Request video details with 480p rendered format
+    params = {
+        "videoId":          video_id,
+        "renderableFormats": "480p",
+        "urlAccess":        "proxied",
+        "getTranscript":    "false",
+    }
+
+    log.info("SMVD YouTube: requesting video ID %s", video_id)
+    resp = requests.get(
+        f"{SMVD_BASE}/youtube/v3/video/details",
+        headers=headers,
+        params=params,
+        timeout=30,
+    )
+
+    if resp.status_code != 200:
+        log.warning("SMVD YouTube: API returned %d — %s", resp.status_code, resp.text[:200])
+        return False
+
+    data = resp.json()
+
+    if data.get("error"):
+        log.warning("SMVD YouTube: API error: %s", data["error"])
+        return False
+
+    contents = data.get("contents", [])
+    if not contents:
+        log.warning("SMVD YouTube: no contents in response")
+        return False
+
+    content = contents[0]
+
+    # ── Try renderableVideos first (pre-merged video+audio) ───
+    renderable = content.get("renderableVideos", [])
+    for rv in renderable:
+        render_config = rv.get("renderConfig", {})
+        execution_url = render_config.get("executionUrl", "")
+        status_url    = render_config.get("statusUrl", "")
+
+        if not execution_url:
+            continue
+
+        log.info("SMVD YouTube: triggering render for %s", rv.get("label", "?"))
         try:
-            log.info("RapidAPI %s: requesting %s", label, url)
-            resp = requests.post(endpoint, json=payload, headers=headers, timeout=30)
+            # Trigger render (no auth needed)
+            exec_resp = requests.get(execution_url, timeout=30)
+            if exec_resp.status_code not in (200, 202):
+                log.warning("SMVD render trigger failed: %d", exec_resp.status_code)
+                continue
 
-            if resp.status_code == 429:
-                log.warning("RapidAPI quota exceeded")
+            # Poll status via WebSocket-style HTTP polling
+            import time
+            import websocket  # websocket-client
+
+            download_url = None
+            deadline = time.time() + 120  # 2 min timeout
+
+            def on_message(ws, message):
+                nonlocal download_url
+                import json
+                try:
+                    msg = json.loads(message)
+                    log.info("SMVD render status: %s", msg.get("status"))
+                    if msg.get("status") == "done":
+                        download_url = msg.get("output", {}).get("url", "")
+                        ws.close()
+                    elif msg.get("status") in ("failed", "error"):
+                        ws.close()
+                except Exception:
+                    pass
+
+            def on_error(ws, error):
+                log.warning("SMVD render WS error: %s", error)
+                ws.close()
+
+            ws = websocket.WebSocketApp(
+                status_url,
+                on_message=on_message,
+                on_error=on_error,
+            )
+            ws.run_forever(ping_timeout=10)
+
+            if download_url:
+                log.info("SMVD YouTube: render complete, downloading")
+                _download_from_url(download_url, output_path)
+                size = os.path.getsize(output_path)
+                if size > 1024:
+                    log.info("SMVD YouTube render: success — %d bytes", size)
+                    return True
+
+        except Exception as e:
+            log.warning("SMVD render error: %s", e)
+            continue
+
+    # ── Fallback: try direct video URLs ───────────────────────
+    videos = content.get("videos", [])
+    audios = content.get("audios", [])
+
+    # Find best video at 480p or lower
+    video_url = None
+    audio_url = None
+
+    preferred = ["480p", "360p", "240p", "144p"]
+    for quality in preferred:
+        for v in videos:
+            if v.get("label", "").startswith(quality):
+                video_url = v.get("url", "")
+                break
+        if video_url:
+            break
+
+    # If no preferred quality found, take the last (lowest) video
+    if not video_url and videos:
+        video_url = videos[-1].get("url", "")
+
+    # Get audio stream
+    if audios:
+        audio_url = audios[0].get("url", "")
+
+    if not video_url:
+        log.warning("SMVD YouTube: no video URL found in response")
+        return False
+
+    # If we have separate video+audio, merge with ffmpeg
+    if audio_url and video_url != audio_url:
+        log.info("SMVD YouTube: merging video+audio with ffmpeg")
+        video_tmp = output_path + ".video.mp4"
+        audio_tmp = output_path + ".audio.m4a"
+        try:
+            _download_from_url(video_url, video_tmp)
+            _download_from_url(audio_url, audio_tmp)
+
+            cmd = [
+                FFMPEG_BIN, "-y",
+                "-i", video_tmp,
+                "-i", audio_tmp,
+                "-c:v", "copy",
+                "-c:a", "copy",
+                "-movflags", "+faststart",
+                output_path,
+            ]
+            r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+            if r.returncode != 0:
+                log.warning("SMVD ffmpeg merge failed: %s", r.stderr.decode()[-200:])
                 return False
 
-            if resp.status_code != 200:
-                log.warning("RapidAPI %s returned %d", label, resp.status_code)
-                continue
-
-            data = resp.json()
-            log.info("RapidAPI %s response keys: %s", label, list(data.keys()))
-
-            # Extract download URL from response
-            # The API returns different structures — handle all known formats
-            video_url = None
-
-            # Format 1: {"url": "https://..."}
-            if isinstance(data.get("url"), str) and data["url"].startswith("http"):
-                video_url = data["url"]
-
-            # Format 2: {"data": {"url": "..."}} or {"data": {"download_url": "..."}}
-            elif isinstance(data.get("data"), dict):
-                d = data["data"]
-                video_url = (
-                    d.get("url") or
-                    d.get("download_url") or
-                    d.get("video_url") or
-                    d.get("mp4")
-                )
-
-            # Format 3: {"medias": [{"url": "..."}]}
-            elif isinstance(data.get("medias"), list) and data["medias"]:
-                for m in data["medias"]:
-                    if isinstance(m, dict) and m.get("url", "").startswith("http"):
-                        video_url = m["url"]
-                        break
-
-            # Format 4: {"links": [{"url": "..."}]}
-            elif isinstance(data.get("links"), list) and data["links"]:
-                for lnk in data["links"]:
-                    if isinstance(lnk, dict) and lnk.get("url", "").startswith("http"):
-                        video_url = lnk["url"]
-                        break
-
-            if not video_url:
-                log.warning("RapidAPI %s: no usable video URL in response: %s", label, str(data)[:300])
-                continue
-
-            log.info("RapidAPI %s: downloading from %s", label, video_url[:80])
-            _download_from_url(video_url, output_path)
-
             size = os.path.getsize(output_path)
-            if size < 1024:
-                log.warning("RapidAPI %s: downloaded file too small (%d bytes)", label, size)
-                continue
-
-            log.info("RapidAPI %s: success — %d bytes", label, size)
+            if size > 1024:
+                log.info("SMVD YouTube merged: success — %d bytes", size)
+                return True
+        finally:
+            for f in (video_tmp, audio_tmp):
+                if os.path.exists(f):
+                    os.remove(f)
+    else:
+        # Single stream — just download directly
+        _download_from_url(video_url, output_path)
+        size = os.path.getsize(output_path)
+        if size > 1024:
+            log.info("SMVD YouTube direct: success — %d bytes", size)
             return True
 
-        except requests.exceptions.RequestException as e:
-            log.warning("RapidAPI %s request failed: %s", label, e)
-            continue
-        except Exception as e:
-            log.warning("RapidAPI %s unexpected error: %s", label, e)
-            continue
-
     return False
+
+
+def _try_smvd_tiktok(url: str, output_path: str) -> bool:
+    """Download TikTok video via SMVD API."""
+    headers = {
+        "x-rapidapi-key":  RAPIDAPI_KEY,
+        "x-rapidapi-host": SMVD_HOST,
+    }
+    params = {"url": url}
+
+    log.info("SMVD TikTok: requesting %s", url)
+    resp = requests.get(
+        f"{SMVD_BASE}/tiktok/v3/post/details",
+        headers=headers,
+        params=params,
+        timeout=30,
+    )
+
+    if resp.status_code != 200:
+        log.warning("SMVD TikTok: API returned %d", resp.status_code)
+        return False
+
+    data = resp.json()
+    if data.get("error"):
+        log.warning("SMVD TikTok: API error: %s", data["error"])
+        return False
+
+    contents = data.get("contents", [])
+    if not contents:
+        return False
+
+    videos = contents[0].get("videos", [])
+    if not videos:
+        return False
+
+    video_url = videos[0].get("url", "")
+    if not video_url:
+        return False
+
+    _download_from_url(video_url, output_path)
+    size = os.path.getsize(output_path)
+    if size > 1024:
+        log.info("SMVD TikTok: success — %d bytes", size)
+        return True
+    return False
+
+
+def _try_smvd_instagram(url: str, output_path: str) -> bool:
+    """Download Instagram video via SMVD API."""
+    import re
+    # Extract shortcode from Instagram URL
+    match = re.search(r'/(?:p|reel|reels)/([A-Za-z0-9_-]+)', url)
+    if not match:
+        log.warning("SMVD Instagram: could not extract shortcode from %s", url)
+        return False
+
+    shortcode = match.group(1)
+    headers = {
+        "x-rapidapi-key":  RAPIDAPI_KEY,
+        "x-rapidapi-host": SMVD_HOST,
+    }
+    params = {"shortcode": shortcode}
+
+    log.info("SMVD Instagram: requesting shortcode %s", shortcode)
+    resp = requests.get(
+        f"{SMVD_BASE}/instagram/v3/media/post/details",
+        headers=headers,
+        params=params,
+        timeout=30,
+    )
+
+    if resp.status_code != 200:
+        log.warning("SMVD Instagram: API returned %d", resp.status_code)
+        return False
+
+    data = resp.json()
+    if data.get("error"):
+        log.warning("SMVD Instagram: API error: %s", data["error"])
+        return False
+
+    contents = data.get("contents", [])
+    if not contents:
+        return False
+
+    videos = contents[0].get("videos", [])
+    if not videos:
+        return False
+
+    video_url = videos[0].get("url", "")
+    if not video_url:
+        return False
+
+    _download_from_url(video_url, output_path)
+    size = os.path.getsize(output_path)
+    if size > 1024:
+        log.info("SMVD Instagram: success — %d bytes", size)
+        return True
+    return False
+
+
+def _try_smvd(url: str, output_path: str) -> bool:
+    """
+    Route to the correct SMVD handler based on platform.
+    Returns True on success, False on failure.
+    """
+    if not RAPIDAPI_KEY:
+        log.warning("RAPIDAPI_KEY not set — skipping SMVD")
+        return False
+
+    try:
+        if "youtube.com" in url or "youtu.be" in url:
+            return _try_smvd_youtube(url, output_path)
+        elif "tiktok.com" in url:
+            return _try_smvd_tiktok(url, output_path)
+        elif "instagram.com" in url:
+            return _try_smvd_instagram(url, output_path)
+        else:
+            log.warning("SMVD: no handler for %s", url)
+            return False
+    except Exception as e:
+        log.warning("SMVD error: %s", e)
+        return False
 
 
 def download_video_ytdlp(url: str, output_path: str) -> None:
@@ -157,10 +389,8 @@ def download_video_ytdlp(url: str, output_path: str) -> None:
     Download a video from any supported platform to output_path.
 
     Strategy:
-      1. RapidAPI  — handles YouTube, TikTok, Instagram, Twitter/X, Facebook
-                     cleanly without bot detection issues.
-      2. yt-dlp    — fallback for everything else (Reddit, Vimeo, Twitch, etc.)
-                     and as a backup when RapidAPI fails.
+      1. SMVD RapidAPI — YouTube, TikTok, Instagram, Facebook
+      2. yt-dlp        — Twitter/X, Reddit, Vimeo, Twitch, and fallback
 
     Raises RuntimeError with a user-friendly message on failure.
     """
@@ -168,24 +398,23 @@ def download_video_ytdlp(url: str, output_path: str) -> None:
     if os.path.exists(output_path):
         os.remove(output_path)
 
-    uses_rapidapi = any(d in url for d in RAPIDAPI_DOMAINS)
+    uses_smvd = any(d in url for d in SMVD_DOMAINS)
 
-    # ── Step 1: Try RapidAPI for supported platforms ──────────
-    if uses_rapidapi:
+    # ── Step 1: Try SMVD for supported platforms ──────────────
+    if uses_smvd:
         try:
-            success = _try_rapidapi(url, output_path)
+            success = _try_smvd(url, output_path)
             if success:
                 return
-            log.info("RapidAPI failed or unavailable — falling back to yt-dlp")
+            log.info("SMVD failed — falling back to yt-dlp")
         except Exception as e:
-            log.warning("RapidAPI error: %s — falling back to yt-dlp", e)
+            log.warning("SMVD error: %s — falling back to yt-dlp", e)
 
     # ── Step 2: yt-dlp fallback ───────────────────────────────
     log.info("Using yt-dlp for: %s", url)
 
-    PROXY_DOMAINS = ("tiktok.com", "instagram.com")
-    needs_proxy = any(d in url for d in PROXY_DOMAINS)
-    proxy_url = os.environ.get("RESIDENTIAL_PROXY_URL", "").strip() if needs_proxy else None
+    if os.path.exists(output_path):
+        os.remove(output_path)
 
     ydl_opts = {
         "format":              "bestvideo[ext=mp4][height<=480]+bestaudio[ext=m4a]/best[ext=mp4][height<=480]/best[height<=480]/best",
@@ -203,12 +432,7 @@ def download_video_ytdlp(url: str, output_path: str) -> None:
         "writesubtitles":      False,
         "ffmpeg_location":     os.path.dirname(FFMPEG_BIN),
         "js_runtimes":         {"node": {"path": "/opt/render/project/.render/node/bin/node"}},
-        **({"proxy": proxy_url} if proxy_url else {}),
     }
-
-    # Must delete again — yt-dlp fallback path
-    if os.path.exists(output_path):
-        os.remove(output_path)
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:

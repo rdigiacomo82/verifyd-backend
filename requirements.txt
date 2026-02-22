@@ -22,3 +22,5 @@ requests>=2.31.0
 # See: pip install "yt-dlp[default,curl-cffi]" in build.sh
 yt-dlp>=2025.1.1
 
+# WebSocket client — used by SMVD RapidAPI render status monitoring
+websocket-client>=1.6.0
