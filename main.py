@@ -23,7 +23,9 @@ from config import (                  # single source of truth for all settings
     BASE_URL,
     UPLOAD_DIR, CERT_DIR, TMP_DIR,
 )
-from database import init_db, insert_certificate, increment_downloads
+from database import (init_db, insert_certificate, increment_downloads,
+                      get_or_create_user, get_user_status, increment_user_uses,
+                      is_valid_email, FREE_USES)
 from video import clip_first_6_seconds, stamp_video, download_video_ytdlp
 
 log = logging.getLogger("verifyd.main")
@@ -140,6 +142,20 @@ def _run_analysis(source_path: str) -> tuple:
 # ─────────────────────────────────────────────
 @app.post("/upload/")
 async def upload(file: UploadFile = File(...), email: str = Form(...)):
+    # ── Email validation ──────────────────────────────────────
+    if not is_valid_email(email):
+        return JSONResponse({"error": "Invalid email address."}, status_code=400)
+
+    # ── Usage limit check ─────────────────────────────────────
+    status = get_user_status(email)
+    if not status["allowed"]:
+        return JSONResponse({
+            "error":      "limit_reached",
+            "plan":       status["plan"],
+            "uses_left":  0,
+            "limit":      status["limit"],
+        }, status_code=402)
+
     cid      = str(uuid.uuid4())
     raw_path = f"{UPLOAD_DIR}/{cid}_{file.filename}"
 
@@ -155,6 +171,9 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
     except Exception as e:
         log.exception("Detection failed for %s", raw_path)
         return JSONResponse({"error": str(e)}, status_code=500)
+
+    # ── Count this use ────────────────────────────────────────
+    increment_user_uses(email)
 
     # Persist every result — certified or not
     insert_certificate(
@@ -234,6 +253,69 @@ def _error_html(message: str, color: str = "orange") -> str:
     """
 
 
+def _payment_required_html(email: str, plan: str) -> str:
+    return f"""
+    <html>
+    <head>
+    <style>
+      body {{ background:#0a0a0a; color:white; text-align:center;
+              padding:60px 20px; font-family:Georgia,serif; margin:0; }}
+      .card {{ background:#111; border:1px solid #2a2a2a; border-radius:16px;
+               padding:40px; max-width:500px; margin:0 auto;
+               box-shadow:0 0 60px rgba(240,165,0,0.08); }}
+      h1 {{ color:#f0a500; font-size:28px; margin-bottom:10px; }}
+      p  {{ color:#aaa; font-size:15px; line-height:1.6; }}
+      .uses {{ background:#1a1a1a; border-radius:8px; padding:12px 20px;
+               margin:20px 0; font-size:14px; color:#888; }}
+      .plan-btn {{ background:#f0a500; color:black; border:none; border-radius:8px;
+                   padding:14px 24px; font-size:14px; font-weight:bold;
+                   cursor:pointer; text-decoration:none; display:inline-block;
+                   min-width:140px; }}
+      .plan-btn:hover {{ background:#ffd166; }}
+      small {{ color:#555; font-size:12px; }}
+    </style>
+    </head>
+    <body>
+      <div class="card">
+        <h1>&#128274; Analysis Limit Reached</h1>
+        <p>You have used all <strong>{FREE_USES} free analyses</strong> on your account.</p>
+        <div class="uses">
+          Signed in as: <strong>{email}</strong><br>
+          Current plan: <strong>{plan.title()}</strong>
+        </div>
+        <p>Upgrade to continue analyzing videos:</p>
+        <div style="display:flex;gap:12px;justify-content:center;flex-wrap:wrap;margin:20px 0">
+          <a style="background:#1a1a1a;color:#f0a500;border:1px solid #f0a500;border-radius:8px;padding:12px 20px;text-decoration:none;font-size:13px;font-weight:bold;" href="https://vfvid.com/pricing">
+            Creator — $19/mo<br><small style="color:#888;font-weight:normal">100 verifications</small>
+          </a>
+          <a style="background:#f0a500;color:black;border-radius:8px;padding:12px 20px;text-decoration:none;font-size:13px;font-weight:bold;" href="https://vfvid.com/pricing">
+            Pro AI — $39/mo<br><small style="color:#333;font-weight:normal">500 verifications</small>
+          </a>
+        </div>
+        <br><br>
+        <small>Already upgraded? It may take a moment to reflect. Try again shortly.</small>
+      </div>
+      <p style="color:#333;margin-top:40px;font-size:13px">Analyzed by VeriFYD</p>
+    </body>
+    </html>
+    """
+
+
+def _invalid_email_html() -> str:
+    return """
+    <html>
+    <body style="background:#0a0a0a;color:white;text-align:center;
+                 padding:80px 20px;font-family:Arial,sans-serif">
+      <h1 style="color:#f0a500;font-size:28px">Invalid Email Address</h1>
+      <p style="color:#aaa;font-size:16px;max-width:400px;margin:20px auto">
+        Please enter a valid email address to use VeriFYD.
+      </p>
+      <p style="color:#555;margin-top:40px;font-size:13px">Analyzed by VeriFYD</p>
+    </body>
+    </html>
+    """
+
+
 # ── Platform routing ─────────────────────────────────────────────────────────
 #
 # PROXY_REQUIRED: TikTok and Instagram actively block cloud/datacenter IPs.
@@ -266,10 +348,35 @@ YTDLP_DOMAINS = (
 )
 
 
+
+@app.get("/user-status/")
+def user_status(email: str = ""):
+    """
+    Check a user's current usage status.
+    Used by the frontend to show remaining analyses.
+    """
+    if not email or not is_valid_email(email):
+        return JSONResponse({"error": "Invalid email"}, status_code=400)
+    status = get_user_status(email)
+    return status
+
+
 @app.get("/analyze-link/", response_class=HTMLResponse)
-def analyze_link(video_url: str):
+def analyze_link(video_url: str, email: str = ""):
     if not video_url.startswith("http"):
         return HTMLResponse(_error_html("Invalid URL — must start with http."), status_code=400)
+
+    # ── Email validation ──────────────────────────────────────
+    if not email or not is_valid_email(email):
+        return HTMLResponse(_invalid_email_html(), status_code=400)
+
+    # ── Usage limit check ─────────────────────────────────────
+    status = get_user_status(email)
+    if not status["allowed"]:
+        return HTMLResponse(
+            _payment_required_html(email, status["plan"]),
+            status_code=402
+        )
 
     tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
     tmp_path = tmp_file.name
