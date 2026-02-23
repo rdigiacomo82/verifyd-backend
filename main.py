@@ -480,6 +480,21 @@ def analyze_link(request: Request, video_url: str, email: str = ""):
 
         authenticity, label, detail, ui_text, color, _ = _run_analysis(tmp_path)
 
+        # ── Count this use and store result ──────────────────
+        if email != "anonymous@verifyd.com":
+            increment_user_uses(email)
+            log.info("analyze-link: counted use for %s", email)
+
+        cid = str(uuid.uuid4())
+        insert_certificate(
+            cert_id       = cid,
+            email         = email,
+            original_file = video_url[:100],
+            label         = label,
+            authenticity  = authenticity,
+            ai_score      = detail["ai_score"],
+        )
+
         html = f"""
         <html>
         <body style="background:black;color:white;text-align:center;
