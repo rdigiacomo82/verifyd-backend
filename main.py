@@ -349,6 +349,60 @@ YTDLP_DOMAINS = (
 
 
 
+
+# ─────────────────────────────────────────────
+#  Session-based email store
+#  In-memory dict: session_token → email
+#  Persists for the lifetime of the server process.
+# ─────────────────────────────────────────────
+import hashlib, time
+from fastapi.responses import JSONResponse
+
+_session_store: dict = {}  # token → {"email": str, "ts": float}
+
+def _clean_sessions():
+    """Remove sessions older than 30 days."""
+    cutoff = time.time() - (30 * 86400)
+    expired = [k for k, v in _session_store.items() if v["ts"] < cutoff]
+    for k in expired:
+        del _session_store[k]
+
+
+@app.post("/register-email/")
+async def register_email(request: Request):
+    """
+    Called by the frontend when user enters their email.
+    Returns a session token stored as a cookie on the frontend.
+    """
+    try:
+        body = await request.json()
+        email = body.get("email", "").strip()
+    except Exception:
+        return JSONResponse({"error": "invalid body"}, status_code=400)
+
+    if not is_valid_email(email):
+        return JSONResponse({"error": "invalid email"}, status_code=400)
+
+    # Create or reuse session token for this email
+    token = hashlib.sha256(f"{email}:{int(time.time() // 3600)}".encode()).hexdigest()[:32]
+    _session_store[token] = {"email": email, "ts": time.time()}
+    _clean_sessions()
+
+    get_or_create_user(email)
+    log.info("register-email: %s → token %s", email, token[:8])
+
+    response = JSONResponse({"status": "ok", "token": token})
+    response.set_cookie(
+        key="vfy_session",
+        value=token,
+        max_age=2592000,  # 30 days
+        samesite="none",
+        secure=True,
+        httponly=False,
+    )
+    return response
+
+
 @app.get("/user-status/")
 def user_status(email: str = ""):
     """
@@ -367,15 +421,15 @@ def analyze_link(request: Request, video_url: str, email: str = ""):
         return HTMLResponse(_error_html("Invalid URL — must start with http."), status_code=400)
 
     # ── Email resolution ──────────────────────────────────────
-    # Priority: 1) query param  2) cookie  3) anonymous fallback
+    # Priority: 1) query param  2) session token cookie  3) anonymous
     if not email or not is_valid_email(email):
-        cookie_email = request.cookies.get("verifyd_email", "")
-        if cookie_email and is_valid_email(cookie_email):
-            email = cookie_email
-            log.info("analyze-link: using email from cookie: %s", email)
+        session_token = request.cookies.get("vfy_session", "")
+        if session_token and session_token in _session_store:
+            email = _session_store[session_token]["email"]
+            log.info("analyze-link: using email from session: %s", email)
         else:
             email = "anonymous@verifyd.com"
-            log.info("analyze-link: no email found, using anonymous")
+            log.info("analyze-link: no session found, using anonymous")
 
     # ── Usage limit check (skip for anonymous) ────────────────
     if email != "anonymous@verifyd.com":
@@ -585,4 +639,5 @@ async def paypal_webhook(request: Request):
     except Exception as e:
         log.exception("PayPal webhook processing error: %s", e)
         return JSONResponse({"error": "processing error"}, status_code=500)
+
 
