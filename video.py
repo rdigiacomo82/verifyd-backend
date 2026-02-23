@@ -536,7 +536,7 @@ def stamp_video(input_path: str, output_path: str, cert_id: str) -> None:
             "-i", tmp_logo.name,
             "-filter_complex",
             "[1:v]scale=120:-1,format=rgba,colorchannelmixer=aa=0.75[logo];"
-            "[0:v][logo]overlay=5:5",
+            "[0:v][logo]overlay=2:2",
             "-map", "0:a?",
             "-c:v", "libx264",
             "-preset", "fast",
