@@ -362,14 +362,20 @@ def user_status(email: str = ""):
 
 
 @app.get("/analyze-link/", response_class=HTMLResponse)
-def analyze_link(video_url: str, email: str = ""):
+def analyze_link(request: Request, video_url: str, email: str = ""):
     if not video_url.startswith("http"):
         return HTMLResponse(_error_html("Invalid URL — must start with http."), status_code=400)
 
-    # ── Email validation ──────────────────────────────────────
-    # If no email provided by frontend, use anonymous tracking
+    # ── Email resolution ──────────────────────────────────────
+    # Priority: 1) query param  2) cookie  3) anonymous fallback
     if not email or not is_valid_email(email):
-        email = "anonymous@verifyd.com"
+        cookie_email = request.cookies.get("verifyd_email", "")
+        if cookie_email and is_valid_email(cookie_email):
+            email = cookie_email
+            log.info("analyze-link: using email from cookie: %s", email)
+        else:
+            email = "anonymous@verifyd.com"
+            log.info("analyze-link: no email found, using anonymous")
 
     # ── Usage limit check (skip for anonymous) ────────────────
     if email != "anonymous@verifyd.com":
