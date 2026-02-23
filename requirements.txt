@@ -13,6 +13,7 @@ python-multipart>=0.0.6
 # 4.13.0.92 is the first release with Python 3.13 support
 opencv-python-headless==4.13.0.92
 numpy>=2.0.0
+Pillow>=10.0.0
 
 # HTTP client for direct .mp4 URLs
 requests>=2.31.0
