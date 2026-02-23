@@ -536,7 +536,7 @@ def stamp_video(input_path: str, output_path: str, cert_id: str) -> None:
             "-i", tmp_logo.name,
             "-filter_complex",
             "[1:v]scale=120:-1,format=rgba,colorchannelmixer=aa=0.75[logo];"
-            "[0:v][logo]overlay=2:2",
+            "[0:v][logo]overlay=0:0",
             "-map", "0:a?",
             "-c:v", "libx264",
             "-preset", "fast",
@@ -552,4 +552,5 @@ def stamp_video(input_path: str, output_path: str, cert_id: str) -> None:
     finally:
         if os.path.exists(tmp_logo.name):
             os.remove(tmp_logo.name)
+
 
