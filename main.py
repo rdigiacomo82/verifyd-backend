@@ -367,16 +367,18 @@ def analyze_link(video_url: str, email: str = ""):
         return HTMLResponse(_error_html("Invalid URL — must start with http."), status_code=400)
 
     # ── Email validation ──────────────────────────────────────
+    # If no email provided by frontend, use anonymous tracking
     if not email or not is_valid_email(email):
-        return HTMLResponse(_invalid_email_html(), status_code=400)
+        email = "anonymous@verifyd.com"
 
-    # ── Usage limit check ─────────────────────────────────────
-    status = get_user_status(email)
-    if not status["allowed"]:
-        return HTMLResponse(
-            _payment_required_html(email, status["plan"]),
-            status_code=402
-        )
+    # ── Usage limit check (skip for anonymous) ────────────────
+    if email != "anonymous@verifyd.com":
+        status = get_user_status(email)
+        if not status["allowed"]:
+            return HTMLResponse(
+                _payment_required_html(email, status["plan"]),
+                status_code=402
+            )
 
     tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
     tmp_path = tmp_file.name
