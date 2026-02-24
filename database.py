@@ -12,7 +12,9 @@ from typing import Optional
 
 log = logging.getLogger("verifyd.db")
 
-DB_PATH = os.getenv("DB_PATH", "certificates.db")
+# Use persistent disk on Render (/data), fallback to local for development
+_DEFAULT_DB = "/data/verifyd.db" if os.path.isdir("/data") else "verifyd.db"
+DB_PATH = os.getenv("DB_PATH", _DEFAULT_DB)
 
 # ── Free tier limit ──────────────────────────────────────────
 FREE_USES = 10

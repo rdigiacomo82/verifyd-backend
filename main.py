@@ -667,7 +667,7 @@ def admin_data(key: str = ""):
 
     try:
         import sqlite3
-        db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "verifyd.db")
+        db_path = "/data/verifyd.db" if os.path.isdir("/data") else "verifyd.db"
         conn = sqlite3.connect(db_path)
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
@@ -710,7 +710,7 @@ def admin_data(key: str = ""):
 def debug_db():
     """Show all tables in the database."""
     import sqlite3
-    db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "verifyd.db")
+    db_path = "/data/verifyd.db" if os.path.isdir("/data") else "verifyd.db"
     try:
         conn = sqlite3.connect(db_path)
         cur = conn.cursor()
