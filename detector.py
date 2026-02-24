@@ -175,6 +175,7 @@ def detect_ai(video_path: str) -> int:
     saturation_scores:  List[float] = []
     flow_regularity_scores: List[float] = []
     motion_scores:      List[float] = []
+    edge_counts_temporal: List[float] = []
     gray_buffer:        List[np.ndarray] = []
 
     prev_gray = None
@@ -199,6 +200,8 @@ def detect_ai(video_path: str) -> int:
         noise_scores.append(_noise_score(gray))
         freq_scores.append(_frequency_score(gray))
         edge_scores.append(_edge_quality(gray))
+        edges_raw = cv2.Canny(gray, 50, 150)
+        edge_counts_temporal.append(float(np.sum(edges_raw > 0)))
         dct_grid_scores.append(_dct_grid_artifact(gray))
         grad_entropy_scores.append(_gradient_orientation_entropy(gray))
         texture_entropy_scores.append(_local_texture_entropy(gray))
@@ -398,13 +401,8 @@ def detect_ai(video_path: str) -> int:
     # REAL edge_std avg: 42996  range: 6853-114053
     # Real videos show much higher edge variation due to natural movement,
     # lighting changes, and camera motion. AI renders are temporally smoother.
-    edge_counts_list = []
-    for fr in frames[::3]:
-        gr = cv2.cvtColor(fr, cv2.COLOR_BGR2GRAY)
-        ed = cv2.Canny(gr, 50, 150)
-        edge_counts_list.append(float(np.sum(ed > 0)))
-    if len(edge_counts_list) > 3:
-        edge_temporal_std = float(np.std(edge_counts_list))
+    if len(edge_counts_temporal) > 3:
+        edge_temporal_std = float(np.std(edge_counts_temporal))
         if edge_temporal_std > 80000:
             ai_score -= 12    # very high edge variation = strong real indicator
         elif edge_temporal_std > 40000:
@@ -413,7 +411,7 @@ def detect_ai(video_path: str) -> int:
             ai_score -= 2     # moderate edge variation = mildly real
         elif edge_temporal_std < 7000:
             ai_score += 6     # very low edge variation = AI temporal smoothing
-        log.info("Edge temporal std: %.0f -> ai_score adjustment applied", edge_temporal_std)
+        log.info("Edge temporal std: %.0f", edge_temporal_std)
 
     # ── AUTHENTICITY BOOSTERS ─────────────────────────────────────────────────
     # These signals reward clear real-camera characteristics.
