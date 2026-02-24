@@ -59,14 +59,17 @@ def run_detection(video_path: str) -> tuple:
     log.info("GPT-4o ai_probability: %d  available: %s", gpt_ai_score, gpt_available)
 
     # ── Combined score ────────────────────────────────────────
-    if gpt_available:
+    # If GPT failed (returned 50 as neutral), use signal only.
+    # A 50 from GPT is not a real score — it's a failure placeholder.
+    gpt_failed = not gpt_available or gpt_result.get("reasoning", "").startswith("GPT analysis error")
+    if not gpt_failed:
         combined_ai_score = (
             signal_ai_score * WEIGHT_SIGNAL +
             gpt_ai_score    * WEIGHT_GPT
         )
     else:
         combined_ai_score = float(signal_ai_score)
-        log.warning("GPT-4o unavailable — using signal detector only")
+        log.warning("GPT-4o failed — using signal detector only (signal=%d)", signal_ai_score)
 
     combined_ai_score = max(0.0, min(100.0, combined_ai_score))
     authenticity = 100 - int(round(combined_ai_score))
