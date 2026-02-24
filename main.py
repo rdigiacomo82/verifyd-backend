@@ -143,7 +143,7 @@ def _run_analysis(source_path: str) -> tuple:
 import urllib.request as _urllib_req
 import urllib.parse   as _urllib_parse
 
-_ABSTRACT_KEY = os.environ.get("ABSTRACT_EMAIL_KEY", "")
+_ABSTRACT_KEY = os.environ.get("ABSTRACT_EMAIL_KEY", "") or os.environ.get("ABSTRACT_API_KEY", "")
 _email_cache: dict = {}   # cache results to avoid duplicate API calls
 
 def _verify_email_deliverable(email: str) -> tuple:
@@ -165,32 +165,32 @@ def _verify_email_deliverable(email: str) -> tuple:
 
     try:
         params = _urllib_parse.urlencode({"api_key": _ABSTRACT_KEY, "email": email_lower})
-        url = f"https://emailvalidation.abstractapi.com/v1/?{params}"
+        url = f"https://emailreputation.abstractapi.com/v1/?{params}"
         req = _urllib_req.Request(url, headers={"User-Agent": "VeriFYD/1.0"})
         with _urllib_req.urlopen(req, timeout=5) as resp:
             import json as _json
             data = _json.loads(resp.read().decode("utf-8"))
 
-        log.info("Abstract email check: %s → %s", email_lower, data)
+        log.info("Abstract email reputation check: %s → %s", email_lower, data)
 
-        # Abstract API v1 response fields:
-        # deliverability: "DELIVERABLE", "UNDELIVERABLE", "RISKY", "UNKNOWN"
-        # is_valid_format: {"value": true/false}
-        # is_disposable_email: {"value": true/false}
-        # quality_score: "0.00" to "0.99" as string
-        deliverability = str(data.get("deliverability", "UNKNOWN")).upper()
-        is_disposable  = data.get("is_disposable_email", {}).get("value", False)
-        is_valid_fmt   = data.get("is_valid_format",     {}).get("value", True)
-        quality_score  = float(data.get("quality_score", "0.70") or 0.70)
+        # Email Reputation API response fields:
+        # status: "DELIVERABLE", "UNDELIVERABLE", "RISKY", "UNKNOWN"
+        # is_disposable_email: true/false (direct boolean)
+        # is_valid_format: true/false (direct boolean)
+        # quality_score: float 0.0-1.0
+        status        = str(data.get("status", "UNKNOWN")).upper()
+        is_disposable = bool(data.get("is_disposable_email", False))
+        is_valid_fmt  = bool(data.get("is_valid_format", True))
+        quality_score = float(data.get("quality_score", 0.70) or 0.70)
 
-        log.info("Email check result: deliverability=%s disposable=%s valid_fmt=%s quality=%.2f",
-                 deliverability, is_disposable, is_valid_fmt, quality_score)
+        log.info("Email reputation result: status=%s disposable=%s valid_fmt=%s quality=%.2f",
+                 status, is_disposable, is_valid_fmt, quality_score)
 
         if not is_valid_fmt:
             result = (False, "Invalid email format.")
         elif is_disposable:
             result = (False, "Disposable or temporary email addresses are not allowed.")
-        elif deliverability == "UNDELIVERABLE":
+        elif status == "UNDELIVERABLE":
             result = (False, "This email address does not appear to exist. Please use a real email.")
         elif quality_score < 0.40:
             result = (False, "This email address could not be verified. Please use a valid email.")
