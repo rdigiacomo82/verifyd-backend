@@ -258,14 +258,18 @@ def detect_ai(video_path: str) -> int:
     ai_score = 50.0
 
     # ── 1. Sensor noise ───────────────────────────────────────────────────────
-    # RECALIBRATED: Compressed mobile real video can be LOW (200-500).
-    # Very high noise (>1500) is unusual and can indicate AI over-sharpening.
-    # Only penalize clearly AI-clean video (< 80).
-    if avg_noise < 80:
-        ai_score += 15        # extremely clean = likely AI
-    elif avg_noise < 150:
+    # RECALIBRATED v2: Real compressed mobile video noise: 68-211 (avg 120)
+    # AI video noise: 37-96 (avg 70). Threshold raised to 40 to avoid
+    # false-penalizing real compressed videos (Real_2=71, Real_3=68).
+    # High noise (>150) is a positive real indicator.
+    if avg_noise < 40:
+        ai_score += 15        # extremely clean = very likely AI
+    elif avg_noise < 60:
         ai_score += 5
-    # Note: high noise no longer strongly indicates real — compression confounds
+    elif avg_noise > 150:
+        ai_score -= 8         # high noise = real camera sensor
+    elif avg_noise > 100:
+        ai_score -= 4         # moderate-high noise = likely real
 
     # ── 2. High-frequency content ─────────────────────────────────────────────
     # Both videos scored 0.41-0.45, close together — weak signal.
@@ -341,14 +345,23 @@ def detect_ai(video_path: str) -> int:
         ai_score -= 5         # very desaturated real footage
 
     # ── 9. Motion amount ─────────────────────────────────────────────────────
-    if avg_motion < 2:
-        ai_score += 8
-    if motion_var < 0.5 and len(motion_scores) > 3:
-        ai_score += 6
+    # RECALIBRATED v2: Real static shots (tripod/handheld) can also have
+    # very low motion. Only penalize if motion AND hist_jitter are both low
+    # (compound signal), not motion alone.
+    if avg_motion < 2 and avg_temporal_jitter < 0.005:
+        ai_score += 10        # both near-zero = very suspicious AI
+    elif avg_motion < 2 and avg_temporal_jitter < 0.015:
+        ai_score += 5         # low motion + low scene change = possibly AI
+    if motion_var < 0.5 and len(motion_scores) > 3 and avg_temporal_jitter < 0.01:
+        ai_score += 4         # extremely uniform motion + no scene change
 
     # ── 10. Histogram temporal jitter ─────────────────────────────────────────
-    if avg_temporal_jitter < 0.008 and len(temporal_diffs) > 3:
-        ai_score += 8
+    # RECALIBRATED v2: Real_2 had jitter=0.002 (static shot, genuinely low).
+    # Tightened threshold to 0.003 to avoid false positives on static real video.
+    if avg_temporal_jitter < 0.003 and len(temporal_diffs) > 3:
+        ai_score += 8         # near-zero jitter = AI temporal smoothing
+    elif avg_temporal_jitter < 0.008 and len(temporal_diffs) > 3:
+        ai_score += 3         # very low jitter = mildly suspicious
     elif avg_temporal_jitter > 0.06:
         ai_score -= 6
 
@@ -378,6 +391,29 @@ def detect_ai(video_path: str) -> int:
         ai_score += 4
     elif residual_var_of_var > 50000:
         ai_score -= 4
+
+    # ── 14. Edge temporal standard deviation (NEW SIGNAL) ───────────────────
+    # STRONG DISCRIMINATOR from video analysis:
+    # AI   edge_std avg: 12847  range: 5451-20632
+    # REAL edge_std avg: 42996  range: 6853-114053
+    # Real videos show much higher edge variation due to natural movement,
+    # lighting changes, and camera motion. AI renders are temporally smoother.
+    edge_counts_list = []
+    for fr in frames[::3]:
+        gr = cv2.cvtColor(fr, cv2.COLOR_BGR2GRAY)
+        ed = cv2.Canny(gr, 50, 150)
+        edge_counts_list.append(float(np.sum(ed > 0)))
+    if len(edge_counts_list) > 3:
+        edge_temporal_std = float(np.std(edge_counts_list))
+        if edge_temporal_std > 80000:
+            ai_score -= 12    # very high edge variation = strong real indicator
+        elif edge_temporal_std > 40000:
+            ai_score -= 6     # high edge variation = likely real
+        elif edge_temporal_std > 20000:
+            ai_score -= 2     # moderate edge variation = mildly real
+        elif edge_temporal_std < 7000:
+            ai_score += 6     # very low edge variation = AI temporal smoothing
+        log.info("Edge temporal std: %.0f -> ai_score adjustment applied", edge_temporal_std)
 
     # ── AUTHENTICITY BOOSTERS ─────────────────────────────────────────────────
     # These signals reward clear real-camera characteristics.
