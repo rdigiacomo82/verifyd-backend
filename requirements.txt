@@ -25,3 +25,7 @@ yt-dlp>=2025.1.1
 
 # WebSocket client — used by SMVD RapidAPI render status monitoring
 websocket-client>=1.6.0
+
+# OpenAI GPT-4o vision analysis
+openai>=1.0.0
+

@@ -200,12 +200,20 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
             "certificate_id":     cid,
             "download_url":       f"{BASE_URL}/download/{cid}",
             "color":              color,
+            "gpt_reasoning":      detail.get("gpt_reasoning", ""),
+            "gpt_flags":          detail.get("gpt_flags", []),
+            "signal_score":       detail.get("signal_ai_score", 0),
+            "gpt_score":          detail.get("gpt_ai_score", 0),
         }
 
     return {
         "status":             ui_text,
         "authenticity_score": authenticity,
         "color":              color,
+        "gpt_reasoning":      detail.get("gpt_reasoning", ""),
+        "gpt_flags":          detail.get("gpt_flags", []),
+        "signal_score":       detail.get("signal_ai_score", 0),
+        "gpt_score":          detail.get("gpt_ai_score", 0),
     }
 
 

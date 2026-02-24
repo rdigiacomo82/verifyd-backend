@@ -3,62 +3,75 @@
 #
 #  Public-facing detection interface for the VeriFYD system.
 #
-#  This module is intentionally thin. All signal analysis lives
-#  in detector.py. This file owns:
-#    - run_detection()  → called by the rest of your system
-#    - Label thresholds (tune here without touching the engine)
-#    - Optional result packaging / logging
+#  DUAL ENGINE:
+#    1. detector.py   — signal-based analysis (noise, edges,
+#                       motion, DCT artifacts, saturation, etc.)
+#    2. gpt_vision.py — GPT-4o semantic analysis (impossible
+#                       elements, AI art artifacts, physics)
 #
-#  Usage:
-#    from detection import run_detection
-#    score, label, detail = run_detection("path/to/video.mp4")
+#  Final score = weighted combination of both engines.
+#  If GPT is unavailable, falls back to signal-only mode.
 # ============================================================
 
 import logging
-from detector import detect_ai          # ← full advanced engine
+from detector    import detect_ai
+from gpt_vision  import gpt_vision_score
 
 log = logging.getLogger("verifyd.detection")
 
 # ─────────────────────────────────────────────
 #  Label thresholds  (authenticity scale 0–100)
 #
-#  Authenticity = 100 − AI score, so:
+#  Authenticity = 100 − combined_ai_score
 #    100 = definitely real      0 = definitely AI
-#
-#  Adjust these without touching the engine in detector.py.
 # ─────────────────────────────────────────────
-THRESHOLD_REAL          = 55   # authenticity ≥ this → REAL
-THRESHOLD_UNDETERMINED  = 40   # authenticity ≥ this → UNDETERMINED
-                               # authenticity <  this → AI
+THRESHOLD_REAL         = 55
+THRESHOLD_UNDETERMINED = 40
+
+# ─────────────────────────────────────────────
+#  Engine weights
+#  Signal detector: reliable for compression/noise artifacts
+#  GPT-4o vision:   reliable for semantic/content anomalies
+# ─────────────────────────────────────────────
+WEIGHT_SIGNAL = 0.45   # 45% signal detector
+WEIGHT_GPT    = 0.55   # 55% GPT-4o vision (semantic is stronger)
 
 
 def run_detection(video_path: str) -> tuple:
     """
-    Analyze a video file and return an authenticity verdict.
-
-    Parameters
-    ----------
-    video_path : str
-        Absolute or relative path to the video file.
+    Analyze a video using dual-engine detection.
 
     Returns
     -------
-    authenticity_score : int
-        0–100.  Higher = more likely real.
-    label : str
-        One of "REAL", "UNDETERMINED", or "AI".
-    detail : dict
-        Additional metadata useful for logging or UI display.
-
-    Examples
-    --------
-    >>> score, label, detail = run_detection("clip.mp4")
-    >>> print(f"{label}  ({score}/100)")
-    AI  (55/100)
+    authenticity_score : int   0-100 (higher = more likely real)
+    label : str                "REAL", "UNDETERMINED", or "AI"
+    detail : dict              Full breakdown of both engine scores
     """
-    ai_score = detect_ai(video_path)
-    authenticity = 100 - ai_score
 
+    # ── Engine 1: Signal-based detector ──────────────────────
+    signal_ai_score = detect_ai(video_path)
+    log.info("Signal detector ai_score: %d", signal_ai_score)
+
+    # ── Engine 2: GPT-4o vision ───────────────────────────────
+    gpt_result    = gpt_vision_score(video_path)
+    gpt_ai_score  = gpt_result["ai_probability"]
+    gpt_available = gpt_result.get("available", False)
+    log.info("GPT-4o ai_probability: %d  available: %s", gpt_ai_score, gpt_available)
+
+    # ── Combined score ────────────────────────────────────────
+    if gpt_available:
+        combined_ai_score = (
+            signal_ai_score * WEIGHT_SIGNAL +
+            gpt_ai_score    * WEIGHT_GPT
+        )
+    else:
+        combined_ai_score = float(signal_ai_score)
+        log.warning("GPT-4o unavailable — using signal detector only")
+
+    combined_ai_score = max(0.0, min(100.0, combined_ai_score))
+    authenticity = 100 - int(round(combined_ai_score))
+
+    # ── Label ─────────────────────────────────────────────────
     if authenticity >= THRESHOLD_REAL:
         label = "REAL"
     elif authenticity >= THRESHOLD_UNDETERMINED:
@@ -67,16 +80,22 @@ def run_detection(video_path: str) -> tuple:
         label = "AI"
 
     detail = {
-        "ai_score":         ai_score,
+        "ai_score":         int(round(combined_ai_score)),
         "authenticity":     authenticity,
         "label":            label,
+        "signal_ai_score":  signal_ai_score,
+        "gpt_ai_score":     gpt_ai_score,
+        "gpt_available":    gpt_available,
+        "gpt_reasoning":    gpt_result.get("reasoning", ""),
+        "gpt_flags":        gpt_result.get("flags", []),
         "threshold_real":   THRESHOLD_REAL,
         "threshold_undet":  THRESHOLD_UNDETERMINED,
     }
 
     log.info(
-        "Detection complete | file=%s  ai_score=%d  authenticity=%d  label=%s",
-        video_path, ai_score, authenticity, label,
+        "Detection complete | signal=%d gpt=%d combined=%d authenticity=%d label=%s",
+        signal_ai_score, gpt_ai_score,
+        int(round(combined_ai_score)), authenticity, label,
     )
 
     return authenticity, label, detail
