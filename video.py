@@ -472,7 +472,12 @@ def clip_first_6_seconds(input_path: str) -> str:
         FFMPEG_BIN, "-y",
         "-i", input_path,
         "-t", "6",
-        "-c", "copy",
+        "-vf", "scale=iw:ih",   # normalize frame size
+        "-c:v", "libx264",
+        "-preset", "ultrafast", # fastest encoding
+        "-crf", "28",           # slightly lower quality for speed
+        "-c:a", "aac",
+        "-ar", "44100",
         "-movflags", "+faststart",
         clipped,
     ]
@@ -539,8 +544,8 @@ def stamp_video(input_path: str, output_path: str, cert_id: str) -> None:
             "[0:v][logo]overlay=W-w-2:H-h-2",
             "-map", "0:a?",
             "-c:v", "libx264",
-            "-preset", "fast",
-            "-crf", "23",
+            "-preset", "ultrafast",
+            "-crf", "26",
             "-c:a", "copy",
             "-movflags", "+faststart",
             output_path,
