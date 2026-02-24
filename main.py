@@ -138,13 +138,80 @@ def _run_analysis(source_path: str) -> tuple:
 
 
 # ─────────────────────────────────────────────
+#  Abstract API Email Validation
+# ─────────────────────────────────────────────
+import urllib.request as _urllib_req
+import urllib.parse   as _urllib_parse
+
+_ABSTRACT_KEY = os.environ.get("ABSTRACT_EMAIL_KEY", "")
+_email_cache: dict = {}   # cache results to avoid duplicate API calls
+
+def _verify_email_deliverable(email: str) -> tuple:
+    """
+    Check if email is real and deliverable using Abstract API.
+    Returns (is_valid: bool, reason: str)
+    Caches results to avoid repeated API calls for same email.
+    """
+    email_lower = email.lower().strip()
+
+    # Return cached result
+    if email_lower in _email_cache:
+        return _email_cache[email_lower]
+
+    # No API key — skip verification
+    if not _ABSTRACT_KEY:
+        log.warning("ABSTRACT_EMAIL_KEY not set — skipping deliverability check")
+        return True, "unchecked"
+
+    try:
+        params = _urllib_parse.urlencode({"api_key": _ABSTRACT_KEY, "email": email_lower})
+        url = f"https://emailvalidation.abstractapi.com/v1/?{params}"
+        req = _urllib_req.Request(url, headers={"User-Agent": "VeriFYD/1.0"})
+        with _urllib_req.urlopen(req, timeout=5) as resp:
+            import json as _json
+            data = _json.loads(resp.read().decode("utf-8"))
+
+        log.info("Abstract email check: %s → %s", email_lower, data)
+
+        # Check deliverability
+        deliverability = data.get("deliverability", "").upper()
+        is_disposable  = data.get("is_disposable_email", {}).get("value", False)
+        is_valid_fmt   = data.get("is_valid_format",     {}).get("value", True)
+        quality_score  = float(data.get("quality_score", "0") or 0)
+
+        if not is_valid_fmt:
+            result = (False, "Invalid email format.")
+        elif is_disposable:
+            result = (False, "Disposable or temporary email addresses are not allowed.")
+        elif deliverability == "UNDELIVERABLE":
+            result = (False, "This email address does not appear to exist. Please use a real email.")
+        elif quality_score < 0.50:
+            result = (False, "This email address could not be verified. Please use a valid email.")
+        else:
+            result = (True, "ok")
+
+        _email_cache[email_lower] = result
+        return result
+
+    except Exception as e:
+        log.warning("Abstract email validation error: %s — allowing email", e)
+        # On API error, allow the email (don't block users due to API issues)
+        return True, "unchecked"
+
+
+# ─────────────────────────────────────────────
 #  Routes
 # ─────────────────────────────────────────────
 @app.post("/upload/")
 async def upload(file: UploadFile = File(...), email: str = Form(...)):
-    # ── Email validation ──────────────────────────────────────
+    # ── Email format validation ───────────────────────────────
     if not is_valid_email(email):
         return JSONResponse({"error": "Invalid email address."}, status_code=400)
+
+    # ── Email deliverability check ────────────────────────────
+    is_deliverable, reason = _verify_email_deliverable(email)
+    if not is_deliverable:
+        return JSONResponse({"error": reason}, status_code=400)
 
     # ── Usage limit check ─────────────────────────────────────
     status = get_user_status(email)
