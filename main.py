@@ -741,5 +741,29 @@ def debug_db():
         return {"error": str(e)}
 
 
+@app.get("/admin-reset-user/")
+def admin_reset_user(email: str = "", key: str = ""):
+    """Reset a user's period_uses to 0 for testing."""
+    if key not in ("Honda#6915", "Honda6915", "admin2026"):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    if not email:
+        return JSONResponse({"error": "email required"}, status_code=400)
+    import sqlite3
+    from datetime import datetime, timezone
+    db_path = "/data/verifyd.db" if os.path.isdir("/data") else "verifyd.db"
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "UPDATE users SET period_uses=0, period_start=? WHERE email_lower=?",
+            (datetime.now(timezone.utc).isoformat(), email.lower())
+        )
+        conn.commit()
+        conn.close()
+        return {"status": "reset", "email": email}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+
 
 
