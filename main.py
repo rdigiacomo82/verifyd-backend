@@ -173,11 +173,18 @@ def _verify_email_deliverable(email: str) -> tuple:
 
         log.info("Abstract email check: %s → %s", email_lower, data)
 
-        # Check deliverability
-        deliverability = data.get("deliverability", "").upper()
+        # Abstract API v1 response fields:
+        # deliverability: "DELIVERABLE", "UNDELIVERABLE", "RISKY", "UNKNOWN"
+        # is_valid_format: {"value": true/false}
+        # is_disposable_email: {"value": true/false}
+        # quality_score: "0.00" to "0.99" as string
+        deliverability = str(data.get("deliverability", "UNKNOWN")).upper()
         is_disposable  = data.get("is_disposable_email", {}).get("value", False)
         is_valid_fmt   = data.get("is_valid_format",     {}).get("value", True)
-        quality_score  = float(data.get("quality_score", "0") or 0)
+        quality_score  = float(data.get("quality_score", "0.70") or 0.70)
+
+        log.info("Email check result: deliverability=%s disposable=%s valid_fmt=%s quality=%.2f",
+                 deliverability, is_disposable, is_valid_fmt, quality_score)
 
         if not is_valid_fmt:
             result = (False, "Invalid email format.")
@@ -185,7 +192,7 @@ def _verify_email_deliverable(email: str) -> tuple:
             result = (False, "Disposable or temporary email addresses are not allowed.")
         elif deliverability == "UNDELIVERABLE":
             result = (False, "This email address does not appear to exist. Please use a real email.")
-        elif quality_score < 0.50:
+        elif quality_score < 0.40:
             result = (False, "This email address could not be verified. Please use a valid email.")
         else:
             result = (True, "ok")
@@ -837,6 +844,17 @@ def admin_reset_user(email: str = "", key: str = ""):
         return {"status": "reset", "email": email}
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/test-email/")
+def test_email(email: str = "", key: str = ""):
+    """Test email validation. Admin only."""
+    if key not in ("Honda#6915", "Honda6915", "admin2026"):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    if not email:
+        return JSONResponse({"error": "email required"}, status_code=400)
+    is_valid, reason = _verify_email_deliverable(email)
+    return {"email": email, "valid": is_valid, "reason": reason}
 
 
 
