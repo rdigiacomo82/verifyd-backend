@@ -706,4 +706,40 @@ def admin_data(key: str = ""):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+@app.get("/debug-db/")
+def debug_db():
+    """Show all tables in the database."""
+    import sqlite3
+    db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "verifyd.db")
+    try:
+        conn = sqlite3.connect(db_path)
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        tables = [row[0] for row in cur.fetchall()]
+        # Try to create users table directly
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                email         TEXT    UNIQUE NOT NULL,
+                email_lower   TEXT    UNIQUE NOT NULL,
+                plan          TEXT    NOT NULL DEFAULT 'free',
+                total_uses    INTEGER NOT NULL DEFAULT 0,
+                period_uses   INTEGER NOT NULL DEFAULT 0,
+                period_start  TEXT    NOT NULL,
+                created_at    TEXT    NOT NULL,
+                last_seen     TEXT    NOT NULL,
+                paypal_sub_id TEXT,
+                notes         TEXT
+            )
+        """)
+        conn.commit()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        tables_after = [row[0] for row in cur.fetchall()]
+        conn.close()
+        return {"tables_before": tables, "tables_after": tables_after, "db_path": db_path}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+
 
