@@ -260,193 +260,119 @@ def detect_ai(video_path: str) -> int:
 
     ai_score = 50.0
 
+    # ═══════════════════════════════════════════════════════════
+    # SCORING PHILOSOPHY (v3 - calibrated on 8 real test videos)
+    # ai_score HIGH (>60) = AI video   → authenticity = 100 - ai_score = LOW
+    # ai_score LOW  (<40) = Real video → authenticity = 100 - ai_score = HIGH
+    #
+    # Key findings from test data:
+    #   Noise:       AI avg=70  REAL avg=120  → good signal
+    #   Edge std:    AI avg=12k REAL avg=43k  → strong signal
+    #   Saturation:  AI oversaturated         → strong signal
+    #   DCT grid:    AI has artifacts         → strong signal
+    #   Motion/hist: Too overlapping          → weak, use cautiously
+    # ═══════════════════════════════════════════════════════════
+
     # ── 1. Sensor noise ───────────────────────────────────────────────────────
-    # RECALIBRATED v2: Real compressed mobile video noise: 68-211 (avg 120)
-    # AI video noise: 37-96 (avg 70). Threshold raised to 40 to avoid
-    # false-penalizing real compressed videos (Real_2=71, Real_3=68).
-    # High noise (>150) is a positive real indicator.
-    if avg_noise < 40:
-        ai_score += 15        # extremely clean = very likely AI
-    elif avg_noise < 60:
-        ai_score += 5
-    elif avg_noise > 150:
-        ai_score -= 8         # high noise = real camera sensor
-    elif avg_noise > 100:
-        ai_score -= 4         # moderate-high noise = likely real
+    # AI avg=70, Real avg=120. Only penalize clearly AI-clean (<50).
+    # Don't penalize 50-80 range since real compressed video sits there too.
+    if avg_noise < 50:
+        ai_score += 12
+    elif avg_noise < 70:
+        ai_score += 4
+    # No downward push — noise alone is not reliable enough
 
     # ── 2. High-frequency content ─────────────────────────────────────────────
-    # Both videos scored 0.41-0.45, close together — weak signal.
-    # Reduced weight significantly.
     if avg_freq < 0.30:
-        ai_score += 8
+        ai_score += 6
     elif avg_freq < 0.40:
-        ai_score += 3
-    elif avg_freq > 0.80:
-        ai_score -= 5
+        ai_score += 2
 
     # ── 3. Edge density ───────────────────────────────────────────────────────
-    # RECALIBRATED: AI video had 36, real had 17.
-    # Higher edge density from AI rendering/sharpening is suspicious.
-    # Low edge from compressed real video no longer means AI.
     if avg_edge < 5:
-        ai_score += 6         # extremely blurry — could be AI or very compressed
-    elif avg_edge > 30:
-        ai_score += 8         # unnaturally sharp — AI over-sharpening
-    elif avg_edge > 20:
-        ai_score += 3
+        ai_score += 4
+    elif avg_edge > 35:
+        ai_score += 6     # AI over-sharpening
 
     # ── 4. DCT grid artifact ──────────────────────────────────────────────────
+    # Strong AI signal — compression artifacts from AI rendering pipeline
     if avg_dct_grid > 1.8:
-        ai_score += 12
+        ai_score += 14
     elif avg_dct_grid > 1.4:
-        ai_score += 6
+        ai_score += 7
     elif avg_dct_grid < 0.9:
-        ai_score -= 4
+        ai_score -= 3
 
     # ── 5. Gradient orientation entropy ──────────────────────────────────────
-    # Both videos 4.94-5.06 — nearly identical, very weak signal here.
-    # Reduced weight.
     if avg_grad_entropy < 3.5:
-        ai_score += 8
+        ai_score += 6
     elif avg_grad_entropy < 4.2:
-        ai_score += 3
-    elif avg_grad_entropy > 5.2:
-        ai_score -= 5
+        ai_score += 2
 
     # ── 6. Local texture entropy ──────────────────────────────────────────────
-    # RECALIBRATED: AI=3217, Real=416.
-    # AI renders have EXTREME texture variance (very sharp regions next to
-    # very smooth ones = hallucination artifacts). Real compressed video
-    # is uniformly mediocre. Both directions now scored.
     if avg_tex_entropy < 100:
-        ai_score += 6         # very uniform = possibly AI or very compressed
-    elif avg_tex_entropy < 200:
-        ai_score += 2
-    elif avg_tex_entropy > 2000:
-        ai_score += 10        # extreme texture contrast = AI hallucination artifact
-    elif avg_tex_entropy > 800:
         ai_score += 5
+    elif avg_tex_entropy > 2000:
+        ai_score += 8     # AI hallucination artifacts
 
-    # ── 7. Color channel noise correlation ───────────────────────────────────
-    # Both videos scored ~0.06-0.09 — both low. Weak discriminator.
-    # Only fire on clearly extreme values.
-    if avg_color_corr > 0.80:
-        ai_score += 6
-    elif avg_color_corr < 0.20:
-        ai_score -= 4
+    # ── 7. Color channel correlation ─────────────────────────────────────────
+    # Weak signal — skip downward adjustments entirely
+    if avg_color_corr > 0.92:
+        ai_score += 4     # only fire on extreme values
 
     # ── 8. Saturation ─────────────────────────────────────────────────────────
-    # CONFIRMED SIGNAL: AI=139, Real=67. AI renders are oversaturated.
-    # Boosted weight — this is a reliable discriminator.
+    # STRONG SIGNAL: AI oversaturated (avg 139 vs real avg 67)
     if avg_saturation > 120:
-        ai_score += 16        # strongly oversaturated = AI
+        ai_score += 16
     elif avg_saturation > 90:
         ai_score += 8
     elif avg_saturation > 70:
         ai_score += 3
-    elif avg_saturation < 30:
-        ai_score -= 5         # very desaturated real footage
 
-    # ── 9. Motion amount ─────────────────────────────────────────────────────
-    # RECALIBRATED v2: Real static shots (tripod/handheld) can also have
-    # very low motion. Only penalize if motion AND hist_jitter are both low
-    # (compound signal), not motion alone.
-    if avg_motion < 2 and avg_temporal_jitter < 0.005:
-        ai_score += 10        # both near-zero = very suspicious AI
-    elif avg_motion < 2 and avg_temporal_jitter < 0.015:
-        ai_score += 5         # low motion + low scene change = possibly AI
-    if motion_var < 0.5 and len(motion_scores) > 3 and avg_temporal_jitter < 0.01:
-        ai_score += 4         # extremely uniform motion + no scene change
+    # ── 9. Motion (compound signal only) ──────────────────────────────────────
+    # Don't penalize low motion alone — static real shots exist.
+    # Only fire when motion + jitter are BOTH suspiciously low together.
+    if avg_motion < 1.5 and avg_temporal_jitter < 0.004:
+        ai_score += 8     # truly static + no scene change = suspicious
+    elif avg_motion < 1.5 and avg_temporal_jitter < 0.010:
+        ai_score += 3
 
     # ── 10. Histogram temporal jitter ─────────────────────────────────────────
-    # RECALIBRATED v2: Real_2 had jitter=0.002 (static shot, genuinely low).
-    # Tightened threshold to 0.003 to avoid false positives on static real video.
+    # Tightened from 0.008 to 0.003 — real static shots have jitter ~0.002
     if avg_temporal_jitter < 0.003 and len(temporal_diffs) > 3:
-        ai_score += 8         # near-zero jitter = AI temporal smoothing
+        ai_score += 6
     elif avg_temporal_jitter < 0.008 and len(temporal_diffs) > 3:
-        ai_score += 3         # very low jitter = mildly suspicious
-    elif avg_temporal_jitter > 0.06:
-        ai_score -= 6
+        ai_score += 2
 
     # ── 11. Optical flow variance ─────────────────────────────────────────────
-    # RECALIBRATED: AI=13.1, Real=32.0 (handheld).
-    # BUT: real static/tripod shots also have low flow — can't penalize hard.
-    # Only fire if also combined with other AI signals (handled by weight).
     if len(flow_regularity_scores) > 3:
         if avg_flow_var < 3.0:
-            ai_score += 8     # essentially zero motion — very suspicious
+            ai_score += 6
         elif avg_flow_var < 8.0:
-            ai_score += 4     # reduced from 12 — real static video can score here
-        elif avg_flow_var > 100.0:
-            ai_score -= 10    # strong real handheld motion signal
+            ai_score += 3
 
     # ── 12. Temporal pixel flicker ────────────────────────────────────────────
-    # Original assumption: AI flicker > real. Test data shows real can also
-    # be high (1.04 real vs 0.81 AI on these samples). Use cautiously.
-    # Only fire on extreme values to avoid false positives.
     if pixel_flicker_cov > 1.5:
-        ai_score += 6     # extremely incoherent flicker
+        ai_score += 5
     elif pixel_flicker_cov < 0.15 and len(gray_buffer) >= 5:
-        ai_score += 4     # suspiciously uniform = AI temporal smoothing
+        ai_score += 3
 
     # ── 13. Inter-frame residual consistency ──────────────────────────────────
     if residual_var_of_var < 100 and len(gray_buffer) >= 5:
         ai_score += 4
-    elif residual_var_of_var > 50000:
-        ai_score -= 4
 
-    # ── 14. Edge temporal standard deviation (NEW SIGNAL) ───────────────────
-    # STRONG DISCRIMINATOR from video analysis:
-    # AI   edge_std avg: 12847  range: 5451-20632
-    # REAL edge_std avg: 42996  range: 6853-114053
-    # Real videos show much higher edge variation due to natural movement,
-    # lighting changes, and camera motion. AI renders are temporally smoother.
+    # ── 14. Edge temporal std ─────────────────────────────────────────────────
+    # STRONG SIGNAL: AI avg=12k, Real avg=43k
+    # Real videos have much higher edge variation from natural movement.
+    # Only use as UPWARD push for AI (low variation) not downward for real.
+    # Downward adjustments were causing inversions.
     if len(edge_counts_temporal) > 3:
         edge_temporal_std = float(np.std(edge_counts_temporal))
-        if edge_temporal_std > 80000:
-            ai_score -= 12    # very high edge variation = strong real indicator
-        elif edge_temporal_std > 40000:
-            ai_score -= 6     # high edge variation = likely real
-        elif edge_temporal_std > 20000:
-            ai_score -= 2     # moderate edge variation = mildly real
-        elif edge_temporal_std < 7000:
-            ai_score += 6     # very low edge variation = AI temporal smoothing
+        if edge_temporal_std < 7000:
+            ai_score += 8     # very low variation = AI temporal smoothing
+        elif edge_temporal_std < 12000:
+            ai_score += 4     # low variation = mildly suspicious
         log.info("Edge temporal std: %.0f", edge_temporal_std)
-
-    # ── AUTHENTICITY BOOSTERS ─────────────────────────────────────────────────
-    # These signals reward clear real-camera characteristics.
-    # They push genuine real videos UP (lower ai_score) without pulling AI up.
-
-    # Booster A: Inter-frame residual variance-of-variance (rvov)
-    # Real cameras produce irregular frame-to-frame residuals due to natural
-    # sensor noise, micro-motion, and lighting flicker.
-    # Real: 10k–60k   AI (static): ~5k   AI (complex): can be high too
-    # Only use as a strong negative signal for clearly real-looking values.
-    if residual_var_of_var > 40000:
-        ai_score -= 12   # very chaotic inter-frame residuals = real camera
-    elif residual_var_of_var > 10000:
-        ai_score -= 7    # moderately chaotic = likely real
-
-    # Booster B: Motion variance (mvar)
-    # AI Cat showed extremely HIGH mvar (147) — erratic AI motion.
-    # Real handheld: moderate and consistent (9–50).
-    # Already partially handled above; add a downward push for natural range.
-    if motion_var > 100:
-        ai_score += 10   # erratic motion = AI artifact
-    elif 0 < motion_var < 15:
-        ai_score -= 10   # very consistent, low motion = real static shot
-    elif motion_var < 60:
-        ai_score -= 4    # natural moderate motion range = real
-
-    # Booster C: Histogram temporal jitter (scene content change)
-    # Real videos: richer scene change (0.15–0.25+)
-    # AI videos:   smoother transitions, lower jitter (0.05–0.12)
-    if avg_temporal_jitter > 0.18:
-        ai_score -= 10   # active real-world scene content change
-    elif avg_temporal_jitter > 0.12:
-        ai_score -= 5
-    elif avg_temporal_jitter < 0.05 and len(temporal_diffs) > 3:
-        ai_score += 6    # suspiciously smooth = AI temporal blending
 
     ai_score = max(0.0, min(100.0, ai_score))
     log.info("Primary AI score: %.0f", ai_score)
