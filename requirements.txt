@@ -29,3 +29,6 @@ websocket-client>=1.6.0
 # OpenAI GPT-4o vision analysis
 openai>=1.0.0
 
+# Resend email SDK for OTP verification
+resend>=2.0.0
+
