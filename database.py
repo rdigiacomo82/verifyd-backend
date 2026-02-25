@@ -79,6 +79,25 @@ def init_db() -> None:
             )
         """)
 
+        # ── OTP Verification ─────────────────────────────────
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS email_otp (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                email_lower TEXT    NOT NULL,
+                code        TEXT    NOT NULL,
+                created_at  TEXT    NOT NULL,
+                expires_at  TEXT    NOT NULL,
+                verified    INTEGER NOT NULL DEFAULT 0,
+                attempts    INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+
+        # Add email_verified column to users if not exists
+        try:
+            conn.execute("ALTER TABLE users ADD COLUMN email_verified INTEGER NOT NULL DEFAULT 0")
+        except Exception:
+            pass  # Column already exists
+
         log.info("Database initialized: %s", DB_PATH)
 
 
@@ -294,4 +313,109 @@ def list_certificates(limit: int = 50, label: Optional[str] = None) -> list:
                 (limit,),
             ).fetchall()
         return [dict(r) for r in rows]
+
+# ─────────────────────────────────────────────
+#  OTP Verification Functions
+# ─────────────────────────────────────────────
+import random
+import string
+
+OTP_EXPIRY_MINUTES = 10
+MAX_OTP_ATTEMPTS   = 5
+
+
+def is_email_verified(email: str) -> bool:
+    """Check if email has already been verified."""
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT email_verified FROM users WHERE email_lower = ?",
+            (email.lower().strip(),)
+        ).fetchone()
+        return bool(row and row["email_verified"])
+
+
+def create_otp(email: str) -> str:
+    """
+    Generate a 6-digit OTP for the email, store in DB, return the code.
+    Deletes any previous unverified OTPs for this email first.
+    """
+    from datetime import timedelta
+    email_lower = email.lower().strip()
+    code = "".join(random.choices(string.digits, k=6))
+    now = datetime.now(timezone.utc)
+    expires = now + timedelta(minutes=OTP_EXPIRY_MINUTES)
+
+    with get_db() as conn:
+        # Remove old OTPs for this email
+        conn.execute("DELETE FROM email_otp WHERE email_lower = ?", (email_lower,))
+        # Insert new OTP
+        conn.execute(
+            """INSERT INTO email_otp (email_lower, code, created_at, expires_at, verified, attempts)
+               VALUES (?, ?, ?, ?, 0, 0)""",
+            (email_lower, code, now.isoformat(), expires.isoformat())
+        )
+
+    log.info("OTP created for %s (expires %s)", email_lower, expires.isoformat())
+    return code
+
+
+def verify_otp(email: str, code: str) -> tuple:
+    """
+    Verify submitted OTP code.
+    Returns (success: bool, message: str)
+    On success, marks email as verified in users table.
+    """
+    email_lower = email.lower().strip()
+    now = datetime.now(timezone.utc)
+
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM email_otp WHERE email_lower = ? ORDER BY id DESC LIMIT 1",
+            (email_lower,)
+        ).fetchone()
+
+        if not row:
+            return False, "No verification code found. Please request a new code."
+
+        # Check expiry
+        expires_at = datetime.fromisoformat(row["expires_at"])
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if now > expires_at:
+            conn.execute("DELETE FROM email_otp WHERE email_lower = ?", (email_lower,))
+            return False, "Verification code expired. Please request a new code."
+
+        # Check attempts
+        if row["attempts"] >= MAX_OTP_ATTEMPTS:
+            conn.execute("DELETE FROM email_otp WHERE email_lower = ?", (email_lower,))
+            return False, "Too many attempts. Please request a new code."
+
+        # Increment attempts
+        conn.execute(
+            "UPDATE email_otp SET attempts = attempts + 1 WHERE email_lower = ?",
+            (email_lower,)
+        )
+
+        # Check code
+        if row["code"] != code.strip():
+            remaining = MAX_OTP_ATTEMPTS - row["attempts"] - 1
+            return False, f"Incorrect code. {remaining} attempts remaining."
+
+        # Success — mark email verified in users table
+        conn.execute("DELETE FROM email_otp WHERE email_lower = ?", (email_lower,))
+        conn.execute(
+            "UPDATE users SET email_verified = 1 WHERE email_lower = ?",
+            (email_lower,)
+        )
+        # If user doesn't exist yet, create them as verified
+        conn.execute(
+            """INSERT OR IGNORE INTO users
+               (email, email_lower, plan, total_uses, period_uses, period_start, created_at, last_seen, email_verified)
+               VALUES (?, ?, 'free', 0, 0, ?, ?, ?, 1)""",
+            (email, email_lower,
+             now.isoformat(), now.isoformat(), now.isoformat())
+        )
+
+    log.info("Email verified successfully: %s", email_lower)
+    return True, "Email verified successfully."
 

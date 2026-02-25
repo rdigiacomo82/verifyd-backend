@@ -23,6 +23,7 @@ from config import (                  # single source of truth for all settings
     BASE_URL,
     UPLOAD_DIR, CERT_DIR, TMP_DIR,
 )
+from emailer  import send_otp_email
 from database import (init_db, insert_certificate, increment_downloads,
                       get_or_create_user, get_user_status, increment_user_uses,
                       is_valid_email, FREE_USES)
@@ -219,6 +220,13 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
     is_deliverable, reason = _verify_email_deliverable(email)
     if not is_deliverable:
         return JSONResponse({"error": reason}, status_code=400)
+
+    # ── Email verification check ──────────────────────────────
+    if not is_email_verified(email):
+        return JSONResponse({
+            "error":            "email_not_verified",
+            "message":          "Please verify your email address before uploading.",
+        }, status_code=403)
 
     # ── Usage limit check ─────────────────────────────────────
     status = get_user_status(email)
@@ -855,6 +863,52 @@ def test_email(email: str = "", key: str = ""):
         return JSONResponse({"error": "email required"}, status_code=400)
     is_valid, reason = _verify_email_deliverable(email)
     return {"email": email, "valid": is_valid, "reason": reason}
+
+
+# ─────────────────────────────────────────────
+#  OTP Endpoints
+# ─────────────────────────────────────────────
+@app.post("/send-otp/")
+async def send_otp(email: str = Form(...)):
+    """Send a 6-digit OTP to the given email for verification."""
+    if not is_valid_email(email):
+        return JSONResponse({"error": "Invalid email address."}, status_code=400)
+
+    # Check deliverability first
+    is_deliverable, reason = _verify_email_deliverable(email)
+    if not is_deliverable:
+        return JSONResponse({"error": reason}, status_code=400)
+
+    # Already verified — no need to send again
+    if is_email_verified(email):
+        return {"status": "already_verified", "message": "Email already verified."}
+
+    # Generate and send OTP
+    code = create_otp(email)
+    sent = send_otp_email(email, code)
+
+    if not sent:
+        return JSONResponse(
+            {"error": "Failed to send verification email. Please try again."},
+            status_code=500
+        )
+
+    log.info("OTP sent to %s", email)
+    return {"status": "sent", "message": f"Verification code sent to {email}"}
+
+
+@app.post("/verify-otp/")
+async def verify_otp_route(email: str = Form(...), code: str = Form(...)):
+    """Verify the OTP code submitted by the user."""
+    if not is_valid_email(email):
+        return JSONResponse({"error": "Invalid email address."}, status_code=400)
+
+    success, message = verify_otp(email, code)
+
+    if not success:
+        return JSONResponse({"error": message}, status_code=400)
+
+    return {"status": "verified", "message": message}
 
 
 
