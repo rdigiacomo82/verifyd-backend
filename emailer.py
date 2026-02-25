@@ -11,7 +11,7 @@ import urllib.request
 log = logging.getLogger("verifyd.emailer")
 
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
-FROM_ADDRESS   = "noreply@vfvid.com"
+FROM_ADDRESS   = "onboarding@resend.dev"
 FROM_NAME      = "VeriFYD"
 
 
