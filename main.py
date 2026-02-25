@@ -912,6 +912,36 @@ async def verify_otp_route(email: str = Form(...), code: str = Form(...)):
     return {"status": "verified", "message": message}
 
 
+@app.get("/test-resend/")
+def test_resend(key: str = ""):
+    """Test Resend API key directly."""
+    if key not in ("Honda#6915", "Honda6915", "admin2026"):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    import urllib.request, urllib.error, json
+    resend_key = os.environ.get("RESEND_API_KEY", "")
+    if not resend_key:
+        return {"error": "RESEND_API_KEY not set"}
+    payload = {
+        "from": "onboarding@resend.dev",
+        "to": ["rdigiacomo82@gmail.com"],
+        "subject": "VeriFYD Test",
+        "html": "<p>Test email from VeriFYD</p>"
+    }
+    try:
+        req = urllib.request.Request(
+            "https://api.resend.com/emails",
+            data=json.dumps(payload).encode(),
+            headers={"Authorization": f"Bearer {resend_key}", "Content-Type": "application/json"},
+            method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return {"success": True, "response": json.loads(resp.read())}
+    except urllib.error.HTTPError as e:
+        return {"error": f"HTTP {e.code}", "detail": e.read().decode()}
+    except Exception as e:
+        return {"error": str(e)}
+
+
 
 
 
