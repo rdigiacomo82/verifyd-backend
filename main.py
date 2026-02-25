@@ -26,7 +26,8 @@ from config import (                  # single source of truth for all settings
 from emailer  import send_otp_email
 from database import (init_db, insert_certificate, increment_downloads,
                       get_or_create_user, get_user_status, increment_user_uses,
-                      is_valid_email, FREE_USES)
+                      is_valid_email, FREE_USES,
+                      is_email_verified, create_otp, verify_otp)
 from video import clip_first_6_seconds, stamp_video, download_video_ytdlp
 
 log = logging.getLogger("verifyd.main")
