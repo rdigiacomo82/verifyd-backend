@@ -165,6 +165,10 @@ def detect_ai(video_path: str) -> int:
         log.error("Could not open video: %s", video_path)
         return 50
 
+    cap_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    cap_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    log.info("Video dimensions: %dx%d", cap_w, cap_h)
+
     noise_scores:       List[float] = []
     freq_scores:        List[float] = []
     edge_scores:        List[float] = []
@@ -258,7 +262,7 @@ def detect_ai(video_path: str) -> int:
         pixel_flicker_cov, residual_var_of_var,
     )
 
-    ai_score = 50.0
+    ai_score = 30.0   # base: assume real until AI signals accumulate
 
     # ═══════════════════════════════════════════════════════════
     # SCORING PHILOSOPHY (v3 - calibrated on 8 real test videos)
@@ -283,6 +287,13 @@ def detect_ai(video_path: str) -> int:
         ai_score += 4
     # No downward push — noise alone is not reliable enough
 
+    # ── REAL video boosters (push score DOWN toward real) ────────────────────
+    # High noise = real camera sensor
+    if avg_noise > 150:
+        ai_score -= 8
+    elif avg_noise > 100:
+        ai_score -= 4
+
     # ── 2. High-frequency content ─────────────────────────────────────────────
     if avg_freq < 0.30:
         ai_score += 6
@@ -296,13 +307,19 @@ def detect_ai(video_path: str) -> int:
         ai_score += 6     # AI over-sharpening
 
     # ── 4. DCT grid artifact ──────────────────────────────────────────────────
-    # Strong AI signal — compression artifacts from AI rendering pipeline
-    if avg_dct_grid > 1.8:
-        ai_score += 14
-    elif avg_dct_grid > 1.4:
-        ai_score += 7
-    elif avg_dct_grid < 0.9:
-        ai_score -= 3
+    # Strong AI signal — BUT unreliable on small/compressed mobile videos.
+    # Small videos (< 480p width) have extreme DCT ratios from compression alone.
+    # Only fire on videos >= 480px wide where DCT is meaningful.
+    _dct_reliable = (cap_w >= 480 and cap_h >= 480)
+    if _dct_reliable:
+        if avg_dct_grid > 1.8:
+            ai_score += 14
+        elif avg_dct_grid > 1.4:
+            ai_score += 7
+        elif avg_dct_grid < 0.9:
+            ai_score -= 3
+    else:
+        log.info("DCT signal skipped — small video %dx%d", cap_w, cap_h)
 
     # ── 5. Gradient orientation entropy ──────────────────────────────────────
     if avg_grad_entropy < 3.5:
