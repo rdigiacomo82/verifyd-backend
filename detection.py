@@ -26,15 +26,14 @@ log = logging.getLogger("verifyd.detection")
 #    100 = definitely real      0 = definitely AI
 # ─────────────────────────────────────────────
 THRESHOLD_REAL         = 55   # authenticity >= 55 = REAL
-THRESHOLD_UNDETERMINED = 45   # authenticity >= 45 = UNDETERMINED, below = AI
+THRESHOLD_UNDETERMINED = 40   # authenticity >= 40 = UNDETERMINED, below = AI
 
 # ─────────────────────────────────────────────
 #  Engine weights
-#  Signal detector is more reliable on compressed/phone videos.
-#  GPT-4o adds semantic check but can misjudge compressed real footage.
+#  GPT-4o is now confirmed running — increase its weight
 # ─────────────────────────────────────────────
-WEIGHT_SIGNAL = 0.65   # 65% signal detector
-WEIGHT_GPT    = 0.35   # 35% GPT-4o vision
+WEIGHT_SIGNAL = 0.40   # 40% signal detector
+WEIGHT_GPT    = 0.60   # 60% GPT-4o vision
 
 
 def run_detection(video_path: str) -> tuple:

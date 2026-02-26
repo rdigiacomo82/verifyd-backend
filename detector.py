@@ -289,10 +289,12 @@ def detect_ai(video_path: str) -> int:
 
     # ── REAL video boosters (push score DOWN toward real) ────────────────────
     # High noise = real camera sensor
-    if avg_noise > 150:
-        ai_score -= 8
+    if avg_noise > 500:
+        ai_score -= 16    # very high noise = definitely real camera
+    elif avg_noise > 150:
+        ai_score -= 10
     elif avg_noise > 100:
-        ai_score -= 4
+        ai_score -= 5
 
     # ── 2. High-frequency content ─────────────────────────────────────────────
     if avg_freq < 0.30:
