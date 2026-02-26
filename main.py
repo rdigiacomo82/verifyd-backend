@@ -26,7 +26,7 @@ from config import (                  # single source of truth for all settings
 from emailer  import send_otp_email
 from database import (init_db, insert_certificate, increment_downloads,
                       get_or_create_user, get_user_status, increment_user_uses,
-                      is_valid_email, FREE_USES,
+                      is_valid_email, FREE_USES, get_certificate,
                       is_email_verified, create_otp, verify_otp)
 from video import clip_first_6_seconds, stamp_video, download_video_ytdlp
 
@@ -307,6 +307,24 @@ def download(cid: str):
         return JSONResponse({"error": "Certificate not found"}, status_code=404)
     increment_downloads(cid)
     return FileResponse(path, media_type="video/mp4")
+
+
+@app.get("/certificate/{cid}")
+def certificate_lookup(cid: str):
+    """Public certificate verification endpoint."""
+    cert = get_certificate(cid)
+    if not cert:
+        return JSONResponse({"error": "Certificate not found"}, status_code=404)
+    return {
+        "certificate_id":  cert["cert_id"],
+        "label":           cert["label"],
+        "authenticity":    cert["authenticity"],
+        "ai_score":        cert["ai_score"],
+        "original_file":   cert["original_file"],
+        "upload_time":     cert["upload_time"],
+        "download_count":  cert["download_count"],
+        "verified_by":     "VeriFYD",
+    }
 
 
 def _proxy_coming_soon_html(video_url: str) -> str:
