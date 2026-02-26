@@ -25,16 +25,16 @@ log = logging.getLogger("verifyd.detection")
 #  Authenticity = 100 − combined_ai_score
 #    100 = definitely real      0 = definitely AI
 # ─────────────────────────────────────────────
-THRESHOLD_REAL         = 50   # lowered from 55 — real videos scoring 62% have headroom
-THRESHOLD_UNDETERMINED = 35   # lowered from 40 — less undetermined zone
+THRESHOLD_REAL         = 55   # authenticity >= 55 = REAL
+THRESHOLD_UNDETERMINED = 45   # authenticity >= 45 = UNDETERMINED, below = AI
 
 # ─────────────────────────────────────────────
 #  Engine weights
-#  GPT-4o is clearly the stronger engine based on test results.
-#  Signal detector still catches compression/DCT artifacts.
+#  Signal detector is more reliable on compressed/phone videos.
+#  GPT-4o adds semantic check but can misjudge compressed real footage.
 # ─────────────────────────────────────────────
-WEIGHT_SIGNAL = 0.50   # 50% signal detector
-WEIGHT_GPT    = 0.50   # 50% GPT-4o vision
+WEIGHT_SIGNAL = 0.65   # 65% signal detector
+WEIGHT_GPT    = 0.35   # 35% GPT-4o vision
 
 
 def run_detection(video_path: str) -> tuple:
@@ -102,7 +102,6 @@ def run_detection(video_path: str) -> tuple:
     )
 
     return authenticity, label, detail
-
 
 
 
