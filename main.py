@@ -315,6 +315,7 @@ def certificate_lookup(cid: str):
     cert = get_certificate(cid)
     if not cert:
         return JSONResponse({"error": "Certificate not found"}, status_code=404)
+    video_available = os.path.exists(f"{CERT_DIR}/{cid}.mp4")
     return {
         "certificate_id":  cert["cert_id"],
         "label":           cert["label"],
@@ -324,7 +325,33 @@ def certificate_lookup(cid: str):
         "upload_time":     cert["upload_time"],
         "download_count":  cert["download_count"],
         "verified_by":     "VeriFYD",
+        "video_available": video_available,
     }
+
+
+@app.get("/pro-download/{cid}")
+def pro_download(cid: str, email: str = ""):
+    """Re-download certified video — Pro AI and Enterprise plans only."""
+    if not email:
+        return JSONResponse({"error": "Email required"}, status_code=400)
+
+    # Check plan
+    user = get_user_status(email.lower().strip())
+    if not user:
+        return JSONResponse({"error": "User not found"}, status_code=404)
+    if user.get("plan") not in ("pro", "enterprise"):
+        return JSONResponse({
+            "error": "Pro AI plan required",
+            "upgrade_url": "https://vfvid.com/pricing"
+        }, status_code=403)
+
+    # Serve file
+    path = f"{CERT_DIR}/{cid}.mp4"
+    if not os.path.exists(path):
+        return JSONResponse({"error": "Video no longer available — please re-verify"}, status_code=404)
+
+    increment_downloads(cid)
+    return FileResponse(path, media_type="video/mp4")
 
 
 def _proxy_coming_soon_html(video_url: str) -> str:
