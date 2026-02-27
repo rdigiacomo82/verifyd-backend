@@ -472,10 +472,10 @@ def clip_first_6_seconds(input_path: str) -> str:
         FFMPEG_BIN, "-y",
         "-i", input_path,
         "-t", "6",
-        "-vf", "scale=iw:ih",   # normalize frame size
+        "-vf", "scale='min(iw,720)':'min(ih,1280)',scale=trunc(iw/2)*2:trunc(ih/2)*2",
         "-c:v", "libx264",
-        "-preset", "ultrafast", # fastest encoding
-        "-crf", "28",           # slightly lower quality for speed
+        "-preset", "ultrafast",
+        "-crf", "28",
         "-c:a", "aac",
         "-ar", "44100",
         "-movflags", "+faststart",
