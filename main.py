@@ -121,22 +121,69 @@ def _sha256(path: str) -> str:
 
 def _run_analysis(source_path: str) -> tuple:
     """
-    Clip → detect → return (authenticity, label, detail, ui_text, color, certify).
-    Cleans up the temp clip automatically.
+    Clip → detect (signal + GPT in parallel) → return results.
     """
+    import concurrent.futures
+    from detector   import detect_ai
+    from gpt_vision import gpt_vision_score
+
     clip_path = clip_first_6_seconds(source_path)
     try:
-        authenticity, label, detail = run_detection(clip_path)
+        # Run signal detector and GPT-4o in parallel
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            future_signal = executor.submit(detect_ai, clip_path)
+            future_gpt    = executor.submit(gpt_vision_score, clip_path)
+            signal_ai_score = future_signal.result()
+            gpt_result      = future_gpt.result()
+
+        from detection import WEIGHT_SIGNAL, WEIGHT_GPT, THRESHOLD_REAL, THRESHOLD_UNDETERMINED
+        gpt_ai_score  = gpt_result["ai_probability"]
+        gpt_available = gpt_result.get("available", False)
+        gpt_failed    = not gpt_available or gpt_result.get("reasoning", "").startswith("GPT analysis error")
+
+        if not gpt_failed:
+            combined = signal_ai_score * WEIGHT_SIGNAL + gpt_ai_score * WEIGHT_GPT
+        else:
+            combined = float(signal_ai_score)
+            log.warning("GPT failed — signal only (signal=%d)", signal_ai_score)
+
+        combined     = max(0.0, min(100.0, combined))
+        authenticity = 100 - int(round(combined))
+
+        if authenticity >= THRESHOLD_REAL:
+            label = "REAL"
+        elif authenticity >= THRESHOLD_UNDETERMINED:
+            label = "UNDETERMINED"
+        else:
+            label = "AI"
+
+        detail = {
+            "ai_score":        int(round(combined)),
+            "authenticity":    authenticity,
+            "label":           label,
+            "signal_ai_score": signal_ai_score,
+            "gpt_ai_score":    gpt_ai_score,
+            "gpt_available":   gpt_available,
+            "gpt_reasoning":   gpt_result.get("reasoning", ""),
+            "gpt_flags":       gpt_result.get("flags", []),
+        }
+        log.info("Parallel detection: signal=%d gpt=%d combined=%d auth=%d label=%s",
+                 signal_ai_score, gpt_ai_score, int(round(combined)), authenticity, label)
     finally:
         if os.path.exists(clip_path):
             os.remove(clip_path)
 
     ui_text, color, certify = LABEL_UI.get(label, ("UNKNOWN", "grey", False))
-    log.info(
-        "Analysis: label=%s authenticity=%d ai_score=%d",
-        label, authenticity, detail["ai_score"],
-    )
     return authenticity, label, detail, ui_text, color, certify
+
+
+def _stamp_video_background(raw_path: str, certified_path: str, cid: str):
+    """Stamp video in background thread after response is sent."""
+    try:
+        stamp_video(raw_path, certified_path, cid)
+        log.info("Background stamp complete: %s", cid)
+    except Exception as e:
+        log.error("Background stamp failed for %s: %s", cid, e)
 
 
 # ─────────────────────────────────────────────
@@ -271,11 +318,13 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
 
     if certify:
         certified_path = f"{CERT_DIR}/{cid}.mp4"
-        try:
-            stamp_video(raw_path, certified_path, cid)
-        except RuntimeError as e:
-            log.error("Stamping failed: %s", e)
-            return JSONResponse({"error": "Video certification failed"}, status_code=500)
+        # Stamp in background so user gets result immediately
+        import threading
+        threading.Thread(
+            target=_stamp_video_background,
+            args=(raw_path, certified_path, cid),
+            daemon=True
+        ).start()
 
         return {
             "status":             ui_text,
