@@ -177,13 +177,25 @@ def _run_analysis(source_path: str) -> tuple:
     return authenticity, label, detail, ui_text, color, certify
 
 
-def _stamp_video_background(raw_path: str, certified_path: str, cid: str):
-    """Stamp video in background thread after response is sent."""
+def _stamp_video_background(
+    raw_path: str, certified_path: str, cid: str,
+    email: str = "", authenticity: int = 0,
+    original_filename: str = "", download_url: str = ""
+):
+    """Stamp video in background thread, then send certification email."""
     try:
         stamp_video(raw_path, certified_path, cid)
         log.info("Background stamp complete: %s", cid)
     except Exception as e:
         log.error("Background stamp failed for %s: %s", cid, e)
+        return  # Don't send email if stamp failed
+
+    # Send email after stamp is confirmed complete
+    if email:
+        try:
+            send_certification_email(email, cid, authenticity, original_filename, download_url)
+        except Exception as e:
+            log.error("Certification email failed for %s: %s", cid, e)
 
 
 # ─────────────────────────────────────────────
@@ -320,18 +332,19 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
         certified_path = f"{CERT_DIR}/{cid}.mp4"
         download_url   = f"{BASE_URL}/download/{cid}"
 
-        # Stamp in background so user gets result immediately
+        # Stamp in background, then send certification email once complete
         import threading
         threading.Thread(
             target=_stamp_video_background,
-            args=(raw_path, certified_path, cid),
-            daemon=True
-        ).start()
-
-        # Send certification email in background
-        threading.Thread(
-            target=send_certification_email,
-            args=(email, cid, authenticity, file.filename, download_url),
+            kwargs={
+                "raw_path":          raw_path,
+                "certified_path":    certified_path,
+                "cid":               cid,
+                "email":             email,
+                "authenticity":      authenticity,
+                "original_filename": file.filename,
+                "download_url":      download_url,
+            },
             daemon=True
         ).start()
 
