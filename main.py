@@ -23,7 +23,7 @@ from config import (                  # single source of truth for all settings
     BASE_URL,
     UPLOAD_DIR, CERT_DIR, TMP_DIR,
 )
-from emailer  import send_otp_email
+from emailer  import send_otp_email, send_certification_email
 from database import (init_db, insert_certificate, increment_downloads,
                       get_or_create_user, get_user_status, increment_user_uses,
                       is_valid_email, FREE_USES, get_certificate,
@@ -318,6 +318,8 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
 
     if certify:
         certified_path = f"{CERT_DIR}/{cid}.mp4"
+        download_url   = f"{BASE_URL}/download/{cid}"
+
         # Stamp in background so user gets result immediately
         import threading
         threading.Thread(
@@ -326,11 +328,18 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
             daemon=True
         ).start()
 
+        # Send certification email in background
+        threading.Thread(
+            target=send_certification_email,
+            args=(email, cid, authenticity, file.filename, download_url),
+            daemon=True
+        ).start()
+
         return {
             "status":             ui_text,
             "authenticity_score": authenticity,
             "certificate_id":     cid,
-            "download_url":       f"{BASE_URL}/download/{cid}",
+            "download_url":       download_url,
             "color":              color,
             "gpt_reasoning":      detail.get("gpt_reasoning", ""),
             "gpt_flags":          detail.get("gpt_flags", []),
