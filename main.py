@@ -128,6 +128,7 @@ def _run_analysis(source_path: str) -> tuple:
     from gpt_vision import gpt_vision_score
 
     clip_path = clip_first_6_seconds(source_path)
+    keep_clip = clip_path   # preserved for caller to use for stamping
     try:
         # Run signal detector and GPT-4o in parallel
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
@@ -169,12 +170,15 @@ def _run_analysis(source_path: str) -> tuple:
         }
         log.info("Parallel detection: signal=%d gpt=%d combined=%d auth=%d label=%s",
                  signal_ai_score, gpt_ai_score, int(round(combined)), authenticity, label)
-    finally:
-        if os.path.exists(clip_path):
-            os.remove(clip_path)
+    except Exception:
+        # Only clean up clip on error — on success caller uses it for stamping
+        if os.path.exists(keep_clip):
+            os.remove(keep_clip)
+        raise
 
     ui_text, color, certify = LABEL_UI.get(label, ("UNKNOWN", "grey", False))
-    return authenticity, label, detail, ui_text, color, certify
+    # Return clip_path so caller can stamp from it, then clean up
+    return authenticity, label, detail, ui_text, color, certify, keep_clip
 
 
 def _stamp_video_background(
@@ -199,6 +203,11 @@ def _stamp_video_background(
     except Exception as e:
         log.error("Background stamp EXCEPTION for %s: %s", cid, traceback.format_exc())
         return  # Don't send email if stamp failed
+    finally:
+        # Always clean up the clip file
+        if os.path.exists(raw_path):
+            os.remove(raw_path)
+            log.info("Cleaned up clip: %s", raw_path)
 
     # Send email after stamp is confirmed complete
     if email:
@@ -320,7 +329,7 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
     sha256 = _sha256(raw_path)
 
     try:
-        authenticity, label, detail, ui_text, color, certify = _run_analysis(raw_path)
+        authenticity, label, detail, ui_text, color, certify, clip_path = _run_analysis(raw_path)
     except Exception as e:
         log.exception("Detection failed for %s", raw_path)
         return JSONResponse({"error": str(e)}, status_code=500)
@@ -343,12 +352,12 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
         certified_path = f"{CERT_DIR}/{cid}.mp4"
         download_url   = f"{BASE_URL}/download/{cid}"
 
-        # Stamp in background, then send certification email once complete
+        # Stamp from clip (already 6s, 720p) — faster and more reliable than raw
         import threading
         threading.Thread(
             target=_stamp_video_background,
             kwargs={
-                "raw_path":          raw_path,
+                "raw_path":          clip_path,
                 "certified_path":    certified_path,
                 "cid":               cid,
                 "email":             email,
@@ -370,6 +379,10 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
             "signal_score":       detail.get("signal_ai_score", 0),
             "gpt_score":          detail.get("gpt_ai_score", 0),
         }
+
+    # Clean up clip and raw for non-certified results
+    if os.path.exists(clip_path):
+        os.remove(clip_path)
 
     return {
         "status":             ui_text,
