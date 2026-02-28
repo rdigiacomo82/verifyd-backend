@@ -709,7 +709,7 @@ def analyze_link(request: Request, video_url: str, email: str = ""):
                 "The platform may have blocked the download."
             ), status_code=400)
 
-        authenticity, label, detail, ui_text, color, _ = _run_analysis(tmp_path)
+        authenticity, label, detail, ui_text, color, certify, clip_path = _run_analysis(tmp_path)
 
         # ── Count this use and store result ──────────────────
         if email != "anonymous@verifyd.com":
@@ -754,6 +754,12 @@ def analyze_link(request: Request, video_url: str, email: str = ""):
     finally:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
+        # clip_path is a tmp file created by _run_analysis — always clean it up
+        try:
+            if 'clip_path' in dir() and clip_path and os.path.exists(clip_path):
+                os.remove(clip_path)
+        except Exception:
+            pass
 
 
 # ─────────────────────────────────────────────
@@ -1080,6 +1086,7 @@ def test_resend(key: str = ""):
         return {"error": f"HTTP {e.code}", "detail": e.read().decode()}
     except Exception as e:
         return {"error": str(e)}
+
 
 
 
