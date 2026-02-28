@@ -537,7 +537,7 @@ def stamp_video(input_path: str, output_path: str, cert_id: str) -> None:
     black_mask = (r_ch < 40) & (g_ch < 40) & (b_ch < 40) & (a_ch > 10)
     data[:,:,3][black_mask] = 0
     img = Image.fromarray(data)
-    new_width  = 220
+    new_width  = 280
     new_height = int(img.height * (new_width / img.width))
     img = img.resize((new_width, new_height), Image.LANCZOS)
 
@@ -552,7 +552,7 @@ def stamp_video(input_path: str, output_path: str, cert_id: str) -> None:
             "-i", input_path,
             "-i", tmp_logo.name,
             "-filter_complex",
-            "[1:v]scale=220:-1,format=rgba,colorchannelmixer=aa=0.85[logo];"
+            "[1:v]scale=280:-1,format=rgba,colorchannelmixer=aa=1.0[logo];"
             "[0:v][logo]overlay=W-w-10:H-h-10",
             "-map", "0:a?",
             "-c:v", "libx264",
