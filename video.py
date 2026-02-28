@@ -608,12 +608,12 @@ def stamp_video(input_path: str, output_path: str, cert_id: str) -> None:
             "-filter_complex",
             "[1:v]scale=280:-1,format=rgba,colorchannelmixer=aa=1.0[logo];"
             "[0:v][logo]overlay=W-w-10:H-h-10[vout]",
-            "-map", "[vout]",          # explicit video output — fixes mobile flutter
-            "-map", "0:a?",            # explicit audio map
+            "-map", "[vout]",
+            "-map", "0:a?",
             "-c:v", "libx264",
             "-preset", "ultrafast",
             "-crf", "24",
-            "-c:a", "aac",             # re-encode to AAC — required for iOS/Safari
+            "-c:a", "aac",
             "-ar", "44100",
             "-ac", "2",
             "-movflags", "+faststart",
