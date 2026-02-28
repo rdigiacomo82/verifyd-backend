@@ -183,17 +183,28 @@ def _stamp_video_background(
     original_filename: str = "", download_url: str = ""
 ):
     """Stamp video in background thread, then send certification email."""
+    import traceback
     try:
+        log.info("Background stamp starting: input=%s exists=%s", raw_path, os.path.exists(raw_path))
+        if not os.path.exists(raw_path):
+            log.error("Background stamp FAILED — raw_path not found: %s", raw_path)
+            return
         stamp_video(raw_path, certified_path, cid)
-        log.info("Background stamp complete: %s", cid)
+        exists = os.path.exists(certified_path)
+        size   = os.path.getsize(certified_path) if exists else 0
+        log.info("Background stamp complete: %s  output_exists=%s  size=%d", cid, exists, size)
+        if not exists or size < 1000:
+            log.error("Stamp produced empty or missing output file for %s", cid)
+            return
     except Exception as e:
-        log.error("Background stamp failed for %s: %s", cid, e)
+        log.error("Background stamp EXCEPTION for %s: %s", cid, traceback.format_exc())
         return  # Don't send email if stamp failed
 
     # Send email after stamp is confirmed complete
     if email:
         try:
             send_certification_email(email, cid, authenticity, original_filename, download_url)
+            log.info("Certification email sent to %s for cert %s", email, cid)
         except Exception as e:
             log.error("Certification email failed for %s: %s", cid, e)
 
