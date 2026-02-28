@@ -454,9 +454,26 @@ def download_video_ytdlp(url: str, output_path: str) -> None:
         raise RuntimeError(f"Could not download video: {msg[:200]}")
 
 
+def _has_audio_stream(path: str) -> bool:
+    """Return True if the file contains at least one audio stream."""
+    cmd = [
+        FFPROBE_BIN, "-v", "error",
+        "-select_streams", "a:0",
+        "-show_entries", "stream=codec_type",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        path,
+    ]
+    r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    return r.returncode == 0 and r.stdout.decode().strip() == "audio"
+
+
 def clip_first_6_seconds(input_path: str) -> str:
     """
-    Stream-copy the first 6 seconds of input_path into a temp file.
+    Encode the first 6 seconds of input_path into a normalised temp MP4.
+    Always produces a file with:
+      - H.264 video at constant 30fps, max 720px wide
+      - AAC stereo audio at 44100 Hz (silent track added if source has none)
+      - faststart moov atom for mobile streaming
     Returns the path to the clipped file.
     Caller is responsible for deleting it after use.
     Raises ValueError if the input file is not valid video.
@@ -467,24 +484,60 @@ def clip_first_6_seconds(input_path: str) -> str:
             "Please try a direct .mp4 link or a URL from a supported platform."
         )
 
-    clipped = os.path.join(TMP_DIR, f"{uuid.uuid4()}.mp4")
-    cmd = [
-        FFMPEG_BIN, "-y",
-        "-i", input_path,
-        "-t", "6",
-        "-vf", "scale='min(iw,720)':'min(ih,1280)',scale=trunc(iw/2)*2:trunc(ih/2)*2",
-        "-c:v", "libx264",
-        "-preset", "ultrafast",
-        "-crf", "28",
-        "-c:a", "aac",
-        "-ar", "44100",
-        "-movflags", "+faststart",
-        clipped,
-    ]
+    has_audio = _has_audio_stream(input_path)
+    clipped   = os.path.join(TMP_DIR, f"{uuid.uuid4()}.mp4")
+
+    if has_audio:
+        # Normal path: source has audio, encode it
+        cmd = [
+            FFMPEG_BIN, "-y",
+            "-i", input_path,
+            "-t", "6",
+            "-vf", "scale='min(iw,720)':'min(ih,1280)',scale=trunc(iw/2)*2:trunc(ih/2)*2",
+            "-vsync", "cfr",
+            "-r", "30",
+            "-c:v", "libx264",
+            "-preset", "ultrafast",
+            "-crf", "28",
+            "-map", "0:v:0",
+            "-map", "0:a:0",
+            "-c:a", "aac",
+            "-ar", "44100",
+            "-ac", "2",
+            "-movflags", "+faststart",
+            clipped,
+        ]
+    else:
+        # Mobile videos sometimes have no audio track.
+        # Inject a silent AAC track so stamp_video always has audio to output.
+        log.info("clip: source has no audio — injecting silent track")
+        cmd = [
+            FFMPEG_BIN, "-y",
+            "-i", input_path,
+            "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+            "-t", "6",
+            "-vf", "scale='min(iw,720)':'min(ih,1280)',scale=trunc(iw/2)*2:trunc(ih/2)*2",
+            "-vsync", "cfr",
+            "-r", "30",
+            "-c:v", "libx264",
+            "-preset", "ultrafast",
+            "-crf", "28",
+            "-map", "0:v:0",
+            "-map", "1:a:0",
+            "-c:a", "aac",
+            "-ar", "44100",
+            "-ac", "2",
+            "-shortest",
+            "-movflags", "+faststart",
+            clipped,
+        ]
+
     r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if r.returncode != 0:
         log.error("clip failed: %s", r.stderr.decode()[-300:])
         raise RuntimeError(f"ffmpeg clip failed: {r.stderr.decode()[-300:]}")
+
+    log.info("clip: output=%s has_audio=%s", clipped, has_audio)
     return clipped
 
 
@@ -555,15 +608,15 @@ def stamp_video(input_path: str, output_path: str, cert_id: str) -> None:
             "-filter_complex",
             "[1:v]scale=280:-1,format=rgba,colorchannelmixer=aa=1.0[logo];"
             "[0:v][logo]overlay=W-w-10:H-h-10[vout]",
-            "-map", "[vout]",          # explicit video output — fixes mobile glitch/flutter
-            "-map", "0:a?",            # explicit audio map — fixes missing audio on iOS/mobile
+            "-map", "[vout]",          # explicit video output — fixes mobile flutter
+            "-map", "0:a?",            # explicit audio map
             "-c:v", "libx264",
             "-preset", "ultrafast",
             "-crf", "24",
-            "-c:a", "aac",             # re-encode audio to AAC for universal mobile compatibility
-            "-ar", "44100",            # standard sample rate — required by iOS/Safari
-            "-ac", "2",                # stereo — prevents mono/channel issues on mobile
-            "-movflags", "+faststart", # progressive download — critical for mobile streaming
+            "-c:a", "aac",             # re-encode to AAC — required for iOS/Safari
+            "-ar", "44100",
+            "-ac", "2",
+            "-movflags", "+faststart",
             output_path,
         ]
         r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
