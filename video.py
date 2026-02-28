@@ -523,7 +523,8 @@ def stamp_video(input_path: str, output_path: str, cert_id: str) -> None:
             "-vf", vf,
             "-map", "0:v:0", "-map", "0:a?",
             "-c:v", "libx264", "-preset", "ultrafast", "-crf", "24",
-            "-c:a", "copy", "-movflags", "+faststart", output_path,
+            "-c:a", "aac", "-ar", "44100", "-ac", "2",
+            "-movflags", "+faststart", output_path,
         ]
         r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         if r.returncode != 0:
@@ -553,13 +554,16 @@ def stamp_video(input_path: str, output_path: str, cert_id: str) -> None:
             "-i", tmp_logo.name,
             "-filter_complex",
             "[1:v]scale=280:-1,format=rgba,colorchannelmixer=aa=1.0[logo];"
-            "[0:v][logo]overlay=W-w-10:H-h-10",
-            "-map", "0:a?",
+            "[0:v][logo]overlay=W-w-10:H-h-10[vout]",
+            "-map", "[vout]",          # explicit video output — fixes mobile glitch/flutter
+            "-map", "0:a?",            # explicit audio map — fixes missing audio on iOS/mobile
             "-c:v", "libx264",
             "-preset", "ultrafast",
             "-crf", "24",
-            "-c:a", "copy",
-            "-movflags", "+faststart",
+            "-c:a", "aac",             # re-encode audio to AAC for universal mobile compatibility
+            "-ar", "44100",            # standard sample rate — required by iOS/Safari
+            "-ac", "2",                # stereo — prevents mono/channel issues on mobile
+            "-movflags", "+faststart", # progressive download — critical for mobile streaming
             output_path,
         ]
         r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -571,7 +575,6 @@ def stamp_video(input_path: str, output_path: str, cert_id: str) -> None:
     finally:
         if os.path.exists(tmp_logo.name):
             os.remove(tmp_logo.name)
-
 
 
 
