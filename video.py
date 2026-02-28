@@ -491,48 +491,60 @@ def clip_first_6_seconds(input_path: str) -> str:
 def stamp_video(input_path: str, output_path: str, cert_id: str) -> None:
     """
     Burn VeriFYD logo watermark into the video.
-    Top-left: transparent VeriFYD logo at 75% opacity.
-    No text overlays, no certificate ID burned in.
+    Bottom-right corner, 85% opacity, scales to 25% of video width.
     """
     import tempfile
     from PIL import Image
     import numpy as np
 
-    # Absolute path to logo
-    logo_src = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "assets", "VeriFYD_Logo.png"
-    )
-    log.info("stamp_video: logo path = %s, exists = %s", logo_src, os.path.exists(logo_src))
+    # Try multiple paths to find logo
+    _here = os.path.dirname(os.path.abspath(__file__))
+    logo_src = None
+    for _candidate in [
+        os.path.join(_here, "assets", "VeriFYD_Logo.png"),
+        "/opt/render/project/src/assets/VeriFYD_Logo.png",
+        os.path.join(os.getcwd(), "assets", "VeriFYD_Logo.png"),
+    ]:
+        if os.path.exists(_candidate):
+            logo_src = _candidate
+            break
+    log.info("stamp_video: logo_src=%s", logo_src)
 
-    if not os.path.exists(logo_src):
-        log.warning("Logo not found — falling back to text watermark")
-        vf = "drawtext=text=\'VeriFYD\':x=10:y=10:fontsize=24:fontcolor=white@0.75"
+    if not logo_src:
+        log.warning("Logo not found - falling back to text watermark bottom-right")
+        vf = (
+            "drawtext=text=\'VeriFYD\':"
+            "x=w-tw-10:y=h-th-10:"
+            "fontsize=28:fontcolor=white@0.85:"
+            "shadowcolor=black@0.6:shadowx=2:shadowy=2"
+        )
         cmd = [
             FFMPEG_BIN, "-y", "-i", input_path,
             "-vf", vf,
             "-map", "0:v:0", "-map", "0:a?",
-            "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "24",
             "-c:a", "copy", "-movflags", "+faststart", output_path,
         ]
         r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         if r.returncode != 0:
-            raise RuntimeError(f"ffmpeg stamp failed: {r.stderr.decode()[-300:]}")
+            raise RuntimeError(f"ffmpeg text stamp failed: {r.stderr.decode()[-300:]}")
         return
 
-    # Remove black background, resize to 120px wide
+    # Process logo: remove near-black pixels, resize to 220px wide
     img = Image.open(logo_src).convert("RGBA")
     data = np.array(img)
-    r_ch, g_ch, b_ch = data[:,:,0], data[:,:,1], data[:,:,2]
-    black_mask = (r_ch < 30) & (g_ch < 30) & (b_ch < 30)
+    r_ch, g_ch, b_ch, a_ch = data[:,:,0], data[:,:,1], data[:,:,2], data[:,:,3]
+    black_mask = (r_ch < 40) & (g_ch < 40) & (b_ch < 40) & (a_ch > 10)
     data[:,:,3][black_mask] = 0
     img = Image.fromarray(data)
-    new_width = 160
+    new_width  = 220
     new_height = int(img.height * (new_width / img.width))
     img = img.resize((new_width, new_height), Image.LANCZOS)
 
     tmp_logo = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
     img.save(tmp_logo.name)
     tmp_logo.close()
+    log.info("stamp_video: tmp_logo=%s size=%dx%d", tmp_logo.name, new_width, new_height)
 
     try:
         cmd = [
@@ -540,12 +552,12 @@ def stamp_video(input_path: str, output_path: str, cert_id: str) -> None:
             "-i", input_path,
             "-i", tmp_logo.name,
             "-filter_complex",
-            "[1:v]scale=iw:-1,format=rgba,colorchannelmixer=aa=0.5[logo];"
-            "[0:v][logo]overlay=W-w-2:H-h-2",
+            "[1:v]scale=220:-1,format=rgba,colorchannelmixer=aa=0.85[logo];"
+            "[0:v][logo]overlay=W-w-10:H-h-10",
             "-map", "0:a?",
             "-c:v", "libx264",
             "-preset", "ultrafast",
-            "-crf", "26",
+            "-crf", "24",
             "-c:a", "copy",
             "-movflags", "+faststart",
             output_path,
@@ -554,6 +566,8 @@ def stamp_video(input_path: str, output_path: str, cert_id: str) -> None:
         if r.returncode != 0:
             log.error("stamp failed: %s", r.stderr.decode()[-300:])
             raise RuntimeError(f"ffmpeg stamp failed: {r.stderr.decode()[-300:]}")
+        sz = os.path.getsize(output_path) if os.path.exists(output_path) else 0
+        log.info("stamp_video: success output=%s size=%d", output_path, sz)
     finally:
         if os.path.exists(tmp_logo.name):
             os.remove(tmp_logo.name)
