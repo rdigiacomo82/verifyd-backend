@@ -127,7 +127,7 @@ def send_certification_email(
 ) -> bool:
     """
     Send post-certification email when a video is certified REAL.
-    Includes certificate link, score, and download button.
+    Includes download link, certificate link, and score.
     """
     cert_url      = f"{SITE_URL}/v/{certificate_id}"
     short_id      = certificate_id[:8].upper()
@@ -153,13 +153,11 @@ def send_certification_email(
           <!-- Hero -->
           <tr>
             <td style="padding:40px 32px 24px;text-align:center;">
-              <!-- Badge -->
               <div style="display:inline-block;background:#052e16;border:1px solid #22c55e;border-radius:100px;padding:8px 20px;margin-bottom:24px;">
                 <span style="color:#22c55e;font-size:13px;font-weight:700;letter-spacing:1px;text-transform:uppercase;">
-                  ✓ &nbsp;Real Video Verified
+                  &#10003; &nbsp;Real Video Verified
                 </span>
               </div>
-
               <h2 style="margin:0 0 8px;font-size:24px;font-weight:800;color:#ffffff;">
                 Your video has been certified
               </h2>
@@ -176,7 +174,6 @@ def send_certification_email(
               <table width="100%" cellpadding="0" cellspacing="0"
                      style="background:#1a1a1a;border:1px solid #2a2a2a;border-radius:12px;overflow:hidden;">
                 <tr>
-                  <!-- Authenticity Score -->
                   <td width="50%" style="padding:24px;text-align:center;border-right:1px solid #2a2a2a;">
                     <p style="margin:0 0 6px;color:#666;font-size:11px;letter-spacing:2px;text-transform:uppercase;">
                       Authenticity Score
@@ -185,7 +182,6 @@ def send_certification_email(
                       {authenticity}%
                     </p>
                   </td>
-                  <!-- Certificate ID -->
                   <td width="50%" style="padding:24px;text-align:center;">
                     <p style="margin:0 0 6px;color:#666;font-size:11px;letter-spacing:2px;text-transform:uppercase;">
                       Certificate ID
@@ -202,33 +198,35 @@ def send_certification_email(
           <!-- CTA Buttons -->
           <tr>
             <td style="padding:0 32px 32px;">
-              <!-- View Certificate -->
-              <a href="{cert_url}"
-                 style="display:block;background:#f59e0b;color:#000000;text-decoration:none;
+              <!-- Download — primary action -->
+              <a href="{download_url}"
+                 style="display:block;background:#22c55e;color:#000000;text-decoration:none;
                         text-align:center;padding:16px;border-radius:10px;
                         font-size:15px;font-weight:700;margin-bottom:12px;">
-                🏆 &nbsp;View Official Certificate
+                &#11015;&#65039; &nbsp;Download Certified Video
               </a>
-              <!-- Download -->
-              <a href="{download_url}"
-                 style="display:block;background:#1a1a1a;color:#ffffff;text-decoration:none;
+              <!-- View Certificate — secondary -->
+              <a href="{cert_url}"
+                 style="display:block;background:#1a1a1a;color:#f59e0b;text-decoration:none;
                         text-align:center;padding:16px;border-radius:10px;
                         font-size:15px;font-weight:700;border:1px solid #333;">
-                ⬇️ &nbsp;Download Certified Video
+                &#127942; &nbsp;View Official Certificate
               </a>
             </td>
           </tr>
 
-          <!-- Share prompt -->
+          <!-- Share certified video link -->
           <tr>
             <td style="padding:0 32px 32px;">
               <div style="background:#0f0f0f;border:1px solid #1e1e1e;border-radius:10px;padding:20px;text-align:center;">
                 <p style="margin:0 0 8px;color:#888;font-size:13px;line-height:1.6;">
-                  Share your certificate link to prove your video is authentic
+                  Share your certified video link
                 </p>
-                <p style="margin:0;font-size:12px;color:#f59e0b;font-family:'Courier New',monospace;word-break:break-all;">
-                  {cert_url}
-                </p>
+                <a href="{download_url}"
+                   style="display:block;font-size:12px;color:#f59e0b;font-family:'Courier New',monospace;
+                          word-break:break-all;text-decoration:none;">
+                  {download_url}
+                </a>
               </div>
             </td>
           </tr>
@@ -239,8 +237,8 @@ def send_certification_email(
               <p style="margin:0 0 12px;color:#555;font-size:12px;line-height:1.7;">
                 <strong style="color:#777;">What does this mean?</strong><br>
                 VeriFYD's dual-engine analysis (signal detection + GPT-4o vision AI) assessed
-                your video and found no significant indicators of AI generation. Your certificate
-                is permanently accessible at the link above and can be shared as proof of authenticity.
+                your video and found no significant indicators of AI generation. Your certified
+                video includes the VeriFYD watermark as proof of authenticity.
               </p>
               <p style="margin:0;color:#444;font-size:11px;line-height:1.6;">
                 Note: VeriFYD results represent analytical guidance. See our
@@ -260,6 +258,6 @@ def send_certification_email(
     return _send({
         "from":    f"{FROM_NAME} <{FROM_ADDRESS}>",
         "to":      [to_email],
-        "subject": f"✓ Your video has been certified — VeriFYD Certificate #{short_id}",
+        "subject": f"&#10003; Your video has been certified — VeriFYD #{short_id}",
         "html":    html,
     })
