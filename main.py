@@ -32,6 +32,14 @@ from video import clip_first_6_seconds, stamp_video, download_video_ytdlp
 
 log = logging.getLogger("verifyd.main")
 
+# Admin key — set ADMIN_KEY env var on Render; falls back to default for local dev
+_ADMIN_KEY = os.environ.get("ADMIN_KEY", "Honda6915")
+
+def _is_admin(key: str) -> bool:
+    """Check admin key — supports both URL-encoded and raw forms."""
+    key = (key or "").strip()
+    return key == _ADMIN_KEY or key == _ADMIN_KEY.replace("#", "%23")
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
@@ -121,64 +129,24 @@ def _sha256(path: str) -> str:
 
 def _run_analysis(source_path: str) -> tuple:
     """
-    Clip → detect (signal + GPT in parallel) → return results.
+    Clip → run_detection() (detection.py handles signal+GPT in parallel)
+    → return (authenticity, label, detail, ui_text, color, certify, clip_path).
+    clip_path is preserved for stamping; caller must delete it after use.
     """
-    import concurrent.futures
-    from detector   import detect_ai
-    from gpt_vision import gpt_vision_score
-
     clip_path = clip_first_6_seconds(source_path)
-    keep_clip = clip_path   # preserved for caller to use for stamping
     try:
-        # Run signal detector and GPT-4o in parallel
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-            future_signal = executor.submit(detect_ai, clip_path)
-            future_gpt    = executor.submit(gpt_vision_score, clip_path)
-            signal_ai_score = future_signal.result()
-            gpt_result      = future_gpt.result()
-
-        from detection import WEIGHT_SIGNAL, WEIGHT_GPT, THRESHOLD_REAL, THRESHOLD_UNDETERMINED
-        gpt_ai_score  = gpt_result["ai_probability"]
-        gpt_available = gpt_result.get("available", False)
-        gpt_failed    = not gpt_available or gpt_result.get("reasoning", "").startswith("GPT analysis error")
-
-        if not gpt_failed:
-            combined = signal_ai_score * WEIGHT_SIGNAL + gpt_ai_score * WEIGHT_GPT
-        else:
-            combined = float(signal_ai_score)
-            log.warning("GPT failed — signal only (signal=%d)", signal_ai_score)
-
-        combined     = max(0.0, min(100.0, combined))
-        authenticity = 100 - int(round(combined))
-
-        if authenticity >= THRESHOLD_REAL:
-            label = "REAL"
-        elif authenticity >= THRESHOLD_UNDETERMINED:
-            label = "UNDETERMINED"
-        else:
-            label = "AI"
-
-        detail = {
-            "ai_score":        int(round(combined)),
-            "authenticity":    authenticity,
-            "label":           label,
-            "signal_ai_score": signal_ai_score,
-            "gpt_ai_score":    gpt_ai_score,
-            "gpt_available":   gpt_available,
-            "gpt_reasoning":   gpt_result.get("reasoning", ""),
-            "gpt_flags":       gpt_result.get("flags", []),
-        }
-        log.info("Parallel detection: signal=%d gpt=%d combined=%d auth=%d label=%s",
-                 signal_ai_score, gpt_ai_score, int(round(combined)), authenticity, label)
+        authenticity, label, detail = run_detection(clip_path)
     except Exception:
-        # Only clean up clip on error — on success caller uses it for stamping
-        if os.path.exists(keep_clip):
-            os.remove(keep_clip)
+        # Clean up clip on detection error
+        if os.path.exists(clip_path):
+            os.remove(clip_path)
         raise
 
     ui_text, color, certify = LABEL_UI.get(label, ("UNKNOWN", "grey", False))
-    # Return clip_path so caller can stamp from it, then clean up
-    return authenticity, label, detail, ui_text, color, certify, keep_clip
+    log.info("Analysis: label=%s authenticity=%d ai_score=%d",
+             label, authenticity, detail["ai_score"])
+    # Return clip_path — caller stamps from it then cleans up
+    return authenticity, label, detail, ui_text, color, certify, clip_path
 
 
 def _stamp_video_background(
@@ -186,31 +154,43 @@ def _stamp_video_background(
     email: str = "", authenticity: int = 0,
     original_filename: str = "", download_url: str = ""
 ):
-    """Stamp video in background thread, then send certification email."""
+    """
+    Stamp video in background thread, then send certification email.
+    Cleans up clip file always. If stamp fails, removes any partial
+    certified_path so download endpoint returns a clean 404 instead
+    of serving a corrupt/empty file.
+    """
     import traceback
+    stamp_ok = False
     try:
         log.info("Background stamp starting: input=%s exists=%s", raw_path, os.path.exists(raw_path))
         if not os.path.exists(raw_path):
-            log.error("Background stamp FAILED — raw_path not found: %s", raw_path)
+            log.error("Background stamp FAILED — clip not found: %s", raw_path)
             return
         stamp_video(raw_path, certified_path, cid)
         exists = os.path.exists(certified_path)
         size   = os.path.getsize(certified_path) if exists else 0
         log.info("Background stamp complete: %s  output_exists=%s  size=%d", cid, exists, size)
         if not exists or size < 1000:
-            log.error("Stamp produced empty or missing output file for %s", cid)
+            log.error("Stamp produced empty/missing output for %s — removing", cid)
+            if exists:
+                os.remove(certified_path)
             return
-    except Exception as e:
-        log.error("Background stamp EXCEPTION for %s: %s", cid, traceback.format_exc())
-        return  # Don't send email if stamp failed
+        stamp_ok = True
+    except Exception:
+        log.error("Background stamp EXCEPTION for %s:\n%s", cid, traceback.format_exc())
+        # Remove any partial output so download returns 404 not corrupt data
+        if os.path.exists(certified_path):
+            os.remove(certified_path)
+        return
     finally:
         # Always clean up the clip file
         if os.path.exists(raw_path):
             os.remove(raw_path)
             log.info("Cleaned up clip: %s", raw_path)
 
-    # Send email after stamp is confirmed complete
-    if email:
+    # Send email only after confirmed successful stamp
+    if stamp_ok and email:
         try:
             send_certification_email(email, cid, authenticity, original_filename, download_url)
             log.info("Certification email sent to %s for cert %s", email, cid)
@@ -756,7 +736,7 @@ def analyze_link(request: Request, video_url: str, email: str = ""):
             os.remove(tmp_path)
         # clip_path is a tmp file created by _run_analysis — always clean it up
         try:
-            if 'clip_path' in dir() and clip_path and os.path.exists(clip_path):
+            if 'clip_path' in locals() and clip_path and os.path.exists(clip_path):
                 os.remove(clip_path)
         except Exception:
             pass
@@ -899,7 +879,7 @@ def admin_data(key: str = ""):
     Returns all user data for the admin dashboard.
     Protected by a simple API key.
     """
-    if key not in ("Honda#6915", "Honda6915", "admin2026"):
+    if not _is_admin(key):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 
     try:
@@ -981,7 +961,7 @@ def debug_db():
 @app.get("/admin-reset-user/")
 def admin_reset_user(email: str = "", key: str = ""):
     """Reset a user's period_uses to 0 for testing."""
-    if key not in ("Honda#6915", "Honda6915", "admin2026"):
+    if not _is_admin(key):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     if not email:
         return JSONResponse({"error": "email required"}, status_code=400)
@@ -1004,7 +984,7 @@ def admin_reset_user(email: str = "", key: str = ""):
 @app.get("/test-email/")
 def test_email(email: str = "", key: str = ""):
     """Test email validation. Admin only."""
-    if key not in ("Honda#6915", "Honda6915", "admin2026"):
+    if not _is_admin(key):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     if not email:
         return JSONResponse({"error": "email required"}, status_code=400)
@@ -1061,7 +1041,7 @@ async def verify_otp_route(email: str = Form(...), code: str = Form(...)):
 @app.get("/test-resend/")
 def test_resend(key: str = ""):
     """Test Resend API key directly."""
-    if key not in ("Honda#6915", "Honda6915", "admin2026"):
+    if not _is_admin(key):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     import urllib.request, urllib.error, json
     resend_key = os.environ.get("RESEND_API_KEY", "")
