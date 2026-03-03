@@ -26,9 +26,9 @@ log = logging.getLogger("verifyd.gpt_vision")
 # ─────────────────────────────────────────────────────────────
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 GPT_MODEL      = "gpt-4o"
-MAX_FRAMES     = 8      # frames to send to GPT-4o (more = better detection)
-FRAME_QUALITY  = 70     # JPEG quality for base64 encoding (lower = cheaper)
-MAX_DIMENSION  = 512    # resize frames to this max dimension (cost control)
+MAX_FRAMES     = 10      # frames to send to GPT-4o (more = better detection)
+FRAME_QUALITY  = 75     # JPEG quality for base64 encoding (lower = cheaper)
+MAX_DIMENSION  = 768    # resize frames to this max dimension (cost control)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -50,8 +50,8 @@ def extract_key_frames(video_path: str, n_frames: int = MAX_FRAMES) -> list:
         return []
 
     # Pick evenly spaced frame indices, skip first 10% and last 20%
-    start = max(0, int(total_frames * 0.10))
-    end   = min(total_frames - 1, int(total_frames * 0.80))
+    start = max(0, int(total_frames * 0.05))
+    end   = min(total_frames - 1, int(total_frames * 0.95))
     indices = [int(start + (end - start) * i / (n_frames - 1)) for i in range(n_frames)]
 
     frames_b64 = []
@@ -102,43 +102,79 @@ def analyze_frames_with_gpt(frames_b64: list) -> dict:
             {
                 "type": "text",
                 "text": (
-                    "You are an expert AI-generated and VFX video detector. Analyze these video frames "
-                    "and determine if this video was generated or enhanced by AI or VFX.\n\n"
-                    "CRITICAL: Check for ANY text in the frames that says 'AI-generated', "
-                    "'AI enhanced', 'AI created', 'made with AI', or similar labels. "
-                    "If you see such text, score ai_probability at 95+.\n\n"
-                    "Look for these STRONG AI/VFX indicators:\n"
-                    "- Text overlay stating 'AI-generated', 'AI-enhanced', or similar\n"
-                    "- Impossible or physically impossible scenes (ocean waves indoors, "
-                    "wave pools on ship decks, impossible weather, supernatural events)\n"
-                    "- VFX compositing — elements that look digitally added to real footage\n"
-                    "- Water, fire, or weather that looks CGI or unnaturally perfect\n"
-                    "- Obvious AI art style (plastic skin, unnaturally perfect faces, dreamlike quality)\n"
+                   "You are an expert AI-generated video detector with deep knowledge of physics "
+                    "and human biomechanics. Analyze these video frames carefully.\n\n"
+
+                    "═══════════════════════════════════════\n"
+                    "PHYSICS VIOLATIONS — HIGHEST PRIORITY\n"
+                    "═══════════════════════════════════════\n"
+                    "These are the strongest indicators of AI generation. If you see ANY of these, "
+                    "score ai_probability at 85 or higher:\n\n"
+
+                    "GRAVITY VIOLATIONS:\n"
+                    "- A person lifting off or floating above a surface (waterslide, ground, etc.) "
+                    "without a visible jump, ramp, or external force\n"
+                    "- Body hovering or rising upward against gravity in a context where this is "
+                    "physically impossible (e.g. rising off a waterslide mid-slide)\n"
+                    "- Objects or people suspended in mid-air longer than physics allows\n"
+                    "- A person's trajectory defying the parabolic arc that gravity produces\n\n"
+
+                    "WATER PHYSICS VIOLATIONS:\n"
+                    "- Water flowing upward or sideways against gravity\n"
+                    "- Splashes that look CGI — too perfect, too symmetric, or unrealistic\n"
+                    "- Water disappearing or appearing instantaneously\n"
+                    "- Wave or splash size inconsistent with the force that caused it\n\n"
+
+                    "BODY PHYSICS VIOLATIONS:\n"
+                    "- Limbs bending at anatomically impossible angles\n"
+                    "- Body proportions shifting or morphing between frames\n"
+                    "- Clothing or hair behaving differently from what physics predicts\n"
+                    "- Movement that is too smooth, too fast, or too perfect for a human\n\n"
+
+                    "ENVIRONMENTAL PHYSICS:\n"
+                    "- Any element in the scene behaving in a way that common sense says\n"
+                    "  cannot happen in that real-world context\n"
+                    "- Scene elements that appear digitally composited onto real footage\n\n"
+
+                    "═══════════════════════════════════════\n"
+                    "OTHER AI/VFX INDICATORS — STRONG SIGNALS\n"
+                    "═══════════════════════════════════════\n"
+                    "- Text overlay stating 'AI-generated', 'AI-enhanced', or similar (score 95+)\n"
+                    "- Obvious AI art style: plastic/waxy skin, unnaturally perfect faces\n"
+                    "- Background that looks painted or rendered rather than photographed\n"
                     "- Objects morphing or changing shape between frames\n"
                     "- Distorted or nonsensical text and signs\n"
-                    "- Background that looks painted or rendered, not photographed\n"
                     "- Creatures or beings that cannot exist in reality\n"
-                    "- Movie set with blue/green screen visible in background\n"
-                    "- Viral 'unexplained phenomena' style content with impossible subjects\n\n"
-                    "These are NOT reliable AI indicators — do NOT penalize for:\n"
+                    "- VFX compositing with visible seams or inconsistent lighting\n\n"
+
+                    "═══════════════════════════════════════\n"
+                    "DO NOT penalize for these — they are normal in real videos:\n"
+                    "═══════════════════════════════════════\n"
                     "- Low resolution or compression artifacts (common in phone videos)\n"
-                    "- Slight blur or noise (normal for real cameras)\n"
-                    "- Text overlays or captions (these are edits, not AI generation)\n\n"
-                    "Real video indicators:\n"
-                    "- Natural camera motion and shake with no impossible elements\n"
-                    "- Consistent lighting and physics throughout\n"
-                    "- Ordinary everyday scenes that obey physics\n\n"
+                    "- Slight blur, noise, or shaky camera (normal for real cameras)\n"
+                    "- Text overlays or captions added in post-production\n"
+                    "- Slow motion effects (normal video technique)\n"
+                    "- Natural athletic or acrobatic movement that is fast or impressive\n\n"
+
+                    "═══════════════════════════════════════\n"
+                    "SCORING GUIDE:\n"
+                    "═══════════════════════════════════════\n"
+                    "0-20:  Definitely real — natural physics, no AI artifacts\n"
+                    "20-40: Likely real — minor anomalies, could be compression\n"
+                    "40-60: Uncertain — some suspicious elements but not conclusive\n"
+                    "60-80: Likely AI — multiple anomalies or one clear physics violation\n"
+                    "80-95: Almost certainly AI — clear physics violations or AI artifacts\n"
+                    "95+:   Definitely AI — explicitly labeled or multiple obvious violations\n\n"
+
                     "Respond ONLY with a JSON object in this exact format:\n"
                     "{\n"
                     '  "ai_probability": <integer 0-100>,\n'
-                    '  "reasoning": "<one sentence summary>",\n'
+                    '  "reasoning": "<one sentence summary of the key finding>",\n'
                     '  "flags": ["<specific anomaly 1>", "<specific anomaly 2>"]\n'
                     "}\n"
-                    "Where ai_probability=100 means definitely AI/VFX, 0 means definitely real.\n"
-                    "For ordinary phone videos with no AI artifacts, score 15-30.\n"
-                    "For videos with impossible composited elements or impossible physics, score 75-95.\n"
-                    "For videos explicitly labeled AI-generated, score 95+.\n"
-                    "flags should list specific anomalies detected (empty array if none)."
+                    "flags should list specific anomalies detected (empty array if none).\n"
+                    "Be specific in flags — e.g. 'Person lifts off waterslide at frame 3 "
+                    "with no jump or ramp visible' rather than just 'unnatural movement'."
                 )
             }
         ]
@@ -156,7 +192,7 @@ def analyze_frames_with_gpt(frames_b64: list) -> dict:
         payload = {
             "model": GPT_MODEL,
             "messages": [{"role": "user", "content": content}],
-            "max_tokens": 300,
+            "max_tokens": 400,
             "temperature": 0.1,   # low temperature for consistent scoring
         }
 
