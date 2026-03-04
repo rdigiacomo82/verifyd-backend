@@ -31,10 +31,10 @@ log = logging.getLogger("verifyd.gpt_vision")
 #  Configuration
 # ─────────────────────────────────────────────────────────────
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
-GPT_MODEL      = "gpt-4o"
-MAX_FRAMES     = 10
-FRAME_QUALITY  = 75
-MAX_DIMENSION  = 768
+GPT_MODEL      = os.environ.get("VERIFYD_GPT_MODEL", "gpt-4o")  # override via env var
+MAX_FRAMES     = 6      # 6 frames optimal — more frames add time without accuracy gain
+FRAME_QUALITY  = 80
+MAX_DIMENSION  = 512    # 512px sufficient for physics/artifact detection
 
 # ─────────────────────────────────────────────────────────────
 #  Concurrency limiter
@@ -207,7 +207,7 @@ def analyze_frames_with_gpt(frames_b64: list, physics_summary: str = "") -> dict
                 "type": "image_url",
                 "image_url": {
                     "url": f"data:image/jpeg;base64,{b64}",
-                    "detail": "high"
+                    "detail": "low"
                 }
             })
 

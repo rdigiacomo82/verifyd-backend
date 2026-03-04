@@ -237,7 +237,7 @@ def detect_ai(video_path: str) -> int:
         frame_count += 1
         if frame_count % 5 != 0:
             continue
-        if samples >= 60:
+        if samples >= 40:   # 40 samples sufficient — was 60, saves ~3s
             break
         samples += 1
 

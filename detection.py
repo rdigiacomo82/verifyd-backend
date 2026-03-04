@@ -70,10 +70,8 @@ def _build_physics_context(signal_score: int) -> dict:
 
 
 def run_detection(video_path: str) -> tuple:
-    # ── Run signal detector first, then pass physics findings to GPT ──
-    # Sequential execution allows GPT to use physics engine results as context,
-    # significantly improving accuracy on action/physics content.
-    from concurrent.futures import ThreadPoolExecutor
+    import time
+    t0 = time.time()
 
     # Step 1: Run signal detector and extract frames in parallel
     with ThreadPoolExecutor(max_workers=2) as executor:
@@ -82,6 +80,8 @@ def run_detection(video_path: str) -> tuple:
         signal_ai_score = future_signal.result()
         frames_b64      = future_frames.result()
 
+    t1 = time.time()
+    log.info("Timing: signal+frames parallel = %.1fs", t1 - t0)
     log.info("Signal detector ai_score: %d", signal_ai_score)
 
     # Step 2: Build physics context from signal results to pass to GPT
@@ -89,6 +89,10 @@ def run_detection(video_path: str) -> tuple:
 
     # Step 3: Run GPT with physics context
     gpt_result = gpt_vision_score_with_context(frames_b64, physics_context)
+
+    t2 = time.time()
+    log.info("Timing: GPT call = %.1fs", t2 - t1)
+    log.info("Timing: total detection = %.1fs", t2 - t0)
 
     gpt_ai_score  = gpt_result["ai_probability"]
     gpt_available = gpt_result.get("available", False)
