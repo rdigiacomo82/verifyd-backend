@@ -224,7 +224,8 @@ def detect_ai(video_path: str) -> int:
     vert_flow_scores:        List[float] = []   # physics engine
     low_corr_count:          int = 0            # content jump counter
 
-    prev_gray  = None
+    prev_gray       = None
+    prev_gray_small = None
     prev_hist  = None
     temporal_diffs: List[float] = []
     frame_count = 0
@@ -243,6 +244,12 @@ def detect_ai(video_path: str) -> int:
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
+        # Downscale to 50% for optical flow only — 4x faster, minimal accuracy loss
+        # Full resolution kept for texture/edge/DCT analysis
+        h_flow = cap_h // 2
+        w_flow = cap_w // 2
+        gray_small = cv2.resize(gray, (w_flow, h_flow), interpolation=cv2.INTER_LINEAR)
+
         noise_scores.append(_noise_score(gray))
         freq_scores.append(_frequency_score(gray))
         edge_scores.append(_edge_quality(gray))
@@ -257,17 +264,18 @@ def detect_ai(video_path: str) -> int:
         texture_var_scores.append(_texture_patch_variance(gray))
 
         if prev_gray is not None:
-            diff = cv2.absdiff(gray, prev_gray)
+            diff = cv2.absdiff(gray_small, prev_gray_small)
             motion_scores.append(float(np.mean(diff)))
-            flow = cv2.calcOpticalFlowFarneback(prev_gray, gray, None,
+            # Optical flow on small frame — 4x faster than full resolution
+            flow = cv2.calcOpticalFlowFarneback(prev_gray_small, gray_small, None,
                 pyr_scale=0.5, levels=3, winsize=15,
                 iterations=3, poly_n=5, poly_sigma=1.2, flags=0)
             flow_regularity_scores.append(float(np.var(np.sqrt(flow[...,0]**2 + flow[...,1]**2))))
             # Vertical flow: negative = upward (anti-gravity), positive = downward
             vert_flow_scores.append(float(np.mean(flow[..., 1])))
-            # Frame correlation for content jump detection
-            c = float(np.corrcoef(gray.flatten().astype(float),
-                                  prev_gray.flatten().astype(float))[0, 1])
+            # Frame correlation on small frame — faster
+            c = float(np.corrcoef(gray_small.flatten().astype(float),
+                                  prev_gray_small.flatten().astype(float))[0, 1])
             if c < 0.5:
                 low_corr_count += 1
 
@@ -276,10 +284,11 @@ def detect_ai(video_path: str) -> int:
         if prev_hist is not None:
             temporal_diffs.append(float(np.sum(np.abs(hist - prev_hist))))
 
-        prev_gray = gray.copy()
+        prev_gray       = gray.copy()
+        prev_gray_small = gray_small.copy()
         prev_hist = hist
 
-        gray_buffer.append(gray)
+        gray_buffer.append(gray_small)
         if len(gray_buffer) > 10:
             gray_buffer.pop(0)
 
