@@ -177,6 +177,14 @@ def _texture_patch_variance(gray: np.ndarray) -> float:
     return float(np.var(gray.astype(np.float64)))
 
 
+# ── Thread-local physics signal store ───────────────────────
+import threading
+_physics_store = threading.local()
+
+def get_last_physics_signals() -> dict:
+    """Return physics signals from the most recent detect_ai() call on this thread."""
+    return getattr(_physics_store, "signals", {})
+
 # ── Main detection function ──────────────────────────────────
 
 def detect_ai(video_path: str) -> int:
@@ -518,6 +526,16 @@ def detect_ai(video_path: str) -> int:
         log.info("Physics: %d content jump frames detected", low_corr_count)
     elif low_corr_count > 2:
         ai_score += 4
+
+    # ── Store physics signals for GPT context handoff ─────────
+    _physics_store.signals = {
+        "avg_vert_flow":       avg_vert_flow       if vert_flow_scores else None,
+        "upward_frame_ratio":  upward_frame_ratio  if vert_flow_scores else None,
+        "accel_std":           accel_std           if vert_flow_scores else None,
+        "low_corr_count":      low_corr_count,
+        "avg_saturation":      avg_saturation,
+        "avg_sharpness":       avg_sharpness,
+    }
 
     ai_score = max(0.0, min(100.0, ai_score))
     log.info("Primary AI score: %.0f", ai_score)

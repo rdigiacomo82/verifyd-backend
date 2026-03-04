@@ -90,7 +90,7 @@ def extract_key_frames(video_path: str, n_frames: int = MAX_FRAMES) -> list:
 # ─────────────────────────────────────────────────────────────
 #  GPT-4o Analysis
 # ─────────────────────────────────────────────────────────────
-def analyze_frames_with_gpt(frames_b64: list) -> dict:
+def analyze_frames_with_gpt(frames_b64: list, physics_summary: str = "") -> dict:
     """
     Send frames to GPT-4o for semantic AI detection analysis.
     Returns dict with: ai_probability (0-100), reasoning, flags
@@ -112,6 +112,8 @@ def analyze_frames_with_gpt(frames_b64: list) -> dict:
             {
                 "type": "text",
                 "text": (
+                    (physics_summary + "\n\n") if physics_summary else ""
+                ) + (
                     "You are an expert AI-generated video detector. Determine if this video "
                     "was AI-generated or is genuine real footage. Follow these steps in order.\n\n"
 
@@ -289,3 +291,88 @@ def gpt_vision_score(video_path: str) -> dict:
     result = analyze_frames_with_gpt(frames)
     result["available"] = True
     return result
+
+
+def gpt_vision_score_with_context(frames_b64: list, physics_context: dict) -> dict:
+    """
+    Run GPT-4o analysis with physics engine context pre-loaded.
+    physics_context dict contains signal detector findings to guide GPT.
+    """
+    if not OPENAI_API_KEY:
+        return {"ai_probability": 50, "reasoning": "GPT vision not configured", "flags": [], "available": False}
+
+    if not frames_b64:
+        return {"ai_probability": 50, "reasoning": "Could not extract frames", "flags": [], "available": False}
+
+    # Build physics context summary to inject into prompt
+    physics_summary = _build_physics_summary(physics_context)
+    result = analyze_frames_with_gpt(frames_b64, physics_summary)
+    result["available"] = True
+    return result
+
+
+def _build_physics_summary(ctx: dict) -> str:
+    """Convert physics context dict into a natural language summary for GPT."""
+    if not ctx:
+        return ""
+
+    lines = []
+    signal_score = ctx.get("signal_score")
+    vert_flow    = ctx.get("vert_flow")
+    upward_ratio = ctx.get("upward_ratio")
+    accel_std    = ctx.get("accel_std")
+    low_corr     = ctx.get("low_corr_count")
+    saturation   = ctx.get("avg_saturation")
+    sharpness    = ctx.get("avg_sharpness")
+
+    lines.append("═══════════════════════════════════════")
+    lines.append("PHYSICS ENGINE PRE-ANALYSIS (from signal detector):")
+    lines.append("The following measurements were made BEFORE you see these frames.")
+    lines.append("Use this data to guide your visual analysis.\n")
+
+    if signal_score is not None:
+        lines.append(f"Overall AI signal score: {signal_score}/100 "
+                     f"({'HIGH — strong AI indicators detected' if signal_score > 60 else 'LOW — consistent with real video' if signal_score < 40 else 'MODERATE — ambiguous'})")
+
+    if vert_flow is not None:
+        if vert_flow < -1.0:
+            lines.append(f"⚠ GRAVITY VIOLATION DETECTED: Mean vertical optical flow = {vert_flow:.2f} "
+                         f"(negative = upward motion against gravity). "
+                         f"Look carefully for the person rising or floating above the surface.")
+        elif vert_flow < -0.3:
+            lines.append(f"⚠ Upward motion tendency detected: vertical flow = {vert_flow:.2f}. "
+                         f"Check if person appears to defy gravity.")
+        else:
+            lines.append(f"✓ Gravity-consistent motion: vertical flow = {vert_flow:.2f} (downward as expected).")
+
+    if upward_ratio is not None:
+        pct = upward_ratio * 100
+        if pct > 25:
+            lines.append(f"⚠ {pct:.0f}% of frames show strong upward motion — "
+                         f"physically impossible for slide/action content. Look for hovering.")
+        elif pct < 10:
+            lines.append(f"✓ Only {pct:.0f}% of frames show upward motion — consistent with real physics.")
+
+    if accel_std is not None:
+        if accel_std < 1.5:
+            lines.append(f"⚠ Unnaturally smooth trajectory detected (accel_std={accel_std:.2f}). "
+                         f"Real action is chaotic. AI motion is smooth.")
+        else:
+            lines.append(f"✓ Chaotic natural trajectory (accel_std={accel_std:.2f}) — consistent with real motion.")
+
+    if low_corr is not None and low_corr > 5:
+        lines.append(f"⚠ {low_corr} frame discontinuities detected — content jumps typical of AI generation.")
+
+    if saturation is not None and saturation > 100:
+        lines.append(f"⚠ Over-saturated colors detected (saturation={saturation:.0f}) — "
+                     f"real outdoor footage is typically less saturated.")
+
+    if sharpness is not None and sharpness < 150:
+        lines.append(f"⚠ Low sharpness detected ({sharpness:.0f}) — AI videos tend to be softer than real camera footage.")
+
+    lines.append("═══════════════════════════════════════\n")
+    lines.append("Now examine the frames with this context in mind.")
+    lines.append("If the physics engine flagged gravity violations, look carefully for the person")
+    lines.append("rising above the surface, floating, or moving in ways that defy physics.\n")
+
+    return "\n".join(lines)

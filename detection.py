@@ -24,9 +24,9 @@
 # ============================================================
 
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from detector    import detect_ai
-from gpt_vision  import gpt_vision_score
+from gpt_vision  import gpt_vision_score, gpt_vision_score_with_context, extract_key_frames
 
 log = logging.getLogger("verifyd.detection")
 
@@ -37,18 +37,59 @@ WEIGHT_GPT             = 0.60
 SIGNAL_ONLY_AI_THRESHOLD = 90
 
 
+def _extract_frames_only(video_path: str) -> list:
+    """Extract frames for GPT without running analysis."""
+    try:
+        return extract_key_frames(video_path)
+    except Exception as e:
+        log.error("Frame extraction failed: %s", e)
+        return []
+
+
+def _build_physics_context(signal_score: int) -> dict:
+    """
+    Read the detector's last-run physics signals from a thread-local
+    store set by detector.py, and build a context dict for GPT.
+    Falls back to signal score alone if detailed signals unavailable.
+    """
+    try:
+        from detector import get_last_physics_signals
+        signals = get_last_physics_signals()
+    except Exception:
+        signals = {}
+
+    return {
+        "signal_score":     signal_score,
+        "vert_flow":        signals.get("avg_vert_flow", None),
+        "upward_ratio":     signals.get("upward_frame_ratio", None),
+        "accel_std":        signals.get("accel_std", None),
+        "low_corr_count":   signals.get("low_corr_count", None),
+        "avg_saturation":   signals.get("avg_saturation", None),
+        "avg_sharpness":    signals.get("avg_sharpness", None),
+    }
+
+
 def run_detection(video_path: str) -> tuple:
-    # ── Run both engines in parallel ──────────────────────────
-    # Signal detector and GPT-4o run simultaneously, cutting
-    # total detection time from ~90s sequential to ~45s parallel.
+    # ── Run signal detector first, then pass physics findings to GPT ──
+    # Sequential execution allows GPT to use physics engine results as context,
+    # significantly improving accuracy on action/physics content.
+    from concurrent.futures import ThreadPoolExecutor
+
+    # Step 1: Run signal detector and extract frames in parallel
     with ThreadPoolExecutor(max_workers=2) as executor:
         future_signal = executor.submit(detect_ai, video_path)
-        future_gpt    = executor.submit(gpt_vision_score, video_path)
-
+        future_frames = executor.submit(_extract_frames_only, video_path)
         signal_ai_score = future_signal.result()
-        gpt_result      = future_gpt.result()
+        frames_b64      = future_frames.result()
 
     log.info("Signal detector ai_score: %d", signal_ai_score)
+
+    # Step 2: Build physics context from signal results to pass to GPT
+    physics_context = _build_physics_context(signal_ai_score)
+
+    # Step 3: Run GPT with physics context
+    gpt_result = gpt_vision_score_with_context(frames_b64, physics_context)
+
     gpt_ai_score  = gpt_result["ai_probability"]
     gpt_available = gpt_result.get("available", False)
     gpt_reasoning = gpt_result.get("reasoning", "")
