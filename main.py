@@ -341,11 +341,27 @@ def job_status(job_id: str):
 
 @app.get("/download/{cid}")
 def download(cid: str):
+    # First check local disk (legacy / direct web service stamping)
     path = f"{CERT_DIR}/{cid}.mp4"
-    if not os.path.exists(path):
-        return JSONResponse({"error": "Certificate not found"}, status_code=404)
-    increment_downloads(cid)
-    return FileResponse(path, media_type="video/mp4")
+    if os.path.exists(path):
+        increment_downloads(cid)
+        return FileResponse(path, media_type="video/mp4")
+
+    # Check Redis — worker stores certified videos here
+    try:
+        from queue_helper import get_redis
+        r = get_redis()
+        video_bytes = r.get(f"certified:{cid}")
+        if video_bytes:
+            increment_downloads(cid)
+            # Cache locally for faster subsequent downloads
+            with open(path, "wb") as f:
+                f.write(video_bytes)
+            return FileResponse(path, media_type="video/mp4")
+    except Exception as e:
+        log.warning("download: Redis check failed for %s: %s", cid, e)
+
+    return JSONResponse({"error": "Certificate not found"}, status_code=404)
 
 
 @app.get("/certificate/{cid}")

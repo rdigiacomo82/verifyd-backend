@@ -124,6 +124,11 @@ def process_upload_job(
             try:
                 clip_path = clip_first_6_seconds(tmp_path)
                 stamp_video(clip_path, certified_path, cid)
+                # Store certified video bytes in Redis so web service can serve download
+                with open(certified_path, "rb") as f:
+                    video_bytes = f.read()
+                redis_conn.setex(f"certified:{cid}", 86400, video_bytes)  # 24hr TTL
+                log.info("Worker: stored certified video in Redis: certified:%s (%d bytes)", cid, len(video_bytes))
                 result["certificate_id"] = cid
                 result["download_url"]   = download_url
                 if email and email != "anonymous@verifyd.com":
