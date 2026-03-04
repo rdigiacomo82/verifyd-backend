@@ -313,7 +313,7 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
     # ── Poll Redis until worker completes (transparent to frontend) ──
     # Frontend never sees job_id — gets same response format as before.
     import asyncio
-    for _ in range(120):   # poll up to 120 times = ~6 minutes max
+    for _ in range(200):   # poll up to 200 times = ~10 minutes max
         await asyncio.sleep(3)
         result = get_job_result(job_id)
         if result and result.get("job_status") == "complete":
