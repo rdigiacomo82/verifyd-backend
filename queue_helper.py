@@ -1,12 +1,13 @@
 # ============================================================
-#  VeriFYD — queue_helper.py
+#  VeriFYD — queue_helper.py  v2
 #
-#  Redis/RQ queue management.
-#  Single source of truth for queue connection and job ops.
+#  Passes file content through Redis instead of file path
+#  since web service and background worker don't share disk.
 # ============================================================
 
 import os
 import json
+import base64
 import logging
 
 log = logging.getLogger("verifyd.queue")
@@ -22,25 +23,44 @@ def get_redis():
 
 def get_queue():
     from rq import Queue
-    return Queue("verifyd", connection=get_redis(), default_timeout=300)
+    return Queue("verifyd", connection=get_redis(), default_timeout=600)
 
 
 def enqueue_upload(job_id: str, file_path: str,
                    filename: str, email: str) -> str:
-    from rq import Queue
+    """
+    Read file content, store in Redis, enqueue job with redis key.
+    Worker retrieves file content from Redis instead of disk.
+    """
     from worker import process_upload_job
+
+    # Store file content in Redis with TTL
+    r = get_redis()
+    with open(file_path, "rb") as f:
+        file_bytes = f.read()
+
+    # Store raw bytes in Redis under a separate key
+    file_key = f"upload_file:{job_id}"
+    r.setex(file_key, RESULT_TTL, file_bytes)
+    log.info("Stored file in Redis: %s (%d bytes)", file_key, len(file_bytes))
+
+    # Clean up local file immediately after storing in Redis
+    if os.path.exists(file_path):
+        os.remove(file_path)
+        log.info("Cleaned up local file: %s", file_path)
+
     q = get_queue()
     q.enqueue(
         process_upload_job,
         kwargs={
-            "job_id":    job_id,
-            "file_path": file_path,
-            "filename":  filename,
-            "email":     email,
+            "job_id":   job_id,
+            "file_key": file_key,
+            "filename": filename,
+            "email":    email,
         },
         job_id      = job_id,
         result_ttl  = RESULT_TTL,
-        job_timeout = 300,
+        job_timeout = 600,
     )
     log.info("Enqueued upload job %s for %s", job_id, email)
     return job_id
@@ -60,7 +80,7 @@ def enqueue_link(job_id: str, video_url: str,
         },
         job_id      = job_id,
         result_ttl  = RESULT_TTL,
-        job_timeout = 300,
+        job_timeout = 600,
     )
     log.info("Enqueued link job %s for %s", job_id, email)
     return job_id
@@ -68,12 +88,7 @@ def enqueue_link(job_id: str, video_url: str,
 
 def get_job_result(job_id: str) -> dict:
     """
-    Check job status. Returns dict with job_status field:
-      queued      — waiting in queue (includes position)
-      processing  — currently running
-      complete    — done (includes full result)
-      error       — failed
-      not_found   — unknown job_id
+    Check job status. Returns dict with job_status field.
     """
     try:
         r = get_redis()
@@ -90,9 +105,9 @@ def get_job_result(job_id: str) -> dict:
             status = job.get_status()
             if str(status) in ("queued",):
                 try:
-                    q       = get_queue()
-                    ids     = q.job_ids
-                    pos     = ids.index(job_id) + 1 if job_id in ids else 1
+                    q   = get_queue()
+                    ids = q.job_ids
+                    pos = ids.index(job_id) + 1 if job_id in ids else 1
                 except Exception:
                     pos = 1
                 return {"job_status": "queued", "position": pos}
