@@ -32,9 +32,9 @@ log = logging.getLogger("verifyd.gpt_vision")
 # ─────────────────────────────────────────────────────────────
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 GPT_MODEL      = "gpt-4o"
-MAX_FRAMES     = 10
+MAX_FRAMES     = 6      # reduced from 10 — saves ~15-20s with minimal accuracy loss
 FRAME_QUALITY  = 75
-MAX_DIMENSION  = 768
+MAX_DIMENSION  = 512    # reduced from 768 — smaller images, faster API response
 
 # ─────────────────────────────────────────────────────────────
 #  Concurrency limiter
