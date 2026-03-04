@@ -56,13 +56,14 @@ echo "node OK: $(node --version)"
 # ── Python dependencies ───────────────────────────────────────
 pip install --upgrade pip
 pip install -r requirements.txt
+pip install redis rq
 # Install yt-dlp with curl-cffi extra so impersonation handler is registered
 pip install --upgrade "yt-dlp[default,curl-cffi]"
 # Install yt-dlp-ejs for YouTube JS challenge solving (requires node)
 pip install --upgrade yt-dlp-ejs
 
 # Smoke-test key imports
-python -c "import cv2, numpy, fastapi, uvicorn, yt_dlp, curl_cffi; print('Python deps OK')"
+python -c "import cv2, numpy, fastapi, uvicorn, yt_dlp, curl_cffi, redis, rq; print('Python deps OK')"
 
 # Verify yt-dlp CLI is available
 yt-dlp --version && echo "yt-dlp OK" || { echo "ERROR: yt-dlp not found"; exit 1; }

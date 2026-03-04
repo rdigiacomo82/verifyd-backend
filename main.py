@@ -310,16 +310,29 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
     enqueue_upload(job_id, raw_path, file.filename, email)
     log.info("upload: queued job %s for %s file=%s", job_id, email, file.filename)
 
-    return JSONResponse({
-        "job_id":  job_id,
-        "status":  "queued",
-        "message": "Video queued for analysis. Poll /job-status/{job_id} for results.",
-    })
+    # ── Poll Redis until worker completes (transparent to frontend) ──
+    # Frontend never sees job_id — gets same response format as before.
+    import asyncio
+    for _ in range(120):   # poll up to 120 times = ~6 minutes max
+        await asyncio.sleep(3)
+        result = get_job_result(job_id)
+        if result and result.get("job_status") == "complete":
+            # Strip internal job_status field before returning
+            result.pop("job_status", None)
+            result.pop("label", None)
+            return JSONResponse(result)
+        if result and result.get("job_status") == "error":
+            return JSONResponse(
+                {"error": result.get("error", "Analysis failed.")},
+                status_code=500
+            )
+
+    return JSONResponse({"error": "Analysis timed out. Please try again."}, status_code=504)
 
 
 @app.get("/job-status/{job_id}")
 def job_status(job_id: str):
-    """Poll for async job result every 3 seconds from frontend."""
+    """Poll endpoint for frontends that handle async directly."""
     result = get_job_result(job_id)
     if not result or result.get("job_status") == "not_found":
         return JSONResponse({"job_status": "not_found"}, status_code=404)
