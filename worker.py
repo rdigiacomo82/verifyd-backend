@@ -17,6 +17,15 @@ logging.basicConfig(level=logging.INFO)
 
 RESULT_TTL = 1800
 
+# ── Initialize database tables on worker startup ──────────────
+# Worker has its own disk at /data so needs its own DB init.
+try:
+    from database import init_db
+    init_db()
+    log.info("Worker: database initialized")
+except Exception as _db_err:
+    log.error("Worker: database init failed: %s", _db_err)
+
 
 def _store_result(redis_conn, job_id: str, result: dict) -> None:
     import json
