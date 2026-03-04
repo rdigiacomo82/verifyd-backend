@@ -7,13 +7,11 @@
 #  artifacts, unnatural physics, and content anomalies that
 #  pure signal analysis cannot catch.
 #
+#  v2: Enhanced physics-based detection for waterslide/action
+#  videos where gravity violations are the primary AI signal.
+#
 #  Returns a 0-100 AI confidence score + reasoning text.
 #  Designed to run alongside detector.py for a combined verdict.
-#
-#  v3: Added threading semaphore to prevent concurrent GPT
-#  bursts from triggering 429 rate limit errors. Max 3
-#  simultaneous GPT calls regardless of user concurrency.
-#  Increased retry waits from 5s/10s to 15s/30s/45s.
 # ============================================================
 
 import os
@@ -21,7 +19,6 @@ import cv2
 import base64
 import logging
 import tempfile
-import threading
 import numpy as np
 from typing import Optional
 
@@ -32,24 +29,20 @@ log = logging.getLogger("verifyd.gpt_vision")
 # ─────────────────────────────────────────────────────────────
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 GPT_MODEL      = "gpt-4o"
-MAX_FRAMES     = 6      # reduced from 10 — saves ~15-20s with minimal accuracy loss
-FRAME_QUALITY  = 75
-MAX_DIMENSION  = 512    # reduced from 768 — smaller images, faster API response
-
-# ─────────────────────────────────────────────────────────────
-#  Concurrency limiter
-#  Max 3 simultaneous GPT calls — prevents burst 429 errors
-#  when multiple users submit videos at the same time.
-# ─────────────────────────────────────────────────────────────
-_gpt_semaphore = threading.Semaphore(3)
+MAX_FRAMES     = 10     # increased from 8 — more frames = better physics detection
+FRAME_QUALITY  = 75     # slightly higher quality for better physics analysis
+MAX_DIMENSION  = 768    # increased from 512 — needed to see body position clearly
 
 
 # ─────────────────────────────────────────────────────────────
-#  Frame extraction
+#  Frame extraction — now includes first/last frames
+#  to catch physics violations at start and end of action
 # ─────────────────────────────────────────────────────────────
 def extract_key_frames(video_path: str, n_frames: int = MAX_FRAMES) -> list:
     """
     Extract n evenly-spaced frames from the video.
+    Includes early and late frames to catch physics violations
+    at any point in the video.
     Returns list of base64-encoded JPEG strings.
     """
     cap = cv2.VideoCapture(video_path)
@@ -62,8 +55,10 @@ def extract_key_frames(video_path: str, n_frames: int = MAX_FRAMES) -> list:
         cap.release()
         return []
 
-    start   = max(0, int(total_frames * 0.05))
-    end     = min(total_frames - 1, int(total_frames * 0.95))
+    # Wider sampling window — start at 5% and end at 95%
+    # to catch physics violations anywhere in the video
+    start = max(0, int(total_frames * 0.05))
+    end   = min(total_frames - 1, int(total_frames * 0.95))
     indices = [int(start + (end - start) * i / (n_frames - 1)) for i in range(n_frames)]
 
     frames_b64 = []
@@ -73,11 +68,13 @@ def extract_key_frames(video_path: str, n_frames: int = MAX_FRAMES) -> list:
         if not ret:
             continue
 
+        # Resize to max dimension
         h, w = frame.shape[:2]
         if max(h, w) > MAX_DIMENSION:
             scale = MAX_DIMENSION / max(h, w)
             frame = cv2.resize(frame, (int(w * scale), int(h * scale)))
 
+        # Encode as JPEG base64
         _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, FRAME_QUALITY])
         b64 = base64.b64encode(buf.tobytes()).decode("utf-8")
         frames_b64.append(b64)
@@ -88,7 +85,7 @@ def extract_key_frames(video_path: str, n_frames: int = MAX_FRAMES) -> list:
 
 
 # ─────────────────────────────────────────────────────────────
-#  GPT-4o Analysis
+#  GPT-4o Analysis — enhanced with physics detection
 # ─────────────────────────────────────────────────────────────
 def analyze_frames_with_gpt(frames_b64: list) -> dict:
     """
@@ -106,8 +103,8 @@ def analyze_frames_with_gpt(frames_b64: list) -> dict:
         import urllib.request
         import urllib.error
         import json
-        import time
 
+        # Build message content with all frames
         content = [
             {
                 "type": "text",
@@ -189,6 +186,7 @@ def analyze_frames_with_gpt(frames_b64: list) -> dict:
             }
         ]
 
+        # Add each frame as an image
         for b64 in frames_b64:
             content.append({
                 "type": "image_url",
@@ -199,12 +197,13 @@ def analyze_frames_with_gpt(frames_b64: list) -> dict:
             })
 
         payload = {
-            "model":       GPT_MODEL,
-            "messages":    [{"role": "user", "content": content}],
-            "max_tokens":  400,
+            "model": GPT_MODEL,
+            "messages": [{"role": "user", "content": content}],
+            "max_tokens": 400,
             "temperature": 0.1,
         }
 
+        import time
         req = urllib.request.Request(
             "https://api.openai.com/v1/chat/completions",
             data=json.dumps(payload).encode("utf-8"),
@@ -215,38 +214,35 @@ def analyze_frames_with_gpt(frames_b64: list) -> dict:
             method="POST"
         )
 
-        # ── Semaphore: max 3 concurrent GPT calls ─────────────
-        # Queues excess requests instead of bursting all at once,
-        # preventing 429 errors under high user concurrency.
+        # Retry up to 3 times on 429 rate limit
         data = None
-        with _gpt_semaphore:
-            # Retry up to 4 times with increasing waits: 15s, 30s, 45s
-            for attempt in range(4):
-                try:
-                    with urllib.request.urlopen(req, timeout=60) as resp:
-                        data = json.loads(resp.read().decode("utf-8"))
-                    break
-                except urllib.error.HTTPError as e:
-                    if e.code == 429 and attempt < 3:
-                        wait = (attempt + 1) * 15   # 15s, 30s, 45s
-                        log.warning("GPT rate limited, retrying in %ds (attempt %d)",
-                                    wait, attempt + 1)
-                        time.sleep(wait)
-                        continue
-                    raise
-
+        for attempt in range(3):
+            try:
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                break
+            except urllib.error.HTTPError as e:
+                if e.code == 429 and attempt < 2:
+                    wait = (attempt + 1) * 5
+                    log.warning("GPT rate limited, retrying in %ds (attempt %d)", wait, attempt+1)
+                    time.sleep(wait)
+                    continue
+                raise
         if data is None:
-            raise RuntimeError("GPT API failed after 4 attempts")
+            raise RuntimeError("GPT API failed after 3 attempts")
 
         raw_text = data["choices"][0]["message"]["content"].strip()
         log.info("gpt_vision raw response: %s", raw_text[:200])
 
+        # Strip markdown code fences if present
         if "```" in raw_text:
             raw_text = raw_text.split("```")[1]
             if raw_text.startswith("json"):
                 raw_text = raw_text[4:]
 
-        result    = json.loads(raw_text.strip())
+        result = json.loads(raw_text.strip())
+
+        # Validate and clamp
         ai_prob   = max(0, min(100, int(result.get("ai_probability", 50))))
         reasoning = str(result.get("reasoning", ""))[:500]
         flags     = [str(f)[:100] for f in result.get("flags", [])][:10]
