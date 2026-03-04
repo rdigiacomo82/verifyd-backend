@@ -20,7 +20,6 @@ import os
 import cv2
 import base64
 import logging
-import tempfile
 import threading
 import numpy as np
 from typing import Optional
@@ -215,12 +214,8 @@ def analyze_frames_with_gpt(frames_b64: list) -> dict:
             method="POST"
         )
 
-        # ── Semaphore: max 3 concurrent GPT calls ─────────────
-        # Queues excess requests instead of bursting all at once,
-        # preventing 429 errors under high user concurrency.
         data = None
         with _gpt_semaphore:
-            # Retry up to 4 times with increasing waits: 15s, 30s, 45s
             for attempt in range(4):
                 try:
                     with urllib.request.urlopen(req, timeout=60) as resp:
@@ -228,7 +223,7 @@ def analyze_frames_with_gpt(frames_b64: list) -> dict:
                     break
                 except urllib.error.HTTPError as e:
                     if e.code == 429 and attempt < 3:
-                        wait = (attempt + 1) * 15   # 15s, 30s, 45s
+                        wait = (attempt + 1) * 15
                         log.warning("GPT rate limited, retrying in %ds (attempt %d)",
                                     wait, attempt + 1)
                         time.sleep(wait)

@@ -5,12 +5,12 @@
 # Web framework
 fastapi>=0.100.0
 uvicorn>=0.23.0
+gunicorn>=21.2.0
 
 # Required for Form() and UploadFile in FastAPI
 python-multipart>=0.0.6
 
 # Computer vision — cp37-abi3 wheel covers Python 3.7–3.13+
-# 4.13.0.92 is the first release with Python 3.13 support
 opencv-python-headless==4.13.0.92
 numpy>=2.0.0
 Pillow>=10.0.0
@@ -18,9 +18,7 @@ Pillow>=10.0.0
 # HTTP client for direct .mp4 URLs
 requests>=2.31.0
 
-# Video downloader — supports TikTok, Instagram, YouTube, and 1000+ platforms
-# Install with curl-cffi extra so yt-dlp registers it as impersonation handler
-# See: pip install "yt-dlp[default,curl-cffi]" in build.sh
+# Video downloader
 yt-dlp>=2025.1.1
 
 # WebSocket client — used by SMVD RapidAPI render status monitoring
@@ -31,4 +29,8 @@ openai>=1.0.0
 
 # Resend email SDK for OTP verification
 resend>=2.0.0
+
+# Job queue — Redis + RQ for async video processing
+redis>=5.0.0
+rq>=1.16.0
 

@@ -29,6 +29,7 @@ from database import (init_db, insert_certificate, increment_downloads,
                       is_valid_email, FREE_USES, get_certificate,
                       is_email_verified, create_otp, verify_otp)
 from video import clip_first_6_seconds, stamp_video, download_video_ytdlp
+from queue_helper import enqueue_upload, enqueue_link, get_job_result
 
 log = logging.getLogger("verifyd.main")
 
@@ -284,95 +285,57 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
     # ── Email verification check ──────────────────────────────
     if not is_email_verified(email):
         return JSONResponse({
-            "error":            "email_not_verified",
-            "message":          "Please verify your email address before uploading.",
+            "error":   "email_not_verified",
+            "message": "Please verify your email address before uploading.",
         }, status_code=403)
 
     # ── Usage limit check ─────────────────────────────────────
     status = get_user_status(email)
     if not status["allowed"]:
         return JSONResponse({
-            "error":      "limit_reached",
-            "plan":       status["plan"],
-            "uses_left":  0,
-            "limit":      status["limit"],
+            "error":     "limit_reached",
+            "plan":      status["plan"],
+            "uses_left": 0,
+            "limit":     status["limit"],
         }, status_code=402)
 
-    cid      = str(uuid.uuid4())
-    raw_path = f"{UPLOAD_DIR}/{cid}_{file.filename}"
+    # ── Save file to disk then enqueue ────────────────────────
+    job_id   = str(uuid.uuid4())
+    raw_path = f"{UPLOAD_DIR}/{job_id}_{file.filename}"
 
     # Stream directly to disk — no memory limit regardless of file size
     with open(raw_path, "wb") as f:
-        while chunk := await file.read(1024 * 1024):  # 1MB chunks
+        while chunk := await file.read(1024 * 1024):   # 1MB chunks
             f.write(chunk)
 
-    sha256 = _sha256(raw_path)
+    # Hand off to background worker — returns immediately
+    enqueue_upload(job_id, raw_path, file.filename, email)
+    log.info("upload: queued job %s for %s file=%s", job_id, email, file.filename)
 
-    try:
-        authenticity, label, detail, ui_text, color, certify, clip_path = _run_analysis(raw_path)
-    except Exception as e:
-        log.exception("Detection failed for %s", raw_path)
-        return JSONResponse({"error": str(e)}, status_code=500)
+    return JSONResponse({
+        "job_id":  job_id,
+        "status":  "queued",
+        "message": "Video queued for analysis. Poll /job-status/{job_id} for results.",
+    })
 
-    # ── Count this use ────────────────────────────────────────
-    increment_user_uses(email)
 
-    # Persist every result — certified or not
-    insert_certificate(
-        cert_id       = cid,
-        email         = email,
-        original_file = file.filename,
-        label         = label,
-        authenticity  = authenticity,
-        ai_score      = detail["ai_score"],
-        sha256        = sha256,
-    )
+@app.get("/job-status/{job_id}")
+def job_status(job_id: str):
+    """
+    Poll for async job result.
+    Frontend should call this every 3 seconds after upload/link submission.
 
-    if certify:
-        certified_path = f"{CERT_DIR}/{cid}.mp4"
-        download_url   = f"{BASE_URL}/download/{cid}"
-
-        # Stamp from clip (already 6s, 720p) — faster and more reliable than raw
-        import threading
-        threading.Thread(
-            target=_stamp_video_background,
-            kwargs={
-                "raw_path":          clip_path,
-                "certified_path":    certified_path,
-                "cid":               cid,
-                "email":             email,
-                "authenticity":      authenticity,
-                "original_filename": file.filename,
-                "download_url":      download_url,
-            },
-            daemon=True
-        ).start()
-
-        return {
-            "status":             ui_text,
-            "authenticity_score": authenticity,
-            "certificate_id":     cid,
-            "download_url":       download_url,
-            "color":              color,
-            "gpt_reasoning":      detail.get("gpt_reasoning", ""),
-            "gpt_flags":          detail.get("gpt_flags", []),
-            "signal_score":       detail.get("signal_ai_score", 0),
-            "gpt_score":          detail.get("gpt_ai_score", 0),
-        }
-
-    # Clean up clip and raw for non-certified results
-    if os.path.exists(clip_path):
-        os.remove(clip_path)
-
-    return {
-        "status":             ui_text,
-        "authenticity_score": authenticity,
-        "color":              color,
-        "gpt_reasoning":      detail.get("gpt_reasoning", ""),
-        "gpt_flags":          detail.get("gpt_flags", []),
-        "signal_score":       detail.get("signal_ai_score", 0),
-        "gpt_score":          detail.get("gpt_ai_score", 0),
-    }
+    Returns:
+      {"job_status": "queued",      "position": N}   — waiting in queue
+      {"job_status": "processing"}                   — analysis running
+      {"job_status": "complete",    ...full result}  — done
+      {"job_status": "error",       "error": "..."}  — failed
+      {"job_status": "not_found"}                    — unknown job_id
+    """
+    result = get_job_result(job_id)
+    if not result or result.get("job_status") == "not_found":
+        return JSONResponse({"job_status": "not_found"}, status_code=404)
+    return JSONResponse(result)
 
 
 @app.get("/download/{cid}")
@@ -627,7 +590,8 @@ def user_status(email: str = ""):
 
 
 @app.get("/analyze-link/", response_class=HTMLResponse)
-def analyze_link(request: Request, video_url: str, email: str = ""):
+def analyze_link(request: Request, video_url: str, email: str = "",
+                 double_count: bool = False):
     if not video_url.startswith("http"):
         return HTMLResponse(_error_html("Invalid URL — must start with http."), status_code=400)
 
@@ -644,102 +608,122 @@ def analyze_link(request: Request, video_url: str, email: str = ""):
 
     # ── Usage limit check (skip for anonymous) ────────────────
     if email != "anonymous@verifyd.com":
-        status = get_user_status(email)
-        if not status["allowed"]:
+        status       = get_user_status(email)
+        required     = 2 if double_count else 1
+        uses_left    = status.get("uses_left", 0)
+        if not status["allowed"] or uses_left < required:
+            if double_count and uses_left < 2:
+                return HTMLResponse(_error_html(
+                    "You need at least 2 analyses remaining to scan a link "
+                    "without downloading your certified video first."
+                ), status_code=402)
             return HTMLResponse(
                 _payment_required_html(email, status["plan"]),
                 status_code=402
             )
 
-    tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
-    tmp_path = tmp_file.name
-    tmp_file.close()
+    # ── Enqueue job — return immediately ─────────────────────
+    job_id = str(uuid.uuid4())
+    enqueue_link(job_id, video_url, email, double_count)
+    log.info("analyze-link: queued job %s for %s url=%s", job_id, email, video_url)
 
-    try:
-        use_ytdlp = any(d in video_url for d in YTDLP_DOMAINS)
+    # Return a polling page that auto-refreshes until result is ready
+    html = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="utf-8">
+      <title>VeriFYD — Analyzing...</title>
+      <style>
+        body {{ background:#0a0a0a; color:white; text-align:center;
+                padding-top:120px; font-family:Arial,sans-serif; margin:0; }}
+        .spinner {{ width:64px; height:64px; border:6px solid #333;
+                    border-top:6px solid #f59e0b; border-radius:50%;
+                    animation:spin 1s linear infinite; margin:0 auto 30px; }}
+        @keyframes spin {{ to {{ transform:rotate(360deg); }} }}
+        h2 {{ color:#f59e0b; }}
+        #status {{ color:#aaa; font-size:15px; margin-top:10px; }}
+        #result {{ display:none; }}
+      </style>
+    </head>
+    <body>
+      <div id="loading">
+        <div class="spinner"></div>
+        <h2>Analyzing your video...</h2>
+        <p id="status">Thank you for your patience, this may take up to 1 minute.</p>
+      </div>
+      <div id="result"></div>
+      <script>
+        const jobId = "{job_id}";
+        const messages = [
+          "Thank you for your patience, this may take up to 1 minute.",
+          "Running signal analysis...",
+          "Running AI vision check...",
+          "Calculating authenticity score..."
+        ];
+        let msgIdx = 0;
+        const statusEl = document.getElementById("status");
+        setInterval(() => {{
+          msgIdx = (msgIdx + 1) % messages.length;
+          statusEl.textContent = messages[msgIdx];
+        }}, 8000);
 
-        if use_ytdlp:
-            log.info("Using yt-dlp for: %s", video_url)
-            download_video_ytdlp(video_url, tmp_path)
-        else:
-            # ── Direct .mp4 / CDN URL → requests ─────────────────────────────
-            log.info("Using direct download for: %s", video_url)
-            r = requests.get(video_url, stream=True, timeout=30, headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-            })
-            if r.status_code != 200:
-                return HTMLResponse(_error_html(
-                    f"Could not download video (HTTP {r.status_code}). "
-                    "Make sure the URL points directly to a video file."
-                ))
-            content_type = r.headers.get("content-type", "")
-            if "text/html" in content_type:
-                return HTMLResponse(_error_html(
-                    "The URL returned a webpage, not a video file. "
-                    "Paste a direct .mp4 link, or a URL from YouTube, Vimeo, "
-                    "Reddit, Twitter/X, Facebook, Twitch, or Dailymotion."
-                ), status_code=400)
-            with open(tmp_path, "wb") as f:
-                for chunk in r.iter_content(8192):
-                    f.write(chunk)
+        async function poll() {{
+          try {{
+            const resp = await fetch("/job-status/" + jobId);
+            const data = await resp.json();
+            if (data.job_status === "complete") {{
+              showResult(data);
+              return;
+            }} else if (data.job_status === "error") {{
+              showError(data.error || "Analysis failed. Please try again.");
+              return;
+            }} else if (data.job_status === "queued") {{
+              statusEl.textContent = "Position " + data.position + " in queue...";
+            }}
+          }} catch(e) {{ }}
+          setTimeout(poll, 3000);
+        }}
 
-        if os.path.getsize(tmp_path) < 1024:
-            return HTMLResponse(_error_html(
-                "Downloaded file is too small to be a valid video. "
-                "The platform may have blocked the download."
-            ), status_code=400)
+        function showResult(data) {{
+          document.getElementById("loading").style.display = "none";
+          const colorMap = {{ green:"#22c55e", red:"#ef4444", blue:"#3b82f6" }};
+          const color = colorMap[data.color] || "#f59e0b";
+          let html = `
+            <h1 style="color:${{color}};font-size:42px;margin-bottom:10px">${{data.status}}</h1>
+            <h2 style="color:white">Authenticity Score: ${{data.authenticity_score}}/100</h2>
+            <p style="color:#aaa">AI Signal Score: ${{data.signal_score}}/100 &nbsp;|&nbsp;
+               GPT Score: ${{data.gpt_score}}/100</p>`;
+          if (data.gpt_reasoning) {{
+            html += `<p style="color:#ccc;max-width:560px;margin:20px auto;font-size:14px">
+              ${{data.gpt_reasoning}}</p>`;
+          }}
+          if (data.download_url) {{
+            html += `<br><a href="${{data.download_url}}"
+              style="background:#f59e0b;color:black;padding:14px 28px;border-radius:8px;
+                     text-decoration:none;font-weight:bold;font-size:16px">
+              ⬇ Download Certified Video</a>`;
+          }}
+          html += `<p style="color:#555;margin-top:40px;font-size:13px">Analyzed by VeriFYD</p>`;
+          document.getElementById("result").innerHTML = html;
+          document.getElementById("result").style.display = "block";
+        }}
 
-        authenticity, label, detail, ui_text, color, certify, clip_path = _run_analysis(tmp_path)
+        function showError(msg) {{
+          document.getElementById("loading").style.display = "none";
+          document.getElementById("result").innerHTML =
+            `<h2 style="color:#ef4444">Analysis Failed</h2>
+             <p style="color:#aaa">${{msg}}</p>
+             <p style="color:#555;margin-top:40px;font-size:13px">Analyzed by VeriFYD</p>`;
+          document.getElementById("result").style.display = "block";
+        }}
 
-        # ── Count this use and store result ──────────────────
-        if email != "anonymous@verifyd.com":
-            increment_user_uses(email)
-            log.info("analyze-link: counted use for %s", email)
-
-        cid = str(uuid.uuid4())
-        insert_certificate(
-            cert_id       = cid,
-            email         = email,
-            original_file = video_url[:100],
-            label         = label,
-            authenticity  = authenticity,
-            ai_score      = detail["ai_score"],
-        )
-
-        html = f"""
-        <html>
-        <body style="background:black;color:white;text-align:center;
-                     padding-top:120px;font-family:Arial">
-          <h1 style="color:{color};font-size:48px">{ui_text}</h1>
-          <h2>Authenticity Score: {authenticity}/100</h2>
-          <p style="color:#aaa">AI Signal Score: {detail["ai_score"]}/100</p>
-          <p>Analyzed by VeriFYD</p>
-        </body>
-        </html>
-        """
-        return HTMLResponse(html)
-
-    except RuntimeError as e:
-        return HTMLResponse(_error_html(str(e)), status_code=400)
-
-    except ValueError as e:
-        return HTMLResponse(_error_html(str(e)), status_code=400)
-
-    except Exception as e:
-        log.exception("analyze-link failed for %s", video_url)
-        return HTMLResponse(_error_html(
-            "Could not process this video. Please try again."
-        ), status_code=500)
-
-    finally:
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
-        # clip_path is a tmp file created by _run_analysis — always clean it up
-        try:
-            if 'clip_path' in locals() and clip_path and os.path.exists(clip_path):
-                os.remove(clip_path)
-        except Exception:
-            pass
+        poll();
+      </script>
+    </body>
+    </html>
+    """
+    return HTMLResponse(html)
 
 
 # ─────────────────────────────────────────────
