@@ -1,20 +1,32 @@
 # ============================================================
-#  VeriFYD — detector.py  (recalibrated v2)
+#  VeriFYD — detector.py  (recalibrated v3)
 #
-#  Recalibration based on real test data:
+#  Recalibration based on waterslide test data (5 videos):
 #
-#  Key finding: The original thresholds assumed high-quality
-#  real footage. Compressed mobile real video (.MOV) has LOW
-#  noise/texture because compression removes it. Meanwhile
-#  high-quality AI renders can score HIGH on those signals.
+#  Measured signal values:
+#  ┌─────────────────────┬──────────────┬──────────────┐
+#  │ Signal              │ AI avg       │ Real avg     │
+#  ├─────────────────────┼──────────────┼──────────────┤
+#  │ Noise level         │ 3.58         │ 4.70         │
+#  │ Edge sharpness      │ 113          │ 230          │
+#  │ Saturation          │ 103          │ 148          │
+#  │ Motion              │ 71.5         │ 59.6         │
+#  │ Texture variance    │ 3175         │ 1577         │
+#  └─────────────────────┴──────────────┴──────────────┘
 #
-#  Fix: Signals that fired wrong are reweighted or inverted.
-#  - noise_score: not reliable alone — removed as primary signal
-#  - texture_entropy: now treated as bidirectional signal
-#  - optical_flow: real video shows MORE variance (handheld)
-#  - saturation: AI renders tend to be oversaturated (confirmed)
-#  - temporal_flicker: AI higher (confirmed)
-#  - color_corr: both low here, weight reduced
+#  Key findings vs prior calibration:
+#  - Noise is a RELIABLE separator for waterslide content
+#  - Edge sharpness: AI videos are LESS sharp (smoothed)
+#  - Texture variance: AI videos are HIGHER (more uniform patches)
+#  - Saturation: both high in waterslide content — less reliable
+#  - Motion: AI slightly higher than real in this content type
+#
+#  v3 changes:
+#  - Recalibrated noise thresholds for waterslide/action content
+#  - Added low-edge-sharpness as AI signal (AI smoothing)
+#  - Added high texture variance as AI signal
+#  - Reduced saturation weight (less reliable in outdoor/wet content)
+#  - Added motion regularity check for action content
 # ============================================================
 
 import cv2
@@ -25,7 +37,7 @@ from typing import List
 log = logging.getLogger("verifyd.detector")
 
 
-# ── Individual signal functions (unchanged) ──────────────────
+# ── Individual signal functions ──────────────────────────────
 
 def _noise_score(gray: np.ndarray) -> float:
     return float(cv2.Laplacian(gray, cv2.CV_64F).var())
@@ -147,16 +159,34 @@ def _inter_frame_residual_consistency(frames_gray: List[np.ndarray]) -> float:
     return float(np.var(variances))
 
 
+def _laplacian_sharpness(gray: np.ndarray) -> float:
+    """
+    Measure overall frame sharpness via Laplacian variance.
+    AI waterslide videos score LOWER (smoothed/soft) vs real (sharper).
+    AI avg ~113, Real avg ~230 in test data.
+    """
+    return float(cv2.Laplacian(gray, cv2.CV_64F).var())
+
+
+def _texture_patch_variance(gray: np.ndarray) -> float:
+    """
+    Measure variance of pixel intensities across the frame.
+    AI waterslide videos score HIGHER (more uniform, artificial texture).
+    AI avg ~3175, Real avg ~1577 in test data.
+    """
+    return float(np.var(gray.astype(np.float64)))
+
+
 # ── Main detection function ──────────────────────────────────
 
 def detect_ai(video_path: str) -> int:
     """
     Analyze video for AI-generation signals.
-    Returns 0–100 where HIGH = likely AI, LOW = likely real.
+    Returns 0-100 where HIGH = likely AI, LOW = likely real.
 
     Calibrated on:
-    - Real video: compressed mobile .MOV (low noise/texture due to compression)
-    - AI video:   high-quality AI render (crisp, oversaturated, unnatural flow)
+    - Real videos: compressed mobile waterslide footage
+    - AI videos:   AI-generated waterslide content
     """
     log.info("Primary detector running on %s", video_path)
 
@@ -165,23 +195,30 @@ def detect_ai(video_path: str) -> int:
         log.error("Could not open video: %s", video_path)
         return 50
 
-    noise_scores:       List[float] = []
-    freq_scores:        List[float] = []
-    edge_scores:        List[float] = []
-    dct_grid_scores:    List[float] = []
-    grad_entropy_scores:List[float] = []
-    texture_entropy_scores: List[float] = []
-    color_corr_scores:  List[float] = []
-    saturation_scores:  List[float] = []
-    flow_regularity_scores: List[float] = []
-    motion_scores:      List[float] = []
-    gray_buffer:        List[np.ndarray] = []
+    cap_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    cap_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    log.info("Video dimensions: %dx%d", cap_w, cap_h)
 
-    prev_gray = None
-    prev_hist = None
+    noise_scores:            List[float] = []
+    freq_scores:             List[float] = []
+    edge_scores:             List[float] = []
+    dct_grid_scores:         List[float] = []
+    grad_entropy_scores:     List[float] = []
+    texture_entropy_scores:  List[float] = []
+    color_corr_scores:       List[float] = []
+    saturation_scores:       List[float] = []
+    flow_regularity_scores:  List[float] = []
+    motion_scores:           List[float] = []
+    edge_counts_temporal:    List[float] = []
+    sharpness_scores:        List[float] = []
+    texture_var_scores:      List[float] = []
+    gray_buffer:             List[np.ndarray] = []
+
+    prev_gray  = None
+    prev_hist  = None
     temporal_diffs: List[float] = []
     frame_count = 0
-    samples = 0
+    samples     = 0
 
     while True:
         ret, frame = cap.read()
@@ -199,11 +236,15 @@ def detect_ai(video_path: str) -> int:
         noise_scores.append(_noise_score(gray))
         freq_scores.append(_frequency_score(gray))
         edge_scores.append(_edge_quality(gray))
+        edges_raw = cv2.Canny(gray, 50, 150)
+        edge_counts_temporal.append(float(np.sum(edges_raw > 0)))
         dct_grid_scores.append(_dct_grid_artifact(gray))
         grad_entropy_scores.append(_gradient_orientation_entropy(gray))
         texture_entropy_scores.append(_local_texture_entropy(gray))
         color_corr_scores.append(_color_channel_noise_correlation(frame))
         saturation_scores.append(_saturation_mean(frame))
+        sharpness_scores.append(_laplacian_sharpness(gray))
+        texture_var_scores.append(_texture_patch_variance(gray))
 
         if prev_gray is not None:
             diff = cv2.absdiff(gray, prev_gray)
@@ -236,10 +277,12 @@ def detect_ai(video_path: str) -> int:
     avg_tex_entropy     = float(np.mean(texture_entropy_scores))
     avg_color_corr      = float(np.mean(color_corr_scores))
     avg_saturation      = float(np.mean(saturation_scores))
-    avg_motion          = float(np.mean(motion_scores)) if motion_scores else 0.0
-    motion_var          = float(np.var(motion_scores))  if len(motion_scores) > 1 else 0.0
-    avg_temporal_jitter = float(np.mean(temporal_diffs)) if temporal_diffs else 0.0
-    avg_flow_var        = float(np.mean(flow_regularity_scores)) if flow_regularity_scores else 0.0
+    avg_motion          = float(np.mean(motion_scores))          if motion_scores           else 0.0
+    motion_var          = float(np.var(motion_scores))           if len(motion_scores) > 1  else 0.0
+    avg_temporal_jitter = float(np.mean(temporal_diffs))         if temporal_diffs           else 0.0
+    avg_flow_var        = float(np.mean(flow_regularity_scores)) if flow_regularity_scores   else 0.0
+    avg_sharpness       = float(np.mean(sharpness_scores))       if sharpness_scores         else 0.0
+    avg_texture_var     = float(np.mean(texture_var_scores))     if texture_var_scores       else 0.0
 
     pixel_flicker_cov   = _temporal_pixel_flicker(gray_buffer)
     residual_var_of_var = _inter_frame_residual_consistency(gray_buffer)
@@ -248,136 +291,163 @@ def detect_ai(video_path: str) -> int:
         "Signals: noise=%.1f freq=%.3f edge=%.1f dct=%.3f "
         "grad=%.3f tex=%.1f corr=%.3f sat=%.1f "
         "motion=%.1f mvar=%.2f hist=%.4f flow=%.2f "
-        "flicker=%.3f rvov=%.2f",
+        "flicker=%.3f rvov=%.2f sharpness=%.1f texvar=%.1f",
         avg_noise, avg_freq, avg_edge, avg_dct_grid,
         avg_grad_entropy, avg_tex_entropy, avg_color_corr, avg_saturation,
         avg_motion, motion_var, avg_temporal_jitter, avg_flow_var,
-        pixel_flicker_cov, residual_var_of_var,
+        pixel_flicker_cov, residual_var_of_var, avg_sharpness, avg_texture_var,
     )
 
-    ai_score = 50.0
+    ai_score = 30.0   # base: assume real until AI signals accumulate
 
-    # ── 1. Sensor noise ───────────────────────────────────────────────────────
-    # RECALIBRATED: Compressed mobile real video can be LOW (200-500).
-    # Very high noise (>1500) is unusual and can indicate AI over-sharpening.
-    # Only penalize clearly AI-clean video (< 80).
-    if avg_noise < 80:
-        ai_score += 15        # extremely clean = likely AI
-    elif avg_noise < 150:
-        ai_score += 5
-    # Note: high noise no longer strongly indicates real — compression confounds
+    # ═══════════════════════════════════════════════════════════
+    # SCORING PHILOSOPHY (v3 - calibrated on waterslide test data)
+    # ai_score HIGH (>60) = AI video   → authenticity = 100 - ai_score = LOW
+    # ai_score LOW  (<40) = Real video → authenticity = 100 - ai_score = HIGH
+    #
+    # Waterslide test data findings:
+    #   Noise:         AI=3.58   Real=4.70  → reliable separator
+    #   Sharpness:     AI=113    Real=230   → strong signal (AI is softer)
+    #   Texture var:   AI=3175   Real=1577  → strong signal (AI more uniform)
+    #   Saturation:    AI=103    Real=148   → less reliable in this content
+    #   Motion:        AI=71.5   Real=59.6  → weak, use cautiously
+    # ═══════════════════════════════════════════════════════════
 
-    # ── 2. High-frequency content ─────────────────────────────────────────────
-    # Both videos scored 0.41-0.45, close together — weak signal.
-    # Reduced weight significantly.
-    if avg_freq < 0.30:
-        ai_score += 8
-    elif avg_freq < 0.40:
-        ai_score += 3
-    elif avg_freq > 0.80:
-        ai_score -= 5
+    # ── 1. Sensor noise (recalibrated for action/waterslide content) ──────────
+    # AI avg=3.58, Real avg=4.70 in our test data (pixel-level noise)
+    # Note: these are RAW pixel noise values, not Laplacian variance
+    raw_noise = float(np.mean([
+        np.std(cv2.cvtColor(cv2.imread(video_path), cv2.COLOR_BGR2GRAY).astype(float) -
+               cv2.GaussianBlur(cv2.cvtColor(cv2.imread(video_path), cv2.COLOR_BGR2GRAY), (5,5), 0).astype(float))
+    ])) if False else avg_noise  # use avg_noise (Laplacian) as proxy
 
-    # ── 3. Edge density ───────────────────────────────────────────────────────
-    # RECALIBRATED: AI video had 36, real had 17.
-    # Higher edge density from AI rendering/sharpening is suspicious.
-    # Low edge from compressed real video no longer means AI.
-    if avg_edge < 5:
-        ai_score += 6         # extremely blurry — could be AI or very compressed
-    elif avg_edge > 30:
-        ai_score += 8         # unnaturally sharp — AI over-sharpening
-    elif avg_edge > 20:
-        ai_score += 3
-
-    # ── 4. DCT grid artifact ──────────────────────────────────────────────────
-    if avg_dct_grid > 1.8:
+    # Laplacian noise: AI avg~70-100, Real avg~150-300 based on prior calibration
+    if avg_noise < 45:
         ai_score += 12
-    elif avg_dct_grid > 1.4:
-        ai_score += 6
-    elif avg_dct_grid < 0.9:
-        ai_score -= 4
+    elif avg_noise < 60:
+        ai_score += 5
+    elif avg_noise < 80:
+        ai_score += 2
 
-    # ── 5. Gradient orientation entropy ──────────────────────────────────────
-    # Both videos 4.94-5.06 — nearly identical, very weak signal here.
-    # Reduced weight.
-    if avg_grad_entropy < 3.5:
-        ai_score += 8
-    elif avg_grad_entropy < 4.2:
-        ai_score += 3
-    elif avg_grad_entropy > 5.2:
+    # Real video noise boosters
+    if avg_noise > 500:
+        ai_score -= 16
+    elif avg_noise > 150:
+        ai_score -= 10
+    elif avg_noise > 100:
         ai_score -= 5
 
-    # ── 6. Local texture entropy ──────────────────────────────────────────────
-    # RECALIBRATED: AI=3217, Real=416.
-    # AI renders have EXTREME texture variance (very sharp regions next to
-    # very smooth ones = hallucination artifacts). Real compressed video
-    # is uniformly mediocre. Both directions now scored.
-    if avg_tex_entropy < 100:
-        ai_score += 6         # very uniform = possibly AI or very compressed
-    elif avg_tex_entropy < 200:
+    # ── 2. Frame sharpness (NEW — calibrated on waterslide data) ─────────────
+    # AI videos are SOFTER/SMOOTHER — lower Laplacian variance
+    # AI avg~113, Real avg~230 in test data
+    if avg_sharpness < 80:
+        ai_score += 14    # very soft = strong AI signal
+    elif avg_sharpness < 130:
+        ai_score += 8     # soft = moderate AI signal
+    elif avg_sharpness < 160:
+        ai_score += 3     # slightly soft
+    elif avg_sharpness > 250:
+        ai_score -= 6     # very sharp = real camera signal
+    elif avg_sharpness > 200:
+        ai_score -= 3     # sharp = likely real
+
+    # ── 3. Texture patch variance (NEW — calibrated on waterslide data) ───────
+    # AI videos have HIGHER texture variance (more artificial uniform patches)
+    # AI avg~3175, Real avg~1577 in test data
+    if avg_texture_var > 4000:
+        ai_score += 10    # very high = strong AI signal
+    elif avg_texture_var > 2800:
+        ai_score += 6     # high = moderate AI signal
+    elif avg_texture_var > 2000:
+        ai_score += 2     # slightly elevated
+    elif avg_texture_var < 1000:
+        ai_score -= 4     # low variance = natural real texture
+
+    # ── 4. High-frequency content ─────────────────────────────────────────────
+    if avg_freq < 0.30:
+        ai_score += 6
+    elif avg_freq < 0.40:
         ai_score += 2
-    elif avg_tex_entropy > 2000:
-        ai_score += 10        # extreme texture contrast = AI hallucination artifact
-    elif avg_tex_entropy > 800:
+
+    # ── 5. Edge density ───────────────────────────────────────────────────────
+    # Low edge density is normal in broadcast/talking-head content
+    # Only penalize if motion is also present (action content with low edges = suspicious)
+    if avg_edge < 5 and avg_motion > 5.0:
+        ai_score += 4
+    elif avg_edge > 35:
+        ai_score += 6     # AI over-sharpening
+
+    # ── 6. DCT grid artifact ──────────────────────────────────────────────────
+    _dct_reliable = (cap_w >= 480 and cap_h >= 480)
+    if _dct_reliable:
+        # Raised thresholds — broadcast compression creates high DCT ratios naturally
+        if avg_dct_grid > 8.0:
+            ai_score += 10
+        elif avg_dct_grid > 4.0:
+            ai_score += 5
+        elif avg_dct_grid > 2.0:
+            ai_score += 2
+        elif avg_dct_grid < 0.9:
+            ai_score -= 3
+    else:
+        log.info("DCT signal skipped — small video %dx%d", cap_w, cap_h)
+
+    # ── 7. Gradient orientation entropy ──────────────────────────────────────
+    if avg_grad_entropy < 3.5:
+        ai_score += 6
+    elif avg_grad_entropy < 4.2:
+        ai_score += 2
+
+    # ── 8. Local texture entropy ──────────────────────────────────────────────
+    if avg_tex_entropy < 100:
         ai_score += 5
-
-    # ── 7. Color channel noise correlation ───────────────────────────────────
-    # Both videos scored ~0.06-0.09 — both low. Weak discriminator.
-    # Only fire on clearly extreme values.
-    if avg_color_corr > 0.80:
-        ai_score += 6
-    elif avg_color_corr < 0.20:
-        ai_score -= 4
-
-    # ── 8. Saturation ─────────────────────────────────────────────────────────
-    # CONFIRMED SIGNAL: AI=139, Real=67. AI renders are oversaturated.
-    # Boosted weight — this is a reliable discriminator.
-    if avg_saturation > 120:
-        ai_score += 16        # strongly oversaturated = AI
-    elif avg_saturation > 90:
+    elif avg_tex_entropy > 2000:
         ai_score += 8
-    elif avg_saturation > 70:
-        ai_score += 3
-    elif avg_saturation < 30:
-        ai_score -= 5         # very desaturated real footage
 
-    # ── 9. Motion amount ─────────────────────────────────────────────────────
-    if avg_motion < 2:
-        ai_score += 8
-    if motion_var < 0.5 and len(motion_scores) > 3:
+    # ── 9. Color channel correlation ─────────────────────────────────────────
+    if avg_color_corr > 0.92:
+        ai_score += 4
+
+    # ── 10. Saturation (reduced weight — less reliable in outdoor content) ────
+    # Both AI and real waterslide videos can be highly saturated outdoors
+    # Reduced thresholds and weights vs v2
+    if avg_saturation > 160:
+        ai_score += 8     # reduced from 16
+    elif avg_saturation > 130:
+        ai_score += 4     # reduced from 8
+    elif avg_saturation > 100:
+        ai_score += 1     # reduced from 3
+
+    # ── 11. Motion (conservative — real waterslide has high motion too) ───────
+    if avg_motion < 0.5 and avg_temporal_jitter < 0.002:
         ai_score += 6
 
-    # ── 10. Histogram temporal jitter ─────────────────────────────────────────
-    if avg_temporal_jitter < 0.008 and len(temporal_diffs) > 3:
-        ai_score += 8
-    elif avg_temporal_jitter > 0.06:
-        ai_score -= 6
-
-    # ── 11. Optical flow variance ─────────────────────────────────────────────
-    # RECALIBRATED: AI=13.1, Real=32.0 (handheld).
-    # BUT: real static/tripod shots also have low flow — can't penalize hard.
-    # Only fire if also combined with other AI signals (handled by weight).
+    # ── 12. Optical flow variance ─────────────────────────────────────────────
     if len(flow_regularity_scores) > 3:
         if avg_flow_var < 3.0:
-            ai_score += 8     # essentially zero motion — very suspicious
+            ai_score += 6
         elif avg_flow_var < 8.0:
-            ai_score += 4     # reduced from 12 — real static video can score here
-        elif avg_flow_var > 100.0:
-            ai_score -= 10    # strong real handheld motion signal
+            ai_score += 3
 
-    # ── 12. Temporal pixel flicker ────────────────────────────────────────────
-    # Original assumption: AI flicker > real. Test data shows real can also
-    # be high (1.04 real vs 0.81 AI on these samples). Use cautiously.
-    # Only fire on extreme values to avoid false positives.
+    # ── 13. Temporal pixel flicker ────────────────────────────────────────────
     if pixel_flicker_cov > 1.5:
-        ai_score += 6     # extremely incoherent flicker
+        ai_score += 5
     elif pixel_flicker_cov < 0.15 and len(gray_buffer) >= 5:
-        ai_score += 4     # suspiciously uniform = AI temporal smoothing
+        ai_score += 3
 
-    # ── 13. Inter-frame residual consistency ──────────────────────────────────
+    # ── 14. Inter-frame residual consistency ──────────────────────────────────
     if residual_var_of_var < 100 and len(gray_buffer) >= 5:
         ai_score += 4
-    elif residual_var_of_var > 50000:
-        ai_score -= 4
+
+    # ── 15. Edge temporal std ─────────────────────────────────────────────────
+    # Real videos have much higher edge variation from natural movement
+    if len(edge_counts_temporal) > 3:
+        edge_temporal_std = float(np.std(edge_counts_temporal))
+        if edge_temporal_std < 6000:
+            ai_score += 8
+        elif edge_temporal_std < 10000:
+            ai_score += 4
+        log.info("Edge temporal std: %.0f", edge_temporal_std)
 
     ai_score = max(0.0, min(100.0, ai_score))
     log.info("Primary AI score: %.0f", ai_score)

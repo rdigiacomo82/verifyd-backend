@@ -59,9 +59,13 @@ def run_detection(video_path: str) -> tuple:
         or gpt_reasoning.startswith("GPT analysis error")
         or gpt_reasoning.startswith("GPT vision not configured")
         or gpt_reasoning == "GPT analysis unavailable"
-        or "rate" in gpt_reasoning.lower()
-        or "429" in gpt_reasoning
+        or gpt_reasoning == "No frames extracted"
+        or gpt_reasoning == "Could not extract frames"
+        or ("rate" in gpt_reasoning.lower() and "429" in gpt_reasoning)
     )
+    # Never treat as failed if GPT returned a real probability score
+    if gpt_available and gpt_ai_score > 0:
+        gpt_failed = False
 
     if not gpt_failed:
         combined_ai_score = (
