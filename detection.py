@@ -68,10 +68,15 @@ def run_detection(video_path: str) -> tuple:
         gpt_failed = False
 
     if not gpt_failed:
-        # Dynamic weighting — if signal and GPT strongly disagree, reduce GPT weight
-        # This handles cases where GPT misreads broadcast/news content
         signal_gpt_gap = abs(signal_ai_score - gpt_ai_score)
-        if signal_gpt_gap > 40 and signal_ai_score < 40:
+
+        if signal_gpt_gap > 40 and signal_ai_score > 60:
+            # Signal says AI, GPT says real — trust signal more when physics engine fired
+            weight_signal = 0.70
+            weight_gpt    = 0.30
+            log.info("High signal/GPT disagreement (gap=%d) + high signal — boosting signal weight to 70%%",
+                     signal_gpt_gap)
+        elif signal_gpt_gap > 40 and signal_ai_score < 40:
             # Signal says real, GPT says AI — trust signal more for low-signal-score videos
             weight_signal = 0.60
             weight_gpt    = 0.40
