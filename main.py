@@ -23,11 +23,14 @@ from config import (                  # single source of truth for all settings
     BASE_URL,
     UPLOAD_DIR, CERT_DIR, TMP_DIR,
 )
-from emailer  import send_otp_email, send_certification_email
+from emailer  import send_otp_email, send_certification_email, send_magic_link_email
 from database import (init_db, insert_certificate, increment_downloads,
                       get_or_create_user, get_user_status, increment_user_uses,
                       is_valid_email, FREE_USES, get_certificate,
-                      is_email_verified, create_otp, verify_otp)
+                      is_email_verified, create_otp, verify_otp,
+                      create_magic_link, verify_magic_link,
+                      create_session, get_session_email, delete_session,
+                      clean_expired_sessions)
 from video import clip_first_6_seconds, stamp_video, download_video_ytdlp
 from queue_helper import enqueue_upload, enqueue_link, get_job_result
 
@@ -542,28 +545,37 @@ YTDLP_DOMAINS = (
 
 
 # ─────────────────────────────────────────────
-#  Session-based email store
-#  In-memory dict: session_token → email
-#  Persists for the lifetime of the server process.
+#  Session management (persistent — database backed)
 # ─────────────────────────────────────────────
-import hashlib, time
+import time
 from fastapi.responses import JSONResponse
 
-_session_store: dict = {}  # token → {"email": str, "ts": float}
 
-def _clean_sessions():
-    """Remove sessions older than 30 days."""
-    cutoff = time.time() - (30 * 86400)
-    expired = [k for k, v in _session_store.items() if v["ts"] < cutoff]
-    for k in expired:
-        del _session_store[k]
+def _set_session_cookie(response, token: str):
+    """Helper to set the vfy_session cookie consistently."""
+    response.set_cookie(
+        key="vfy_session",
+        value=token,
+        max_age=2592000,  # 30 days
+        samesite="none",
+        secure=True,
+        httponly=False,
+    )
+
+
+def _get_session_from_request(request: Request) -> str | None:
+    """Extract and validate session token from request cookie."""
+    token = request.cookies.get("vfy_session", "")
+    if not token:
+        return None
+    return get_session_email(token)
 
 
 @app.post("/register-email/")
 async def register_email(request: Request):
     """
     Called by the frontend when user enters their email.
-    Returns a session token stored as a cookie on the frontend.
+    Creates a persistent database session.
     """
     try:
         body = await request.json()
@@ -574,24 +586,105 @@ async def register_email(request: Request):
     if not is_valid_email(email):
         return JSONResponse({"error": "invalid email"}, status_code=400)
 
-    # Create or reuse session token for this email
-    token = hashlib.sha256(f"{email}:{int(time.time() // 3600)}".encode()).hexdigest()[:32]
-    _session_store[token] = {"email": email, "ts": time.time()}
-    _clean_sessions()
-
     get_or_create_user(email)
-    log.info("register-email: %s → token %s", email, token[:8])
+    token = create_session(email)
+    log.info("register-email: %s → session %s", email, token[:8])
 
     response = JSONResponse({"status": "ok", "token": token})
-    response.set_cookie(
-        key="vfy_session",
-        value=token,
-        max_age=2592000,  # 30 days
-        samesite="none",
-        secure=True,
-        httponly=False,
-    )
+    _set_session_cookie(response, token)
     return response
+
+
+# ─────────────────────────────────────────────
+#  Magic Link endpoints
+# ─────────────────────────────────────────────
+BASE_URL = os.environ.get("BASE_URL", "https://verifyd-backend.onrender.com")
+
+@app.post("/send-magic-link/")
+async def send_magic_link(request: Request):
+    """
+    Send a magic link login email to the given address.
+    User clicks the link → authenticated for 30 days.
+    """
+    try:
+        body = await request.json()
+        email = body.get("email", "").strip()
+    except Exception:
+        return JSONResponse({"error": "invalid body"}, status_code=400)
+
+    if not is_valid_email(email):
+        return JSONResponse({"error": "invalid email"}, status_code=400)
+
+    get_or_create_user(email)
+    token   = create_magic_link(email)
+    url     = f"{BASE_URL}/auth/{token}"
+    sent    = send_magic_link_email(email, url)
+
+    if not sent:
+        log.error("send-magic-link: email failed for %s", email)
+        return JSONResponse({"error": "Failed to send email. Please try again."}, status_code=500)
+
+    log.info("send-magic-link: sent to %s", email)
+    return JSONResponse({"status": "ok", "message": "Check your email for a sign-in link."})
+
+
+@app.get("/auth/{token}")
+async def magic_link_auth(token: str, request: Request):
+    """
+    Magic link callback — user clicks link from email.
+    Verifies token, creates session, redirects to app.
+    """
+    email, success, message = verify_magic_link(token)
+
+    if not success:
+        # Redirect to app with error
+        return HTMLResponse(f"""
+        <html><head>
+        <meta http-equiv="refresh" content="3;url=https://verifyd.com">
+        </head><body style="background:#0a0a0a;color:#fff;font-family:sans-serif;
+                             display:flex;align-items:center;justify-content:center;
+                             height:100vh;margin:0;">
+        <div style="text-align:center;">
+            <p style="font-size:48px;margin:0 0 16px;">⚠️</p>
+            <h2 style="color:#f59e0b;">Link expired or already used</h2>
+            <p style="color:#888;">{message}</p>
+            <p style="color:#555;font-size:13px;">Redirecting you back...</p>
+        </div>
+        </body></html>
+        """, status_code=400)
+
+    # Create persistent session
+    session_token = create_session(email)
+    log.info("magic-link auth: session created for %s", email)
+
+    # Redirect to app with session cookie set
+    response = HTMLResponse(f"""
+    <html><head>
+    <meta http-equiv="refresh" content="1;url=https://verifyd.com">
+    </head><body style="background:#0a0a0a;color:#fff;font-family:sans-serif;
+                         display:flex;align-items:center;justify-content:center;
+                         height:100vh;margin:0;">
+    <div style="text-align:center;">
+        <p style="font-size:48px;margin:0 0 16px;">✅</p>
+        <h2 style="color:#f59e0b;">You're signed in!</h2>
+        <p style="color:#888;">Redirecting you to VeriFYD...</p>
+    </div>
+    </body></html>
+    """)
+    _set_session_cookie(response, session_token)
+    return response
+
+
+@app.post("/logout/")
+async def logout(request: Request):
+    """Clear the session cookie and delete from database."""
+    token = request.cookies.get("vfy_session", "")
+    if token:
+        delete_session(token)
+    response = JSONResponse({"status": "ok"})
+    response.delete_cookie("vfy_session")
+    return response
+
 
 
 @app.get("/user-status/")
@@ -614,9 +707,9 @@ def analyze_link(request: Request, video_url: str, email: str = "",
 
     # ── Email resolution ──────────────────────────────────────
     if not email or not is_valid_email(email):
-        session_token = request.cookies.get("vfy_session", "")
-        if session_token and session_token in _session_store:
-            email = _session_store[session_token]["email"]
+        session_email = _get_session_from_request(request)
+        if session_email:
+            email = session_email
             log.info("analyze-link: using email from session: %s", email)
         else:
             email = "anonymous@verifyd.com"
@@ -1046,6 +1139,7 @@ def test_resend(key: str = ""):
         return {"error": f"HTTP {e.code}", "detail": e.read().decode()}
     except Exception as e:
         return {"error": str(e)}
+
 
 
 

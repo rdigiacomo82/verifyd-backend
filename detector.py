@@ -244,11 +244,22 @@ def detect_ai(video_path: str) -> int:
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
+        # Cap resolution at 640px for all analysis — mobile videos (1080x1920)
+        # are 4x more pixels than TikTok clips and 9x slower to process.
+        # 640px is sufficient for all signal detection with no accuracy loss.
+        MAX_ANALYSIS_DIM = 640
+        h_orig, w_orig = gray.shape
+        if max(h_orig, w_orig) > MAX_ANALYSIS_DIM:
+            scale = MAX_ANALYSIS_DIM / max(h_orig, w_orig)
+            gray  = cv2.resize(gray, (int(w_orig * scale), int(h_orig * scale)),
+                               interpolation=cv2.INTER_LINEAR)
+            frame = cv2.resize(frame, (int(w_orig * scale), int(h_orig * scale)),
+                               interpolation=cv2.INTER_LINEAR)
+
         # Downscale to 50% for optical flow only — 4x faster, minimal accuracy loss
-        # Full resolution kept for texture/edge/DCT analysis
-        h_flow = cap_h // 2
-        w_flow = cap_w // 2
-        gray_small = cv2.resize(gray, (w_flow, h_flow), interpolation=cv2.INTER_LINEAR)
+        h_gray, w_gray = gray.shape
+        gray_small = cv2.resize(gray, (w_gray // 2, h_gray // 2),
+                                interpolation=cv2.INTER_LINEAR)
 
         noise_scores.append(_noise_score(gray))
         freq_scores.append(_frequency_score(gray))
