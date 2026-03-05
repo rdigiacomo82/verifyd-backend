@@ -640,7 +640,7 @@ async def magic_link_auth(token: str, request: Request):
         # Redirect to app with error
         return HTMLResponse(f"""
         <html><head>
-        <meta http-equiv="refresh" content="3;url=https://vfvid.com/app.html">
+        <meta http-equiv="refresh" content="3;url=https://vfvid.com/app">
         </head><body style="background:#0a0a0a;color:#fff;font-family:sans-serif;
                              display:flex;align-items:center;justify-content:center;
                              height:100vh;margin:0;">
@@ -660,7 +660,7 @@ async def magic_link_auth(token: str, request: Request):
     # Redirect to app with session cookie set
     response = HTMLResponse(f"""
     <html><head>
-    <meta http-equiv="refresh" content="1;url=https://vfvid.com/app.html">
+    <meta http-equiv="refresh" content="1;url=https://vfvid.com/app">
     </head><body style="background:#0a0a0a;color:#fff;font-family:sans-serif;
                          display:flex;align-items:center;justify-content:center;
                          height:100vh;margin:0;">
@@ -1139,6 +1139,7 @@ def test_resend(key: str = ""):
         return {"error": f"HTTP {e.code}", "detail": e.read().decode()}
     except Exception as e:
         return {"error": str(e)}
+
 
 
 
