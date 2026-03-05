@@ -1079,12 +1079,31 @@ async def send_otp(email: str = Form(...)):
     if not is_deliverable:
         return JSONResponse({"error": reason}, status_code=400)
 
-    # Already verified — no need to send again
-    if is_email_verified(email):
-        return {"status": "already_verified", "message": "Email already verified."}
+@app.post("/send-otp/")
+async def send_otp(email: str = Form(...)):
+    """Send a 6-digit OTP to the given email for verification."""
+    if not is_valid_email(email):
+        return JSONResponse({"error": "Invalid email address."}, status_code=400)
 
-    # Generate and send OTP
+    # Check deliverability first
+    is_deliverable, reason = _verify_email_deliverable(email)
+    if not is_deliverable:
+        return JSONResponse({"error": reason}, status_code=400)
+
+    # Always send OTP regardless of verified status
+    # Users need to re-authenticate on new devices/sessions
+    get_or_create_user(email)
     code = create_otp(email)
+    sent = send_otp_email(email, code)
+
+    if not sent:
+        return JSONResponse(
+            {"error": "Failed to send verification email. Please try again."},
+            status_code=500
+        )
+
+    log.info("OTP sent to %s", email)
+    return {"status": "sent", "message": f"Verification code sent to {email}"}
     sent = send_otp_email(email, code)
 
     if not sent:
@@ -1139,7 +1158,6 @@ def test_resend(key: str = ""):
         return {"error": f"HTTP {e.code}", "detail": e.read().decode()}
     except Exception as e:
         return {"error": str(e)}
-
 
 
 
