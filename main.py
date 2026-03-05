@@ -15,7 +15,11 @@
 from fastapi import FastAPI, UploadFile, File, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from pydantic import BaseModel
 import os, uuid, requests, tempfile, logging, hashlib
+
+class EmailRequest(BaseModel):
+    email: str
 from contextlib import asynccontextmanager
 
 from detection import run_detection   # returns (authenticity, label, detail)
@@ -601,24 +605,20 @@ async def register_email(request: Request):
 BASE_URL = os.environ.get("BASE_URL", "https://verifyd-backend.onrender.com")
 
 @app.post("/send-magic-link/")
-async def send_magic_link(request: Request):
+async def send_magic_link(body: EmailRequest):
     """
     Send a magic link login email to the given address.
     User clicks the link → authenticated for 30 days.
     """
-    try:
-        body = await request.json()
-        email = body.get("email", "").strip()
-    except Exception:
-        return JSONResponse({"error": "invalid body"}, status_code=400)
+    email = body.email.strip()
 
     if not is_valid_email(email):
         return JSONResponse({"error": "invalid email"}, status_code=400)
 
     get_or_create_user(email)
-    token   = create_magic_link(email)
-    url     = f"{BASE_URL}/auth/{token}"
-    sent    = send_magic_link_email(email, url)
+    token = create_magic_link(email)
+    url   = f"{BASE_URL}/auth/{token}"
+    sent  = send_magic_link_email(email, url)
 
     if not sent:
         log.error("send-magic-link: email failed for %s", email)
