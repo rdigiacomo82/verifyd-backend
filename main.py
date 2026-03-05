@@ -640,7 +640,7 @@ async def magic_link_auth(token: str, request: Request):
         # Redirect to app with error
         return HTMLResponse(f"""
         <html><head>
-        <meta http-equiv="refresh" content="3;url=https://verifyd.com">
+        <meta http-equiv="refresh" content="3;url=https://vfvid.com/app.html">
         </head><body style="background:#0a0a0a;color:#fff;font-family:sans-serif;
                              display:flex;align-items:center;justify-content:center;
                              height:100vh;margin:0;">
@@ -660,7 +660,7 @@ async def magic_link_auth(token: str, request: Request):
     # Redirect to app with session cookie set
     response = HTMLResponse(f"""
     <html><head>
-    <meta http-equiv="refresh" content="1;url=https://verifyd.com">
+    <meta http-equiv="refresh" content="1;url=https://vfvid.com/app.html">
     </head><body style="background:#0a0a0a;color:#fff;font-family:sans-serif;
                          display:flex;align-items:center;justify-content:center;
                          height:100vh;margin:0;">
