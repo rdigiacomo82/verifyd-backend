@@ -1110,6 +1110,15 @@ async def verify_otp_route(email: str = Form(...), code: str = Form(...)):
     return {"status": "verified", "message": message}
 
 
+@app.post("/check-session/")
+async def check_session(email: str = Form(...)):
+    """Check if an email is already verified in the database."""
+    if not is_valid_email(email):
+        return JSONResponse({"verified": False}, status_code=200)
+    verified = is_email_verified(email)
+    return {"verified": verified}
+
+
 @app.get("/test-resend/")
 def test_resend(key: str = ""):
     """Test Resend API key directly."""
@@ -1138,6 +1147,7 @@ def test_resend(key: str = ""):
         return {"error": f"HTTP {e.code}", "detail": e.read().decode()}
     except Exception as e:
         return {"error": str(e)}
+
 
 
 
