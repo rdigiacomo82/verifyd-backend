@@ -51,10 +51,40 @@ def extract_key_frames(video_path: str, n_frames: int = MAX_FRAMES) -> list:
     """
     Extract n evenly-spaced frames from the video.
     Returns list of base64-encoded JPEG strings.
+    Converts WebM/MKV to MP4 first since cv2 cannot read WebM reliably.
     """
+    import subprocess, shutil
+
+    # Convert WebM/MKV to MP4 before frame extraction
+    converted_path = None
+    ext = os.path.splitext(video_path)[1].lower()
+    if ext in ('.webm', '.mkv', '.ogg'):
+        try:
+            tmp = tempfile.NamedTemporaryFile(suffix='.mp4', delete=False)
+            converted_path = tmp.name
+            tmp.close()
+            result = subprocess.run(
+                ['ffmpeg', '-y', '-i', video_path, '-c:v', 'libx264',
+                 '-preset', 'ultrafast', '-crf', '28', '-an', converted_path],
+                capture_output=True, timeout=60
+            )
+            if result.returncode == 0 and os.path.exists(converted_path):
+                log.info("gpt_vision: converted %s -> mp4 for frame extraction", ext)
+                video_path = converted_path
+            else:
+                log.warning("gpt_vision: ffmpeg conversion failed, trying original")
+                if os.path.exists(converted_path):
+                    os.remove(converted_path)
+                converted_path = None
+        except Exception as e:
+            log.warning("gpt_vision: conversion error: %s — trying original", e)
+            converted_path = None
+
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         log.error("gpt_vision: cannot open %s", video_path)
+        if converted_path and os.path.exists(converted_path):
+            os.remove(converted_path)
         return []
 
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -83,6 +113,8 @@ def extract_key_frames(video_path: str, n_frames: int = MAX_FRAMES) -> list:
         frames_b64.append(b64)
 
     cap.release()
+    if converted_path and os.path.exists(converted_path):
+        os.remove(converted_path)
     log.info("gpt_vision: extracted %d frames from %s", len(frames_b64), video_path)
     return frames_b64
 
