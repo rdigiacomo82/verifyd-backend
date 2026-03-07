@@ -10,10 +10,16 @@
 #  Returns a 0-100 AI confidence score + reasoning text.
 #  Designed to run alongside detector.py for a combined verdict.
 #
-#  v3: Added threading semaphore to prevent concurrent GPT
-#  bursts from triggering 429 rate limit errors. Max 3
-#  simultaneous GPT calls regardless of user concurrency.
-#  Increased retry waits from 5s/10s to 15s/30s/45s.
+#  v3: Added threading semaphore, increased retry waits.
+#  v4: Added cinematic/animal/nature AI detection prompt section.
+#      GPT now explicitly checks for:
+#      - Plastic/waxy fur and skin texture
+#      - Unnaturally smooth animal movement
+#      - CGI-quality lighting and reflections
+#      - Background that looks rendered vs photographed
+#      - Oversaturated "cinematic AI" color grading
+#      Updated physics context builder to pass sat_std,
+#      bg_drift, and flicker_std signals to GPT.
 # ============================================================
 
 import os
@@ -31,15 +37,13 @@ log = logging.getLogger("verifyd.gpt_vision")
 #  Configuration
 # ─────────────────────────────────────────────────────────────
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
-GPT_MODEL      = os.environ.get("VERIFYD_GPT_MODEL", "gpt-4o")  # override via env var
-MAX_FRAMES     = 6      # 6 frames optimal — more frames add time without accuracy gain
+GPT_MODEL      = os.environ.get("VERIFYD_GPT_MODEL", "gpt-4o")
+MAX_FRAMES     = 6
 FRAME_QUALITY  = 80
-MAX_DIMENSION  = 512    # 512px sufficient for physics/artifact detection
+MAX_DIMENSION  = 512
 
 # ─────────────────────────────────────────────────────────────
-#  Concurrency limiter
-#  Max 3 simultaneous GPT calls — prevents burst 429 errors
-#  when multiple users submit videos at the same time.
+#  Concurrency limiter — max 3 simultaneous GPT calls
 # ─────────────────────────────────────────────────────────────
 _gpt_semaphore = threading.Semaphore(3)
 
@@ -55,7 +59,6 @@ def extract_key_frames(video_path: str, n_frames: int = MAX_FRAMES) -> list:
     """
     import subprocess, shutil
 
-    # Convert WebM/MKV to MP4 before frame extraction
     converted_path = None
     ext = os.path.splitext(video_path)[1].lower()
     if ext in ('.webm', '.mkv', '.ogg'):
@@ -184,6 +187,7 @@ def analyze_frames_with_gpt(frames_b64: list, physics_summary: str = "") -> dict
                     "STEP 3: GENUINE AI INDICATORS ONLY\n"
                     "═══════════════════════════════════════\n"
                     "Only flag as AI if you see CLEAR, UNAMBIGUOUS evidence:\n\n"
+
                     "PHYSICS VIOLATIONS (score 85+):\n"
                     "- GRAVITY VIOLATION: person rising or floating upward with no physical cause\n"
                     "  * Person lifting off a waterslide, slope, or surface going UP against gravity\n"
@@ -193,6 +197,7 @@ def analyze_frames_with_gpt(frames_b64: list, physics_summary: str = "") -> dict
                     "- Water flowing upward or splashes that are too perfect/symmetric/CGI\n"
                     "- Limbs bending at anatomically impossible angles\n"
                     "- Body proportions shifting or morphing between frames\n\n"
+
                     "WATERSLIDE / ACTION SPORT SPECIFIC (score 80+):\n"
                     "If you see a waterslide, ski slope, rollercoaster, parkour, or action sport:\n"
                     "- Does the person rise ABOVE the surface without a ramp or physical jump?\n"
@@ -201,6 +206,28 @@ def analyze_frames_with_gpt(frames_b64: list, physics_summary: str = "") -> dict
                     "- Are colors over-saturated vs natural outdoor/water environments?\n"
                     "- Do water splashes look too perfect or computer-generated?\n"
                     "If YES to any of these: score 80+.\n\n"
+
+                    "CINEMATIC / ANIMAL / NATURE CONTENT (score 70+):\n"
+                    "If you see animals, wildlife, nature scenes, or cinematic footage:\n"
+                    "- TEXTURE: Does fur, skin, or feathers look waxy, plastic, or too smooth?\n"
+                    "  Real animal fur has individual hair strands, dirt, matting, natural variation.\n"
+                    "  AI fur looks uniformly perfect, like a plush toy or CGI render.\n"
+                    "- MOVEMENT: Is animal movement unnaturally fluid or graceful?\n"
+                    "  Real animals move with weight, effort, and imperfection.\n"
+                    "  AI animals move like animations — too smooth, too perfectly coordinated.\n"
+                    "- EYES: Do animal eyes look glassy, perfectly reflective, or unnaturally bright?\n"
+                    "  Real animal eyes are imperfect with natural occlusion and variation.\n"
+                    "- LIGHTING: Does lighting look like a professional CGI render — perfectly\n"
+                    "  diffused, no harsh shadows, no natural imperfections like lens flare or\n"
+                    "  dappled light? Real outdoor footage has uncontrolled, imperfect lighting.\n"
+                    "- BACKGROUND: Does the background look painted, rendered, or like a stock\n"
+                    "  photo backdrop rather than a real place with depth and imperfection?\n"
+                    "- COLORS: Are colors over-saturated or color-graded in a way that looks\n"
+                    "  like a movie poster rather than natural footage?\n"
+                    "- SCENE COHERENCE: Do the subject and background match in terms of lighting\n"
+                    "  angle, time of day, and shadow direction? AI often composites these poorly.\n"
+                    "If you see plastic fur, CGI lighting, or rendered backgrounds: score 70+.\n\n"
+
                     "AI GENERATION ARTIFACTS (score 70+):\n"
                     "- Explicit AI label: 'AI-generated', 'Sora', 'Midjourney' etc. (score 95+)\n"
                     "- Plastic/waxy skin with no natural pores or texture variation\n"
@@ -209,7 +236,7 @@ def analyze_frames_with_gpt(frames_b64: list, physics_summary: str = "") -> dict
                     "- Objects morphing shape between frames\n"
                     "- Lip sync visibly misaligned with speech\n"
                     "- Eyes flickering or behaving unnaturally\n"
-                    "- Unnaturally smooth motion in action content (real action is jerky/chaotic)\n\n"
+                    "- Unnaturally smooth motion in action or animal content\n\n"
 
                     "═══════════════════════════════════════\n"
                     "SCORING GUIDE:\n"
@@ -260,12 +287,8 @@ def analyze_frames_with_gpt(frames_b64: list, physics_summary: str = "") -> dict
             method="POST"
         )
 
-        # ── Semaphore: max 3 concurrent GPT calls ─────────────
-        # Queues excess requests instead of bursting all at once,
-        # preventing 429 errors under high user concurrency.
         data = None
         with _gpt_semaphore:
-            # Retry up to 4 times with increasing waits: 15s, 30s, 45s
             for attempt in range(4):
                 try:
                     with urllib.request.urlopen(req, timeout=60) as resp:
@@ -273,7 +296,7 @@ def analyze_frames_with_gpt(frames_b64: list, physics_summary: str = "") -> dict
                     break
                 except urllib.error.HTTPError as e:
                     if e.code == 429 and attempt < 3:
-                        wait = (attempt + 1) * 15   # 15s, 30s, 45s
+                        wait = (attempt + 1) * 15
                         log.warning("GPT rate limited, retrying in %ds (attempt %d)",
                                     wait, attempt + 1)
                         time.sleep(wait)
@@ -336,7 +359,6 @@ def gpt_vision_score_with_context(frames_b64: list, physics_context: dict) -> di
     if not frames_b64:
         return {"ai_probability": 50, "reasoning": "Could not extract frames", "flags": [], "available": False}
 
-    # Build physics context summary to inject into prompt
     physics_summary = _build_physics_summary(physics_context)
     result = analyze_frames_with_gpt(frames_b64, physics_summary)
     result["available"] = True
@@ -356,55 +378,100 @@ def _build_physics_summary(ctx: dict) -> str:
     low_corr     = ctx.get("low_corr_count")
     saturation   = ctx.get("avg_saturation")
     sharpness    = ctx.get("avg_sharpness")
+    # NEW v4 context fields
+    sat_std      = ctx.get("sat_frame_std")
+    bg_drift     = ctx.get("bg_drift")
+    flicker_std  = ctx.get("flicker_std")
 
     lines.append("═══════════════════════════════════════")
-    lines.append("PHYSICS ENGINE PRE-ANALYSIS (from signal detector):")
-    lines.append("The following measurements were made BEFORE you see these frames.")
-    lines.append("Use this data to guide your visual analysis.\n")
+    lines.append("SIGNAL DETECTOR PRE-ANALYSIS (v4 — measured before you see these frames):")
+    lines.append("Use this data to guide and confirm your visual analysis.\n")
 
     if signal_score is not None:
-        lines.append(f"Overall AI signal score: {signal_score}/100 "
-                     f"({'HIGH — strong AI indicators detected' if signal_score > 60 else 'LOW — consistent with real video' if signal_score < 40 else 'MODERATE — ambiguous'})")
+        label = ("HIGH — strong AI indicators" if signal_score > 60
+                 else "LOW — consistent with real video" if signal_score < 40
+                 else "MODERATE — ambiguous")
+        lines.append(f"Overall AI signal score: {signal_score}/100 ({label})")
 
+    # ── Physics / motion ──
     if vert_flow is not None:
         if vert_flow < -1.0:
-            lines.append(f"⚠ GRAVITY VIOLATION DETECTED: Mean vertical optical flow = {vert_flow:.2f} "
+            lines.append(f"⚠ GRAVITY VIOLATION: Mean vertical flow = {vert_flow:.2f} "
                          f"(negative = upward motion against gravity). "
-                         f"Look carefully for the person rising or floating above the surface.")
+                         f"Look for the person rising or floating above the surface.")
         elif vert_flow < -0.3:
-            lines.append(f"⚠ Upward motion tendency detected: vertical flow = {vert_flow:.2f}. "
+            lines.append(f"⚠ Upward motion tendency: vertical flow = {vert_flow:.2f}. "
                          f"Check if person appears to defy gravity.")
         else:
-            lines.append(f"✓ Gravity-consistent motion: vertical flow = {vert_flow:.2f} (downward as expected).")
+            lines.append(f"✓ Gravity-consistent motion: vertical flow = {vert_flow:.2f}.")
 
     if upward_ratio is not None:
         pct = upward_ratio * 100
         if pct > 25:
             lines.append(f"⚠ {pct:.0f}% of frames show strong upward motion — "
-                         f"physically impossible for slide/action content. Look for hovering.")
+                         f"physically impossible for slide/action content.")
         elif pct < 10:
-            lines.append(f"✓ Only {pct:.0f}% of frames show upward motion — consistent with real physics.")
+            lines.append(f"✓ Only {pct:.0f}% upward-motion frames — consistent with real physics.")
 
     if accel_std is not None:
         if accel_std < 1.5:
-            lines.append(f"⚠ Unnaturally smooth trajectory detected (accel_std={accel_std:.2f}). "
+            lines.append(f"⚠ Unnaturally smooth trajectory (accel_std={accel_std:.2f}). "
                          f"Real action is chaotic. AI motion is smooth.")
         else:
-            lines.append(f"✓ Chaotic natural trajectory (accel_std={accel_std:.2f}) — consistent with real motion.")
+            lines.append(f"✓ Natural chaotic trajectory (accel_std={accel_std:.2f}).")
 
     if low_corr is not None and low_corr > 5:
-        lines.append(f"⚠ {low_corr} frame discontinuities detected — content jumps typical of AI generation.")
+        lines.append(f"⚠ {low_corr} frame discontinuities — content jumps typical of AI generation.")
 
+    # ── Color / lighting ──
     if saturation is not None and saturation > 100:
-        lines.append(f"⚠ Over-saturated colors detected (saturation={saturation:.0f}) — "
+        lines.append(f"⚠ Over-saturated colors (saturation={saturation:.0f}) — "
                      f"real outdoor footage is typically less saturated.")
 
-    if sharpness is not None and sharpness < 150:
-        lines.append(f"⚠ Low sharpness detected ({sharpness:.0f}) — AI videos tend to be softer than real camera footage.")
+    if sat_std is not None:
+        if sat_std < 5.0:
+            lines.append(f"⚠ Frozen lighting detected (sat_std={sat_std:.2f}) — "
+                         f"natural lighting always varies. Possible AI render. "
+                         f"Look for unnaturally perfect, studio-quality lighting on the subject.")
+        elif sat_std > 22.0:
+            lines.append(f"⚠ Unstable color/lighting (sat_std={sat_std:.2f}) — "
+                         f"flickering or inconsistent saturation typical of AI generation artifacts.")
+        else:
+            lines.append(f"✓ Natural lighting variation (sat_std={sat_std:.2f}).")
 
-    lines.append("═══════════════════════════════════════\n")
+    # ── Background stability ──
+    if bg_drift is not None:
+        if bg_drift < 3.0:
+            lines.append(f"⚠ Frozen background (bg_drift={bg_drift:.2f}) — "
+                         f"background corners are nearly static, suggesting a rendered/AI scene. "
+                         f"Look for a background that appears painted or computer-generated.")
+        elif bg_drift > 25.0:
+            lines.append(f"⚠ Warping background (bg_drift={bg_drift:.2f}) — "
+                         f"background is shifting unnaturally between frames, a common AI artifact. "
+                         f"Look for background elements that change or morph.")
+        else:
+            lines.append(f"✓ Natural background movement (bg_drift={bg_drift:.2f}).")
+
+    # ── Temporal consistency ──
+    if flicker_std is not None:
+        if flicker_std > 4.0:
+            lines.append(f"⚠ High temporal inconsistency (flicker_std={flicker_std:.2f}) — "
+                         f"frames are inconsistently rendered, typical of AI video generation. "
+                         f"Look for subtle frame-to-frame changes in texture, lighting, or detail.")
+        elif flicker_std < 1.0:
+            lines.append(f"✓ Temporally consistent frames (flicker_std={flicker_std:.2f}).")
+
+    if sharpness is not None and sharpness < 150:
+        lines.append(f"⚠ Low sharpness ({sharpness:.0f}) — AI videos tend to be softer than real camera footage.")
+
+    lines.append("\n═══════════════════════════════════════")
     lines.append("Now examine the frames with this context in mind.")
-    lines.append("If the physics engine flagged gravity violations, look carefully for the person")
-    lines.append("rising above the surface, floating, or moving in ways that defy physics.\n")
+    if bg_drift is not None and bg_drift < 3.0:
+        lines.append("→ Pay close attention to whether the background looks rendered or artificial.")
+    if sat_std is not None and sat_std < 5.0:
+        lines.append("→ Check if the subject's fur, skin, or texture looks unnaturally smooth or plastic.")
+    if flicker_std is not None and flicker_std > 4.0:
+        lines.append("→ Look for inconsistencies in fine details between frames.")
+    lines.append("")
 
     return "\n".join(lines)
