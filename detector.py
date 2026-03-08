@@ -356,8 +356,10 @@ def detect_ai(video_path: str) -> int:
     cap_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     fps = cap.get(cv2.CAP_PROP_FPS)
-    log.info("Video dimensions: %dx%d  frames=%d  fps=%.1f",
-             cap_w, cap_h, total_frames, fps)
+    video_duration = total_frames / fps if fps > 0 else 0.0
+    _is_short_clip = video_duration < 4.0   # guard: unreliable temporal signals on short clips
+    log.info("Video dimensions: %dx%d  frames=%d  fps=%.1f  duration=%.1fs",
+             cap_w, cap_h, total_frames, fps, video_duration)
 
     noise_scores:            List[float] = []
     freq_scores:             List[float] = []
@@ -669,12 +671,12 @@ def detect_ai(video_path: str) -> int:
         log.info("SAT_STD %.2f sat=%.0f → frozen AI render → +14", sat_frame_std, avg_saturation)
     elif _unstable_is_outdoor:
         log.info("SAT_STD %.2f → outdoor action variation → no penalty", sat_frame_std)
-    elif sat_frame_std < 3.0:
+    elif sat_frame_std < 3.0 and not _is_short_clip:
         ai_score += 14
         log.info("SAT_STD %.2f → frozen AI lighting → +14", sat_frame_std)
-    elif sat_frame_std < 6.0:
+    elif sat_frame_std < 6.0 and not _is_short_clip:
         ai_score += 8
-        log.info("SAT_STD %.2f → stable lighting → +8", sat_frame_std)
+        log.info("SAT_STD %.2f → stable lighting → +8 (skipped for short clip)", sat_frame_std)
     elif sat_frame_std > 35.0 and not is_action_content:
         ai_score += 10
         log.info("SAT_STD %.2f → unstable AI color → +10", sat_frame_std)
@@ -732,7 +734,7 @@ def detect_ai(video_path: str) -> int:
     # Real emergency/crowd footage has chaotic multi-directional movement (high entropy).
     # Calibrated: Bus AI=1.73, Moose AI=2.34 vs Real action ~2.8+
     # Only meaningful when significant motion is present
-    if avg_motion > 3.0 and len(flow_dir_scores) > 5:
+    if avg_motion > 3.0 and len(flow_dir_scores) > 5 and not _is_short_clip:
         if avg_flow_dir_entropy < 1.5:
             # Very uniform flow — strong AI crowd signal
             ai_score += 12
@@ -754,7 +756,7 @@ def detect_ai(video_path: str) -> int:
     # Calibrated: Bus AI=21 (has 1 big cut spike), Moose AI=1.5 (no spikes at all)
     # Real emergencies: typically 5-30+ with multiple spikes throughout
     # Guard: only meaningful for non-static content
-    if avg_motion > 3.0 and not is_static_content:
+    if avg_motion > 3.0 and not is_static_content and not _is_short_clip:
         if peak_to_mean_ratio < 2.0:
             # Completely flat motion — no reactions at all (Moose-style)
             ai_score += 10
@@ -826,13 +828,18 @@ def detect_ai(video_path: str) -> int:
     # with equal computational precision (low CoV = too uniform).
     # Calibrated: Gorilla=0.365, Bus=0.433, Moose=0.498
     #             Real Slide1=0.916, Real Slide2=0.581, Real Pres=0.725
-    if quad_cov < 0.40:
+    # Portrait phone videos (h > w*1.5) have naturally lower quad CoV — relax thresholds
+    _is_portrait = (cap_h > cap_w * 1.5)
+    _quad_thresh_strong = 0.30 if _is_portrait else 0.40
+    _quad_thresh_med    = 0.40 if _is_portrait else 0.50
+    _quad_thresh_slight = 0.45 if _is_portrait else 0.55
+    if quad_cov < _quad_thresh_strong:
         ai_score += 14
         log.info("QUAD_COV %.3f → very uniform render focus → +14", quad_cov)
-    elif quad_cov < 0.50:
+    elif quad_cov < _quad_thresh_med:
         ai_score += 8
         log.info("QUAD_COV %.3f → uniform render focus → +8", quad_cov)
-    elif quad_cov < 0.55:
+    elif quad_cov < _quad_thresh_slight:
         ai_score += 3
         log.info("QUAD_COV %.3f → slightly uniform → +3", quad_cov)
     elif quad_cov > 0.75:
