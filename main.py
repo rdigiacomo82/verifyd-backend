@@ -398,13 +398,8 @@ def download(cid: str):
     tmp.write(cert_bytes)
     tmp.flush()
     tmp.close()
-    fname = f"VeriFYD_Certified_{cid[:8]}.mp4"
-    return FileResponse(
-        tmp.name,
-        media_type="video/mp4",
-        filename=fname,
-        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
-    )
+    return FileResponse(tmp.name, media_type="video/mp4",
+                        filename=f"VeriFYD_Certified_{cid[:8]}.mp4")
 
 
 @app.get("/certificate/{cid}")
@@ -465,13 +460,8 @@ def pro_download(cid: str, email: str = ""):
     tmp.write(cert_bytes)
     tmp.flush()
     tmp.close()
-    fname = f"VeriFYD_Certified_{cid[:8]}.mp4"
-    return FileResponse(
-        tmp.name,
-        media_type="video/mp4",
-        filename=fname,
-        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
-    )
+    return FileResponse(tmp.name, media_type="video/mp4",
+                        filename=f"VeriFYD_Certified_{cid[:8]}.mp4")
 
 
 def _proxy_coming_soon_html(video_url: str) -> str:
