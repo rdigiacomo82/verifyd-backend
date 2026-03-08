@@ -52,7 +52,7 @@ def run_detection(video_path: str) -> tuple:
 
     else:
         # Determine blend mode
-        clash_real  = signal_ai_score < 50 and gpt_ai_score > 60   # GPT says AI, signal says real
+        clash_real  = signal_ai_score < 50 and gpt_ai_score > 50   # GPT uncertain/wrong, signal says real
         clash_ai    = signal_ai_score > 65 and gpt_ai_score < 40   # signal says AI, GPT misses it
         both_real   = signal_ai_score < 45 and gpt_ai_score < 45
         both_ai     = signal_ai_score > 65 and gpt_ai_score > 65
