@@ -380,11 +380,26 @@ def job_status(job_id: str):
 
 @app.get("/download/{cid}")
 def download(cid: str):
-    path = f"{CERT_DIR}/{cid}.mp4"
-    if not os.path.exists(path):
-        return JSONResponse({"error": "Certificate not found"}, status_code=404)
+    """Serve certified video stored in Redis by the worker."""
+    import redis as _redis
+    import tempfile
+    redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379")
+    try:
+        r = _redis.from_url(redis_url, decode_responses=False)
+        cert_bytes = r.get(f"cert:{cid}")
+    except Exception as e:
+        log.error("Redis error in /download/%s: %s", cid, e)
+        cert_bytes = None
+    if not cert_bytes:
+        return JSONResponse({"error": "Certificate not found or expired. Videos are available for 1 hour after verification."}, status_code=404)
     increment_downloads(cid)
-    return FileResponse(path, media_type="video/mp4")
+    # Write to a temp file and serve — FileResponse needs a path
+    tmp = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
+    tmp.write(cert_bytes)
+    tmp.flush()
+    tmp.close()
+    return FileResponse(tmp.name, media_type="video/mp4",
+                        filename=f"VeriFYD_Certified_{cid[:8]}.mp4")
 
 
 @app.get("/certificate/{cid}")
@@ -393,7 +408,13 @@ def certificate_lookup(cid: str):
     cert = get_certificate(cid)
     if not cert:
         return JSONResponse({"error": "Certificate not found"}, status_code=404)
-    video_available = os.path.exists(f"{CERT_DIR}/{cid}.mp4")
+    # Check Redis for video availability (worker stores certified video there)
+    import redis as _redis
+    try:
+        r = _redis.from_url(os.environ.get("REDIS_URL", "redis://localhost:6379"), decode_responses=False)
+        video_available = bool(r.exists(f"cert:{cid}"))
+    except Exception:
+        video_available = False
     return {
         "certificate_id":  cert["cert_id"],
         "label":           cert["label"],
@@ -423,13 +444,24 @@ def pro_download(cid: str, email: str = ""):
             "upgrade_url": "https://vfvid.com/pricing"
         }, status_code=403)
 
-    # Serve file
-    path = f"{CERT_DIR}/{cid}.mp4"
-    if not os.path.exists(path):
+    # Serve file from Redis
+    import redis as _redis
+    import tempfile
+    try:
+        r = _redis.from_url(os.environ.get("REDIS_URL", "redis://localhost:6379"), decode_responses=False)
+        cert_bytes = r.get(f"cert:{cid}")
+    except Exception as e:
+        log.error("Redis error in /pro-download/%s: %s", cid, e)
+        cert_bytes = None
+    if not cert_bytes:
         return JSONResponse({"error": "Video no longer available — please re-verify"}, status_code=404)
-
     increment_downloads(cid)
-    return FileResponse(path, media_type="video/mp4")
+    tmp = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
+    tmp.write(cert_bytes)
+    tmp.flush()
+    tmp.close()
+    return FileResponse(tmp.name, media_type="video/mp4",
+                        filename=f"VeriFYD_Certified_{cid[:8]}.mp4")
 
 
 def _proxy_coming_soon_html(video_url: str) -> str:
@@ -1078,3 +1110,9 @@ def test_resend(key: str = ""):
         return {"error": f"HTTP {e.code}", "detail": e.read().decode()}
     except Exception as e:
         return {"error": str(e)}
+
+
+
+
+
+

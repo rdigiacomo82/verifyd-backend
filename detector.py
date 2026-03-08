@@ -511,10 +511,23 @@ def detect_ai(video_path: str) -> int:
     # Used to guard v4 signals that overlap with fast-action real content
     is_action_content = (avg_motion > 8.0 and avg_edge > 3.0)
     is_static_content = (avg_motion < 3.0)
-    log.info("Content type: %s (motion=%.1f edge=%.1f)",
-             "action" if is_action_content else
-             "static" if is_static_content else "cinematic",
-             avg_motion, avg_edge)
+
+    # ── Selfie / talking-head detection (v8) ────────────────
+    # Portrait phone selfie: vertical aspect ratio + low motion + moderate sharpness.
+    # These videos have naturally stable bg, stable lighting, low sync —
+    # signals built for AI crowd detection must be suppressed for them.
+    _is_portrait        = (cap_h > cap_w * 1.5)
+    _is_selfie_content  = (
+        _is_portrait                    # vertical phone video
+        and avg_motion < 6.0            # mostly static subject
+        and avg_edge < 20.0             # not busy/crowded scene
+        and avg_sharpness > 100         # real camera sharpness (not AI-smooth 50-80)
+    )
+    log.info("Content type: %s (motion=%.1f edge=%.1f portrait=%s selfie=%s)",
+             "action"  if is_action_content else
+             "selfie"  if _is_selfie_content else
+             "static"  if is_static_content  else "cinematic",
+             avg_motion, avg_edge, _is_portrait, _is_selfie_content)
 
     ai_score = 30.0   # base: lean real until AI signals accumulate
 
@@ -621,6 +634,13 @@ def detect_ai(video_path: str) -> int:
         ai_score -= 2
         log.info("NOISE %.1f → moderate grain → -2", avg_noise)
 
+    # ── 9c. Selfie bonus (v8) ────────────────────────────────
+    # Portrait phone selfies are overwhelmingly real-world content.
+    # Reduce base AI score when all selfie markers are present.
+    if _is_selfie_content:
+        ai_score -= 12
+        log.info("SELFIE portrait+static+sharp → real phone video bonus → -12")
+
     # ── 10. Saturation mean ──────────────────────────────────
     if avg_saturation > 160:
         ai_score += 8
@@ -653,11 +673,15 @@ def detect_ai(video_path: str) -> int:
     # ── 15. Edge temporal std ────────────────────────────────
     if len(edge_counts_temporal) > 3:
         edge_temporal_std = float(np.std(edge_counts_temporal))
-        if edge_temporal_std < 6000:
+        if _is_selfie_content:
+            # Talking heads naturally have very low edge std — don't penalize
+            log.info("Edge temporal std: %.0f → selfie guard → skip", edge_temporal_std)
+        elif edge_temporal_std < 6000:
             ai_score += 8
         elif edge_temporal_std < 10000:
             ai_score += 4
-        log.info("Edge temporal std: %.0f", edge_temporal_std)
+        if not _is_selfie_content:
+            log.info("Edge temporal std: %.0f", edge_temporal_std)
 
     # ════════════════════════════════════════════════════════
     # NEW v4 SIGNALS — cinematic / animal / nature AI detection
@@ -677,6 +701,9 @@ def detect_ai(video_path: str) -> int:
 
     if _stable_is_broadcast:
         log.info("SAT_STD %.2f sat=%.0f → broadcast studio → no penalty", sat_frame_std, avg_saturation)
+    elif _is_selfie_content and sat_frame_std < 8.0:
+        # Indoor selfie lighting is naturally stable — not an AI signal
+        log.info("SAT_STD %.2f → selfie indoor lighting → no penalty", sat_frame_std)
     elif _stable_is_ai_render:
         # Frozen lighting on low-sat content = AI animal/nature render (Gorilla, Monkey)
         ai_score += 14
@@ -702,7 +729,10 @@ def detect_ai(video_path: str) -> int:
     # GUARD: static real content (broadcast/tripod) also has frozen bg — exempt if static+broadcast.
     _static_broadcast = (is_static_content and avg_saturation > 140)
     _bg_warp_threshold = 55.0 if is_action_content else 30.0
-    if bg_drift < 2.0 and not _static_broadcast:
+    if _is_selfie_content and bg_drift < 6.0:
+        # Selfie held steady or on table — naturally low bg drift
+        log.info("BG_DRIFT %.2f → selfie static hold → no penalty", bg_drift)
+    elif bg_drift < 2.0 and not _static_broadcast:
         # Frozen background — AI render (not a static broadcast camera)
         ai_score += 12
         log.info("BG_DRIFT %.2f → frozen AI bg → +12", bg_drift)
@@ -799,7 +829,8 @@ def detect_ai(video_path: str) -> int:
     # Real crowds: independent motion, higher variance between halves.
     # Calibrated: Bus AI=0.088, Moose AI=0.046 vs Real=0.10–0.14
     # Guard: only meaningful when multiple people / crowd is present
-    if avg_motion > 3.0 and not is_static_content:
+    # Selfie guard: single person = naturally low sync, not an AI signal
+    if avg_motion > 3.0 and not is_static_content and not _is_selfie_content:
         if motion_sync < 0.06:
             # Extreme lockstep — strong AI crowd signal (Moose)
             ai_score += 14

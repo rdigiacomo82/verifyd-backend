@@ -121,17 +121,24 @@ def process_upload_job(
 
         # ── Stamp certified videos ────────────────────────────
         if certify:
-            certified_path = os.path.join(CERT_DIR, f"{job_id}.mp4")
+            certified_path = os.path.join(tempfile.gettempdir(), f"cert_{job_id}.mp4")
             download_url   = f"{BASE_URL}/download/{job_id}"
             try:
-                os.makedirs(CERT_DIR, exist_ok=True)
                 clip_path = clip_first_6_seconds(tmp_path)
                 stamp_video(clip_path, certified_path, job_id)
                 if os.path.exists(clip_path):
                     os.remove(clip_path)
+                # Store certified video bytes in Redis so backend can serve download
+                # (worker and backend are separate containers with no shared disk)
+                if os.path.exists(certified_path):
+                    with open(certified_path, "rb") as vf:
+                        cert_bytes = vf.read()
+                    r.setex(f"cert:{job_id}", 3600, cert_bytes)  # 1 hour TTL
+                    os.remove(certified_path)
+                    log.info("Worker: certified video stored in Redis: job=%s size=%d bytes",
+                             job_id, len(cert_bytes))
                 result["certificate_id"] = job_id
                 result["download_url"]   = download_url
-                log.info("Worker: certified video stamped: %s", certified_path)
                 # Send email
                 if email and "@" in email:
                     try:
@@ -220,14 +227,20 @@ def process_link_job(
         }
 
         if certify:
-            certified_path = os.path.join(CERT_DIR, f"{job_id}.mp4")
+            certified_path = os.path.join(tempfile.gettempdir(), f"cert_{job_id}.mp4")
             download_url   = f"{BASE_URL}/download/{job_id}"
             try:
-                os.makedirs(CERT_DIR, exist_ok=True)
                 clip_path = clip_first_6_seconds(tmp_path)
                 stamp_video(clip_path, certified_path, job_id)
                 if os.path.exists(clip_path):
                     os.remove(clip_path)
+                if os.path.exists(certified_path):
+                    with open(certified_path, "rb") as vf:
+                        cert_bytes = vf.read()
+                    r.setex(f"cert:{job_id}", 3600, cert_bytes)
+                    os.remove(certified_path)
+                    log.info("Worker: certified video stored in Redis: link job=%s size=%d bytes",
+                             job_id, len(cert_bytes))
                 result["certificate_id"] = job_id
                 result["download_url"]   = download_url
                 if email and "@" in email:
@@ -251,4 +264,3 @@ def process_link_job(
     finally:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
-
