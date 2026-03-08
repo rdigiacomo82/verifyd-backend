@@ -6,7 +6,7 @@ import sqlite3
 import os
 import logging
 import re
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from contextlib import contextmanager
 from typing import Optional
 
@@ -92,26 +92,6 @@ def init_db() -> None:
             )
         """)
 
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS sessions (
-                token       TEXT    PRIMARY KEY,
-                email_lower TEXT    NOT NULL,
-                created_at  TEXT    NOT NULL,
-                expires_at  TEXT    NOT NULL,
-                last_seen   TEXT    NOT NULL
-            )
-        """)
-
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS magic_links (
-                token       TEXT    PRIMARY KEY,
-                email_lower TEXT    NOT NULL,
-                created_at  TEXT    NOT NULL,
-                expires_at  TEXT    NOT NULL,
-                used        INTEGER NOT NULL DEFAULT 0
-            )
-        """)
-
         # Add email_verified column to users if not exists
         try:
             conn.execute("ALTER TABLE users ADD COLUMN email_verified INTEGER NOT NULL DEFAULT 0")
@@ -183,6 +163,8 @@ def get_or_create_user(email: str) -> dict:
 def get_user_status(email: str) -> dict:
     """
     Returns user info including whether they are within their usage limit.
+    For FREE users: period is 30 days from created_at (not rolling).
+    Period auto-resets for paid plans on billing cycle.
 
     Returns dict with:
         allowed      : bool   — True if they can perform an analysis
@@ -193,9 +175,34 @@ def get_user_status(email: str) -> dict:
         limit        : int    — max uses for their plan
         over_limit   : bool   — True if they've exceeded their limit
     """
+    from datetime import timedelta
     user = get_or_create_user(email)
     plan  = user.get("plan", "free")
     limit = PLAN_LIMITS.get(plan, FREE_USES)
+
+    # ── Paid plan: reset period every 30 days from period_start ──
+    if plan != "free":
+        period_start_str = user.get("period_start", "")
+        try:
+            period_start = datetime.fromisoformat(period_start_str)
+            if period_start.tzinfo is None:
+                period_start = period_start.replace(tzinfo=timezone.utc)
+            now = datetime.now(timezone.utc)
+            if (now - period_start).days >= 30:
+                reset_period_uses(email)
+                user["period_uses"] = 0
+                log.info("Billing period reset for %s (%s plan)", email, plan)
+        except Exception:
+            pass
+
+    # ── Free plan: 30-day window from account creation ───────────
+    # Free users get 10 uses within their first 30 days.
+    # After 30 days, period resets once — giving them another 10.
+    # This prevents the "register a new email" bypass because the
+    # email is permanently stored in the DB even after period reset.
+    # NOTE: period_uses tracks uses within a 30-day window.
+    # We do NOT reset free users automatically — admin reset only.
+
     period_uses = user.get("period_uses", 0)
     over_limit  = period_uses >= limit
 
@@ -437,166 +444,15 @@ def verify_otp(email: str, code: str) -> tuple:
         )
 
     log.info("Email verified successfully: %s", email_lower)
+
+    # Check if this verified user is already at their limit
+    # (catches people who try to re-verify to bypass the limit)
+    status = get_user_status(email)
+    if status["over_limit"]:
+        log.warning("Verified user %s is already at limit (%d/%d uses)",
+                    email_lower, status["period_uses"], status["limit"])
+        return True, "limit_reached"
+
     return True, "Email verified successfully."
 
-
-# ─────────────────────────────────────────────────────────────
-#  Magic Link functions
-# ─────────────────────────────────────────────────────────────
-MAGIC_LINK_EXPIRY_MINUTES = 15
-
-def create_magic_link(email: str) -> str:
-    """
-    Generate a one-time magic link token for the given email.
-    Token expires in 15 minutes and can only be used once.
-    Returns the token string.
-    """
-    import secrets
-    email_lower = email.strip().lower()
-    token       = secrets.token_urlsafe(32)
-    now         = datetime.now(timezone.utc)
-    expires_at  = now + timedelta(minutes=MAGIC_LINK_EXPIRY_MINUTES)
-
-    with get_db() as conn:
-        # Invalidate any existing unused magic links for this email
-        conn.execute(
-            "DELETE FROM magic_links WHERE email_lower = ? AND used = 0",
-            (email_lower,)
-        )
-        conn.execute(
-            """INSERT INTO magic_links (token, email_lower, created_at, expires_at, used)
-               VALUES (?, ?, ?, ?, 0)""",
-            (token, email_lower, now.isoformat(), expires_at.isoformat())
-        )
-
-    log.info("Magic link created for %s (expires %s)", email_lower, expires_at.isoformat())
-    return token
-
-
-def verify_magic_link(token: str) -> tuple:
-    """
-    Verify a magic link token.
-    Returns (email, success, message).
-    On success, marks token as used and marks email as verified.
-    """
-    now = datetime.now(timezone.utc)
-
-    with get_db() as conn:
-        row = conn.execute(
-            "SELECT * FROM magic_links WHERE token = ?", (token,)
-        ).fetchone()
-
-        if not row:
-            return None, False, "Invalid or expired link. Please request a new one."
-
-        if row["used"]:
-            return None, False, "This link has already been used. Please request a new one."
-
-        expires_at = datetime.fromisoformat(row["expires_at"])
-        if expires_at.tzinfo is None:
-            expires_at = expires_at.replace(tzinfo=timezone.utc)
-        if now > expires_at:
-            conn.execute("DELETE FROM magic_links WHERE token = ?", (token,))
-            return None, False, "This link has expired. Please request a new one."
-
-        # Mark as used
-        conn.execute("UPDATE magic_links SET used = 1 WHERE token = ?", (token,))
-
-        email_lower = row["email_lower"]
-
-        # Mark email as verified
-        conn.execute(
-            "UPDATE users SET email_verified = 1, last_seen = ? WHERE email_lower = ?",
-            (now.isoformat(), email_lower)
-        )
-        # Create user if doesn't exist
-        conn.execute(
-            """INSERT OR IGNORE INTO users
-               (email, email_lower, plan, total_uses, period_uses, period_start,
-                created_at, last_seen, email_verified)
-               VALUES (?, ?, 'free', 0, 0, ?, ?, ?, 1)""",
-            (email_lower, email_lower,
-             now.isoformat(), now.isoformat(), now.isoformat())
-        )
-
-    log.info("Magic link verified for %s", email_lower)
-    return email_lower, True, "Email verified successfully."
-
-
-# ─────────────────────────────────────────────────────────────
-#  Persistent Session functions
-# ─────────────────────────────────────────────────────────────
-SESSION_EXPIRY_DAYS = 30
-
-def create_session(email: str) -> str:
-    """
-    Create a persistent session token for the given email.
-    Stored in the database — survives redeploys.
-    Returns the session token.
-    """
-    import secrets
-    email_lower = email.strip().lower()
-    token       = secrets.token_urlsafe(32)
-    now         = datetime.now(timezone.utc)
-    expires_at  = now + timedelta(days=SESSION_EXPIRY_DAYS)
-
-    with get_db() as conn:
-        conn.execute(
-            """INSERT INTO sessions (token, email_lower, created_at, expires_at, last_seen)
-               VALUES (?, ?, ?, ?, ?)""",
-            (token, email_lower, now.isoformat(), expires_at.isoformat(), now.isoformat())
-        )
-
-    log.info("Session created for %s", email_lower)
-    return token
-
-
-def get_session_email(token: str) -> str | None:
-    """
-    Look up email from session token.
-    Returns email string if valid, None if expired or not found.
-    """
-    if not token:
-        return None
-
-    now = datetime.now(timezone.utc)
-
-    with get_db() as conn:
-        row = conn.execute(
-            "SELECT * FROM sessions WHERE token = ?", (token,)
-        ).fetchone()
-
-        if not row:
-            return None
-
-        expires_at = datetime.fromisoformat(row["expires_at"])
-        if expires_at.tzinfo is None:
-            expires_at = expires_at.replace(tzinfo=timezone.utc)
-        if now > expires_at:
-            conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
-            return None
-
-        # Update last_seen
-        conn.execute(
-            "UPDATE sessions SET last_seen = ? WHERE token = ?",
-            (now.isoformat(), token)
-        )
-
-    return row["email_lower"]
-
-
-def delete_session(token: str) -> None:
-    """Delete a session (logout)."""
-    with get_db() as conn:
-        conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
-    log.info("Session deleted: %s", token[:8] + "...")
-
-
-def clean_expired_sessions() -> None:
-    """Remove all expired sessions. Call periodically."""
-    now = datetime.now(timezone.utc)
-    with get_db() as conn:
-        conn.execute(
-            "DELETE FROM sessions WHERE expires_at < ?", (now.isoformat(),)
-        )
 

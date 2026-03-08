@@ -15,11 +15,7 @@
 from fastapi import FastAPI, UploadFile, File, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
-from pydantic import BaseModel
 import os, uuid, requests, tempfile, logging, hashlib
-
-class EmailRequest(BaseModel):
-    email: str
 from contextlib import asynccontextmanager
 
 from detection import run_detection   # returns (authenticity, label, detail)
@@ -27,16 +23,12 @@ from config import (                  # single source of truth for all settings
     BASE_URL,
     UPLOAD_DIR, CERT_DIR, TMP_DIR,
 )
-from emailer  import send_otp_email, send_certification_email, send_magic_link_email
+from emailer  import send_otp_email, send_certification_email
 from database import (init_db, insert_certificate, increment_downloads,
                       get_or_create_user, get_user_status, increment_user_uses,
                       is_valid_email, FREE_USES, get_certificate,
-                      is_email_verified, create_otp, verify_otp,
-                      create_magic_link, verify_magic_link,
-                      create_session, get_session_email, delete_session,
-                      clean_expired_sessions)
+                      is_email_verified, create_otp, verify_otp)
 from video import clip_first_6_seconds, stamp_video, download_video_ytdlp
-from queue_helper import enqueue_upload, enqueue_link, get_job_result
 
 log = logging.getLogger("verifyd.main")
 
@@ -292,83 +284,104 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
     # ── Email verification check ──────────────────────────────
     if not is_email_verified(email):
         return JSONResponse({
-            "error":   "email_not_verified",
-            "message": "Please verify your email address before uploading.",
+            "error":            "email_not_verified",
+            "message":          "Please verify your email address before uploading.",
         }, status_code=403)
 
     # ── Usage limit check ─────────────────────────────────────
     status = get_user_status(email)
     if not status["allowed"]:
         return JSONResponse({
-            "error":     "limit_reached",
-            "plan":      status["plan"],
-            "uses_left": 0,
-            "limit":     status["limit"],
+            "error":      "limit_reached",
+            "plan":       status["plan"],
+            "uses_left":  0,
+            "limit":      status["limit"],
         }, status_code=402)
 
-    # ── Save file to disk then enqueue ────────────────────────
-    job_id   = str(uuid.uuid4())
-    raw_path = f"{UPLOAD_DIR}/{job_id}_{file.filename}"
+    cid      = str(uuid.uuid4())
+    raw_path = f"{UPLOAD_DIR}/{cid}_{file.filename}"
 
+    # Stream directly to disk — no memory limit regardless of file size
     with open(raw_path, "wb") as f:
-        while chunk := await file.read(1024 * 1024):
+        while chunk := await file.read(1024 * 1024):  # 1MB chunks
             f.write(chunk)
 
-    enqueue_upload(job_id, raw_path, file.filename, email)
-    log.info("upload: queued job %s for %s file=%s", job_id, email, file.filename)
+    sha256 = _sha256(raw_path)
 
-    # ── Poll Redis until worker completes (transparent to frontend) ──
-    # Frontend never sees job_id — gets same response format as before.
-    import asyncio
-    for _ in range(200):   # poll up to 200 times = ~10 minutes max
-        await asyncio.sleep(3)
-        result = get_job_result(job_id)
-        if result and result.get("job_status") == "complete":
-            # Strip internal job_status field before returning
-            result.pop("job_status", None)
-            result.pop("label", None)
-            return JSONResponse(result)
-        if result and result.get("job_status") == "error":
-            return JSONResponse(
-                {"error": result.get("error", "Analysis failed.")},
-                status_code=500
-            )
+    try:
+        authenticity, label, detail, ui_text, color, certify, clip_path = _run_analysis(raw_path)
+    except Exception as e:
+        log.exception("Detection failed for %s", raw_path)
+        return JSONResponse({"error": str(e)}, status_code=500)
 
-    return JSONResponse({"error": "Analysis timed out. Please try again."}, status_code=504)
+    # ── Count this use ────────────────────────────────────────
+    increment_user_uses(email)
 
+    # Persist every result — certified or not
+    insert_certificate(
+        cert_id       = cid,
+        email         = email,
+        original_file = file.filename,
+        label         = label,
+        authenticity  = authenticity,
+        ai_score      = detail["ai_score"],
+        sha256        = sha256,
+    )
 
-@app.get("/job-status/{job_id}")
-def job_status(job_id: str):
-    """Poll endpoint for frontends that handle async directly."""
-    result = get_job_result(job_id)
-    if not result or result.get("job_status") == "not_found":
-        return JSONResponse({"job_status": "not_found"}, status_code=404)
-    return JSONResponse(result)
+    if certify:
+        certified_path = f"{CERT_DIR}/{cid}.mp4"
+        download_url   = f"{BASE_URL}/download/{cid}"
+
+        # Stamp from clip (already 6s, 720p) — faster and more reliable than raw
+        import threading
+        threading.Thread(
+            target=_stamp_video_background,
+            kwargs={
+                "raw_path":          clip_path,
+                "certified_path":    certified_path,
+                "cid":               cid,
+                "email":             email,
+                "authenticity":      authenticity,
+                "original_filename": file.filename,
+                "download_url":      download_url,
+            },
+            daemon=True
+        ).start()
+
+        return {
+            "status":             ui_text,
+            "authenticity_score": authenticity,
+            "certificate_id":     cid,
+            "download_url":       download_url,
+            "color":              color,
+            "gpt_reasoning":      detail.get("gpt_reasoning", ""),
+            "gpt_flags":          detail.get("gpt_flags", []),
+            "signal_score":       detail.get("signal_ai_score", 0),
+            "gpt_score":          detail.get("gpt_ai_score", 0),
+        }
+
+    # Clean up clip and raw for non-certified results
+    if os.path.exists(clip_path):
+        os.remove(clip_path)
+
+    return {
+        "status":             ui_text,
+        "authenticity_score": authenticity,
+        "color":              color,
+        "gpt_reasoning":      detail.get("gpt_reasoning", ""),
+        "gpt_flags":          detail.get("gpt_flags", []),
+        "signal_score":       detail.get("signal_ai_score", 0),
+        "gpt_score":          detail.get("gpt_ai_score", 0),
+    }
 
 
 @app.get("/download/{cid}")
 def download(cid: str):
-    # First check local disk (legacy / direct web service stamping)
     path = f"{CERT_DIR}/{cid}.mp4"
-    if os.path.exists(path):
-        increment_downloads(cid)
-        return FileResponse(path, media_type="video/mp4")
-
-    # Check Redis — worker stores certified videos here
-    try:
-        from queue_helper import get_redis
-        r = get_redis()
-        video_bytes = r.get(f"certified:{cid}")
-        if video_bytes:
-            increment_downloads(cid)
-            # Cache locally for faster subsequent downloads
-            with open(path, "wb") as f:
-                f.write(video_bytes)
-            return FileResponse(path, media_type="video/mp4")
-    except Exception as e:
-        log.warning("download: Redis check failed for %s: %s", cid, e)
-
-    return JSONResponse({"error": "Certificate not found"}, status_code=404)
+    if not os.path.exists(path):
+        return JSONResponse({"error": "Certificate not found"}, status_code=404)
+    increment_downloads(cid)
+    return FileResponse(path, media_type="video/mp4")
 
 
 @app.get("/certificate/{cid}")
@@ -549,37 +562,28 @@ YTDLP_DOMAINS = (
 
 
 # ─────────────────────────────────────────────
-#  Session management (persistent — database backed)
+#  Session-based email store
+#  In-memory dict: session_token → email
+#  Persists for the lifetime of the server process.
 # ─────────────────────────────────────────────
-import time
+import hashlib, time
 from fastapi.responses import JSONResponse
 
+_session_store: dict = {}  # token → {"email": str, "ts": float}
 
-def _set_session_cookie(response, token: str):
-    """Helper to set the vfy_session cookie consistently."""
-    response.set_cookie(
-        key="vfy_session",
-        value=token,
-        max_age=2592000,  # 30 days
-        samesite="none",
-        secure=True,
-        httponly=False,
-    )
-
-
-def _get_session_from_request(request: Request) -> str | None:
-    """Extract and validate session token from request cookie."""
-    token = request.cookies.get("vfy_session", "")
-    if not token:
-        return None
-    return get_session_email(token)
+def _clean_sessions():
+    """Remove sessions older than 30 days."""
+    cutoff = time.time() - (30 * 86400)
+    expired = [k for k, v in _session_store.items() if v["ts"] < cutoff]
+    for k in expired:
+        del _session_store[k]
 
 
 @app.post("/register-email/")
 async def register_email(request: Request):
     """
     Called by the frontend when user enters their email.
-    Creates a persistent database session.
+    Returns a session token stored as a cookie on the frontend.
     """
     try:
         body = await request.json()
@@ -590,101 +594,24 @@ async def register_email(request: Request):
     if not is_valid_email(email):
         return JSONResponse({"error": "invalid email"}, status_code=400)
 
+    # Create or reuse session token for this email
+    token = hashlib.sha256(f"{email}:{int(time.time() // 3600)}".encode()).hexdigest()[:32]
+    _session_store[token] = {"email": email, "ts": time.time()}
+    _clean_sessions()
+
     get_or_create_user(email)
-    token = create_session(email)
-    log.info("register-email: %s → session %s", email, token[:8])
+    log.info("register-email: %s → token %s", email, token[:8])
 
     response = JSONResponse({"status": "ok", "token": token})
-    _set_session_cookie(response, token)
+    response.set_cookie(
+        key="vfy_session",
+        value=token,
+        max_age=2592000,  # 30 days
+        samesite="none",
+        secure=True,
+        httponly=False,
+    )
     return response
-
-
-# ─────────────────────────────────────────────
-#  Magic Link endpoints
-# ─────────────────────────────────────────────
-BASE_URL = os.environ.get("BASE_URL", "https://verifyd-backend.onrender.com")
-
-@app.post("/send-magic-link/")
-async def send_magic_link(body: EmailRequest):
-    """
-    Send a magic link login email to the given address.
-    User clicks the link → authenticated for 30 days.
-    """
-    email = body.email.strip()
-
-    if not is_valid_email(email):
-        return JSONResponse({"error": "invalid email"}, status_code=400)
-
-    get_or_create_user(email)
-    token = create_magic_link(email)
-    url   = f"{BASE_URL}/auth/{token}"
-    sent  = send_magic_link_email(email, url)
-
-    if not sent:
-        log.error("send-magic-link: email failed for %s", email)
-        return JSONResponse({"error": "Failed to send email. Please try again."}, status_code=500)
-
-    log.info("send-magic-link: sent to %s", email)
-    return JSONResponse({"status": "ok", "message": "Check your email for a sign-in link."})
-
-
-@app.get("/auth/{token}")
-async def magic_link_auth(token: str, request: Request):
-    """
-    Magic link callback — user clicks link from email.
-    Verifies token, creates session, redirects to app.
-    """
-    email, success, message = verify_magic_link(token)
-
-    if not success:
-        # Redirect to app with error
-        return HTMLResponse(f"""
-        <html><head>
-        <meta http-equiv="refresh" content="3;url=https://vfvid.com/app">
-        </head><body style="background:#0a0a0a;color:#fff;font-family:sans-serif;
-                             display:flex;align-items:center;justify-content:center;
-                             height:100vh;margin:0;">
-        <div style="text-align:center;">
-            <p style="font-size:48px;margin:0 0 16px;">⚠️</p>
-            <h2 style="color:#f59e0b;">Link expired or already used</h2>
-            <p style="color:#888;">{message}</p>
-            <p style="color:#555;font-size:13px;">Redirecting you back...</p>
-        </div>
-        </body></html>
-        """, status_code=400)
-
-    # Create persistent session
-    session_token = create_session(email)
-    log.info("magic-link auth: session created for %s", email)
-
-    # Redirect to app with session cookie set
-    response = HTMLResponse(f"""
-    <html><head>
-    <meta http-equiv="refresh" content="1;url=https://vfvid.com/app">
-    </head><body style="background:#0a0a0a;color:#fff;font-family:sans-serif;
-                         display:flex;align-items:center;justify-content:center;
-                         height:100vh;margin:0;">
-    <div style="text-align:center;">
-        <p style="font-size:48px;margin:0 0 16px;">✅</p>
-        <h2 style="color:#f59e0b;">You're signed in!</h2>
-        <p style="color:#888;">Redirecting you to VeriFYD...</p>
-    </div>
-    </body></html>
-    """)
-    _set_session_cookie(response, session_token)
-    return response
-
-
-@app.post("/logout/")
-async def logout(request: Request):
-    """Clear the session cookie and delete from database."""
-    token = request.cookies.get("vfy_session", "")
-    if token:
-        delete_session(token)
-    response = JSONResponse({"status": "ok"})
-    response.delete_cookie("vfy_session")
-    return response
-
 
 
 @app.get("/user-status/")
@@ -700,119 +627,119 @@ def user_status(email: str = ""):
 
 
 @app.get("/analyze-link/", response_class=HTMLResponse)
-def analyze_link(request: Request, video_url: str, email: str = "",
-                 double_count: bool = False):
+def analyze_link(request: Request, video_url: str, email: str = ""):
     if not video_url.startswith("http"):
         return HTMLResponse(_error_html("Invalid URL — must start with http."), status_code=400)
 
     # ── Email resolution ──────────────────────────────────────
+    # Priority: 1) query param  2) session token cookie  3) anonymous
     if not email or not is_valid_email(email):
-        session_email = _get_session_from_request(request)
-        if session_email:
-            email = session_email
+        session_token = request.cookies.get("vfy_session", "")
+        if session_token and session_token in _session_store:
+            email = _session_store[session_token]["email"]
             log.info("analyze-link: using email from session: %s", email)
         else:
             email = "anonymous@verifyd.com"
             log.info("analyze-link: no session found, using anonymous")
 
-    # ── Usage limit check ────────────────────────────────────
+    # ── Usage limit check (skip for anonymous) ────────────────
     if email != "anonymous@verifyd.com":
-        status    = get_user_status(email)
-        required  = 2 if double_count else 1
-        uses_left = status.get("uses_left", 0)
-        if not status["allowed"] or uses_left < required:
-            if double_count and uses_left < 2:
-                return HTMLResponse(_error_html(
-                    "You need at least 2 analyses remaining to scan a link "
-                    "without downloading your certified video first."
-                ), status_code=402)
+        status = get_user_status(email)
+        if not status["allowed"]:
             return HTMLResponse(
                 _payment_required_html(email, status["plan"]),
                 status_code=402
             )
 
-    # ── Enqueue job — return polling page immediately ─────────
-    job_id = str(uuid.uuid4())
-    enqueue_link(job_id, video_url, email, double_count)
-    log.info("analyze-link: queued job %s for %s url=%s", job_id, email, video_url)
+    tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+    tmp_path = tmp_file.name
+    tmp_file.close()
 
-    html = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <meta charset="utf-8">
-      <title>VeriFYD — Analyzing...</title>
-      <style>
-        body {{ background:#0a0a0a; color:white; text-align:center;
-                padding-top:120px; font-family:Arial,sans-serif; margin:0; }}
-        .spinner {{ width:64px; height:64px; border:6px solid #333;
-                    border-top:6px solid #f59e0b; border-radius:50%;
-                    animation:spin 1s linear infinite; margin:0 auto 30px; }}
-        @keyframes spin {{ to {{ transform:rotate(360deg); }} }}
-        h2 {{ color:#f59e0b; }}
-        #status {{ color:#aaa; font-size:15px; margin-top:10px; }}
-      </style>
-    </head>
-    <body>
-      <div id="loading">
-        <div class="spinner"></div>
-        <h2>Analyzing your video...</h2>
-        <p id="status">Thank you for your patience, this may take up to 1 minute.</p>
-      </div>
-      <div id="result" style="display:none"></div>
-      <script>
-        const jobId = "{job_id}";
-        const messages = [
-          "Thank you for your patience, this may take up to 1 minute.",
-          "Running signal analysis...",
-          "Running AI vision check...",
-          "Calculating authenticity score..."
-        ];
-        let msgIdx = 0;
-        const statusEl = document.getElementById("status");
-        setInterval(() => {{
-          msgIdx = (msgIdx + 1) % messages.length;
-          statusEl.textContent = messages[msgIdx];
-        }}, 8000);
+    try:
+        use_ytdlp = any(d in video_url for d in YTDLP_DOMAINS)
 
-        async function poll() {{
-          try {{
-            const resp = await fetch("/job-status/" + jobId);
-            const data = await resp.json();
-            if (data.job_status === "complete") {{ showResult(data); return; }}
-            if (data.job_status === "error") {{ showError(data.error || "Analysis failed."); return; }}
-            if (data.job_status === "queued") statusEl.textContent = "Position " + data.position + " in queue...";
-          }} catch(e) {{}}
-          setTimeout(poll, 3000);
-        }}
+        if use_ytdlp:
+            log.info("Using yt-dlp for: %s", video_url)
+            download_video_ytdlp(video_url, tmp_path)
+        else:
+            # ── Direct .mp4 / CDN URL → requests ─────────────────────────────
+            log.info("Using direct download for: %s", video_url)
+            r = requests.get(video_url, stream=True, timeout=30, headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            })
+            if r.status_code != 200:
+                return HTMLResponse(_error_html(
+                    f"Could not download video (HTTP {r.status_code}). "
+                    "Make sure the URL points directly to a video file."
+                ))
+            content_type = r.headers.get("content-type", "")
+            if "text/html" in content_type:
+                return HTMLResponse(_error_html(
+                    "The URL returned a webpage, not a video file. "
+                    "Paste a direct .mp4 link, or a URL from YouTube, Vimeo, "
+                    "Reddit, Twitter/X, Facebook, Twitch, or Dailymotion."
+                ), status_code=400)
+            with open(tmp_path, "wb") as f:
+                for chunk in r.iter_content(8192):
+                    f.write(chunk)
 
-        function showResult(data) {{
-          document.getElementById("loading").style.display = "none";
-          const colorMap = {{ green:"#22c55e", red:"#ef4444", blue:"#3b82f6" }};
-          const color = colorMap[data.color] || "#f59e0b";
-          let html = `<h1 style="color:${{color}};font-size:42px">${{data.status}}</h1>
-            <h2>Authenticity Score: ${{data.authenticity_score}}/100</h2>
-            <p style="color:#aaa">Signal: ${{data.signal_score}}/100 | GPT: ${{data.gpt_score}}/100</p>`;
-          if (data.gpt_reasoning) html += `<p style="color:#ccc;max-width:560px;margin:20px auto;font-size:14px">${{data.gpt_reasoning}}</p>`;
-          if (data.download_url) html += `<br><a href="${{data.download_url}}" style="background:#f59e0b;color:black;padding:14px 28px;border-radius:8px;text-decoration:none;font-weight:bold">⬇ Download Certified Video</a>`;
-          html += `<p style="color:#555;margin-top:40px;font-size:13px">Analyzed by VeriFYD</p>`;
-          document.getElementById("result").innerHTML = html;
-          document.getElementById("result").style.display = "block";
-        }}
+        if os.path.getsize(tmp_path) < 1024:
+            return HTMLResponse(_error_html(
+                "Downloaded file is too small to be a valid video. "
+                "The platform may have blocked the download."
+            ), status_code=400)
 
-        function showError(msg) {{
-          document.getElementById("loading").style.display = "none";
-          document.getElementById("result").innerHTML =
-            `<h2 style="color:#ef4444">Analysis Failed</h2><p style="color:#aaa">${{msg}}</p>`;
-          document.getElementById("result").style.display = "block";
-        }}
+        authenticity, label, detail, ui_text, color, certify, clip_path = _run_analysis(tmp_path)
 
-        poll();
-      </script>
-    </body>
-    </html>
-    """
-    return HTMLResponse(html)
+        # ── Count this use and store result ──────────────────
+        if email != "anonymous@verifyd.com":
+            increment_user_uses(email)
+            log.info("analyze-link: counted use for %s", email)
+
+        cid = str(uuid.uuid4())
+        insert_certificate(
+            cert_id       = cid,
+            email         = email,
+            original_file = video_url[:100],
+            label         = label,
+            authenticity  = authenticity,
+            ai_score      = detail["ai_score"],
+        )
+
+        html = f"""
+        <html>
+        <body style="background:black;color:white;text-align:center;
+                     padding-top:120px;font-family:Arial">
+          <h1 style="color:{color};font-size:48px">{ui_text}</h1>
+          <h2>Authenticity Score: {authenticity}/100</h2>
+          <p style="color:#aaa">AI Signal Score: {detail["ai_score"]}/100</p>
+          <p>Analyzed by VeriFYD</p>
+        </body>
+        </html>
+        """
+        return HTMLResponse(html)
+
+    except RuntimeError as e:
+        return HTMLResponse(_error_html(str(e)), status_code=400)
+
+    except ValueError as e:
+        return HTMLResponse(_error_html(str(e)), status_code=400)
+
+    except Exception as e:
+        log.exception("analyze-link failed for %s", video_url)
+        return HTMLResponse(_error_html(
+            "Could not process this video. Please try again."
+        ), status_code=500)
+
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        # clip_path is a tmp file created by _run_analysis — always clean it up
+        try:
+            if 'clip_path' in locals() and clip_path and os.path.exists(clip_path):
+                os.remove(clip_path)
+        except Exception:
+            pass
 
 
 # ─────────────────────────────────────────────
@@ -1079,9 +1006,11 @@ async def send_otp(email: str = Form(...)):
     if not is_deliverable:
         return JSONResponse({"error": reason}, status_code=400)
 
-    # Always send OTP regardless of verified status
-    # Users need to re-authenticate on new devices/sessions
-    get_or_create_user(email)
+    # Already verified — no need to send again
+    if is_email_verified(email):
+        return {"status": "already_verified", "message": "Email already verified."}
+
+    # Generate and send OTP
     code = create_otp(email)
     sent = send_otp_email(email, code)
 
@@ -1092,7 +1021,6 @@ async def send_otp(email: str = Form(...)):
         )
 
     log.info("OTP sent to %s", email)
-    return {"status": "sent", "message": f"Verification code sent to {email}"}
     return {"status": "sent", "message": f"Verification code sent to {email}"}
 
 
@@ -1107,16 +1035,16 @@ async def verify_otp_route(email: str = Form(...), code: str = Form(...)):
     if not success:
         return JSONResponse({"error": message}, status_code=400)
 
+    # Check if verified user is already at their usage limit
+    # This catches users who try to re-verify to bypass the 10-use free limit
+    if message == "limit_reached":
+        return JSONResponse({
+            "error":    "limit_reached",
+            "message":  "You have used all 10 free analyses on this account. Please upgrade to continue.",
+            "uses_left": 0,
+        }, status_code=402)
+
     return {"status": "verified", "message": message}
-
-
-@app.post("/check-session/")
-async def check_session(email: str = Form(...)):
-    """Check if an email is already verified in the database."""
-    if not is_valid_email(email):
-        return JSONResponse({"verified": False}, status_code=200)
-    verified = is_email_verified(email)
-    return {"verified": verified}
 
 
 @app.get("/test-resend/")
@@ -1147,6 +1075,7 @@ def test_resend(key: str = ""):
         return {"error": f"HTTP {e.code}", "detail": e.read().decode()}
     except Exception as e:
         return {"error": str(e)}
+
 
 
 
