@@ -35,20 +35,25 @@ def _store_result(redis_conn, job_id: str, result: dict) -> None:
 
 
 def process_upload_job(
-    job_id:   str,
     file_key: str,   # Redis key where file bytes are stored
     filename: str,
     email:    str,
 ) -> dict:
     """
     Background job: retrieve video from Redis, analyze it, store result.
-    Called by RQ. file_key = 'file:{job_id}' stored by main.py.
+    Called by RQ. job_id retrieved from RQ job context.
+    file_key = 'file:{job_id}' stored by main.py.
     """
+    from rq        import get_current_job
     from detection import run_detection
     from video     import clip_first_6_seconds, stamp_video
     from database  import insert_certificate, increment_user_uses
     from config    import CERT_DIR, BASE_URL
     from emailer   import send_certification_email
+
+    # Get job_id from RQ context
+    rq_job = get_current_job()
+    job_id = rq_job.id if rq_job else file_key.replace("file:", "")
 
     r = _get_redis()
 
@@ -246,3 +251,4 @@ def process_link_job(
     finally:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
+

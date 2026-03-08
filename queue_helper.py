@@ -43,10 +43,10 @@ def enqueue_upload(job_id: str, file_path: str, filename: str, email: str) -> No
     q = Queue(QUEUE_NAME, connection=r)
     q.enqueue(
         "worker.process_upload_job",
-        job_id=job_id,
         file_key=file_key,
         filename=filename,
         email=email,
+        job_id=job_id,        # RQ uses this as the job's own ID
         job_timeout=600,
         result_ttl=RESULT_TTL,
     )
