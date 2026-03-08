@@ -302,12 +302,19 @@ def analyze_frames_with_gpt(frames_b64: list, physics_summary: str = "") -> dict
                     "═══════════════════════════════════════\n"
                     "SCORING GUIDE:\n"
                     "═══════════════════════════════════════\n"
-                    "0-20:  Real — broadcast graphics detected OR clear real-world footage\n"
-                    "20-35: Likely real — natural physics, compression artifacts only\n"
-                    "35-55: Uncertain — ambiguous, no clear evidence either way\n"
-                    "55-75: Likely AI — multiple soft indicators\n"
-                    "75-90: Almost certainly AI — clear AI artifacts or physics violations\n"
-                    "90+:   Definitely AI — explicit label or multiple unambiguous violations\n\n"
+                    "0-10:  Clearly real — broadcast verified OR obvious real-world footage\n"
+                    "       with natural motion, sensor noise, camera shake, and no AI tells.\n"
+                    "10-25: Likely real — natural physics and lighting, only compression\n"
+                    "       artifacts, slight ambiguity but no AI indicators present.\n"
+                    "25-45: Uncertain — some ambiguity, no strong evidence either way.\n"
+                    "45-65: Likely AI — multiple soft indicators present.\n"
+                    "65-85: Almost certainly AI — clear AI artifacts or physics violations.\n"
+                    "85+:   Definitely AI — explicit AI label or multiple unambiguous violations.\n\n"
+                    "IMPORTANT: If you see NO AI indicators at all — natural motion, real\n"
+                    "camera grain/shake, plausible physics, compression artifacts — score 0-15.\n"
+                    "Do NOT score 30-40 just because you are uncertain. Uncertainty with\n"
+                    "no AI evidence = low score (0-20). Only score above 25 if you see\n"
+                    "actual AI indicators, not just the absence of proof it is real.\n\n"
 
                     "Respond ONLY with a JSON object:\n"
                     "{\n"
@@ -577,4 +584,5 @@ def _build_physics_summary(ctx: dict) -> str:
     lines.append("")
 
     return "\n".join(lines)
+
 
