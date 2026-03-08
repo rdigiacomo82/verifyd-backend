@@ -19,7 +19,6 @@ import os, uuid, requests, tempfile, logging, hashlib
 from contextlib import asynccontextmanager
 
 from detection import run_detection   # returns (authenticity, label, detail)
-from queue_helper import enqueue_upload, enqueue_link, get_job_result
 from config import (                  # single source of truth for all settings
     BASE_URL,
     UPLOAD_DIR, CERT_DIR, TMP_DIR,
@@ -299,83 +298,81 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
             "limit":      status["limit"],
         }, status_code=402)
 
-    # ── Save file to disk then enqueue ────────────────────────
-    job_id   = str(uuid.uuid4())
-    raw_path = f"{UPLOAD_DIR}/{job_id}_{file.filename}"
+    cid      = str(uuid.uuid4())
+    raw_path = f"{UPLOAD_DIR}/{cid}_{file.filename}"
 
+    # Stream directly to disk — no memory limit regardless of file size
     with open(raw_path, "wb") as f:
-        while chunk := await file.read(1024 * 1024):
+        while chunk := await file.read(1024 * 1024):  # 1MB chunks
             f.write(chunk)
 
+    sha256 = _sha256(raw_path)
+
     try:
-        enqueue_upload(job_id, raw_path, file.filename, email)
-        log.info("upload: queued job %s for %s file=%s", job_id, email, file.filename)
+        authenticity, label, detail, ui_text, color, certify, clip_path = _run_analysis(raw_path)
     except Exception as e:
-        # Redis unavailable — fall back to synchronous processing
-        log.warning("Queue unavailable (%s) — falling back to sync processing", e)
-        try:
-            sha256 = _sha256(raw_path)
-            authenticity, label, detail, ui_text, color, certify, clip_path = _run_analysis(raw_path)
-            increment_user_uses(email)
-            cid = job_id
-            insert_certificate(
-                cert_id=cid, email=email, original_file=file.filename,
-                label=label, authenticity=authenticity,
-                ai_score=detail["ai_score"], sha256=sha256,
-            )
-            if certify:
-                certified_path = f"{CERT_DIR}/{cid}.mp4"
-                download_url   = f"{BASE_URL}/download/{cid}"
-                import threading
-                threading.Thread(
-                    target=_stamp_video_background,
-                    kwargs=dict(raw_path=clip_path, certified_path=certified_path,
-                                cid=cid, email=email, authenticity=authenticity,
-                                original_filename=file.filename, download_url=download_url),
-                    daemon=True
-                ).start()
-                return {"status": ui_text, "authenticity_score": authenticity,
-                        "certificate_id": cid, "download_url": download_url,
-                        "color": color, "gpt_reasoning": detail.get("gpt_reasoning",""),
-                        "gpt_flags": detail.get("gpt_flags",[]),
-                        "signal_score": detail.get("signal_ai_score",0),
-                        "gpt_score": detail.get("gpt_ai_score",0)}
-            if os.path.exists(clip_path):
-                os.remove(clip_path)
-            return {"status": ui_text, "authenticity_score": authenticity, "color": color,
-                    "gpt_reasoning": detail.get("gpt_reasoning",""),
-                    "gpt_flags": detail.get("gpt_flags",[]),
-                    "signal_score": detail.get("signal_ai_score",0),
-                    "gpt_score": detail.get("gpt_ai_score",0)}
-        except Exception as e2:
-            log.exception("Sync fallback also failed for %s", raw_path)
-            return JSONResponse({"error": str(e2)}, status_code=500)
+        log.exception("Detection failed for %s", raw_path)
+        return JSONResponse({"error": str(e)}, status_code=500)
 
-    # ── Transparent polling — wait for worker result ──────────
-    # Frontend sees same response format as before — no job_id exposed.
-    import asyncio
-    for _ in range(120):   # poll up to 6 minutes
-        await asyncio.sleep(3)
-        result = get_job_result(job_id)
-        if result and result.get("job_status") == "complete":
-            result.pop("job_status", None)
-            return JSONResponse(result)
-        if result and result.get("job_status") == "error":
-            return JSONResponse(
-                {"error": result.get("error", "Analysis failed.")},
-                status_code=500
-            )
+    # ── Count this use ────────────────────────────────────────
+    increment_user_uses(email)
 
-    return JSONResponse({"error": "Analysis timed out. Please try again."}, status_code=504)
+    # Persist every result — certified or not
+    insert_certificate(
+        cert_id       = cid,
+        email         = email,
+        original_file = file.filename,
+        label         = label,
+        authenticity  = authenticity,
+        ai_score      = detail["ai_score"],
+        sha256        = sha256,
+    )
 
+    if certify:
+        certified_path = f"{CERT_DIR}/{cid}.mp4"
+        download_url   = f"{BASE_URL}/download/{cid}"
 
-@app.get("/job-status/{job_id}")
-def job_status(job_id: str):
-    """Poll endpoint for direct async frontends."""
-    result = get_job_result(job_id)
-    if not result or result.get("job_status") == "not_found":
-        return JSONResponse({"job_status": "not_found"}, status_code=404)
-    return JSONResponse(result)
+        # Stamp from clip (already 6s, 720p) — faster and more reliable than raw
+        import threading
+        threading.Thread(
+            target=_stamp_video_background,
+            kwargs={
+                "raw_path":          clip_path,
+                "certified_path":    certified_path,
+                "cid":               cid,
+                "email":             email,
+                "authenticity":      authenticity,
+                "original_filename": file.filename,
+                "download_url":      download_url,
+            },
+            daemon=True
+        ).start()
+
+        return {
+            "status":             ui_text,
+            "authenticity_score": authenticity,
+            "certificate_id":     cid,
+            "download_url":       download_url,
+            "color":              color,
+            "gpt_reasoning":      detail.get("gpt_reasoning", ""),
+            "gpt_flags":          detail.get("gpt_flags", []),
+            "signal_score":       detail.get("signal_ai_score", 0),
+            "gpt_score":          detail.get("gpt_ai_score", 0),
+        }
+
+    # Clean up clip and raw for non-certified results
+    if os.path.exists(clip_path):
+        os.remove(clip_path)
+
+    return {
+        "status":             ui_text,
+        "authenticity_score": authenticity,
+        "color":              color,
+        "gpt_reasoning":      detail.get("gpt_reasoning", ""),
+        "gpt_flags":          detail.get("gpt_flags", []),
+        "signal_score":       detail.get("signal_ai_score", 0),
+        "gpt_score":          detail.get("gpt_ai_score", 0),
+    }
 
 
 @app.get("/download/{cid}")
