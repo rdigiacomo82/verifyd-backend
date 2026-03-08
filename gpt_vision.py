@@ -444,9 +444,12 @@ def _build_physics_summary(ctx: dict) -> str:
     bg_drift     = ctx.get("bg_drift")
     flicker_std  = ctx.get("flicker_std")
     # NEW v6 context fields
-    quad_cov     = ctx.get("quad_cov")      # low = uniform AI render focus
-    fg_bg_ratio  = ctx.get("fg_bg_ratio")   # high = unnatural depth
-    motion_sync  = ctx.get("motion_sync")   # low = lockstep AI crowd
+    quad_cov     = ctx.get("quad_cov")         # low = uniform AI render focus
+    fg_bg_ratio  = ctx.get("fg_bg_ratio")      # high = unnatural depth
+    motion_sync  = ctx.get("motion_sync")      # low = lockstep AI crowd
+    # Behavioral signals
+    flow_entropy = ctx.get("flow_dir_entropy") # low = uniform AI crowd motion
+    peak_ratio   = ctx.get("peak_to_mean_ratio") # low = no reaction spikes
 
     lines.append("═══════════════════════════════════════")
     lines.append("SIGNAL DETECTOR PRE-ANALYSIS (v4 — measured before you see these frames):")
@@ -572,4 +575,6 @@ def _build_physics_summary(ctx: dict) -> str:
         lines.append("→ BEHAVIORAL FLAG: No dramatic motion spikes detected — real emergency footage")
         lines.append("  always has sudden reaction bursts. This scene's motion is too smooth/gradual.")
     lines.append("")
+
+    return "\n".join(lines)
 
