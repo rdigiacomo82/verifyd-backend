@@ -1,9 +1,16 @@
 # ============================================================
-#  VeriFYD — worker.py  v2
+#  VeriFYD — worker.py
 #
-#  Retrieves file content from Redis instead of shared disk.
-#  Web service stores file bytes in Redis, worker retrieves
-#  them, writes to local tmp, processes, then cleans up.
+#  RQ background worker for async video analysis.
+#  Run this as a separate Render Background Worker service.
+#
+#  This file contains:
+#    1. process_upload_job()    — handles file upload analysis
+#    2. process_link_job()      — handles link analysis
+#    3. Helper to store results in Redis
+#
+#  Jobs are queued by main.py and picked up by this worker.
+#  Results stored in Redis with 30-minute TTL.
 # ============================================================
 
 import os
@@ -15,34 +22,29 @@ import hashlib
 log = logging.getLogger("verifyd.worker")
 logging.basicConfig(level=logging.INFO)
 
-RESULT_TTL = 1800
-
-# ── Initialize database tables on worker startup ──────────────
-# Worker has its own disk at /data so needs its own DB init.
-try:
-    from database import init_db
-    init_db()
-    log.info("Worker: database initialized")
-except Exception as _db_err:
-    log.error("Worker: database init failed: %s", _db_err)
+# ── Result TTL ────────────────────────────────────────────────
+RESULT_TTL = 1800   # 30 minutes in seconds
 
 
 def _store_result(redis_conn, job_id: str, result: dict) -> None:
+    """Store job result in Redis with TTL."""
     import json
     redis_conn.setex(f"result:{job_id}", RESULT_TTL, json.dumps(result))
     log.info("Stored result for job %s: label=%s", job_id, result.get("label"))
 
 
 def process_upload_job(
-    job_id:   str,
-    file_key: str,
-    filename: str,
-    email:    str,
+    job_id:    str,
+    file_path: str,
+    filename:  str,
+    email:     str,
 ) -> dict:
     """
-    Background job: retrieve file from Redis, analyze, store result.
+    Background job: analyze an uploaded video file.
+    Called by RQ worker. Stores result in Redis when done.
     """
     import redis
+    import json
     from detection import run_detection
     from video     import clip_first_6_seconds, stamp_video
     from database  import (insert_certificate, increment_user_uses,
@@ -59,43 +61,25 @@ def process_upload_job(
         "AI":           ("AI DETECTED",         "red",    False),
     }
 
-    tmp_path = None
-    clip_path = None
-
     try:
         log.info("Worker: processing upload job %s for %s", job_id, email)
 
-        # ── Retrieve file bytes from Redis ────────────────────
-        file_bytes = redis_conn.get(file_key)
-        if not file_bytes:
-            raise RuntimeError(f"File not found in Redis: {file_key}")
-
-        # Write to local tmp file
-        suffix = os.path.splitext(filename)[1] or ".mp4"
-        tmp_path = tempfile.mktemp(suffix=suffix)
-        with open(tmp_path, "wb") as f:
-            f.write(file_bytes)
-        log.info("Worker: wrote %d bytes to %s", len(file_bytes), tmp_path)
-
-        # Clean up Redis file key immediately
-        redis_conn.delete(file_key)
-
-        # ── Hash the file ─────────────────────────────────────
+        # Hash the file
         h = hashlib.sha256()
-        with open(tmp_path, "rb") as f:
+        with open(file_path, "rb") as f:
             for chunk in iter(lambda: f.read(65536), b""):
                 h.update(chunk)
         sha256 = h.hexdigest()
 
-        # ── Run detection ─────────────────────────────────────
-        authenticity, label, detail = run_detection(tmp_path)
+        # Run detection
+        authenticity, label, detail = run_detection(file_path)
         ui_text, color, certify = LABEL_UI.get(label, ("UNKNOWN", "grey", False))
 
-        # ── Count this use ────────────────────────────────────
+        # Count the use
         increment_user_uses(email)
 
-        # ── Persist certificate record ────────────────────────
-        cid = job_id
+        # Persist certificate record
+        cid = job_id   # reuse job_id as cert_id for simplicity
         insert_certificate(
             cert_id       = cid,
             email         = email,
@@ -122,15 +106,13 @@ def process_upload_job(
             certified_path = f"{CERT_DIR}/{cid}.mp4"
             download_url   = f"{BASE_URL}/download/{cid}"
             try:
-                clip_path = clip_first_6_seconds(tmp_path)
+                clip_path = clip_first_6_seconds(file_path)
                 stamp_video(clip_path, certified_path, cid)
-                # Store certified video bytes in Redis so web service can serve download
-                with open(certified_path, "rb") as f:
-                    video_bytes = f.read()
-                redis_conn.setex(f"certified:{cid}", 86400, video_bytes)  # 24hr TTL
-                log.info("Worker: stored certified video in Redis: certified:%s (%d bytes)", cid, len(video_bytes))
+                if os.path.exists(clip_path):
+                    os.remove(clip_path)
                 result["certificate_id"] = cid
                 result["download_url"]   = download_url
+                # Send certification email
                 if email and email != "anonymous@verifyd.com":
                     send_certification_email(
                         email, cid, authenticity, filename, download_url
@@ -143,15 +125,18 @@ def process_upload_job(
 
     except Exception as e:
         log.exception("Worker: job %s failed: %s", job_id, e)
-        error_result = {"job_status": "error", "error": str(e)[:200]}
+        error_result = {
+            "job_status": "error",
+            "error":      str(e)[:200],
+        }
         _store_result(redis_conn, job_id, error_result)
         return error_result
 
     finally:
-        for path in [tmp_path, clip_path]:
-            if path and os.path.exists(path):
-                os.remove(path)
-                log.info("Worker: cleaned up %s", path)
+        # Always clean up the uploaded file
+        if os.path.exists(file_path):
+            os.remove(file_path)
+            log.info("Worker: cleaned up %s", file_path)
 
 
 def process_link_job(
@@ -162,6 +147,7 @@ def process_link_job(
 ) -> dict:
     """
     Background job: download and analyze a video from a URL.
+    Called by RQ worker. Stores result in Redis when done.
     """
     import redis
     from detection import run_detection
@@ -190,6 +176,7 @@ def process_link_job(
         authenticity, label, detail = run_detection(tmp_path)
         ui_text, color, certify = LABEL_UI.get(label, ("UNKNOWN", "grey", False))
 
+        # Count use(s)
         if email and email != "anonymous@verifyd.com":
             increment_user_uses(email)
             if double_count:
@@ -222,7 +209,10 @@ def process_link_job(
 
     except Exception as e:
         log.exception("Worker: link job %s failed: %s", job_id, e)
-        error_result = {"job_status": "error", "error": str(e)[:200]}
+        error_result = {
+            "job_status": "error",
+            "error":      str(e)[:200],
+        }
         _store_result(redis_conn, job_id, error_result)
         return error_result
 

@@ -1,121 +1,106 @@
 # ============================================================
-#  VeriFYD — queue_helper.py  v2
+#  VeriFYD — queue_helper.py
 #
-#  Passes file content through Redis instead of file path
-#  since web service and background worker don't share disk.
+#  Redis/RQ queue interface for background job processing.
+#  Web service enqueues jobs; worker processes them.
+#  File bytes transferred through Redis (no shared disk needed).
 # ============================================================
 
 import os
 import json
-import base64
 import logging
 
 log = logging.getLogger("verifyd.queue")
 
-REDIS_URL  = os.environ.get("REDIS_URL", "redis://localhost:6379")
-RESULT_TTL = 1800   # 30 minutes
+RESULT_TTL  = 1800   # 30 min — how long results stay in Redis
+FILE_TTL    = 3600   # 1 hr  — how long raw file bytes stay in Redis
+QUEUE_NAME  = "verifyd"
 
 
 def get_redis():
     import redis
-    return redis.from_url(REDIS_URL)
+    url = os.environ.get("REDIS_URL", "redis://localhost:6379")
+    return redis.from_url(url, decode_responses=False)
 
 
-def get_queue():
+def enqueue_upload(job_id: str, file_path: str, filename: str, email: str) -> None:
+    """
+    Store file bytes in Redis, then enqueue a processing job.
+    The worker retrieves bytes from Redis (no shared disk needed).
+    """
     from rq import Queue
-    return Queue("verifyd", connection=get_redis(), default_timeout=600)
 
-
-def enqueue_upload(job_id: str, file_path: str,
-                   filename: str, email: str) -> str:
-    """
-    Read file content, store in Redis, enqueue job with redis key.
-    Worker retrieves file content from Redis instead of disk.
-    """
-    from worker import process_upload_job
-
-    # Store file content in Redis with TTL
     r = get_redis()
+
+    # Store file bytes in Redis so worker can retrieve them
+    file_key = f"file:{job_id}"
     with open(file_path, "rb") as f:
         file_bytes = f.read()
+    r.setex(file_key, FILE_TTL, file_bytes)
+    log.info("Stored file in Redis: key=%s size=%d", file_key, len(file_bytes))
 
-    # Store raw bytes in Redis under a separate key
-    file_key = f"upload_file:{job_id}"
-    r.setex(file_key, RESULT_TTL, file_bytes)
-    log.info("Stored file in Redis: %s (%d bytes)", file_key, len(file_bytes))
-
-    # Clean up local file immediately after storing in Redis
-    if os.path.exists(file_path):
-        os.remove(file_path)
-        log.info("Cleaned up local file: %s", file_path)
-
-    q = get_queue()
+    # Enqueue job
+    q = Queue(QUEUE_NAME, connection=r)
     q.enqueue(
-        process_upload_job,
-        kwargs={
-            "job_id":   job_id,
-            "file_key": file_key,
-            "filename": filename,
-            "email":    email,
-        },
-        job_id      = job_id,
-        result_ttl  = RESULT_TTL,
-        job_timeout = 600,
+        "worker.process_upload_job",
+        job_id=job_id,
+        file_key=file_key,
+        filename=filename,
+        email=email,
+        job_timeout=600,
+        result_ttl=RESULT_TTL,
     )
-    log.info("Enqueued upload job %s for %s", job_id, email)
-    return job_id
+    log.info("Enqueued upload job: job_id=%s email=%s file=%s", job_id, email, filename)
 
 
-def enqueue_link(job_id: str, video_url: str,
-                 email: str, double_count: bool = False) -> str:
-    from worker import process_link_job
-    q = get_queue()
+def enqueue_link(job_id: str, video_url: str, email: str, double_count: bool = False) -> None:
+    """Enqueue a link analysis job."""
+    from rq import Queue
+
+    r = get_redis()
+    q = Queue(QUEUE_NAME, connection=r)
     q.enqueue(
-        process_link_job,
-        kwargs={
-            "job_id":       job_id,
-            "video_url":    video_url,
-            "email":        email,
-            "double_count": double_count,
-        },
-        job_id      = job_id,
-        result_ttl  = RESULT_TTL,
-        job_timeout = 600,
+        "worker.process_link_job",
+        job_id=job_id,
+        video_url=video_url,
+        email=email,
+        double_count=double_count,
+        job_timeout=600,
+        result_ttl=RESULT_TTL,
     )
-    log.info("Enqueued link job %s for %s", job_id, email)
-    return job_id
+    log.info("Enqueued link job: job_id=%s email=%s url=%s", job_id, email, video_url)
 
 
 def get_job_result(job_id: str) -> dict:
     """
-    Check job status. Returns dict with job_status field.
+    Check Redis for a completed job result.
+    Returns None if not found, or dict with job_status field.
     """
     try:
         r = get_redis()
 
         # Check for completed result stored by worker
-        raw = r.get(f"result:{job_id}")
+        result_key = f"result:{job_id}"
+        raw = r.get(result_key)
         if raw:
-            return json.loads(raw)
+            result = json.loads(raw)
+            result["job_status"] = "complete"
+            return result
 
-        # Check live RQ job status
+        # Check RQ job status
         from rq.job import Job
         try:
-            job    = Job.fetch(job_id, connection=r)
-            status = job.get_status()
-            if str(status) in ("queued",):
-                try:
-                    q   = get_queue()
-                    ids = q.job_ids
-                    pos = ids.index(job_id) + 1 if job_id in ids else 1
-                except Exception:
-                    pos = 1
-                return {"job_status": "queued", "position": pos}
-            elif str(status) in ("started", "deferred", "scheduled"):
+            job = Job.fetch(job_id, connection=r)
+            if job.is_failed:
+                return {"job_status": "error", "error": str(job.exc_info)[:200]}
+            elif job.is_started:
                 return {"job_status": "processing"}
-            elif str(status) == "failed":
-                return {"job_status": "error",
-                        "error": "Analysis failed — please try again."}
+            elif job.is_queued:
+                # Get position in queue
+                from rq import Queue
+                q = Queue(QUEUE_NAME, connection=r)
+                position = q.job_ids.index(job_id) + 1 if job_id in q.job_ids else 1
+                return {"job_status": "queued", "position": position}
         except Exception:
             pass
 
@@ -123,4 +108,4 @@ def get_job_result(job_id: str) -> dict:
 
     except Exception as e:
         log.error("get_job_result error: %s", e)
-        return {"job_status": "error", "error": str(e)[:100]}
+        return {"job_status": "not_found"}
