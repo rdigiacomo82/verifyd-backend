@@ -609,6 +609,18 @@ def detect_ai(video_path: str) -> int:
     if avg_color_corr > 0.92:
         ai_score += 4
 
+    # ── 9b. Sensor noise bonus ───────────────────────────────
+    # Real cameras always have natural sensor/grain noise (8-20).
+    # AI renders are virtually noise-free (1-5).
+    # Only apply when not a screengrab/broadcast (low noise is normal there).
+    _is_broadcast_noise = (avg_saturation > 140)   # broadcast/studio has clean low noise
+    if avg_noise > 8.0 and not _is_broadcast_noise:
+        ai_score -= 5
+        log.info("NOISE %.1f → real camera grain → -5", avg_noise)
+    elif avg_noise > 6.0 and not _is_broadcast_noise:
+        ai_score -= 2
+        log.info("NOISE %.1f → moderate grain → -2", avg_noise)
+
     # ── 10. Saturation mean ──────────────────────────────────
     if avg_saturation > 160:
         ai_score += 8
@@ -796,7 +808,7 @@ def detect_ai(video_path: str) -> int:
             # Moderate lockstep (Bus)
             ai_score += 8
             log.info("MOTION_SYNC %.3f → lockstep crowd → +8", motion_sync)
-        elif motion_sync < 0.11:
+        elif motion_sync < 0.105:
             ai_score += 3
             log.info("MOTION_SYNC %.3f → slightly synchronized → +3", motion_sync)
         elif motion_sync > 0.13:
@@ -817,7 +829,7 @@ def detect_ai(video_path: str) -> int:
     elif hue_entropy < 2.5:
         ai_score += 3
         log.info("HUE_ENT %.3f → somewhat limited palette → +3", hue_entropy)
-    elif hue_entropy > 2.8:
+    elif hue_entropy > 2.6:
         # Rich natural palette — real video signal
         ai_score -= 5
         log.info("HUE_ENT %.3f → natural palette → -5", hue_entropy)
@@ -832,7 +844,7 @@ def detect_ai(video_path: str) -> int:
     _is_portrait = (cap_h > cap_w * 1.5)
     _quad_thresh_strong = 0.30 if _is_portrait else 0.40
     _quad_thresh_med    = 0.40 if _is_portrait else 0.50
-    _quad_thresh_slight = 0.45 if _is_portrait else 0.55
+    _quad_thresh_slight = 0.55 if _is_portrait else 0.55
     if quad_cov < _quad_thresh_strong:
         ai_score += 14
         log.info("QUAD_COV %.3f → very uniform render focus → +14", quad_cov)
@@ -851,3 +863,4 @@ def detect_ai(video_path: str) -> int:
     log.info("Primary AI score v6: %.0f  (quad_cov=%.3f fg_bg=%.0f sync=%.3f hue=%.2f sat_std=%.1f)",
              ai_score, quad_cov, fg_bg_ratio, motion_sync, hue_entropy, sat_frame_std)
     return int(round(ai_score))
+
