@@ -207,26 +207,87 @@ def analyze_frames_with_gpt(frames_b64: list, physics_summary: str = "") -> dict
                     "- Do water splashes look too perfect or computer-generated?\n"
                     "If YES to any of these: score 80+.\n\n"
 
-                    "CINEMATIC / ANIMAL / NATURE CONTENT (score 70+):\n"
-                    "If you see animals, wildlife, nature scenes, or cinematic footage:\n"
-                    "- TEXTURE: Does fur, skin, or feathers look waxy, plastic, or too smooth?\n"
-                    "  Real animal fur has individual hair strands, dirt, matting, natural variation.\n"
-                    "  AI fur looks uniformly perfect, like a plush toy or CGI render.\n"
-                    "- MOVEMENT: Is animal movement unnaturally fluid or graceful?\n"
-                    "  Real animals move with weight, effort, and imperfection.\n"
-                    "  AI animals move like animations — too smooth, too perfectly coordinated.\n"
-                    "- EYES: Do animal eyes look glassy, perfectly reflective, or unnaturally bright?\n"
-                    "  Real animal eyes are imperfect with natural occlusion and variation.\n"
-                    "- LIGHTING: Does lighting look like a professional CGI render — perfectly\n"
-                    "  diffused, no harsh shadows, no natural imperfections like lens flare or\n"
-                    "  dappled light? Real outdoor footage has uncontrolled, imperfect lighting.\n"
-                    "- BACKGROUND: Does the background look painted, rendered, or like a stock\n"
-                    "  photo backdrop rather than a real place with depth and imperfection?\n"
-                    "- COLORS: Are colors over-saturated or color-graded in a way that looks\n"
-                    "  like a movie poster rather than natural footage?\n"
-                    "- SCENE COHERENCE: Do the subject and background match in terms of lighting\n"
-                    "  angle, time of day, and shadow direction? AI often composites these poorly.\n"
-                    "If you see plastic fur, CGI lighting, or rendered backgrounds: score 70+.\n\n"
+                    "CINEMATIC / ANIMAL / WILDLIFE CONTENT (score 70+):\n"
+                    "If you see animals, wildlife, nature scenes, or cinematic footage,\n"
+                    "apply ALL of these checks — AI animal videos are a common deepfake category:\n\n"
+                    "- FUR / FEATHER TEXTURE (most reliable tell):\n"
+                    "  Look closely at the animal's coat, fur, or feathers.\n"
+                    "  REAL: Individual hair strands visible, directional growth patterns,\n"
+                    "  natural clumping, matting, moisture variation, dirt/debris in fur.\n"
+                    "  AI: Fur appears as a smooth uniform mass — no individual strands,\n"
+                    "  looks like velvet, plush toy, or CGI render. Too perfect, too clean.\n"
+                    "  For dark-furred animals (gorilla, bear, black cat): AI renders dark fur\n"
+                    "  as a flat dark mass with no micro-detail. Real dark fur still shows\n"
+                    "  individual hair texture and light catching on strand tips.\n"
+                    "  → If fur looks like a render or plush toy: score 75+\n\n"
+                    "- SKIN / FACE TEXTURE:\n"
+                    "  REAL: Animal facial skin (around eyes, muzzle, pads) is dry, wrinkled,\n"
+                    "  leathery, pored — visibly aged and textured.\n"
+                    "  AI: Skin appears as a smooth gradient — no pores, no wrinkles, no\n"
+                    "  surface irregularity. Looks like polished rubber or painted silicone.\n"
+                    "  → If skin looks unnaturally smooth for the species: score 70+\n\n"
+                    "- EYES (very reliable — AI eyes are almost always wrong):\n"
+                    "  REAL animal eyes: small, irregular catchlights, wet-surface imperfect\n"
+                    "  reflections, mostly iris/pupil visible, natural occlusion from lids.\n"
+                    "  AI animal eyes: large symmetric perfectly round catchlights, too much\n"
+                    "  white sclera visible (human-like), eyes too bright and 'glassy',\n"
+                    "  reflections that look like perfectly placed studio lights.\n"
+                    "  → If eyes look too perfect, too bright, or too human: score 75+\n\n"
+                    "- BACKGROUND (AI compositing tell):\n"
+                    "  REAL outdoor footage: background has natural depth variation, real\n"
+                    "  leaves have irregular edges, lighting varies across the scene.\n"
+                    "  AI background: unnaturally uniform synthetic bokeh (flat blur),\n"
+                    "  vegetation looks repetitive/symmetric (rendered leaves), background\n"
+                    "  looks like a stock photo or nature documentary backdrop.\n"
+                    "  Subject and background often have mismatched lighting direction.\n"
+                    "  → If background looks rendered or like a stock photo: score 70+\n\n"
+                    "- MOVEMENT QUALITY:\n"
+                    "  REAL animals move with weight, muscle tension, and physical impact.\n"
+                    "  Knuckle-walking gorilla: impact shudder, muscle definition visible.\n"
+                    "  Running animals: fur ripples, body bounces with inertia.\n"
+                    "  AI animals: movement too smooth and fluid, like CGI animation.\n"
+                    "  No physical weight or inertia — moves like it is floating.\n"
+                    "  → If movement looks animated rather than physical: score 70+\n\n"
+                    "- GRAIN / SENSOR NOISE:\n"
+                    "  REAL camera footage: luminance noise visible in dark areas (fur, shadows).\n"
+                    "  AI renders: completely noise-free, or noise is too uniform/regular.\n"
+                    "  Dark fur in real footage should have visible grain. AI dark fur is clean.\n"
+                    "  → If dark regions are completely noise-free: score 65+\n\n"
+                    "- LIGHTING CONSISTENCY:\n"
+                    "  REAL outdoor: dappled shadows, uneven highlights from tree cover,\n"
+                    "  natural rim lighting, subsurface scattering in ears/thin skin areas.\n"
+                    "  AI: lighting follows a perfect gradient, looks like a render farm output,\n"
+                    "  too diffused and perfect, no harsh or unexpected shadows.\n"
+                    "  → If lighting looks like a professional CGI render: score 70+\n\n"
+                    "COMBINED ANIMAL SCORING: If you observe 3+ of the above tells, score 80+.\n"
+                    "If you observe fur texture issues AND eye issues together, score 80+.\n\n"
+
+
+                    "CROWD / EMERGENCY / REACTION CONTENT (score 75+):\n"
+                    "If you see crowds, emergencies, accidents, police, or public reactions:\n"
+                    "- REACTION TIMING: Do bystanders react with appropriate urgency and surprise?\n"
+                    "  Real emergencies trigger immediate, instinctive human reactions — flinching,\n"
+                    "  running, screaming, chaos. AI crowds often react too slowly, too calmly,\n"
+                    "  or not at all relative to the severity of what is happening.\n"
+                    "- CROWD BEHAVIOR: Are crowd members moving independently and chaotically?\n"
+                    "  Real crowds have organic, unpredictable individual movement — people bumping,\n"
+                    "  turning, pointing, using phones. AI crowds often move in unnaturally uniform\n"
+                    "  or synchronized patterns, or people seem frozen/static in the background.\n"
+                    "- POLICE/OFFICIAL RESPONSE: Do officers or officials respond with appropriate\n"
+                    "  urgency? Real police respond fast to active threats. AI scenes often show\n"
+                    "  officers standing or moving slowly even during active emergencies.\n"
+                    "- AUDIO-VISUAL SYNC (if inferrable from visual cues): Do mouths match speech?\n"
+                    "  Do crowd sounds match crowd movement? Do impact sounds match what you see?\n"
+                    "  AI videos frequently have audio that is mismatched, too clean, or generic\n"
+                    "  stock-sound-style reactions that don't match the specific visual event.\n"
+                    "- EMOTIONAL AUTHENTICITY: Do facial expressions match the situation?\n"
+                    "  Real emergency footage captures raw, uncontrolled human emotion.\n"
+                    "  AI faces often show neutral or slightly wrong expressions for the context.\n"
+                    "- SCENE LOGIC: Does everyone's behavior make sense for what is happening?\n"
+                    "  In real emergencies, people instinctively seek safety, help others, or record.\n"
+                    "  AI scenes often have people acting as if the event isn't happening.\n"
+                    "If reactions are too calm/slow, crowd movement is synchronized, or official\n"
+                    "response is disproportionately delayed: score 75+.\n\n"
 
                     "AI GENERATION ARTIFACTS (score 70+):\n"
                     "- Explicit AI label: 'AI-generated', 'Sora', 'Midjourney' etc. (score 95+)\n"
@@ -382,6 +443,10 @@ def _build_physics_summary(ctx: dict) -> str:
     sat_std      = ctx.get("sat_frame_std")
     bg_drift     = ctx.get("bg_drift")
     flicker_std  = ctx.get("flicker_std")
+    # NEW v6 context fields
+    quad_cov     = ctx.get("quad_cov")      # low = uniform AI render focus
+    fg_bg_ratio  = ctx.get("fg_bg_ratio")   # high = unnatural depth
+    motion_sync  = ctx.get("motion_sync")   # low = lockstep AI crowd
 
     lines.append("═══════════════════════════════════════")
     lines.append("SIGNAL DETECTOR PRE-ANALYSIS (v4 — measured before you see these frames):")
@@ -464,14 +529,47 @@ def _build_physics_summary(ctx: dict) -> str:
     if sharpness is not None and sharpness < 150:
         lines.append(f"⚠ Low sharpness ({sharpness:.0f}) — AI videos tend to be softer than real camera footage.")
 
+    # ── v6: Render uniformity signals ──
+    if quad_cov is not None:
+        if quad_cov < 0.40:
+            lines.append(f"⚠ UNIFORM RENDER FOCUS (quad_cov={quad_cov:.3f}) — "
+                         f"sharpness is identical across all frame quadrants. "
+                         f"Real cameras have natural depth-of-field variation. "
+                         f"This is a strong AI render signature. Look for unnaturally "
+                         f"sharp subjects against suspiciously blurred/rendered backgrounds.")
+        elif quad_cov < 0.50:
+            lines.append(f"⚠ Low depth-of-field variation (quad_cov={quad_cov:.3f}) — "
+                         f"focus is more uniform than expected for real camera footage.")
+
+    if fg_bg_ratio is not None and fg_bg_ratio > 900:
+        lines.append(f"⚠ EXTREME SUBJECT/BACKGROUND CONTRAST (fg_bg={fg_bg_ratio:.0f}) — "
+                     f"the subject is rendered at extreme sharpness vs the background. "
+                     f"This unnatural depth ratio is a strong AI compositing signature.")
+
+    if motion_sync is not None and motion_sync < 0.09:
+        lines.append(f"⚠ LOCKSTEP CROWD MOTION (sync={motion_sync:.3f}) — "
+                     f"left and right halves of frame move in near-identical patterns. "
+                     f"Real crowds have independent chaotic movement. AI crowds are scripted.")
+
     lines.append("\n═══════════════════════════════════════")
     lines.append("Now examine the frames with this context in mind.")
     if bg_drift is not None and bg_drift < 3.0:
         lines.append("→ Pay close attention to whether the background looks rendered or artificial.")
     if sat_std is not None and sat_std < 5.0:
         lines.append("→ Check if the subject's fur, skin, or texture looks unnaturally smooth or plastic.")
+        lines.append("→ For animals: look closely at fur for individual hair strands (real) vs smooth mass (AI).")
+        lines.append("→ Check animal eyes — AI eyes have large symmetric catchlights and look too bright.")
     if flicker_std is not None and flicker_std > 4.0:
         lines.append("→ Look for inconsistencies in fine details between frames.")
+    if quad_cov is not None and quad_cov < 0.50:
+        lines.append("→ RENDER FLAG: Focus is suspiciously uniform. Check if this looks like a CGI render.")
+        lines.append("  Look for the 'uncanny valley' quality — too perfect to be real camera footage.")
+    if flow_entropy is not None and flow_entropy < 1.5:
+        lines.append("→ BEHAVIORAL FLAG: Motion analysis detected unnaturally uniform crowd/scene movement.")
+        lines.append("  Look carefully at whether bystanders react with appropriate urgency and chaos.")
+        lines.append("  Real emergencies produce unpredictable individual movement — AI scenes do not.")
+    if peak_ratio is not None and peak_ratio < 3.0:
+        lines.append("→ BEHAVIORAL FLAG: No dramatic motion spikes detected — real emergency footage")
+        lines.append("  always has sudden reaction bursts. This scene's motion is too smooth/gradual.")
     lines.append("")
 
-    return "\n".join(lines)
