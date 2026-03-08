@@ -1,30 +1,25 @@
 # ============================================================
-#  VeriFYD — detector.py  (v5 — crowd/reaction/depth signals)
+#  VeriFYD — detector.py  (v6 — gorilla/uniform-render signals)
 #
-#  v5 adds three new signals targeting AI crowd-scene and
-#  cinematic content (Bus, Moose) that v4 still missed:
+#  v6 adds two new signals targeting AI animal videos where
+#  the render is uniformly sharp (no real camera depth-of-field):
 #
-#  NEW signals calibrated on Bus/Moose AI test videos:
+#  NEW signals calibrated on Gorilla AI test video:
 #  ┌──────────────────────────┬──────────────┬──────────────┐
 #  │ Signal                   │ AI range     │ Real range   │
 #  ├──────────────────────────┼──────────────┼──────────────┤
-#  │ Motion sync (crowd)      │ 0.05–0.15    │ 0.10–0.15    │
-#  │ FG/BG sharpness ratio    │ >1000        │ 300–800      │
-#  │ Hue entropy              │ <2.0         │ 2.5–3.5      │
+#  │ Quad sharpness CoV       │ <0.50        │ 0.58–0.92    │
+#  │ sat_std (low-sat guard)  │ <5, mean<100 │ varies       │
 #  └──────────────────────────┴──────────────┴──────────────┘
 #
-#  Key findings from Bus/Moose analysis:
-#  - Bus:   motion_sync=0.088, fg_bg_ratio=2145, hue_ent=1.62
-#  - Moose: motion_sync=0.046, fg_bg_ratio=1525, hue_ent=2.98
-#  - Real:  motion_sync=0.10-0.14, fg_bg=335-800, hue_ent=2.7-3.2
+#  Root cause of Gorilla miss:
+#  - sat_std=3.86 (frozen AI lighting) was guarded by is_action
+#  - quad_sharpness_cov=0.365 (uniform render focus, no lens)
+#  - Fix: sat_std frozen guard now checks sat_mean<100 as separate
+#    path from the broadcast guard (sat_mean>140)
 #
-#  Root cause of missed detections:
-#  - Crowd lockstep: all "people" react with identical timing (AI)
-#  - Unnatural depth: subject 2000x sharper than background (AI render)
-#  - Limited palette: AI color grading uses fewer hues than real cameras
-#
+#  v5 signals preserved (fg_bg_ratio, motion_sync, hue_entropy).
 #  v4 signals preserved (sat_std, bg_drift, flicker_std).
-#  Prior calibration data preserved (waterslide, president).
 # ============================================================
 
 import cv2
@@ -310,6 +305,33 @@ def _hue_entropy(frames_bgr: List[np.ndarray]) -> float:
     return float(np.mean(entropies))
 
 
+# ── NEW v6: Quadrant sharpness uniformity ───────────────────
+def _quad_sharpness_cov(frames_gray: List[np.ndarray]) -> float:
+    """
+    Measure how uniformly sharp all quadrants of the frame are.
+    Real cameras have natural depth-of-field variation — some parts
+    of the frame are sharper than others (foreground vs background).
+    AI renders every region with equal computational sharpness,
+    resulting in unnaturally low CoV across quadrants.
+
+    Calibrated:
+      AI Gorilla=0.365, AI Bus=0.433, AI Moose=0.498
+      Real Slide1=0.916, Real Slide2=0.581, Real President=0.725
+    Threshold: <0.50 = strong AI signal
+    """
+    if not frames_gray:
+        return 1.0
+    covs = []
+    for g in frames_gray:
+        fh, fw = g.shape
+        qs = [
+            cv2.Laplacian(g[fh//2*a:fh//2*(a+1), fw//2*b:fw//2*(b+1)], cv2.CV_64F).var()
+            for a in range(2) for b in range(2)
+        ]
+        covs.append(float(np.std(qs) / (np.mean(qs) + 1.0)))
+    return float(np.mean(covs))
+
+
 # ── Main detection function ──────────────────────────────────
 
 def detect_ai(video_path: str) -> int:
@@ -462,10 +484,11 @@ def detect_ai(video_path: str) -> int:
     else:
         peak_to_mean_ratio = 1.0
 
-    # ── NEW v5 signals ──────────────────────────────────────
+    # ── NEW v5/v6 signals ────────────────────────────────────
     fg_bg_ratio  = _fg_bg_sharpness_ratio(v4_gray_frames)
     motion_sync  = _motion_sync_score(v4_gray_frames)
     hue_entropy  = _hue_entropy(v5_bgr_frames)
+    quad_cov     = _quad_sharpness_cov(v4_gray_frames)  # v6
 
     log.info(
         "Signals: noise=%.1f freq=%.3f edge=%.1f dct=%.3f "
@@ -473,13 +496,13 @@ def detect_ai(video_path: str) -> int:
         "motion=%.1f mvar=%.2f hist=%.4f flow=%.2f "
         "flicker_cov=%.3f rvov=%.2f sharp=%.1f texvar=%.1f "
         "[v4] sat_std=%.2f bg_drift=%.2f flicker_std=%.3f "
-        "[v5] fg_bg=%.0f motion_sync=%.3f hue_ent=%.3f",
+        "[v5/v6] fg_bg=%.0f motion_sync=%.3f hue_ent=%.3f quad_cov=%.3f",
         avg_noise, avg_freq, avg_edge, avg_dct_grid,
         avg_grad_entropy, avg_tex_entropy, avg_color_corr, avg_saturation,
         avg_motion, motion_var, avg_temporal_jitter, avg_flow_var,
         pixel_flicker_cov, residual_var_of_var, avg_sharpness, avg_texture_var,
         sat_frame_std, bg_drift, flicker_std,
-        fg_bg_ratio, motion_sync, hue_entropy,
+        fg_bg_ratio, motion_sync, hue_entropy, quad_cov,
     )
 
     # ── Content type auto-detection ─────────────────────────
@@ -626,32 +649,36 @@ def detect_ai(video_path: str) -> int:
     # NEW v4 SIGNALS — cinematic / animal / nature AI detection
     # ════════════════════════════════════════════════════════
 
-    # ── 16. Saturation frame std (NEW v4) ────────────────────
+    # ── 16. Saturation frame std (NEW v4, updated v6) ────────
     # AI lighting is unnaturally stable (<5) OR chaotically unstable (>35).
     # Real video has natural variation from real-world lighting (8–20).
-    # Calibrated: Dancing Monkey AI=1.32, Bus AI=32.7
-    # GUARD: avg_saturation > 140 with low std = real broadcast studio, not AI render.
-    # GUARD: action content with high sat_std = natural outdoor lighting variation (Real Slide2=32).
+    # THREE cases for low sat_std:
+    #   A) Broadcast studio: sat_std<5, sat_mean>140 → NOT AI, skip
+    #   B) AI render (low-sat): sat_std<5, sat_mean<100 → AI frozen lighting (Gorilla=3.86/50)
+    #   C) Mid-range (100-140): sat_std<5 → moderate AI signal
+    # GUARD: action content with high sat_std = natural outdoor lighting variation
     _stable_is_broadcast = (sat_frame_std < 5.0 and avg_saturation > 140)
-    _unstable_is_outdoor_action = (sat_frame_std > 22.0 and is_action_content)
+    _stable_is_ai_render = (sat_frame_std < 5.0 and avg_saturation < 100)
+    _unstable_is_outdoor = (sat_frame_std > 22.0 and is_action_content)
+
     if _stable_is_broadcast:
         log.info("SAT_STD %.2f sat=%.0f → broadcast studio → no penalty", sat_frame_std, avg_saturation)
-    elif _unstable_is_outdoor_action:
-        log.info("SAT_STD %.2f → outdoor action lighting variation → no penalty", sat_frame_std)
+    elif _stable_is_ai_render:
+        # Frozen lighting on low-sat content = AI animal/nature render (Gorilla, Monkey)
+        ai_score += 14
+        log.info("SAT_STD %.2f sat=%.0f → frozen AI render → +14", sat_frame_std, avg_saturation)
+    elif _unstable_is_outdoor:
+        log.info("SAT_STD %.2f → outdoor action variation → no penalty", sat_frame_std)
     elif sat_frame_std < 3.0:
-        # Frozen lighting on non-broadcast content — strong AI signal (Monkey)
         ai_score += 14
         log.info("SAT_STD %.2f → frozen AI lighting → +14", sat_frame_std)
     elif sat_frame_std < 6.0:
-        # Very stable, non-broadcast — moderate AI signal
         ai_score += 8
         log.info("SAT_STD %.2f → stable lighting → +8", sat_frame_std)
     elif sat_frame_std > 35.0 and not is_action_content:
-        # Wildly unstable non-action — AI color flickering (Bus-like on static content)
         ai_score += 10
         log.info("SAT_STD %.2f → unstable AI color → +10", sat_frame_std)
     elif 8.0 <= sat_frame_std <= 20.0:
-        # Natural range — real video evidence
         ai_score -= 6
         log.info("SAT_STD %.2f → natural range → -6", sat_frame_std)
 
@@ -793,7 +820,27 @@ def detect_ai(video_path: str) -> int:
         ai_score -= 5
         log.info("HUE_ENT %.3f → natural palette → -5", hue_entropy)
 
+    # ── 24. Quadrant sharpness uniformity (NEW v6) ───────────
+    # Real cameras have natural depth-of-field — sharpness varies
+    # significantly across the frame. AI renders every quadrant
+    # with equal computational precision (low CoV = too uniform).
+    # Calibrated: Gorilla=0.365, Bus=0.433, Moose=0.498
+    #             Real Slide1=0.916, Real Slide2=0.581, Real Pres=0.725
+    if quad_cov < 0.40:
+        ai_score += 14
+        log.info("QUAD_COV %.3f → very uniform render focus → +14", quad_cov)
+    elif quad_cov < 0.50:
+        ai_score += 8
+        log.info("QUAD_COV %.3f → uniform render focus → +8", quad_cov)
+    elif quad_cov < 0.55:
+        ai_score += 3
+        log.info("QUAD_COV %.3f → slightly uniform → +3", quad_cov)
+    elif quad_cov > 0.75:
+        # Strong depth-of-field variation = real camera signal
+        ai_score -= 5
+        log.info("QUAD_COV %.3f → natural lens depth-of-field → -5", quad_cov)
+
     ai_score = max(0.0, min(100.0, ai_score))
-    log.info("Primary AI score v5: %.0f  (fg_bg=%.0f sync=%.3f hue=%.2f sat_std=%.1f bg_drift=%.1f)",
-             ai_score, fg_bg_ratio, motion_sync, hue_entropy, sat_frame_std, bg_drift)
+    log.info("Primary AI score v6: %.0f  (quad_cov=%.3f fg_bg=%.0f sync=%.3f hue=%.2f sat_std=%.1f)",
+             ai_score, quad_cov, fg_bg_ratio, motion_sync, hue_entropy, sat_frame_std)
     return int(round(ai_score))
