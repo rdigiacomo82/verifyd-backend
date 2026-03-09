@@ -523,11 +523,42 @@ def detect_ai(video_path: str) -> int:
         and avg_edge < 20.0             # not busy/crowded scene
         and avg_sharpness > 100         # real camera sharpness (not AI-smooth 50-80)
     )
-    log.info("Content type: %s (motion=%.1f edge=%.1f portrait=%s selfie=%s)",
-             "action"  if is_action_content else
-             "selfie"  if _is_selfie_content else
-             "static"  if is_static_content  else "cinematic",
-             avg_motion, avg_edge, _is_portrait, _is_selfie_content)
+
+    # ── Talking-head / active portrait detection (v9) ────────
+    # A real person talking/moving on camera: portrait + active motion + rich edges.
+    # Key insight: single person moving as one unit → HIGH motion_sync (not AI signal).
+    # Skin-tone dominant → LOW sat_std (not AI signal — it's just skin/neutral clothing).
+    # Edge density stays consistent (single subject indoors) → LOW edge_std (not AI signal).
+    # These are REAL characteristics that the AI-crowd signals incorrectly penalize.
+    _talking_head_skin  = False
+    if _is_portrait and avg_motion > 8.0 and avg_edge > 25.0:
+        # Quick skin tone check using center of frame
+        try:
+            sample_frame = gray_buffer[len(gray_buffer)//2]
+            # Load original color frame for skin check
+            _th_cap = cv2.VideoCapture(video_path)
+            _th_cap.set(cv2.CAP_PROP_POS_FRAMES, len(gray_buffer)//2 * max(1, total_frames // len(gray_buffer)))
+            _th_ret, _th_frame = _th_cap.read()
+            _th_cap.release()
+            if _th_ret:
+                _th_hsv = cv2.cvtColor(_th_frame, cv2.COLOR_BGR2HSV)
+                _th_skin = cv2.inRange(_th_hsv, np.array([0,20,70]), np.array([20,255,255]))
+                _talking_head_skin = (_th_skin.sum() / (_th_skin.shape[0]*_th_skin.shape[1]*255)) > 0.06
+        except Exception:
+            pass
+    _is_talking_head = (
+        _is_portrait
+        and avg_motion > 8.0            # active — person is moving/talking
+        and avg_edge > 25.0             # rich edge content (hair, clothing, face detail)
+        and not _is_selfie_content      # not a static hold selfie
+    )
+
+    log.info("Content type: %s (motion=%.1f edge=%.1f portrait=%s selfie=%s talking_head=%s skin=%s)",
+             "action"       if is_action_content  else
+             "talking_head" if _is_talking_head   else
+             "selfie"       if _is_selfie_content else
+             "static"       if is_static_content  else "cinematic",
+             avg_motion, avg_edge, _is_portrait, _is_selfie_content, _is_talking_head, _talking_head_skin)
 
     ai_score = 30.0   # base: lean real until AI signals accumulate
 
@@ -641,6 +672,17 @@ def detect_ai(video_path: str) -> int:
         ai_score -= 12
         log.info("SELFIE portrait+static+sharp → real phone video bonus → -12")
 
+    # ── 9d. Talking-head bonus (v9) ──────────────────────────
+    # Active portrait of a real person: strongest real-video signal.
+    # Portrait + motion + edges = somebody real talking/moving on camera.
+    # Skin presence confirms human subject (not AI animal/cinematic render).
+    if _is_talking_head:
+        ai_score -= 12
+        log.info("TALKING_HEAD portrait+motion+edges → real person video → -12")
+    if _is_talking_head and _talking_head_skin:
+        ai_score -= 6
+        log.info("TALKING_HEAD skin confirmed → real person bonus → -6")
+
     # ── 10. Saturation mean ──────────────────────────────────
     if avg_saturation > 160:
         ai_score += 8
@@ -673,14 +715,15 @@ def detect_ai(video_path: str) -> int:
     # ── 15. Edge temporal std ────────────────────────────────
     if len(edge_counts_temporal) > 3:
         edge_temporal_std = float(np.std(edge_counts_temporal))
-        if _is_selfie_content:
-            # Talking heads naturally have very low edge std — don't penalize
-            log.info("Edge temporal std: %.0f → selfie guard → skip", edge_temporal_std)
+        if _is_selfie_content or _is_talking_head:
+            # Talking heads / single-subject portraits naturally have very low edge std
+            # (consistent scene, consistent clothing) — not an AI signal
+            log.info("Edge temporal std: %.0f → portrait content guard → skip", edge_temporal_std)
         elif edge_temporal_std < 6000:
             ai_score += 8
         elif edge_temporal_std < 10000:
             ai_score += 4
-        if not _is_selfie_content:
+        if not _is_selfie_content and not _is_talking_head:
             log.info("Edge temporal std: %.0f", edge_temporal_std)
 
     # ════════════════════════════════════════════════════════
@@ -705,6 +748,10 @@ def detect_ai(video_path: str) -> int:
     elif _is_selfie_content and sat_frame_std < 8.0:
         # Indoor selfie lighting is naturally stable — not an AI signal
         log.info("SAT_STD %.2f → selfie indoor lighting → no penalty", sat_frame_std)
+    elif _is_talking_head and sat_frame_std < 8.0:
+        # Talking head indoors: skin + neutral clothing = naturally low sat variance
+        # Emily video: sat_std=1.09, 83% low-sat pixels — REAL characteristic
+        log.info("SAT_STD %.2f → talking_head skin/neutral dominant → no penalty", sat_frame_std)
     elif is_action_content and sat_frame_std < 6.0:
         # Action video with stable sat — natural (overcast sky, indoor sport, etc.)
         log.info("SAT_STD %.2f → action content stable sat → no penalty", sat_frame_std)
@@ -833,12 +880,12 @@ def detect_ai(video_path: str) -> int:
     # Real crowds: independent motion, higher variance between halves.
     # Calibrated: Bus AI=0.088, Moose AI=0.046 vs Real=0.10–0.14
     # Guard: only meaningful when multiple people / crowd is present
-    # Selfie guard: single person = naturally low sync, not an AI signal
+    # Selfie/talking-head guard: single person moves as one unit → naturally high sync
     # Action guard: single-subject action videos naturally have correlated L/R motion
     _sync_thresh_strong = 0.05 if is_action_content else 0.06
     _sync_thresh_med    = 0.07 if is_action_content else 0.09
     _sync_thresh_slight = 0.09 if is_action_content else 0.105
-    if avg_motion > 3.0 and not is_static_content and not _is_selfie_content:
+    if avg_motion > 3.0 and not is_static_content and not _is_selfie_content and not _is_talking_head:
         if motion_sync < _sync_thresh_strong:
             ai_score += 14
             log.info("MOTION_SYNC %.3f → extreme lockstep crowd → +14", motion_sync)
@@ -898,4 +945,26 @@ def detect_ai(video_path: str) -> int:
     ai_score = max(0.0, min(100.0, ai_score))
     log.info("Primary AI score v6: %.0f  (quad_cov=%.3f fg_bg=%.0f sync=%.3f hue=%.2f sat_std=%.1f)",
              ai_score, quad_cov, fg_bg_ratio, motion_sync, hue_entropy, sat_frame_std)
-    return int(round(ai_score))
+
+    # Build content_type string for GPT context
+    _content_type = (
+        "action"       if is_action_content  else
+        "talking_head" if _is_talking_head   else
+        "selfie"       if _is_selfie_content else
+        "static"       if is_static_content  else
+        "cinematic"
+    )
+
+    signal_context = {
+        "signal_score":   int(round(ai_score)),
+        "content_type":   _content_type,
+        "avg_saturation": avg_saturation,
+        "avg_sharpness":  avg_sharpness,
+        "sat_frame_std":  sat_frame_std,
+        "bg_drift":       bg_drift,
+        "flicker_std":    flicker_std,
+        "quad_cov":       quad_cov,
+        "fg_bg_ratio":    fg_bg_ratio,
+        "motion_sync":    motion_sync,
+    }
+    return int(round(ai_score)), signal_context

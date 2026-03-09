@@ -457,10 +457,28 @@ def _build_physics_summary(ctx: dict) -> str:
     # Behavioral signals
     flow_entropy = ctx.get("flow_dir_entropy") # low = uniform AI crowd motion
     peak_ratio   = ctx.get("peak_to_mean_ratio") # low = no reaction spikes
+    # v9 content type
+    content_type = ctx.get("content_type", "cinematic")  # selfie / talking_head / action / cinematic
+    is_talking_head = content_type == "talking_head"
+    is_selfie = content_type == "selfie"
 
     lines.append("═══════════════════════════════════════")
     lines.append("SIGNAL DETECTOR PRE-ANALYSIS (v4 — measured before you see these frames):")
     lines.append("Use this data to guide and confirm your visual analysis.\n")
+
+    # ── Content type notice ──
+    if is_talking_head:
+        lines.append("📱 CONTENT TYPE: TALKING-HEAD / ACTIVE PORTRAIT")
+        lines.append("   Signal detector identified this as a real person talking/moving on camera.")
+        lines.append("   Key real-world characteristics for this content type:")
+        lines.append("   • Low saturation variance is NORMAL (skin tones + neutral clothing dominate)")
+        lines.append("   • Consistent edge density is NORMAL (single subject, indoor scene)")
+        lines.append("   • High motion sync is NORMAL (one person moves as one unit)")
+        lines.append("   Focus your analysis on: face texture realism, natural micro-expressions,")
+        lines.append("   hair strand detail, skin pores/imperfections, and lighting consistency.\n")
+    elif is_selfie:
+        lines.append("📱 CONTENT TYPE: SELFIE / STATIC PORTRAIT")
+        lines.append("   Signal detector identified this as a phone selfie or portrait video.\n")
 
     if signal_score is not None:
         label = ("HIGH — strong AI indicators" if signal_score > 60
@@ -504,10 +522,12 @@ def _build_physics_summary(ctx: dict) -> str:
                      f"real outdoor footage is typically less saturated.")
 
     if sat_std is not None:
-        if sat_std < 5.0:
+        if sat_std < 5.0 and not is_talking_head and not is_selfie:
             lines.append(f"⚠ Frozen lighting detected (sat_std={sat_std:.2f}) — "
                          f"natural lighting always varies. Possible AI render. "
                          f"Look for unnaturally perfect, studio-quality lighting on the subject.")
+        elif sat_std < 5.0 and (is_talking_head or is_selfie):
+            lines.append(f"✓ Low sat variance (sat_std={sat_std:.2f}) — expected for portrait with skin/neutral tones.")
         elif sat_std > 22.0:
             lines.append(f"⚠ Unstable color/lighting (sat_std={sat_std:.2f}) — "
                          f"flickering or inconsistent saturation typical of AI generation artifacts.")
@@ -556,7 +576,7 @@ def _build_physics_summary(ctx: dict) -> str:
                      f"the subject is rendered at extreme sharpness vs the background. "
                      f"This unnatural depth ratio is a strong AI compositing signature.")
 
-    if motion_sync is not None and motion_sync < 0.09:
+    if motion_sync is not None and motion_sync < 0.09 and not is_talking_head and not is_selfie:
         lines.append(f"⚠ LOCKSTEP CROWD MOTION (sync={motion_sync:.3f}) — "
                      f"left and right halves of frame move in near-identical patterns. "
                      f"Real crowds have independent chaotic movement. AI crowds are scripted.")
@@ -565,10 +585,15 @@ def _build_physics_summary(ctx: dict) -> str:
     lines.append("Now examine the frames with this context in mind.")
     if bg_drift is not None and bg_drift < 3.0:
         lines.append("→ Pay close attention to whether the background looks rendered or artificial.")
-    if sat_std is not None and sat_std < 5.0:
+    if sat_std is not None and sat_std < 5.0 and not is_talking_head and not is_selfie:
         lines.append("→ Check if the subject's fur, skin, or texture looks unnaturally smooth or plastic.")
         lines.append("→ For animals: look closely at fur for individual hair strands (real) vs smooth mass (AI).")
         lines.append("→ Check animal eyes — AI eyes have large symmetric catchlights and look too bright.")
+    if is_talking_head:
+        lines.append("→ PORTRAIT FOCUS: Examine skin texture for natural pores, imperfections, subtle redness.")
+        lines.append("→ Check hair for individual strands, fly-aways, and natural lighting on hair tips.")
+        lines.append("→ Look for natural micro-expressions and spontaneous blinks/eye movement.")
+        lines.append("→ Check teeth, ears, and hands if visible — these are hard for AI to render naturally.")
     if flicker_std is not None and flicker_std > 4.0:
         lines.append("→ Look for inconsistencies in fine details between frames.")
     if quad_cov is not None and quad_cov < 0.50:

@@ -28,13 +28,13 @@ THRESHOLD_UNDETERMINED = 40
 
 def run_detection(video_path: str) -> tuple:
     # ── Engine 1: Signal detector ─────────────────────────────
-    signal_ai_score = detect_ai(video_path)
-    log.info("Signal detector ai_score: %d", signal_ai_score)
+    signal_ai_score, signal_context = detect_ai(video_path)
+    log.info("Signal detector ai_score: %d  content_type: %s",
+             signal_ai_score, signal_context.get("content_type", "unknown"))
 
     # ── Engine 2: GPT-4o ──────────────────────────────────────
     frames_b64      = extract_key_frames(video_path)
-    physics_context = {"signal_score": signal_ai_score}
-    gpt_result      = gpt_vision_score_with_context(frames_b64, physics_context)
+    gpt_result      = gpt_vision_score_with_context(frames_b64, signal_context)
     gpt_ai_score    = gpt_result["ai_probability"]
     gpt_available   = gpt_result.get("available", False)
     log.info("GPT-4o ai_probability: %d  available: %s", gpt_ai_score, gpt_available)

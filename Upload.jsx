@@ -1,0 +1,1017 @@
+import React, { useState, useRef, useEffect } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
+import { 
+  Shield, 
+  AlertCircle, 
+  CheckCircle2, 
+  FileCheck, 
+  Calendar, 
+  Upload as UploadIcon, 
+  Link as LinkIcon, 
+  X, 
+  Loader2,
+  FileVideo,
+  Download,
+  RefreshCw,
+  CreditCard,
+  MailCheck,
+  Copy,
+  ExternalLink
+} from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { useToast } from '@/components/ui/use-toast';
+import { Link } from 'react-router-dom';
+import { useEmailVerificationFlow } from '@/hooks/useEmailVerificationFlow';
+import LimitReachedOverlay from '@/components/LimitReachedOverlay';
+import EmailVerificationFlow from '@/components/EmailVerificationFlow';
+
+const MAX_FILE_SIZE = 52428800; // 50MB
+
+const loadingMessages = [
+  "Analyzing your video...",
+  "Analyzing signal patterns...",
+  "Running AI vision check...",
+  "Calculating authenticity score..."
+];
+
+const Upload = () => {
+  const { toast } = useToast();
+  
+  // Shared State - Initialize from localStorage to persist across session
+  const [email, setEmail] = useState(() => localStorage.getItem('verifyd_session_email') || '');
+  const [isEmailValid, setIsEmailValid] = useState(() => {
+    const savedEmail = localStorage.getItem('verifyd_session_email') || '';
+    const re = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    return re.test(String(savedEmail).toLowerCase());
+  });
+  const [emailTouched, setEmailTouched] = useState(() => !!localStorage.getItem('verifyd_session_email'));
+  const [pendingAction, setPendingAction] = useState(null); // 'upload' | 'analyze' | null
+
+  // Update localStorage whenever email changes to ensure persistence
+  useEffect(() => {
+    if (email) {
+      localStorage.setItem('verifyd_session_email', email);
+    } else {
+      localStorage.removeItem('verifyd_session_email');
+    }
+  }, [email]);
+
+  // Email Verification Flow State
+  const { 
+    isVerifying,
+    showModal: showVerifyModal,
+    error: verifyError,
+    isVerified,
+    sendOTP,
+    verifyOTP,
+    isEmailVerified,
+    closeVerificationModal
+  } = useEmailVerificationFlow();
+
+  // Link Analysis State
+  const [videoLink, setVideoLink] = useState('');
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+
+  // File Upload State
+  const [file, setFile] = useState(null);
+  const [dragActive, setDragActive] = useState(false);
+  const [processingStatus, setProcessingStatus] = useState('idle'); // idle, processing, success, error
+  const [uploadResult, setUploadResult] = useState(null);
+  const [copied, setCopied] = useState(false);
+  
+  // Loading Overlay State
+  const [messageIndex, setMessageIndex] = useState(0);
+
+  // Polling State
+  const [jobState, setJobState] = useState(null);
+  const [queuePosition, setQueuePosition] = useState(null);
+  
+  const fileInputRef = useRef(null);
+
+  // Limits State
+  const [showLimitOverlay, setShowLimitOverlay] = useState(false);
+
+  // Check verification on email change
+  useEffect(() => {
+    if (isEmailValid && email) {
+      isEmailVerified(email);
+    }
+  }, [email, isEmailValid, isEmailVerified]);
+
+  // Rotating Messages Effect
+  useEffect(() => {
+    let interval;
+    if (processingStatus === 'processing') {
+      interval = setInterval(() => {
+        setMessageIndex((prev) => (prev + 1) % loadingMessages.length);
+      }, 8000);
+    } else {
+      setMessageIndex(0);
+    }
+    return () => clearInterval(interval);
+  }, [processingStatus]);
+
+  // Email Validation Logic
+  const validateEmail = (email) => {
+    const re = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    return re.test(String(email).toLowerCase());
+  };
+
+  const handleEmailChange = (e) => {
+    const val = e.target.value;
+    setEmail(val);
+    const isValid = validateEmail(val);
+    setIsEmailValid(isValid);
+    if (!emailTouched && val.length > 0) setEmailTouched(true);
+  };
+
+  const handleVerifyEmailClick = async () => {
+    if (!isEmailValid) return;
+    const result = await sendOTP(email);
+    if (result.success && !result.alreadyVerified) {
+      toast({
+        title: "Code Sent",
+        description: `Verification code sent to ${email}`,
+        className: "bg-amber-500 text-black border-none",
+      });
+    } else if (result.success && result.alreadyVerified) {
+      toast({
+        title: "Already Verified",
+        description: "Your email is already verified!",
+        className: "bg-green-600 text-white border-none",
+      });
+    } else {
+      toast({
+        variant: "destructive",
+        title: "Verification Error",
+        description: result.error || "Please try again later.",
+      });
+    }
+  };
+
+  const handleVerificationSuccess = () => {
+    toast({
+      title: "Email Verified",
+      description: "Your email has been successfully verified.",
+      className: "bg-green-600 text-white border-none",
+    });
+    
+    // Resume pending action
+    if (pendingAction === 'upload') {
+      performUpload();
+    } else if (pendingAction === 'analyze') {
+      performAnalyze();
+    }
+    setPendingAction(null);
+  };
+
+  const checkVerification = async (action) => {
+    if (!isEmailValid) {
+      toast({
+          variant: "destructive",
+          title: "Email Required",
+          description: "Please enter a valid email address first.",
+      });
+      return false;
+    }
+    
+    if (!isEmailVerified(email)) {
+      setPendingAction(action);
+      await handleVerifyEmailClick();
+      return false;
+    }
+    return true;
+  };
+
+  const handleCopyLink = async (url) => {
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+      toast({
+        title: "Copied!",
+        description: "Certificate URL copied to clipboard.",
+        className: "bg-green-600 text-white border-none",
+        duration: 2000,
+      });
+    } catch (err) {
+      toast({
+        variant: "destructive",
+        title: "Copy Failed",
+        description: "Could not copy the URL. Please try manually.",
+      });
+    }
+  };
+
+  // --- LINK ANALYSIS LOGIC ---
+  const performAnalyze = async () => {
+    setIsAnalyzing(true);
+    setProcessingStatus('processing');
+    setUploadResult(null);
+    setJobState('analyzing_link');
+    setQueuePosition(null);
+
+    try {
+      const response = await fetch(`https://verifyd-backend.onrender.com/analyze-link/?video_url=${encodeURIComponent(videoLink)}&email=${encodeURIComponent(email)}`);
+      
+      if (!response.ok) {
+        if (response.status === 402 || response.status === 403) {
+          try {
+            const errData = await response.json();
+            if (errData.error === "limit_reached") throw new Error("LIMIT_REACHED");
+            if (errData.error === "email_not_verified") throw new Error("EMAIL_NOT_VERIFIED");
+          } catch (e) {
+            if (e.message === "LIMIT_REACHED" || e.message === "EMAIL_NOT_VERIFIED") throw e;
+          }
+        }
+        throw new Error(`Analysis failed: ${response.statusText || response.status}`);
+      }
+
+      const data = await response.json();
+
+      if (data.status === 'queued' && data.job_id) {
+        setJobState('queued');
+        pollJobStatus(data.job_id);
+      } else if (data.job_id) {
+        pollJobStatus(data.job_id);
+      } else if (data.status === 'complete') {
+        setUploadResult(data.result || data);
+        setProcessingStatus('success');
+        setJobState(null);
+        toast({
+          title: "Analysis Complete",
+          description: "Link processed successfully.",
+          className: "bg-green-500 border-none text-white",
+        });
+      } else {
+        setUploadResult(data.result || data);
+        setProcessingStatus('success');
+        setJobState(null);
+        toast({
+          title: "Analysis Complete",
+          description: "Link processed successfully.",
+          className: "bg-green-500 border-none text-white",
+        });
+      }
+    } catch (error) {
+      if (error.message === "LIMIT_REACHED") {
+        setProcessingStatus('idle');
+        setJobState(null);
+        setShowLimitOverlay(true);
+        setIsAnalyzing(false);
+        return;
+      }
+      if (error.message === "EMAIL_NOT_VERIFIED") {
+        setProcessingStatus('idle');
+        setJobState(null);
+        setPendingAction('analyze');
+        handleVerifyEmailClick();
+        setIsAnalyzing(false);
+        return;
+      }
+      
+      toast({
+        variant: "destructive",
+        title: "Analysis Failed",
+        description: error.message || "There was an error analyzing the link.",
+      });
+      setProcessingStatus('error');
+      setUploadResult({ error: error.message });
+      setJobState(null);
+    } finally {
+      setIsAnalyzing(false);
+    }
+  };
+
+  const handleLinkAnalyze = async () => {
+    if (!videoLink) {
+      toast({
+        variant: "destructive",
+        title: "Link Required",
+        description: "Please paste a video link to analyze.",
+      });
+      return;
+    }
+    if (await checkVerification('analyze')) {
+      performAnalyze();
+    }
+  };
+
+  // --- FILE UPLOAD LOGIC ---
+  const processSelectedFile = async (selectedFile) => {
+    if (selectedFile.size > MAX_FILE_SIZE) {
+      toast({
+        variant: "destructive",
+        title: "File exceeds 50MB limit",
+        description: "Your video is larger than our 50MB limit. Try compressing it or splitting it into smaller segments.",
+        duration: 6000,
+      });
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      return;
+    }
+
+    setFile(selectedFile);
+    setProcessingStatus('idle');
+    setUploadResult(null);
+    setJobState(null);
+    setQueuePosition(null);
+  };
+
+  const handleDrag = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!isEmailValid) return;
+
+    if (e.type === "dragenter" || e.type === "dragover") {
+      setDragActive(true);
+    } else if (e.type === "dragleave") {
+      setDragActive(false);
+    }
+  };
+
+  const handleDrop = async (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!isEmailValid) return;
+    setDragActive(false);
+    
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+      const droppedFile = e.dataTransfer.files[0];
+      if (['video/mp4', 'video/quicktime', 'video/webm'].includes(droppedFile.type)) {
+        await processSelectedFile(droppedFile);
+      } else {
+        toast({
+          variant: "destructive",
+          title: "Invalid file type",
+          description: "Please upload MP4, MOV, or WebM files.",
+        });
+      }
+    }
+  };
+
+  const handleFileSelect = async (e) => {
+    if (e.target.files && e.target.files[0]) {
+      await processSelectedFile(e.target.files[0]);
+    }
+  };
+
+  const pollJobStatus = async (jobId, attempts = 0) => {
+    if (attempts >= 40) {
+      setProcessingStatus('error');
+      setJobState(null);
+      toast({
+        variant: "destructive",
+        title: "Timeout",
+        description: "Analysis took too long. Please try again.",
+      });
+      return;
+    }
+
+    try {
+      const response = await fetch(`https://verifyd-backend.onrender.com/job-status/${jobId}`);
+      
+      if (response.status === 404) {
+        setTimeout(() => pollJobStatus(jobId, attempts + 1), 3000);
+        return;
+      }
+      
+      if (!response.ok) throw new Error('Failed to fetch job status');
+      
+      const data = await response.json();
+      
+      if (data.status === 'complete') {
+        setUploadResult(data.result || data);
+        setProcessingStatus('success');
+        setJobState(null);
+        toast({
+          title: "Analysis Complete",
+          description: "Video processed successfully.",
+          className: "bg-green-500 border-none text-white",
+        });
+      } else if (data.status === 'error') {
+        throw new Error(data.error || 'Job processing failed');
+      } else if (data.status === 'not_found') {
+        setTimeout(() => pollJobStatus(jobId, attempts + 1), 3000);
+      } else {
+        setJobState(data.status);
+        if (data.status === 'queued' && data.position) {
+          setQueuePosition(data.position);
+        } else {
+          setQueuePosition(null);
+        }
+        setTimeout(() => pollJobStatus(jobId, attempts + 1), 3000);
+      }
+    } catch (error) {
+      setProcessingStatus('error');
+      setJobState(null);
+      toast({
+        variant: "destructive",
+        title: "Analysis Failed",
+        description: error.message || "There was an error processing your video.",
+      });
+    }
+  };
+
+  const performUpload = async () => {
+    if (!file) return;
+
+    setProcessingStatus('processing');
+    setUploadResult(null);
+    setJobState('analyzing');
+    setQueuePosition(null);
+    
+    const formData = new FormData();
+    formData.append('email', email);
+    formData.append('file', file);
+
+    try {
+      const data = await new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', 'https://verifyd-backend.onrender.com/upload/');
+
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            try {
+              const responseData = JSON.parse(xhr.responseText);
+              resolve(responseData);
+            } catch (err) {
+              reject(new Error("Invalid response format"));
+            }
+          } else {
+            if (xhr.status === 402 || xhr.status === 403) {
+              try {
+                const errData = JSON.parse(xhr.responseText);
+                if (errData.error === "limit_reached") {
+                  reject(new Error("LIMIT_REACHED"));
+                  return;
+                }
+                if (errData.error === "email_not_verified") {
+                  reject(new Error("EMAIL_NOT_VERIFIED"));
+                  return;
+                }
+              } catch (parseErr) {}
+            }
+            reject(new Error(`Upload failed: ${xhr.statusText || xhr.status}`));
+          }
+        };
+
+        xhr.onerror = () => {
+          reject(new Error("Network error occurred during upload"));
+        };
+
+        xhr.send(formData);
+      });
+
+      if (data.status === 'queued' && data.job_id) {
+        setJobState('queued');
+        pollJobStatus(data.job_id);
+      } else if (data.job_id) {
+        pollJobStatus(data.job_id);
+      } else if (data.status === 'complete') {
+        setUploadResult(data.result || data);
+        setProcessingStatus('success');
+        setJobState(null);
+        toast({
+          title: "Analysis Complete",
+          description: "Video processed successfully.",
+          className: "bg-green-500 border-none text-white",
+        });
+      } else {
+        setUploadResult(data.result || data);
+        setProcessingStatus('success');
+        setJobState(null);
+        toast({
+          title: "Analysis Complete",
+          description: "Video processed successfully.",
+          className: "bg-green-500 border-none text-white",
+        });
+      }
+
+    } catch (error) {
+      if (error.message === "LIMIT_REACHED") {
+        setProcessingStatus('idle');
+        setJobState(null);
+        setShowLimitOverlay(true);
+        return;
+      }
+      if (error.message === "EMAIL_NOT_VERIFIED") {
+        setProcessingStatus('idle');
+        setJobState(null);
+        setPendingAction('upload');
+        handleVerifyEmailClick();
+        return;
+      }
+      
+      toast({
+        variant: "destructive",
+        title: "Upload Failed",
+        description: error.message || "There was an error uploading your video.",
+      });
+      setProcessingStatus('error');
+      setUploadResult({ error: error.message });
+      setJobState(null);
+    }
+  };
+
+  const uploadVideo = async (e) => {
+    e.preventDefault();
+    if (await checkVerification('upload')) {
+      performUpload();
+    }
+  };
+
+  const clearFile = () => {
+    setFile(null);
+    setProcessingStatus('idle');
+    setUploadResult(null);
+    setVideoLink('');
+    setJobState(null);
+    setQueuePosition(null);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  const handleAnalyzeAnother = () => {
+    clearFile();
+  };
+
+  const getStatusColor = (status, score) => {
+    if (!status && score === undefined) return 'text-white';
+    const s = status ? status.toLowerCase() : '';
+    if (s.includes('authentic') || (score !== undefined && score >= 85)) return 'text-[#10B981]';
+    if (s.includes('suspicious') || (score !== undefined && score >= 50 && score < 85)) return 'text-[#FBBF24]';
+    if (s.includes('fake') || (score !== undefined && score < 50)) return 'text-[#EF4444]';
+    return 'text-white';
+  };
+
+  const showResultArea = file || processingStatus !== 'idle';
+
+  return (
+    <div className="min-h-screen bg-[#0C0D0D] text-white pt-24 pb-12 px-4 sm:px-6 lg:px-8 relative">
+      
+      {/* Verify Modal */}
+      {showVerifyModal && (
+        <EmailVerificationFlow 
+          email={email}
+          onClose={closeVerificationModal}
+          onVerificationSuccess={handleVerificationSuccess}
+          verifyOTP={verifyOTP}
+          sendOTP={sendOTP}
+          isVerifying={isVerifying}
+          error={verifyError}
+        />
+      )}
+
+      {/* Limit Reached Overlay */}
+      <AnimatePresence>
+        {showLimitOverlay && (
+          <LimitReachedOverlay onDismiss={() => setShowLimitOverlay(false)} />
+        )}
+      </AnimatePresence>
+
+      {/* Full-Screen Loading Overlay */}
+      <AnimatePresence>
+        {processingStatus === 'processing' && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[100] flex flex-col items-center justify-center bg-black/80 backdrop-blur-md"
+          >
+            <motion.div
+              animate={{ rotate: 360 }}
+              transition={{ repeat: Infinity, duration: 2, ease: "linear" }}
+              className="w-32 h-32 rounded-full border-4 border-white/10 border-t-[#D4AF37] border-r-[#D4AF37] mb-8 shadow-[0_0_30px_rgba(212,175,55,0.3)]"
+            />
+            <div className="h-16 relative flex justify-center items-center w-full max-w-lg">
+              <AnimatePresence mode="wait">
+                <motion.p
+                  key={messageIndex}
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -10 }}
+                  transition={{ duration: 0.5 }}
+                  className="text-2xl md:text-3xl font-semibold text-[#D4AF37] absolute text-center w-full drop-shadow-md"
+                >
+                  {loadingMessages[messageIndex]}
+                </motion.p>
+              </AnimatePresence>
+            </div>
+            <p className="text-gray-400 text-sm mt-4 px-8 text-center">
+              Videos can take up to a minute — we're being thorough! ✨
+            </p>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <div className="max-w-6xl mx-auto space-y-12">
+        {/* Header Section */}
+        <div className="text-center space-y-6">
+            <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
+              <div className="inline-flex items-center justify-center space-x-2 bg-blue-900/30 text-blue-400 px-4 py-1.5 rounded-full text-sm font-medium border border-blue-500/20">
+                <Shield className="w-4 h-4" />
+                <span>Secure Verification Gateway</span>
+              </div>
+              <Link to="/pricing">
+                <div className="inline-flex items-center justify-center space-x-2 bg-purple-900/30 text-purple-400 px-4 py-1.5 rounded-full text-sm font-medium border border-purple-500/20 hover:bg-purple-900/50 transition-colors cursor-pointer">
+                  <CreditCard className="w-4 h-4" />
+                  <span>View Pricing Plans</span>
+                </div>
+              </Link>
+            </div>
+            
+            <h1 className="text-4xl md:text-5xl font-bold tracking-tight">
+              Start Verification
+            </h1>
+            
+            <p className="text-gray-400 text-lg max-w-2xl mx-auto">
+              Enter your email below to unlock the verification tools.
+            </p>
+
+            {/* Email Input */}
+            <div className="max-w-md mx-auto relative pt-4">
+              <div className={`relative transition-all duration-300`}>
+                <div className={`absolute inset-0 bg-gradient-to-r from-blue-500 to-purple-600 rounded-lg blur opacity-20 ${isEmailValid ? 'opacity-40' : 'opacity-20'}`}></div>
+                <div className="relative bg-[#1A1D1E] rounded-lg border border-white/10 flex items-center shadow-2xl p-1">
+                  <div className="pl-4 text-gray-400">
+                    <Shield className="w-5 h-5" />
+                  </div>
+                  <Input
+                    type="email"
+                    placeholder="Enter your email to enable upload"
+                    value={email}
+                    onChange={handleEmailChange}
+                    className="border-0 bg-transparent focus-visible:ring-0 text-lg py-6 px-4 text-white placeholder:text-gray-500 w-full"
+                  />
+                  <div className="pr-2 flex items-center gap-2">
+                    {isEmailValid && !isVerified && (
+                      <Button 
+                        size="sm" 
+                        onClick={handleVerifyEmailClick}
+                        disabled={isVerifying}
+                        className="bg-amber-500 hover:bg-amber-600 text-black font-semibold h-9 px-3 rounded-md shadow-lg shadow-amber-500/20 whitespace-nowrap"
+                      >
+                        {isVerifying ? <Loader2 className="w-4 h-4 animate-spin" /> : "Verify"}
+                      </Button>
+                    )}
+                    {isVerified ? (
+                      <div className="flex items-center justify-center h-9 px-2 bg-green-500/10 rounded-md border border-green-500/30">
+                        <MailCheck className="w-5 h-5 text-green-500" />
+                        <span className="ml-1 text-xs text-green-500 font-medium">Verified</span>
+                      </div>
+                    ) : (
+                       isEmailValid ? <CheckCircle2 className="w-5 h-5 text-blue-400" /> : (emailTouched && email.length > 0 && <AlertCircle className="w-5 h-5 text-red-500" />)
+                    )}
+                  </div>
+                </div>
+              </div>
+              {!isEmailValid && emailTouched && email.length > 0 && (
+                <p className="text-red-400 text-sm mt-2 font-medium">
+                  Please enter a valid email address
+                </p>
+              )}
+            </div>
+        </div>
+
+        {/* Main Content Columns */}
+        <div className={`grid grid-cols-1 md:grid-cols-2 gap-8 items-start transition-opacity duration-300 ${!isEmailValid ? 'opacity-50 pointer-events-none' : 'opacity-100'}`}>
+          
+          {/* Left Column: Upload & Results */}
+          <div className="relative group bg-[#1A1D1E] rounded-xl border border-white/10 hover:border-blue-500/30 p-6 md:p-8 transition-all duration-300 shadow-xl overflow-hidden min-h-[400px]">
+            <div className="flex items-center space-x-3 mb-6">
+              <div className="p-2 bg-blue-500/10 rounded-lg">
+                <UploadIcon className="w-6 h-6 text-blue-400" />
+              </div>
+              <h2 className="text-xl font-semibold text-white">Upload or Result</h2>
+            </div>
+
+            <AnimatePresence mode="wait">
+              {!showResultArea ? (
+                <motion.div 
+                  key="dropzone"
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  className={`border-2 border-dashed rounded-xl p-8 text-center transition-all h-[300px] flex flex-col justify-center items-center ${dragActive ? 'border-blue-500 bg-blue-500/5' : 'border-white/10 hover:border-white/20'}`}
+                  onDragEnter={handleDrag}
+                  onDragLeave={handleDrag}
+                  onDragOver={handleDrag}
+                  onDrop={handleDrop}
+                >
+                  <input 
+                    ref={fileInputRef}
+                    type="file" 
+                    className="hidden" 
+                    accept="video/mp4,video/quicktime,video/webm"
+                    onChange={handleFileSelect}
+                    disabled={!isEmailValid}
+                  />
+                  <div className="w-16 h-16 bg-gray-800 rounded-full flex items-center justify-center mb-4">
+                    <FileVideo className="w-8 h-8 text-gray-400" />
+                  </div>
+                  <p className="text-white font-medium mb-2">Drag & Drop Video</p>
+                  <p className="text-sm text-gray-500 mb-6">MP4, MOV, WebM (Max 50MB)</p>
+                  
+                  <Button 
+                    variant="outline" 
+                    onClick={() => {
+                      if (!isVerified) {
+                        setPendingAction(null);
+                        handleVerifyEmailClick();
+                      } else {
+                        fileInputRef.current?.click();
+                      }
+                    }}
+                    disabled={!isEmailValid}
+                    className="bg-white text-black hover:bg-gray-200 border-none px-8 font-bold text-sm h-11 shadow-lg transition-all duration-200 flex items-center justify-center"
+                  >
+                    Select File
+                  </Button>
+                </motion.div>
+              ) : (
+                <motion.div 
+                    key="result"
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
+                    className="bg-black/30 rounded-xl p-6 border border-white/10 flex flex-col justify-between h-auto min-h-[300px]"
+                >
+                  {processingStatus !== 'success' && processingStatus !== 'error' && (
+                    <div className="flex justify-between items-start mb-6">
+                      {file ? (
+                        <div className="flex items-center space-x-3 overflow-hidden">
+                            <div className="p-2 bg-blue-500/20 rounded-lg">
+                            <FileVideo className="w-5 h-5 text-blue-400" />
+                            </div>
+                            <div className="truncate">
+                            <p className="text-white text-sm font-medium truncate max-w-[150px]">{file.name}</p>
+                            <p className="text-xs text-gray-500">{(file.size / (1024*1024)).toFixed(2)} MB</p>
+                            </div>
+                        </div>
+                      ) : (
+                        <div className="flex items-center space-x-3 overflow-hidden">
+                            <div className="p-2 bg-purple-500/20 rounded-lg">
+                                <LinkIcon className="w-5 h-5 text-purple-400" />
+                            </div>
+                            <div className="truncate">
+                                <p className="text-white text-sm font-medium truncate max-w-[150px]">Link Analysis</p>
+                                <p className="text-xs text-gray-500">Remote Content</p>
+                            </div>
+                        </div>
+                      )}
+                      
+                      {processingStatus !== 'processing' && (
+                        <button type="button" onClick={clearFile} className="text-gray-500 hover:text-white transition-colors">
+                          <X className="w-5 h-5" />
+                        </button>
+                      )}
+                    </div>
+                  )}
+
+                  {processingStatus === 'idle' && (
+                    <div className="mt-auto">
+                      <Button 
+                        onClick={uploadVideo}
+                        className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-6"
+                        disabled={!isEmailValid}
+                      >
+                        Analyze Video
+                      </Button>
+                      <p className="text-xs text-center text-gray-500 mt-3">This will upload your video to our secure server.</p>
+                    </div>
+                  )}
+
+                  {processingStatus === 'processing' && (
+                    <div className="flex-1 flex items-center justify-center py-12">
+                      <p className="text-gray-400 text-sm animate-pulse">Analysis in progress...</p>
+                    </div>
+                  )}
+                  
+                  {processingStatus === 'success' && uploadResult && (
+                     <motion.div 
+                       initial={{ opacity: 0, y: 20 }}
+                       animate={{ opacity: 1, y: 0 }}
+                       transition={{ duration: 0.5 }}
+                       className="flex flex-col items-center justify-center space-y-6 w-full"
+                     >
+                       {uploadResult.video_url && (
+                          <div className="w-full bg-[#0C0D0D] rounded-lg overflow-hidden border-2 border-white shadow-lg">
+                            <video 
+                              controls
+                              playsInline
+                              preload="metadata"
+                              className="w-full max-h-[250px] object-contain"
+                            >
+                              <source src={uploadResult.video_url} type="video/mp4" />
+                            </video>
+                          </div>
+                       )}
+
+                       <div className="relative flex flex-col items-center mt-2">
+                         <div className={`w-24 h-24 rounded-full flex items-center justify-center border-4 ${getStatusColor(uploadResult.status, uploadResult.authenticity_score).replace('text-', 'border-')}`}>
+                           <span className={`text-3xl font-bold ${getStatusColor(uploadResult.status, uploadResult.authenticity_score)}`}>
+                             {uploadResult.authenticity_score || 0}%
+                           </span>
+                         </div>
+                         <div className="mt-4 text-center">
+                           <h3 className={`text-2xl font-bold uppercase tracking-wide ${getStatusColor(uploadResult.status, uploadResult.authenticity_score)}`}>
+                             {uploadResult.status || "Analyzed"}
+                           </h3>
+                         </div>
+                         <Link to="/how-it-works" className="text-[#D4AF37] text-sm mt-2 hover:underline">
+                           What does this score mean?
+                         </Link>
+                       </div>
+
+                       <div className="flex flex-col gap-3 w-full mt-4">
+                         {uploadResult.certificate_id && (
+                           <>
+                             <Button 
+                               onClick={() => window.location.href = `https://verifyd-backend.onrender.com/download/${uploadResult.certificate_id}`}
+                               className="w-full bg-[#10B981] hover:bg-[#059669] text-white gap-2 font-bold py-6 text-md shadow-lg"
+                             >
+                               <Download className="w-5 h-5" />
+                               Download Certified Video
+                             </Button>
+
+                             {/* Share link — prominent with copy button */}
+                             <div className="flex flex-col items-start mt-2 w-full bg-black/40 p-4 rounded-lg border border-purple-500/40">
+                               <p className="font-bold text-base text-white mb-2">
+                                 🔗 Share your certified video link
+                               </p>
+                               <div className="flex items-center gap-2 w-full">
+                                 <input
+                                   readOnly
+                                   type="text"
+                                   value={`https://vfvid.com/v/${uploadResult.certificate_id}`}
+                                   onClick={(e) => e.target.select()}
+                                   style={{
+                                     flex: 1,
+                                     background: '#111827',
+                                     border: '1px solid #7c3aed',
+                                     borderRadius: '8px',
+                                     color: '#c4b5fd',
+                                     padding: '10px 12px',
+                                     fontSize: '14px',
+                                     outline: 'none',
+                                     cursor: 'text',
+                                     minWidth: 0,
+                                   }}
+                                 />
+                                 <button
+                                   onClick={() => handleCopyLink(`https://vfvid.com/v/${uploadResult.certificate_id}`)}
+                                   style={{
+                                     background: copied ? '#059669' : '#7c3aed',
+                                     color: 'white',
+                                     border: 'none',
+                                     borderRadius: '8px',
+                                     padding: '10px 16px',
+                                     cursor: 'pointer',
+                                     fontWeight: 'bold',
+                                     fontSize: '14px',
+                                     whiteSpace: 'nowrap',
+                                     flexShrink: 0,
+                                     transition: 'background 0.2s',
+                                   }}
+                                 >
+                                   {copied ? '✓ Copied!' : '📋 Copy'}
+                                 </button>
+                               </div>
+                             </div>
+                           </>
+                         )}
+                         
+                         {/* Scan another — bright and visible */}
+                         <button
+                           onClick={handleAnalyzeAnother}
+                           style={{
+                             width: '100%',
+                             marginTop: '8px',
+                             padding: '14px',
+                             background: 'transparent',
+                             border: '2px solid rgba(255,255,255,0.5)',
+                             borderRadius: '10px',
+                             color: 'white',
+                             fontSize: '15px',
+                             fontWeight: 'bold',
+                             cursor: 'pointer',
+                             display: 'flex',
+                             alignItems: 'center',
+                             justifyContent: 'center',
+                             gap: '8px',
+                             transition: 'border-color 0.2s, background 0.2s',
+                           }}
+                           onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.08)'}
+                           onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+                         >
+                           ↺ Scan Another Video
+                         </button>
+                       </div>
+                     </motion.div>
+                  )}
+
+                  {processingStatus === 'error' && (
+                    <motion.div 
+                      initial={{ opacity: 0, scale: 0.95 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      className="flex flex-col items-center justify-center space-y-4 my-8 p-6 bg-[#1A1D1E] rounded-xl border border-red-500/20"
+                    >
+                      <AlertCircle className="w-12 h-12 text-[#EF4444]" />
+                      <div className="text-center space-y-2">
+                        <h3 className="text-xl font-bold text-white">Analysis Failed</h3>
+                        <p className="text-gray-400 text-sm max-w-sm">
+                          {uploadResult?.error || "We encountered an error while processing your video. Please ensure the file is valid and try again."}
+                        </p>
+                      </div>
+                      <button
+                        onClick={handleAnalyzeAnother}
+                        style={{
+                          width: '100%',
+                          marginTop: '8px',
+                          padding: '14px',
+                          background: 'transparent',
+                          border: '2px solid rgba(255,255,255,0.5)',
+                          borderRadius: '10px',
+                          color: 'white',
+                          fontSize: '15px',
+                          fontWeight: 'bold',
+                          cursor: 'pointer',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          gap: '8px',
+                        }}
+                      >
+                        ↺ Scan Another Video
+                      </button>
+                    </motion.div>
+                  )}
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+
+          {/* Right Column: Link Analysis */}
+          <div className="relative bg-[#1A1D1E] rounded-xl border border-white/10 hover:border-blue-500/30 p-6 md:p-8 transition-all duration-300 shadow-xl flex flex-col min-h-[465px]">
+            <div className="flex items-center space-x-3 mb-6">
+              <div className="p-2 bg-purple-500/10 rounded-lg">
+                <LinkIcon className="w-6 h-6 text-purple-400" />
+              </div>
+              <h2 className="text-xl font-semibold text-white">Paste a Link</h2>
+            </div>
+
+            <div className="space-y-4 flex-1 flex flex-col">
+              <Input
+                placeholder="https://tiktok.com/..."
+                value={videoLink}
+                onChange={(e) => setVideoLink(e.target.value)}
+                disabled={!isEmailValid}
+                className="bg-black/20 border-white/10 text-white focus:border-purple-500/50"
+              />
+              
+              <Button 
+                onClick={handleLinkAnalyze}
+                disabled={!isEmailValid || !videoLink || isAnalyzing}
+                className="w-full bg-white text-black hover:bg-gray-200 font-bold h-12 text-md disabled:opacity-70 flex items-center justify-center"
+              >
+                  {isAnalyzing ? (
+                    <>
+                      <Loader2 className="w-5 h-5 mr-2 animate-spin text-black" />
+                      Analyzing...
+                    </>
+                  ) : "Analyze Link"}
+              </Button>
+
+              <div className="mt-8 pt-8 border-t border-white/10 flex-1 flex flex-col justify-center items-center text-center">
+                  <div className="text-gray-500 text-sm">
+                    <p>Supported platforms:</p>
+                    <div className="flex justify-center space-x-3 mt-2 opacity-60">
+                      <span>TikTok</span>•<span>Instagram</span>•<span>YouTube</span>
+                    </div>
+                  </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Footer Info */}
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-6 pt-8 border-t border-white/5">
+          <div className="flex items-center justify-center sm:justify-start space-x-4 text-gray-400">
+            <Calendar className="w-5 h-5 text-gray-500" />
+            <span className="text-sm">Real-time Analysis</span>
+          </div>
+           <div className="flex items-center justify-center sm:justify-start space-x-4 text-gray-400">
+            <FileCheck className="w-5 h-5 text-gray-500" />
+            <span className="text-sm">Detailed Metadata Report</span>
+          </div>
+           <div className="flex items-center justify-center sm:justify-start space-x-4 text-gray-400">
+            <Shield className="w-5 h-5 text-gray-500" />
+            <span className="text-sm">100% Private & Secure</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default Upload;
