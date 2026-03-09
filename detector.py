@@ -695,8 +695,9 @@ def detect_ai(video_path: str) -> int:
     #   B) AI render (low-sat): sat_std<5, sat_mean<100 → AI frozen lighting (Gorilla=3.86/50)
     #   C) Mid-range (100-140): sat_std<5 → moderate AI signal
     # GUARD: action content with high sat_std = natural outdoor lighting variation
+    # GUARD: action content with low sat naturally (overcast/indoor) — not an AI signal
     _stable_is_broadcast = (sat_frame_std < 5.0 and avg_saturation > 140)
-    _stable_is_ai_render = (sat_frame_std < 5.0 and avg_saturation < 100)
+    _stable_is_ai_render = (sat_frame_std < 5.0 and avg_saturation < 100 and not is_action_content)
     _unstable_is_outdoor = (sat_frame_std > 22.0 and is_action_content)
 
     if _stable_is_broadcast:
@@ -704,8 +705,11 @@ def detect_ai(video_path: str) -> int:
     elif _is_selfie_content and sat_frame_std < 8.0:
         # Indoor selfie lighting is naturally stable — not an AI signal
         log.info("SAT_STD %.2f → selfie indoor lighting → no penalty", sat_frame_std)
+    elif is_action_content and sat_frame_std < 6.0:
+        # Action video with stable sat — natural (overcast sky, indoor sport, etc.)
+        log.info("SAT_STD %.2f → action content stable sat → no penalty", sat_frame_std)
     elif _stable_is_ai_render:
-        # Frozen lighting on low-sat content = AI animal/nature render (Gorilla, Monkey)
+        # Frozen lighting on low-sat NON-action content = AI animal/nature render (Gorilla, Monkey)
         ai_score += 14
         log.info("SAT_STD %.2f sat=%.0f → frozen AI render → +14", sat_frame_std, avg_saturation)
     elif _unstable_is_outdoor:
@@ -830,20 +834,21 @@ def detect_ai(video_path: str) -> int:
     # Calibrated: Bus AI=0.088, Moose AI=0.046 vs Real=0.10–0.14
     # Guard: only meaningful when multiple people / crowd is present
     # Selfie guard: single person = naturally low sync, not an AI signal
+    # Action guard: single-subject action videos naturally have correlated L/R motion
+    _sync_thresh_strong = 0.05 if is_action_content else 0.06
+    _sync_thresh_med    = 0.07 if is_action_content else 0.09
+    _sync_thresh_slight = 0.09 if is_action_content else 0.105
     if avg_motion > 3.0 and not is_static_content and not _is_selfie_content:
-        if motion_sync < 0.06:
-            # Extreme lockstep — strong AI crowd signal (Moose)
+        if motion_sync < _sync_thresh_strong:
             ai_score += 14
             log.info("MOTION_SYNC %.3f → extreme lockstep crowd → +14", motion_sync)
-        elif motion_sync < 0.09:
-            # Moderate lockstep (Bus)
+        elif motion_sync < _sync_thresh_med:
             ai_score += 8
             log.info("MOTION_SYNC %.3f → lockstep crowd → +8", motion_sync)
-        elif motion_sync < 0.105:
+        elif motion_sync < _sync_thresh_slight:
             ai_score += 3
             log.info("MOTION_SYNC %.3f → slightly synchronized → +3", motion_sync)
         elif motion_sync > 0.13:
-            # Natural independent motion
             ai_score -= 4
             log.info("MOTION_SYNC %.3f → natural independent motion → -4", motion_sync)
 
