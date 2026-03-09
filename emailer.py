@@ -218,15 +218,22 @@ def send_certification_email(
           <!-- Share certified video link -->
           <tr>
             <td style="padding:0 32px 32px;">
-              <div style="background:#0f0f0f;border:1px solid #1e1e1e;border-radius:10px;padding:20px;text-align:center;">
-                <p style="margin:0 0 8px;color:#888;font-size:13px;line-height:1.6;">
-                  Share your certified video link
+              <div style="background:#0f0f0f;border:1px solid #7c3aed;border-radius:10px;padding:20px;text-align:center;">
+                <p style="margin:0 0 10px;color:#c4b5fd;font-size:13px;font-weight:700;letter-spacing:1px;text-transform:uppercase;">
+                  🔗 Share Your Certified Video
                 </p>
-                <a href="{download_url}"
-                   style="display:block;font-size:12px;color:#f59e0b;font-family:'Courier New',monospace;
-                          word-break:break-all;text-decoration:none;">
-                  {download_url}
+                <p style="margin:0 0 12px;color:#888;font-size:12px;line-height:1.6;">
+                  Share this link with anyone to prove your video is real:
+                </p>
+                <a href="{cert_url}"
+                   style="display:block;background:#1a1a1a;border:1px solid #7c3aed;border-radius:8px;
+                          font-size:13px;color:#c4b5fd;font-family:'Courier New',monospace;
+                          word-break:break-all;text-decoration:none;padding:12px;">
+                  {cert_url}
                 </a>
+                <p style="margin:10px 0 0;color:#555;font-size:11px;">
+                  Tap the link above to open it, then copy from your browser's address bar.
+                </p>
               </div>
             </td>
           </tr>
@@ -259,68 +266,5 @@ def send_certification_email(
         "from":    f"{FROM_NAME} <{FROM_ADDRESS}>",
         "to":      [to_email],
         "subject": f"&#10003; Your video has been certified — VeriFYD #{short_id}",
-        "html":    html,
-    })
-
-
-def send_magic_link_email(to_email: str, magic_url: str) -> bool:
-    """Send a magic link login email via Resend."""
-    html = f"""
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-</head>
-<body style="margin:0;padding:0;background-color:#0a0a0a;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
-  <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#0a0a0a;padding:40px 20px;">
-    <tr>
-      <td align="center">
-        <table width="500" cellpadding="0" cellspacing="0" style="background-color:#111111;border-radius:12px;border:1px solid #222222;overflow:hidden;max-width:500px;width:100%;">
-          {_header_html()}
-          <tr>
-            <td style="padding:40px 32px;">
-              <h2 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#ffffff;">
-                Sign in to VeriFYD
-              </h2>
-              <p style="margin:0 0 32px;color:#888888;font-size:15px;line-height:1.6;">
-                Click the button below to sign in to your VeriFYD account.
-                This link expires in <strong style="color:#f59e0b;">15 minutes</strong>
-                and can only be used once.
-              </p>
-              <div style="text-align:center;margin:0 0 32px;">
-                <a href="{magic_url}"
-                   style="display:inline-block;background:#f59e0b;color:#000000;
-                          font-size:16px;font-weight:700;padding:16px 40px;
-                          border-radius:8px;text-decoration:none;letter-spacing:0.5px;">
-                  ✓ Sign In to VeriFYD
-                </a>
-              </div>
-              <p style="margin:0 0 16px;color:#555555;font-size:13px;line-height:1.6;">
-                Or copy and paste this link into your browser:
-              </p>
-              <p style="margin:0 0 24px;background:#1a1a1a;border:1px solid #333;
-                        border-radius:6px;padding:12px;font-size:11px;
-                        color:#888;word-break:break-all;font-family:'Courier New',monospace;">
-                {magic_url}
-              </p>
-              <p style="margin:0;color:#555555;font-size:13px;line-height:1.6;">
-                If you didn't request this link, you can safely ignore this email.
-                Your account is secure.
-              </p>
-            </td>
-          </tr>
-          {_footer_html()}
-        </table>
-      </td>
-    </tr>
-  </table>
-</body>
-</html>"""
-
-    return _send({
-        "from":    f"{FROM_NAME} <{FROM_ADDRESS}>",
-        "to":      [to_email],
-        "subject": "Sign in to VeriFYD — your login link",
         "html":    html,
     })
