@@ -380,9 +380,12 @@ def job_status(job_id: str):
 
 @app.get("/download/{cid}")
 def download(cid: str):
-    """Serve certified video stored in Redis by the worker."""
+    """Serve certified video stored in Redis by the worker.
+    Uses StreamingResponse with Content-Disposition: inline so mobile
+    browsers play the video directly rather than triggering a download."""
     import redis as _redis
-    import tempfile
+    from fastapi.responses import StreamingResponse
+    import io
     redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379")
     try:
         r = _redis.from_url(redis_url, decode_responses=False)
@@ -393,13 +396,17 @@ def download(cid: str):
     if not cert_bytes:
         return JSONResponse({"error": "Certificate not found or expired. Videos are available for 1 hour after verification."}, status_code=404)
     increment_downloads(cid)
-    # Write to a temp file and serve — FileResponse needs a path
-    tmp = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
-    tmp.write(cert_bytes)
-    tmp.flush()
-    tmp.close()
-    return FileResponse(tmp.name, media_type="video/mp4",
-                        filename=f"VeriFYD_Certified_{cid[:8]}.mp4")
+    fname = f"VeriFYD_Certified_{cid[:8]}.mp4"
+    return StreamingResponse(
+        io.BytesIO(cert_bytes),
+        media_type="video/mp4",
+        headers={
+            "Content-Disposition": f'inline; filename="{fname}"',
+            "Content-Length": str(len(cert_bytes)),
+            "Accept-Ranges": "bytes",
+            "Cache-Control": "no-cache",
+        },
+    )
 
 
 @app.get("/certificate/{cid}")
@@ -456,12 +463,19 @@ def pro_download(cid: str, email: str = ""):
     if not cert_bytes:
         return JSONResponse({"error": "Video no longer available — please re-verify"}, status_code=404)
     increment_downloads(cid)
-    tmp = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
-    tmp.write(cert_bytes)
-    tmp.flush()
-    tmp.close()
-    return FileResponse(tmp.name, media_type="video/mp4",
-                        filename=f"VeriFYD_Certified_{cid[:8]}.mp4")
+    from fastapi.responses import StreamingResponse
+    import io
+    fname = f"VeriFYD_Certified_{cid[:8]}.mp4"
+    return StreamingResponse(
+        io.BytesIO(cert_bytes),
+        media_type="video/mp4",
+        headers={
+            "Content-Disposition": f'inline; filename="{fname}"',
+            "Content-Length": str(len(cert_bytes)),
+            "Accept-Ranges": "bytes",
+            "Cache-Control": "no-cache",
+        },
+    )
 
 
 def _proxy_coming_soon_html(video_url: str) -> str:
