@@ -507,6 +507,18 @@ def detect_ai(video_path: str) -> int:
         fg_bg_ratio, motion_sync, hue_entropy, quad_cov,
     )
 
+    # ── Skin ratio — fraction of pixels in skin-tone HSV range ─
+    # Used by single_subject detection to confirm a person is the main subject.
+    # Computed from v5_bgr_frames (sampled color frames).
+    skin_ratio = 0.0
+    if v5_bgr_frames:
+        _skin_counts = []
+        for _sf in v5_bgr_frames:
+            _hsv = cv2.cvtColor(_sf, cv2.COLOR_BGR2HSV)
+            _mask = cv2.inRange(_hsv, np.array([0, 20, 70]), np.array([20, 255, 255]))
+            _skin_counts.append(_mask.sum() / (_mask.shape[0] * _mask.shape[1] * 255))
+        skin_ratio = float(np.mean(_skin_counts))
+
     # ── Content type auto-detection ─────────────────────────
     # Used to guard v4 signals that overlap with fast-action real content
     is_action_content = (avg_motion > 8.0 and avg_edge > 3.0)
