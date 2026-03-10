@@ -461,6 +461,7 @@ def _build_physics_summary(ctx: dict) -> str:
     content_type = ctx.get("content_type", "cinematic")  # selfie / talking_head / action / cinematic
     is_talking_head = content_type == "talking_head"
     is_selfie = content_type == "selfie"
+    is_single_subject = content_type == "single_subject"
 
     lines.append("═══════════════════════════════════════")
     lines.append("SIGNAL DETECTOR PRE-ANALYSIS (v4 — measured before you see these frames):")
@@ -481,6 +482,19 @@ def _build_physics_summary(ctx: dict) -> str:
         lines.append("   missing pores/imperfections, AI-typical hair (too perfect or floating),")
         lines.append("   inconsistent lighting across frames, or morphing/glitching artifacts.")
         lines.append("   A realistic-looking person on a phone video is almost certainly REAL.\n")
+    elif is_single_subject:
+        lines.append("🎥 CONTENT TYPE: SINGLE-SUBJECT PERSON VIDEO (LANDSCAPE)")
+        lines.append("   Signal detector identified this as a real person filmed in landscape orientation.")
+        lines.append("   IMPORTANT: The following are NORMAL for this content type — do NOT treat as AI signals:")
+        lines.append("   • Low saturation variance — skin tones + clothing naturally dominate the frame")
+        lines.append("   • Consistent edge density — camera is focused on one subject")
+        lines.append("   • Uniform sharpness across frame — camera locked onto a single person")
+        lines.append("   • Smooth steady motion — a person moving normally has no emergency reaction spikes")
+        lines.append("   • High skin ratio confirms a real human is the primary subject")
+        lines.append("   For this content type, ONLY flag AI if you see: unnatural skin smoothness,")
+        lines.append("   missing pores/imperfections, AI-typical hair or clothing texture,")
+        lines.append("   background inconsistencies, or morphing/glitching artifacts.")
+        lines.append("   A realistic person filmed on a camera is almost certainly REAL.\n")
     elif is_selfie:
         lines.append("📱 CONTENT TYPE: SELFIE / STATIC PORTRAIT")
         lines.append("   Signal detector identified this as a phone selfie or portrait video.\n")
@@ -527,12 +541,12 @@ def _build_physics_summary(ctx: dict) -> str:
                      f"real outdoor footage is typically less saturated.")
 
     if sat_std is not None:
-        if sat_std < 5.0 and not is_talking_head and not is_selfie:
+        if sat_std < 5.0 and not is_talking_head and not is_selfie and not is_single_subject:
             lines.append(f"⚠ Frozen lighting detected (sat_std={sat_std:.2f}) — "
                          f"natural lighting always varies. Possible AI render. "
                          f"Look for unnaturally perfect, studio-quality lighting on the subject.")
-        elif sat_std < 5.0 and (is_talking_head or is_selfie):
-            lines.append(f"✓ Low sat variance (sat_std={sat_std:.2f}) — expected for portrait with skin/neutral tones.")
+        elif sat_std < 5.0 and (is_talking_head or is_selfie or is_single_subject):
+            lines.append(f"✓ Low sat variance (sat_std={sat_std:.2f}) — expected for person video with skin/neutral tones.")
         elif sat_std > 22.0:
             lines.append(f"⚠ Unstable color/lighting (sat_std={sat_std:.2f}) — "
                          f"flickering or inconsistent saturation typical of AI generation artifacts.")
@@ -572,7 +586,7 @@ def _build_physics_summary(ctx: dict) -> str:
                          f"Real cameras have natural depth-of-field variation. "
                          f"This is a strong AI render signature. Look for unnaturally "
                          f"sharp subjects against suspiciously blurred/rendered backgrounds.")
-        elif quad_cov < 0.50 and not is_talking_head:
+        elif quad_cov < 0.50 and not is_talking_head and not is_single_subject:
             lines.append(f"⚠ Low depth-of-field variation (quad_cov={quad_cov:.3f}) — "
                          f"focus is more uniform than expected for real camera footage.")
 
@@ -581,7 +595,7 @@ def _build_physics_summary(ctx: dict) -> str:
                      f"the subject is rendered at extreme sharpness vs the background. "
                      f"This unnatural depth ratio is a strong AI compositing signature.")
 
-    if motion_sync is not None and motion_sync < 0.09 and not is_talking_head and not is_selfie:
+    if motion_sync is not None and motion_sync < 0.09 and not is_talking_head and not is_selfie and not is_single_subject:
         lines.append(f"⚠ LOCKSTEP CROWD MOTION (sync={motion_sync:.3f}) — "
                      f"left and right halves of frame move in near-identical patterns. "
                      f"Real crowds have independent chaotic movement. AI crowds are scripted.")
@@ -599,16 +613,21 @@ def _build_physics_summary(ctx: dict) -> str:
         lines.append("→ Check hair for individual strands, fly-aways, and natural lighting on hair tips.")
         lines.append("→ Look for natural micro-expressions and spontaneous blinks/eye movement.")
         lines.append("→ Check teeth, ears, and hands if visible — these are hard for AI to render naturally.")
+    if is_single_subject:
+        lines.append("→ PERSON FOCUS: Examine skin texture for natural pores, imperfections, and natural color variation.")
+        lines.append("→ Check clothing for realistic fabric wrinkles and natural lighting shadows.")
+        lines.append("→ Look for natural body movement — real people have subtle weight shifts and micro-movements.")
+        lines.append("→ Check the background for natural depth blur and environmental consistency.")
     if flicker_std is not None and flicker_std > 4.0:
         lines.append("→ Look for inconsistencies in fine details between frames.")
-    if quad_cov is not None and quad_cov < 0.50 and not is_talking_head:
+    if quad_cov is not None and quad_cov < 0.50 and not is_talking_head and not is_single_subject:
         lines.append("→ RENDER FLAG: Focus is suspiciously uniform. Check if this looks like a CGI render.")
         lines.append("  Look for the 'uncanny valley' quality — too perfect to be real camera footage.")
     if flow_entropy is not None and flow_entropy < 1.5:
         lines.append("→ BEHAVIORAL FLAG: Motion analysis detected unnaturally uniform crowd/scene movement.")
         lines.append("  Look carefully at whether bystanders react with appropriate urgency and chaos.")
         lines.append("  Real emergencies produce unpredictable individual movement — AI scenes do not.")
-    if peak_ratio is not None and peak_ratio < 3.0 and not is_talking_head:
+    if peak_ratio is not None and peak_ratio < 3.0 and not is_talking_head and not is_single_subject:
         lines.append("→ BEHAVIORAL FLAG: No dramatic motion spikes detected — real emergency footage")
         lines.append("  always has sudden reaction bursts. This scene's motion is too smooth/gradual.")
     lines.append("")

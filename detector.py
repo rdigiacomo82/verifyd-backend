@@ -553,12 +553,28 @@ def detect_ai(video_path: str) -> int:
         and not _is_selfie_content      # not a static hold selfie
     )
 
-    log.info("Content type: %s (motion=%.1f edge=%.1f portrait=%s selfie=%s talking_head=%s skin=%s)",
-             "action"       if is_action_content  else
-             "talking_head" if _is_talking_head   else
-             "selfie"       if _is_selfie_content else
-             "static"       if is_static_content  else "cinematic",
-             avg_motion, avg_edge, _is_portrait, _is_selfie_content, _is_talking_head, _talking_head_skin)
+    # ── Single-subject landscape person detection (v10) ─────────
+    # A real person filmed in landscape orientation — phone/camera focused on
+    # one subject. Same signals misfire as talking_head but no portrait flag.
+    # High skin ratio is the key discriminator — confirms a person is the subject.
+    # fg_bg < 200 confirms no extreme AI depth separation (AI renders subject
+    # at 1000-2000x background sharpness; real cameras produce 4-400x).
+    _is_single_subject = (
+        not _is_portrait                # landscape orientation only
+        and skin_ratio > 0.10           # significant skin visible — person is main subject
+        and avg_motion > 2.0            # some movement
+        and avg_motion < 20.0           # not a wild action/crowd scene
+        and fg_bg_ratio < 200           # no extreme AI depth separation
+        and not is_action_content       # not a crowd/event scene
+    )
+
+    log.info("Content type: %s (motion=%.1f edge=%.1f portrait=%s selfie=%s talking_head=%s skin=%.3f single_subject=%s)",
+             "action"          if is_action_content   else
+             "talking_head"    if _is_talking_head    else
+             "single_subject"  if _is_single_subject  else
+             "selfie"          if _is_selfie_content  else
+             "static"          if is_static_content   else "cinematic",
+             avg_motion, avg_edge, _is_portrait, _is_selfie_content, _is_talking_head, skin_ratio, _is_single_subject)
 
     ai_score = 30.0   # base: lean real until AI signals accumulate
 
@@ -683,6 +699,14 @@ def detect_ai(video_path: str) -> int:
         ai_score -= 6
         log.info("TALKING_HEAD skin confirmed → real person bonus → -6")
 
+    # ── 9e. Single-subject landscape bonus (v10) ─────────────
+    # Landscape video of a real person — skin ratio confirms human subject.
+    # Camera naturally focuses on one person → uniform sharpness/low sat variance
+    # are real characteristics, not AI signals.
+    if _is_single_subject:
+        ai_score -= 8
+        log.info("SINGLE_SUBJECT landscape person video → real subject bonus → -8")
+
     # ── 10. Saturation mean ──────────────────────────────────
     if avg_saturation > 160:
         ai_score += 8
@@ -715,7 +739,7 @@ def detect_ai(video_path: str) -> int:
     # ── 15. Edge temporal std ────────────────────────────────
     if len(edge_counts_temporal) > 3:
         edge_temporal_std = float(np.std(edge_counts_temporal))
-        if _is_selfie_content or _is_talking_head:
+        if _is_selfie_content or _is_talking_head or _is_single_subject:
             # Talking heads / single-subject portraits naturally have very low edge std
             # (consistent scene, consistent clothing) — not an AI signal
             log.info("Edge temporal std: %.0f → portrait content guard → skip", edge_temporal_std)
@@ -748,7 +772,7 @@ def detect_ai(video_path: str) -> int:
     elif _is_selfie_content and sat_frame_std < 8.0:
         # Indoor selfie lighting is naturally stable — not an AI signal
         log.info("SAT_STD %.2f → selfie indoor lighting → no penalty", sat_frame_std)
-    elif _is_talking_head and sat_frame_std < 8.0:
+    elif (_is_talking_head or _is_single_subject) and sat_frame_std < 8.0:
         # Talking head indoors: skin + neutral clothing = naturally low sat variance
         # Emily video: sat_std=1.09, 83% low-sat pixels — REAL characteristic
         log.info("SAT_STD %.2f → talking_head skin/neutral dominant → no penalty", sat_frame_std)
@@ -849,7 +873,7 @@ def detect_ai(video_path: str) -> int:
     # Calibrated: Bus AI=21 (has 1 big cut spike), Moose AI=1.5 (no spikes at all)
     # Real emergencies: typically 5-30+ with multiple spikes throughout
     # Guard: only meaningful for non-static content
-    if avg_motion > 3.0 and not is_static_content and not _is_short_clip and not _is_talking_head and not (_is_portrait and avg_edge < 30.0):
+    if avg_motion > 3.0 and not is_static_content and not _is_short_clip and not _is_talking_head and not _is_single_subject and not (_is_portrait and avg_edge < 30.0):
         if peak_to_mean_ratio < 2.0:
             # Completely flat motion — no reactions at all (Moose-style)
             ai_score += 10
@@ -885,7 +909,7 @@ def detect_ai(video_path: str) -> int:
     _sync_thresh_strong = 0.05 if is_action_content else 0.06
     _sync_thresh_med    = 0.07 if is_action_content else 0.09
     _sync_thresh_slight = 0.09 if is_action_content else 0.105
-    if avg_motion > 3.0 and not is_static_content and not _is_selfie_content and not _is_talking_head and not (_is_portrait and avg_edge < 30.0):
+    if avg_motion > 3.0 and not is_static_content and not _is_selfie_content and not _is_talking_head and not _is_single_subject and not (_is_portrait and avg_edge < 30.0):
         if motion_sync < _sync_thresh_strong:
             ai_score += 14
             log.info("MOTION_SYNC %.3f → extreme lockstep crowd → +14", motion_sync)
@@ -928,10 +952,10 @@ def detect_ai(video_path: str) -> int:
     _quad_thresh_strong = 0.18 if _is_portrait else 0.40
     _quad_thresh_med    = 0.30 if _is_portrait else 0.50
     _quad_thresh_slight = 0.55 if _is_portrait else 0.55
-    if quad_cov < _quad_thresh_strong and not _is_talking_head:
+    if quad_cov < _quad_thresh_strong and not _is_talking_head and not _is_single_subject:
         ai_score += 14
         log.info("QUAD_COV %.3f → very uniform render focus → +14", quad_cov)
-    elif quad_cov < _quad_thresh_med and not _is_talking_head:
+    elif quad_cov < _quad_thresh_med and not _is_talking_head and not _is_single_subject:
         ai_score += 8
         log.info("QUAD_COV %.3f → uniform render focus → +8", quad_cov)
     elif quad_cov < _quad_thresh_slight:
@@ -948,10 +972,11 @@ def detect_ai(video_path: str) -> int:
 
     # Build content_type string for GPT context
     _content_type = (
-        "action"       if is_action_content  else
-        "talking_head" if _is_talking_head   else
-        "selfie"       if _is_selfie_content else
-        "static"       if is_static_content  else
+        "action"          if is_action_content  else
+        "talking_head"    if _is_talking_head   else
+        "single_subject"  if _is_single_subject else
+        "selfie"          if _is_selfie_content else
+        "static"          if is_static_content  else
         "cinematic"
     )
 
