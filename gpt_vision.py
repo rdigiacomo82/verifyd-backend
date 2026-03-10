@@ -1,25 +1,40 @@
 # ============================================================
-#  VeriFYD — gpt_vision.py
+#  VeriFYD — gpt_vision.py  v5
 #
 #  GPT-4o vision analysis for AI video detection.
-#  Extracts key frames from video and sends to GPT-4o for
-#  semantic analysis — detects impossible elements, AI art
-#  artifacts, unnatural physics, and content anomalies that
-#  pure signal analysis cannot catch.
 #
-#  Returns a 0-100 AI confidence score + reasoning text.
-#  Designed to run alongside detector.py for a combined verdict.
+#  v5 ARCHITECTURE — Structured 12-Dimension Rubric:
 #
-#  v3: Added threading semaphore, increased retry waits.
-#  v4: Added cinematic/animal/nature AI detection prompt section.
-#      GPT now explicitly checks for:
-#      - Plastic/waxy fur and skin texture
-#      - Unnaturally smooth animal movement
-#      - CGI-quality lighting and reflections
-#      - Background that looks rendered vs photographed
-#      - Oversaturated "cinematic AI" color grading
-#      Updated physics context builder to pass sat_std,
-#      bg_drift, and flicker_std signals to GPT.
+#  Previously: one narrative prompt → one number (inconsistent,
+#  undebuggable, can't tune individual dimensions).
+#
+#  Now: GPT scores 12 independent dimensions 0-10 with a
+#  required reason per dimension. Python computes the final
+#  score using content-type-aware weights. This gives:
+#    - Reproducible scores (same video → same result)
+#    - Per-dimension debugging (know exactly what fired)
+#    - Generator fingerprinting (Sora vs Kling vs Pika)
+#    - Tunable weights per content type without re-prompting
+#    - Full evidence trail stored per job
+#
+#  DIMENSIONS (0=definitely real, 10=definitely AI):
+#    1.  skin_texture       — pores/grain vs waxy/smooth
+#    2.  hair_detail        — individual strands vs helmet mass
+#    3.  eye_quality        — natural imperfection vs glassy/symmetric
+#    4.  motion_physics     — inertia/weight vs floaty/smooth CGI
+#    5.  background_realism — photographed depth vs rendered/stock
+#    6.  lighting_coherence — consistent real source vs AI-perfect
+#    7.  temporal_stability — frame consistency vs flicker/morph
+#    8.  color_naturalism   — camera palette vs hyperreal/flat
+#    9.  crowd_behavior     — organic chaos vs synchronized/scripted
+#    10. text_objects       — readable/stable vs garbled/morphing
+#    11. physics_violations — plausible motion vs impossible motion
+#    12. generator_artifacts— no AI evidence vs explicit AI label
+#
+#  FRAME STRATEGY:
+#    - 8 frames at 'high' detail for person content (skin/eye texture)
+#    - 8 frames at 'low' detail for non-person content
+#    - Spread: 5%–95% of video to avoid title/end cards
 # ============================================================
 
 import os
@@ -38,14 +53,113 @@ log = logging.getLogger("verifyd.gpt_vision")
 # ─────────────────────────────────────────────────────────────
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 GPT_MODEL      = os.environ.get("VERIFYD_GPT_MODEL", "gpt-4o")
-MAX_FRAMES     = 6
-FRAME_QUALITY  = 80
-MAX_DIMENSION  = 512
+MAX_FRAMES     = 8           # increased from 6
+FRAME_QUALITY  = 85          # increased from 80
+MAX_DIMENSION  = 768         # increased from 512
 
 # ─────────────────────────────────────────────────────────────
 #  Concurrency limiter — max 3 simultaneous GPT calls
 # ─────────────────────────────────────────────────────────────
 _gpt_semaphore = threading.Semaphore(3)
+
+
+# ─────────────────────────────────────────────────────────────
+#  Dimension definitions & content-type-aware weights
+# ─────────────────────────────────────────────────────────────
+
+DIMENSIONS = [
+    "skin_texture",
+    "hair_detail",
+    "eye_quality",
+    "motion_physics",
+    "background_realism",
+    "lighting_coherence",
+    "temporal_stability",
+    "color_naturalism",
+    "crowd_behavior",
+    "text_objects",
+    "physics_violations",
+    "generator_artifacts",
+]
+
+# Base weights (unnormalized — normalized at runtime)
+_BASE_WEIGHTS = {
+    "skin_texture":       1.5,
+    "hair_detail":        1.2,
+    "eye_quality":        1.3,
+    "motion_physics":     1.5,
+    "background_realism": 1.0,
+    "lighting_coherence": 0.8,
+    "temporal_stability": 1.2,
+    "color_naturalism":   0.8,
+    "crowd_behavior":     0.8,
+    "text_objects":       0.6,
+    "physics_violations": 2.0,   # always high — impossible physics = certain AI
+    "generator_artifacts":2.5,   # always highest — explicit label = certain AI
+}
+
+# Per-content-type multipliers applied on top of base weights
+_CONTENT_WEIGHTS = {
+    "talking_head": {
+        "skin_texture": 2.5, "hair_detail": 2.0, "eye_quality": 2.5,
+        "motion_physics": 0.7, "crowd_behavior": 0.2, "background_realism": 0.6,
+    },
+    "selfie": {
+        "skin_texture": 2.5, "hair_detail": 2.0, "eye_quality": 2.5,
+        "motion_physics": 0.4, "crowd_behavior": 0.2, "background_realism": 0.6,
+    },
+    "single_subject": {
+        "skin_texture": 2.0, "hair_detail": 1.5, "eye_quality": 1.5,
+        "background_realism": 1.5, "motion_physics": 1.2,
+    },
+    "action": {
+        "motion_physics": 2.5, "physics_violations": 2.5,
+        "temporal_stability": 1.5, "crowd_behavior": 1.5,
+        "skin_texture": 0.7, "hair_detail": 0.5,
+    },
+    "cinematic": {
+        "background_realism": 2.0, "lighting_coherence": 1.8,
+        "color_naturalism": 1.5, "motion_physics": 1.8,
+        "skin_texture": 1.2, "hair_detail": 0.7,
+    },
+    "static": {
+        "background_realism": 1.8, "lighting_coherence": 1.8,
+        "color_naturalism": 1.5, "temporal_stability": 0.5,
+        "motion_physics": 0.4,
+    },
+}
+
+
+def _get_weights(content_type: str) -> dict:
+    """Return normalized per-dimension weights for a given content type."""
+    weights = dict(_BASE_WEIGHTS)
+    for dim, mult in _CONTENT_WEIGHTS.get(content_type, {}).items():
+        weights[dim] = weights.get(dim, 1.0) * mult
+    total = sum(weights.values())
+    return {k: v / total for k, v in weights.items()}
+
+
+def _scores_to_ai_probability(scores: dict, content_type: str) -> int:
+    """
+    Convert per-dimension 0–10 scores → 0–100 AI probability.
+    Hard floor rules for unambiguous signals:
+      generator_artifacts >= 8 → floor 90
+      physics_violations  >= 8 → floor 80
+      any dimension       >= 9 → floor 75
+    """
+    weights = _get_weights(content_type)
+    weighted_sum = sum(scores.get(d, 5) * weights.get(d, 0) for d in DIMENSIONS)
+    prob = int(round(weighted_sum * 10))
+    prob = max(0, min(100, prob))
+
+    if scores.get("generator_artifacts", 0) >= 8:
+        prob = max(prob, 90)
+    if scores.get("physics_violations", 0) >= 8:
+        prob = max(prob, 80)
+    if any(scores.get(d, 0) >= 9 for d in DIMENSIONS):
+        prob = max(prob, 75)
+
+    return prob
 
 
 # ─────────────────────────────────────────────────────────────
@@ -55,13 +169,13 @@ def extract_key_frames(video_path: str, n_frames: int = MAX_FRAMES) -> list:
     """
     Extract n evenly-spaced frames from the video.
     Returns list of base64-encoded JPEG strings.
-    Converts WebM/MKV to MP4 first since cv2 cannot read WebM reliably.
+    Converts WebM/MKV/MOV to MP4 first for cv2 reliability.
     """
-    import subprocess, shutil
+    import subprocess
 
     converted_path = None
     ext = os.path.splitext(video_path)[1].lower()
-    if ext in ('.webm', '.mkv', '.ogg'):
+    if ext in ('.webm', '.mkv', '.ogg', '.mov'):
         try:
             tmp = tempfile.NamedTemporaryFile(suffix='.mp4', delete=False)
             converted_path = tmp.name
@@ -72,7 +186,7 @@ def extract_key_frames(video_path: str, n_frames: int = MAX_FRAMES) -> list:
                 capture_output=True, timeout=60
             )
             if result.returncode == 0 and os.path.exists(converted_path):
-                log.info("gpt_vision: converted %s -> mp4 for frame extraction", ext)
+                log.info("gpt_vision: converted %s → mp4 for frame extraction", ext)
                 video_path = converted_path
             else:
                 log.warning("gpt_vision: ffmpeg conversion failed, trying original")
@@ -118,24 +232,168 @@ def extract_key_frames(video_path: str, n_frames: int = MAX_FRAMES) -> list:
     cap.release()
     if converted_path and os.path.exists(converted_path):
         os.remove(converted_path)
+
     log.info("gpt_vision: extracted %d frames from %s", len(frames_b64), video_path)
     return frames_b64
 
 
 # ─────────────────────────────────────────────────────────────
+#  The 12-dimension scoring prompt
+# ─────────────────────────────────────────────────────────────
+
+_DIMENSION_GUIDE = """\
+You are a forensic AI video detection expert. Score each of the 12 dimensions below
+from 0 to 10, where:
+  0  = strongly real  (clear evidence this is genuine camera footage)
+  5  = uncertain / not visible / not applicable to this content
+  10 = strongly AI    (clear evidence of synthesis or manipulation)
+
+Score ONLY what you can actually observe. If a dimension is not visible in these
+frames (e.g. no people visible → skin_texture is N/A → score 5), score it exactly 5.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ FAST-PATH: BROADCAST / NEWS FOOTAGE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+If you see a NEWS NETWORK LOGO (BBC, CNN, Fox, Reuters, AP, Sky, NBC, ABC, CBS)
+COMBINED WITH news lower-thirds, chyrons, or a press briefing room podium:
+→ Score ALL 12 dimensions as 1 and explain in reasoning. This is real broadcast.
+A TikTok or Instagram watermark ALONE does not qualify — AI videos are posted there.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ DO NOT PENALIZE COMPRESSION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Blockiness, grain, blur, pixelation from social media re-compression are normal in
+REAL videos. Score dimensions on the underlying content — not on compression quality.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ THE 12 DIMENSIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. SKIN_TEXTURE
+   0-2 = Real: visible pores, subtle redness/variation, natural color heterogeneity,
+         fine lines, natural imperfections, subsurface scattering in ears/nose.
+   8-10= AI:   porcelain-smooth, uniform color, airbrushed/plastic quality, no pores,
+         no texture variation under any lighting. "Too perfect" is the tell.
+   5   = No skin visible in frames, or too compressed to assess.
+
+2. HAIR_DETAIL
+   0-2 = Real: individual strands visible, flyaways, directional variation, matte
+         roots vs. glossy tips, color variation strand-to-strand.
+   8-10= AI:   rendered as a uniform mass, helmet-like, too smooth, all strands
+         perfectly aligned, lacks micro-chaos of real hair.
+   5   = No hair visible, or too compressed to assess.
+
+3. EYE_QUALITY
+   0-2 = Real: irregular catchlights (environmental), natural sclera amount, asymmetric
+         iris, realistic moisture, natural lid droop, slight redness.
+   8-10= AI:   perfectly symmetric, too bright, circular studio catchlights, too much
+         white sclera (wide stare), glassy doll quality, identical in every frame.
+   5   = Eyes not visible or too small to assess.
+
+4. MOTION_PHYSICS
+   0-2 = Real: subjects decelerate with inertia, hair/clothing lag behind body,
+         foot-ground contact causes compression, impact creates visible reaction.
+   8-10= AI:   fluid and frictionless, no inertia delay, objects move with perfect
+         smoothness like CGI, no secondary motion in hair or fabric.
+   5   = Static video or motion not assessable.
+
+5. BACKGROUND_REALISM
+   0-2 = Real: natural depth variation, real leaves with irregular edges, real
+         bokeh following depth of field, environmental context (dirt, debris, shadows).
+   8-10= AI:   synthetic circular bokeh, vegetation looks repetitive/rendered,
+         background resembles stock photo, subject and background have mismatched lighting.
+   5   = Background not visible or not enough context.
+
+6. LIGHTING_COHERENCE
+   0-2 = Real: shadows from consistent real source, rim light follows environment,
+         winter outdoor = cool blue-tinted diffuse, indoor = warm uneven.
+   8-10= AI:   too diffuse and perfect (render-farm quality), OR incoherent (shadows
+         in different directions), OR subject lit differently from background.
+   5   = Lighting not assessable.
+
+7. TEMPORAL_STABILITY
+   0-2 = Stable: texture, geometry, and lighting are consistent across frames.
+   8-10= Unstable: subtle flickering in fine details, texture changes between frames,
+         face geometry drifts slightly, background elements appear/disappear.
+   Compare multiple frames carefully. Does any fine detail shift in ways a real camera
+   wouldn't produce?
+
+8. COLOR_NATURALISM
+   0-2 = Real: slightly muted, natural gamut, color variation across scene, subtle
+         color noise in shadows. Outdoor overcast = slightly cool and desaturated.
+   8-10= AI:   oversaturated "candy" colors, suspiciously perfect color gradients,
+         or bizarrely flat/uniform color with no natural variation.
+   5   = Color not assessable.
+
+9. CROWD_BEHAVIOR  (score 5 if no crowd / multiple people in scene)
+   0-2 = Real: individuals move independently, unpredictable, genuine emotional
+         reactions (flinching, running, recording), organic chaos.
+   8-10= AI:   synchronized movement, uniform crowd behavior, bystanders too calm
+         for the event severity, people act as if central event isn't happening.
+
+10. TEXT_OBJECTS  (score 5 if no text visible in scene)
+    0-2 = Real: visible text (signs, labels, screens) is readable and stable across frames.
+    8-10= AI:   text is garbled, morphing, misspelled, or transforms between frames.
+          AI generators still struggle with consistent text rendering.
+
+11. PHYSICS_VIOLATIONS  ← MOST IMPORTANT DIMENSION
+    0-2 = Real: objects obey gravity, water flows down, human trajectories follow
+          parabolic arcs, no body part bends at impossible angles.
+    8-10= AI:   people floating upward against gravity on slides/slopes, water flowing
+          the wrong direction, limbs bending impossibly, body rising without physical cause.
+    Score 10 for any clear, unambiguous physics violation. This is dispositive.
+
+12. GENERATOR_ARTIFACTS  ← SECOND MOST IMPORTANT DIMENSION
+    0-2 = No AI labels, watermarks, or known generator signatures visible.
+    8-10= Explicit AI evidence: text saying "AI-generated", "Sora", "Kling", "Runway",
+          "Pika", "Midjourney", "DALL-E", or visible AI tool watermark.
+    6-8 = Strong known generator signature without explicit label:
+          Sora: characteristic smooth particle systems, slightly dreamlike depth.
+          Kling: portrait-mode compression blur, subtle face warping on motion.
+          Pika: color bloom on edges, slightly over-sharpened subjects.
+          Runway: cinematic color grading, smooth camera moves, slight temporal flicker.
+          HeyGen/D-ID: talking-head with slightly too-smooth skin and perfect eye contact.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Respond ONLY with this exact JSON — no markdown, no preamble, no extra text:
+{
+  "scores": {
+    "skin_texture": <0-10>,
+    "hair_detail": <0-10>,
+    "eye_quality": <0-10>,
+    "motion_physics": <0-10>,
+    "background_realism": <0-10>,
+    "lighting_coherence": <0-10>,
+    "temporal_stability": <0-10>,
+    "color_naturalism": <0-10>,
+    "crowd_behavior": <0-10>,
+    "text_objects": <0-10>,
+    "physics_violations": <0-10>,
+    "generator_artifacts": <0-10>
+  },
+  "reasoning": "<one concise sentence overall assessment>",
+  "top_flags": ["<most significant finding>", "<second finding>", "<third finding>"],
+  "generator_guess": "<Sora | Kling | Runway | Pika | HeyGen | Unknown-AI | Real>"
+}
+"""
+
+
+# ─────────────────────────────────────────────────────────────
 #  GPT-4o Analysis
 # ─────────────────────────────────────────────────────────────
-def analyze_frames_with_gpt(frames_b64: list, physics_summary: str = "") -> dict:
+def analyze_frames_with_gpt(frames_b64: list, physics_summary: str = "",
+                             content_type: str = "cinematic") -> dict:
     """
-    Send frames to GPT-4o for semantic AI detection analysis.
-    Returns dict with: ai_probability (0-100), reasoning, flags
+    Send frames to GPT-4o for 12-dimension rubric scoring.
+    Returns dict: ai_probability, scores, reasoning, flags, generator_guess.
     """
     if not OPENAI_API_KEY:
         log.warning("gpt_vision: OPENAI_API_KEY not set — skipping GPT analysis")
-        return {"ai_probability": 50, "reasoning": "GPT analysis unavailable", "flags": []}
+        return _unavailable_result("GPT analysis unavailable — no API key")
 
     if not frames_b64:
-        return {"ai_probability": 50, "reasoning": "No frames extracted", "flags": []}
+        return _unavailable_result("No frames extracted")
 
     try:
         import urllib.request
@@ -143,212 +401,15 @@ def analyze_frames_with_gpt(frames_b64: list, physics_summary: str = "") -> dict
         import json
         import time
 
+        # Higher detail for person content where texture matters most
+        img_detail = "high" if content_type in ("talking_head", "selfie", "single_subject") else "low"
+
         content = [
             {
                 "type": "text",
                 "text": (
                     (physics_summary + "\n\n") if physics_summary else ""
-                ) + (
-                    "You are an expert AI-generated video detector. Determine if this video "
-                    "was AI-generated or is genuine real footage. Follow these steps in order.\n\n"
-
-                    "═══════════════════════════════════════\n"
-                    "STEP 1: BROADCAST GRAPHICS CHECK (DO THIS FIRST)\n"
-                    "═══════════════════════════════════════\n"
-                    "Look for ANY of these in the frames:\n"
-                    "- Network logos: BBC, CNN, Fox News, NBC, ABC, CBS, Sky News, Reuters, AP, etc.\n"
-                    "- News lower-third banners or chyrons with headline text\n"
-                    "- Social media watermarks: TikTok logo, @username handle, Instagram, YouTube\n"
-                    "- Date or timestamp overlays in any corner of the frame\n"
-                    "- News ticker or crawl text at bottom\n"
-                    "- Press conference podium, official microphone stand, briefing room\n"
-                    "- Sports broadcast graphics, scoreboards, or commentary overlays\n\n"
-                    "IF YOU DETECT A NEWS NETWORK LOGO + news lower-third OR podium: Score 0-20 MAXIMUM.\n"
-                    "IMPORTANT: A TikTok or Instagram watermark ALONE is NOT sufficient to lower the score.\n"
-                    "AI-generated videos are frequently posted to TikTok. Social media watermarks prove\n"
-                    "distribution, NOT authenticity. Only apply the low-score cap when you see a verified\n"
-                    "NEWS NETWORK LOGO (BBC, CNN, Fox, Reuters, AP etc.) combined with news graphics\n"
-                    "OR a real press conference/briefing room setting.\n\n"
-
-                    "═══════════════════════════════════════\n"
-                    "STEP 2: COMPRESSION AND SCENE CONTEXT\n"
-                    "═══════════════════════════════════════\n"
-                    "DO NOT flag these as AI — they are normal in real videos:\n"
-                    "- Blockiness, pixelation, grain, or blur from social media recompression\n"
-                    "- Vertical 9:16 crop of originally horizontal broadcast footage\n"
-                    "- Dark or uniform studio backgrounds (intentional in broadcast)\n"
-                    "- Controlled consistent studio lighting (intentional, not synthetic)\n"
-                    "- Minimal body movement — podium speakers and presenters are deliberately still\n"
-                    "- Consistent facial expressions — professional composure is normal\n"
-                    "- Static camera on tripod — standard broadcast technique\n"
-                    "- Dark suit against dark background — low contrast is normal in press briefings\n\n"
-
-                    "═══════════════════════════════════════\n"
-                    "STEP 3: GENUINE AI INDICATORS ONLY\n"
-                    "═══════════════════════════════════════\n"
-                    "Only flag as AI if you see CLEAR, UNAMBIGUOUS evidence:\n\n"
-
-                    "PHYSICS VIOLATIONS (score 85+):\n"
-                    "- GRAVITY VIOLATION: person rising or floating upward with no physical cause\n"
-                    "  * Person lifting off a waterslide, slope, or surface going UP against gravity\n"
-                    "  * Body rising far higher than any realistic jump could produce\n"
-                    "  * Person hovering or suspended mid-air for an impossible duration\n"
-                    "  * Trajectory curving upward instead of following a parabolic arc\n"
-                    "- Water flowing upward or splashes that are too perfect/symmetric/CGI\n"
-                    "- Limbs bending at anatomically impossible angles\n"
-                    "- Body proportions shifting or morphing between frames\n\n"
-
-                    "WATERSLIDE / ACTION SPORT SPECIFIC (score 80+):\n"
-                    "If you see a waterslide, ski slope, rollercoaster, parkour, or action sport:\n"
-                    "- Does the person rise ABOVE the surface without a ramp or physical jump?\n"
-                    "- Does the person float or hover at the peak of their trajectory?\n"
-                    "- Is the motion unnaturally smooth — real action is chaotic and jerky?\n"
-                    "- Are colors over-saturated vs natural outdoor/water environments?\n"
-                    "- Do water splashes look too perfect or computer-generated?\n"
-                    "If YES to any of these: score 80+.\n\n"
-
-                    "CINEMATIC / ANIMAL / WILDLIFE CONTENT (score 70+):\n"
-                    "If you see animals, wildlife, nature scenes, or cinematic footage,\n"
-                    "apply ALL of these checks — AI animal videos are a common deepfake category:\n\n"
-                    "- SNOW / WINTER ENVIRONMENT (high-priority AI tell):\n"
-                    "  AI generators render snow as a perfect uniform white surface with\n"
-                    "  mathematically smooth gradients and no real-world imperfections.\n"
-                    "  REAL snow: irregular surface, compaction tracks, shadows with blue tint,\n"
-                    "  wind-blown texture variation, footprints, debris, natural asymmetry.\n"
-                    "  AI snow: looks like a smooth white gradient or a painted backdrop.\n"
-                    "  No tracks, no shadows with correct directionality, no surface texture.\n"
-                    "  Snow edges (where snow meets ground/object) are too perfectly defined.\n"
-                    "  → If snow looks like a smooth white surface with no real texture: score 75+\n\n"
-                    "- ANIMAL-ENVIRONMENT INTERACTION:\n"
-                    "  REAL animals in snow: paws/hooves sink and displace snow, breath vapor\n"
-                    "  visible in cold air, fur/coat has snow particles caught in it,\n"
-                    "  movement disturbs the snow surface, body weight creates compression.\n"
-                    "  AI animals: glide across snow surface without displacing it, no breath\n"
-                    "  vapor, fur stays perfectly clean, no environmental interaction.\n"
-                    "  → If animal shows no physical interaction with environment: score 75+\n\n"
-                    "- LIGHTING IN WINTER SCENES:\n"
-                    "  REAL winter outdoor lighting: diffuse overcast light, blue-tinted shadows\n"
-                    "  on snow, subsurface scattering in snow near light sources, consistent\n"
-                    "  ambient occlusion. Color temperature is cool and slightly blue.\n"
-                    "  AI winter scenes: lighting is too warm or too neutral, shadows on snow\n"
-                    "  are grey not blue-tinted, overall scene has studio-lit quality.\n"
-                    "  → If winter lighting looks artificially warm or studio-lit: score 70+\n\n"
-                    "- FUR / FEATHER TEXTURE (most reliable tell):\n"
-                    "  Look closely at the animal's coat, fur, or feathers.\n"
-                    "  REAL: Individual hair strands visible, directional growth patterns,\n"
-                    "  natural clumping, matting, moisture variation, dirt/debris in fur.\n"
-                    "  AI: Fur appears as a smooth uniform mass — no individual strands,\n"
-                    "  looks like velvet, plush toy, or CGI render. Too perfect, too clean.\n"
-                    "  For dark-furred animals (gorilla, bear, black cat): AI renders dark fur\n"
-                    "  as a flat dark mass with no micro-detail. Real dark fur still shows\n"
-                    "  individual hair texture and light catching on strand tips.\n"
-                    "  → If fur looks like a render or plush toy: score 75+\n\n"
-                    "- SKIN / FACE TEXTURE:\n"
-                    "  REAL: Animal facial skin (around eyes, muzzle, pads) is dry, wrinkled,\n"
-                    "  leathery, pored — visibly aged and textured.\n"
-                    "  AI: Skin appears as a smooth gradient — no pores, no wrinkles, no\n"
-                    "  surface irregularity. Looks like polished rubber or painted silicone.\n"
-                    "  → If skin looks unnaturally smooth for the species: score 70+\n\n"
-                    "- EYES (very reliable — AI eyes are almost always wrong):\n"
-                    "  REAL animal eyes: small, irregular catchlights, wet-surface imperfect\n"
-                    "  reflections, mostly iris/pupil visible, natural occlusion from lids.\n"
-                    "  AI animal eyes: large symmetric perfectly round catchlights, too much\n"
-                    "  white sclera visible (human-like), eyes too bright and 'glassy',\n"
-                    "  reflections that look like perfectly placed studio lights.\n"
-                    "  → If eyes look too perfect, too bright, or too human: score 75+\n\n"
-                    "- BACKGROUND (AI compositing tell):\n"
-                    "  REAL outdoor footage: background has natural depth variation, real\n"
-                    "  leaves have irregular edges, lighting varies across the scene.\n"
-                    "  AI background: unnaturally uniform synthetic bokeh (flat blur),\n"
-                    "  vegetation looks repetitive/symmetric (rendered leaves), background\n"
-                    "  looks like a stock photo or nature documentary backdrop.\n"
-                    "  Subject and background often have mismatched lighting direction.\n"
-                    "  → If background looks rendered or like a stock photo: score 70+\n\n"
-                    "- MOVEMENT QUALITY:\n"
-                    "  REAL animals move with weight, muscle tension, and physical impact.\n"
-                    "  Knuckle-walking gorilla: impact shudder, muscle definition visible.\n"
-                    "  Running animals: fur ripples, body bounces with inertia.\n"
-                    "  AI animals: movement too smooth and fluid, like CGI animation.\n"
-                    "  No physical weight or inertia — moves like it is floating.\n"
-                    "  → If movement looks animated rather than physical: score 70+\n\n"
-                    "- GRAIN / SENSOR NOISE:\n"
-                    "  REAL camera footage: luminance noise visible in dark areas (fur, shadows).\n"
-                    "  AI renders: completely noise-free, or noise is too uniform/regular.\n"
-                    "  Dark fur in real footage should have visible grain. AI dark fur is clean.\n"
-                    "  → If dark regions are completely noise-free: score 65+\n\n"
-                    "- LIGHTING CONSISTENCY:\n"
-                    "  REAL outdoor: dappled shadows, uneven highlights from tree cover,\n"
-                    "  natural rim lighting, subsurface scattering in ears/thin skin areas.\n"
-                    "  AI: lighting follows a perfect gradient, looks like a render farm output,\n"
-                    "  too diffused and perfect, no harsh or unexpected shadows.\n"
-                    "  → If lighting looks like a professional CGI render: score 70+\n\n"
-                    "COMBINED ANIMAL SCORING: If you observe 3+ of the above tells, score 80+.\n"
-                    "If you observe fur texture issues AND eye issues together, score 80+.\n\n"
-
-
-                    "CROWD / EMERGENCY / REACTION CONTENT (score 75+):\n"
-                    "If you see crowds, emergencies, accidents, police, or public reactions:\n"
-                    "- REACTION TIMING: Do bystanders react with appropriate urgency and surprise?\n"
-                    "  Real emergencies trigger immediate, instinctive human reactions — flinching,\n"
-                    "  running, screaming, chaos. AI crowds often react too slowly, too calmly,\n"
-                    "  or not at all relative to the severity of what is happening.\n"
-                    "- CROWD BEHAVIOR: Are crowd members moving independently and chaotically?\n"
-                    "  Real crowds have organic, unpredictable individual movement — people bumping,\n"
-                    "  turning, pointing, using phones. AI crowds often move in unnaturally uniform\n"
-                    "  or synchronized patterns, or people seem frozen/static in the background.\n"
-                    "- POLICE/OFFICIAL RESPONSE: Do officers or officials respond with appropriate\n"
-                    "  urgency? Real police respond fast to active threats. AI scenes often show\n"
-                    "  officers standing or moving slowly even during active emergencies.\n"
-                    "- AUDIO-VISUAL SYNC (if inferrable from visual cues): Do mouths match speech?\n"
-                    "  Do crowd sounds match crowd movement? Do impact sounds match what you see?\n"
-                    "  AI videos frequently have audio that is mismatched, too clean, or generic\n"
-                    "  stock-sound-style reactions that don't match the specific visual event.\n"
-                    "- EMOTIONAL AUTHENTICITY: Do facial expressions match the situation?\n"
-                    "  Real emergency footage captures raw, uncontrolled human emotion.\n"
-                    "  AI faces often show neutral or slightly wrong expressions for the context.\n"
-                    "- SCENE LOGIC: Does everyone's behavior make sense for what is happening?\n"
-                    "  In real emergencies, people instinctively seek safety, help others, or record.\n"
-                    "  AI scenes often have people acting as if the event isn't happening.\n"
-                    "If reactions are too calm/slow, crowd movement is synchronized, or official\n"
-                    "response is disproportionately delayed: score 75+.\n\n"
-
-                    "AI GENERATION ARTIFACTS (score 70+):\n"
-                    "- Explicit AI label: 'AI-generated', 'Sora', 'Midjourney' etc. (score 95+)\n"
-                    "- Plastic/waxy skin with no natural pores or texture variation\n"
-                    "- Background that looks painted or rendered, not photographed\n"
-                    "- Text in the scene that is garbled or distorted\n"
-                    "- Objects morphing shape between frames\n"
-                    "- Lip sync visibly misaligned with speech\n"
-                    "- Eyes flickering or behaving unnaturally\n"
-                    "- Unnaturally smooth motion in action or animal content\n\n"
-
-                    "═══════════════════════════════════════\n"
-                    "SCORING GUIDE:\n"
-                    "═══════════════════════════════════════\n"
-                    "0-10:  Clearly real — broadcast verified OR obvious real-world footage\n"
-                    "       with natural motion, sensor noise, camera shake, and no AI tells.\n"
-                    "10-25: Likely real — natural physics and lighting, only compression\n"
-                    "       artifacts, slight ambiguity but no AI indicators present.\n"
-                    "25-45: Uncertain — some ambiguity, no strong evidence either way.\n"
-                    "45-65: Likely AI — multiple soft indicators present.\n"
-                    "65-85: Almost certainly AI — clear AI artifacts or physics violations.\n"
-                    "85+:   Definitely AI — explicit AI label or multiple unambiguous violations.\n\n"
-                    "IMPORTANT: If you see NO AI indicators at all — natural motion, real\n"
-                    "camera grain/shake, plausible physics, compression artifacts — score 0-15.\n"
-                    "Do NOT score 30-40 just because you are uncertain. Uncertainty with\n"
-                    "no AI evidence = low score (0-20). Only score above 25 if you see\n"
-                    "actual AI indicators, not just the absence of proof it is real.\n\n"
-
-                    "Respond ONLY with a JSON object:\n"
-                    "{\n"
-                    '  "ai_probability": <integer 0-100>,\n'
-                    '  "reasoning": "<one sentence summary>",\n'
-                    '  "flags": ["<specific finding 1>", "<specific finding 2>"]\n'
-                    "}\n"
-                    "For real videos list what real indicators you detected "
-                    "(e.g. 'BBC network logo detected in frame', 'Natural lip sync observed'). "
-                    "For AI videos list specific violations."
-                )
+                ) + _DIMENSION_GUIDE
             }
         ]
 
@@ -357,14 +418,14 @@ def analyze_frames_with_gpt(frames_b64: list, physics_summary: str = "") -> dict
                 "type": "image_url",
                 "image_url": {
                     "url": f"data:image/jpeg;base64,{b64}",
-                    "detail": "low"
+                    "detail": img_detail
                 }
             })
 
         payload = {
             "model":       GPT_MODEL,
             "messages":    [{"role": "user", "content": content}],
-            "max_tokens":  400,
+            "max_tokens":  800,         # increased from 400 — rubric needs room
             "temperature": 0.1,
         }
 
@@ -398,24 +459,189 @@ def analyze_frames_with_gpt(frames_b64: list, physics_summary: str = "") -> dict
             raise RuntimeError("GPT API failed after 4 attempts")
 
         raw_text = data["choices"][0]["message"]["content"].strip()
-        log.info("gpt_vision raw response: %s", raw_text[:200])
+        log.info("gpt_vision raw response: %s", raw_text[:300])
 
+        # Strip markdown fences if present
         if "```" in raw_text:
             raw_text = raw_text.split("```")[1]
             if raw_text.startswith("json"):
                 raw_text = raw_text[4:]
 
-        result    = json.loads(raw_text.strip())
-        ai_prob   = max(0, min(100, int(result.get("ai_probability", 50))))
-        reasoning = str(result.get("reasoning", ""))[:500]
-        flags     = [str(f)[:100] for f in result.get("flags", [])][:10]
+        result = json.loads(raw_text.strip())
 
-        log.info("gpt_vision: ai_probability=%d  flags=%s", ai_prob, flags)
-        return {"ai_probability": ai_prob, "reasoning": reasoning, "flags": flags}
+        # Extract and clamp scores
+        raw_scores = result.get("scores", {})
+        scores = {}
+        for dim in DIMENSIONS:
+            val = raw_scores.get(dim, 5)
+            scores[dim] = max(0, min(10, int(round(float(val)))))
+
+        # Compute weighted AI probability in Python
+        ai_prob = _scores_to_ai_probability(scores, content_type)
+
+        reasoning       = str(result.get("reasoning", ""))[:500]
+        top_flags       = [str(f)[:150] for f in result.get("top_flags", [])][:5]
+        generator_guess = str(result.get("generator_guess", "Unknown"))[:50]
+
+        log.info(
+            "gpt_vision: ai_prob=%d  content=%s  generator=%s  scores=%s",
+            ai_prob, content_type, generator_guess,
+            " ".join(f"{k[:4]}={v}" for k, v in scores.items())
+        )
+
+        return {
+            "ai_probability":   ai_prob,
+            "reasoning":        reasoning,
+            "flags":            top_flags,
+            "scores":           scores,
+            "generator_guess":  generator_guess,
+            "available":        True,
+        }
 
     except Exception as e:
         log.error("gpt_vision error: %s", e)
-        return {"ai_probability": 50, "reasoning": f"GPT analysis error: {str(e)[:100]}", "flags": []}
+        return {
+            "ai_probability":  50,
+            "reasoning":       f"GPT analysis error: {str(e)[:100]}",
+            "flags":           [],
+            "scores":          {},
+            "generator_guess": "Unknown",
+            "available":       False,
+        }
+
+
+def _unavailable_result(reason: str) -> dict:
+    return {
+        "ai_probability":  50,
+        "reasoning":       reason,
+        "flags":           [],
+        "scores":          {},
+        "generator_guess": "Unknown",
+        "available":       False,
+    }
+
+
+# ─────────────────────────────────────────────────────────────
+#  Signal detector context → GPT pre-amble
+# ─────────────────────────────────────────────────────────────
+def _build_physics_summary(ctx: dict) -> str:
+    """
+    Convert signal detector context dict into a focused visual inspection
+    guide for GPT. Only passes signals that have a visual correlate GPT
+    can actually confirm — avoids flooding GPT with numbers it can't see.
+    """
+    if not ctx:
+        return ""
+
+    content_type   = ctx.get("content_type", "cinematic")
+    signal_score   = ctx.get("signal_score")
+    sat_std        = ctx.get("sat_frame_std")
+    bg_drift       = ctx.get("bg_drift")
+    flicker_std    = ctx.get("flicker_std")
+    quad_cov       = ctx.get("quad_cov")
+    motion_sync    = ctx.get("motion_sync")
+    avg_saturation = ctx.get("avg_saturation")
+    flow_entropy   = ctx.get("flow_dir_entropy")
+    vert_flow      = ctx.get("vert_flow")
+
+    is_person = content_type in ("talking_head", "selfie", "single_subject")
+    is_action = content_type == "action"
+
+    lines = ["═══ SIGNAL DETECTOR PRE-ANALYSIS ═══"]
+    lines.append("Pixel-level detector measured these signals before you see the frames.")
+    lines.append("Use them to guide your visual inspection — confirm or override with what you observe.\n")
+
+    ct_labels = {
+        "talking_head":   "📱 PERSON VIDEO — talking head or active portrait",
+        "selfie":         "📱 SELFIE — static portrait",
+        "single_subject": "🎥 SINGLE PERSON IN FRAME — landscape",
+        "action":         "⚡ ACTION / SPORT CONTENT",
+        "cinematic":      "🎬 CINEMATIC / NATURE / ANIMAL",
+        "static":         "📷 STATIC / LOW-MOTION CONTENT",
+    }
+    lines.append(ct_labels.get(content_type, f"Content type: {content_type}"))
+
+    if signal_score is not None:
+        tier = ("HIGH — strong AI indicators" if signal_score > 60
+                else "LOW — consistent with real footage" if signal_score < 35
+                else "MODERATE — ambiguous")
+        lines.append(f"Signal score: {signal_score}/100 ({tier})\n")
+
+    # Only emit hints that map to something GPT can visually verify
+    hints = []
+
+    if vert_flow is not None and vert_flow < -0.5:
+        hints.append(
+            f"⚠ GRAVITY VIOLATION detected (vert_flow={vert_flow:.2f}). "
+            "Look for a person or object rising against gravity. "
+            "→ If confirmed: score physics_violations 8-10."
+        )
+
+    if sat_std is not None and sat_std < 3.0 and not is_person:
+        hints.append(
+            f"⚠ FROZEN LIGHTING (sat_std={sat_std:.2f}). "
+            "Look for unnaturally perfect AI-render lighting with no variation. "
+            "→ If confirmed: score lighting_coherence 7-9."
+        )
+
+    if avg_saturation is not None and avg_saturation > 130:
+        hints.append(
+            f"⚠ HYPERREAL SATURATION (sat_mean={avg_saturation:.0f}). "
+            "Look for candy-colored, oversaturated palette. "
+            "→ If confirmed: score color_naturalism 7-9."
+        )
+
+    if bg_drift is not None and bg_drift < 3.0:
+        hints.append(
+            f"⚠ FROZEN BACKGROUND (bg_drift={bg_drift:.2f}). "
+            "Background corners are nearly static — look for painted/rendered background. "
+            "→ If confirmed: score background_realism 7-9."
+        )
+
+    if flicker_std is not None and flicker_std > 4.0:
+        hints.append(
+            f"⚠ FRAME FLICKER (flicker_std={flicker_std:.2f}). "
+            "Compare frames for subtle texture or geometry changes. "
+            "→ If confirmed: score temporal_stability 7-9."
+        )
+
+    if quad_cov is not None and quad_cov < 0.40:
+        hints.append(
+            f"⚠ UNIFORM RENDER FOCUS (quad_cov={quad_cov:.3f}). "
+            "All frame quadrants are identically sharp — real cameras have DOF variation. "
+            "→ If confirmed: score background_realism 7-9."
+        )
+
+    if motion_sync is not None and motion_sync < 0.09 and not is_person:
+        hints.append(
+            f"⚠ LOCKSTEP MOTION (sync={motion_sync:.3f}). "
+            "Left/right halves move identically — AI crowd signature. "
+            "→ If confirmed: score crowd_behavior 7-9."
+        )
+
+    if flow_entropy is not None and flow_entropy < 1.5 and is_action:
+        hints.append(
+            f"⚠ UNIFORM CROWD MOTION (entropy={flow_entropy:.3f}). "
+            "All motion vectors same direction — real action is chaotic. "
+            "→ If confirmed: score crowd_behavior 7-9."
+        )
+
+    if is_person:
+        hints.append(
+            "✓ PERSON CONTENT: Focus closely on skin_texture, hair_detail, eye_quality. "
+            "Score 0-3 if skin/hair/eyes look genuinely real with natural imperfections."
+        )
+
+    if hints:
+        lines.append("VISUAL INSPECTION PRIORITIES:")
+        for h in hints:
+            lines.append(f"  {h}")
+
+    lines.append("\n═══════════════════════════════════════")
+    lines.append("Now score all 12 dimensions based on what you observe in the frames.")
+    lines.append("")
+
+    return "\n".join(lines)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -423,16 +649,17 @@ def analyze_frames_with_gpt(frames_b64: list, physics_summary: str = "") -> dict
 # ─────────────────────────────────────────────────────────────
 def gpt_vision_score(video_path: str) -> dict:
     """
-    Main entry point. Extract frames and run GPT-4o analysis.
-    Returns dict with ai_probability (0-100), reasoning, flags.
+    Main entry point — no signal context.
+    Extract frames and run GPT-4o rubric analysis.
+    Returns dict: ai_probability, scores, reasoning, flags, generator_guess.
     """
     if not OPENAI_API_KEY:
         log.warning("gpt_vision: OPENAI_API_KEY not configured")
-        return {"ai_probability": 50, "reasoning": "GPT vision not configured", "flags": [], "available": False}
+        return _unavailable_result("GPT vision not configured")
 
     frames = extract_key_frames(video_path)
     if not frames:
-        return {"ai_probability": 50, "reasoning": "Could not extract frames", "flags": [], "available": False}
+        return _unavailable_result("Could not extract frames")
 
     result = analyze_frames_with_gpt(frames)
     result["available"] = True
@@ -441,220 +668,20 @@ def gpt_vision_score(video_path: str) -> dict:
 
 def gpt_vision_score_with_context(frames_b64: list, physics_context: dict) -> dict:
     """
-    Run GPT-4o analysis with physics engine context pre-loaded.
-    physics_context dict contains signal detector findings to guide GPT.
+    Primary entry point — with signal detector context.
+    physics_context dict contains measured signals from detector.py.
+    Returns dict: ai_probability, scores, reasoning, flags, generator_guess.
     """
     if not OPENAI_API_KEY:
-        return {"ai_probability": 50, "reasoning": "GPT vision not configured", "flags": [], "available": False}
+        return _unavailable_result("GPT vision not configured")
 
     if not frames_b64:
-        return {"ai_probability": 50, "reasoning": "Could not extract frames", "flags": [], "available": False}
+        return _unavailable_result("Could not extract frames")
 
+    content_type    = physics_context.get("content_type", "cinematic")
     physics_summary = _build_physics_summary(physics_context)
-    result = analyze_frames_with_gpt(frames_b64, physics_summary)
+    result          = analyze_frames_with_gpt(frames_b64, physics_summary, content_type)
     result["available"] = True
     return result
-
-
-def _build_physics_summary(ctx: dict) -> str:
-    """Convert physics context dict into a natural language summary for GPT."""
-    if not ctx:
-        return ""
-
-    lines = []
-    signal_score = ctx.get("signal_score")
-    vert_flow    = ctx.get("vert_flow")
-    upward_ratio = ctx.get("upward_ratio")
-    accel_std    = ctx.get("accel_std")
-    low_corr     = ctx.get("low_corr_count")
-    saturation   = ctx.get("avg_saturation")
-    sharpness    = ctx.get("avg_sharpness")
-    # NEW v4 context fields
-    sat_std      = ctx.get("sat_frame_std")
-    bg_drift     = ctx.get("bg_drift")
-    flicker_std  = ctx.get("flicker_std")
-    # NEW v6 context fields
-    quad_cov     = ctx.get("quad_cov")         # low = uniform AI render focus
-    fg_bg_ratio  = ctx.get("fg_bg_ratio")      # high = unnatural depth
-    motion_sync  = ctx.get("motion_sync")      # low = lockstep AI crowd
-    # Behavioral signals
-    flow_entropy = ctx.get("flow_dir_entropy") # low = uniform AI crowd motion
-    peak_ratio   = ctx.get("peak_to_mean_ratio") # low = no reaction spikes
-    # v9 content type
-    content_type = ctx.get("content_type", "cinematic")  # selfie / talking_head / action / cinematic
-    is_talking_head = content_type == "talking_head"
-    is_selfie = content_type == "selfie"
-    is_single_subject = content_type == "single_subject"
-
-    lines.append("═══════════════════════════════════════")
-    lines.append("SIGNAL DETECTOR PRE-ANALYSIS (v4 — measured before you see these frames):")
-    lines.append("Use this data to guide and confirm your visual analysis.\n")
-
-    # ── Content type notice ──
-    if is_talking_head:
-        lines.append("📱 CONTENT TYPE: TALKING-HEAD / ACTIVE PORTRAIT")
-        lines.append("   Signal detector identified this as a real person talking, walking, or moving on camera.")
-        lines.append("   IMPORTANT: The following are NORMAL for this content type — do NOT treat as AI signals:")
-        lines.append("   • Low saturation variance — skin tones + neutral clothing naturally dominate")
-        lines.append("   • Consistent edge density — single subject in a scene, not a crowd")
-        lines.append("   • Uniform motion sync — one person moves as one unit, not a scripted crowd")
-        lines.append("   • Uniform sharpness across frame — phone cameras focus on one subject")
-        lines.append("   • Smooth steady motion — a person walking or talking moves smoothly by nature")
-        lines.append("   • No sudden motion spikes — walking/talking has no emergency reaction bursts")
-        lines.append("   For this content type, ONLY flag AI if you see: unnatural skin smoothness,")
-        lines.append("   missing pores/imperfections, AI-typical hair (too perfect or floating),")
-        lines.append("   inconsistent lighting across frames, or morphing/glitching artifacts.")
-        lines.append("   A realistic-looking person on a phone video is almost certainly REAL.\n")
-    elif is_single_subject:
-        lines.append("🎥 CONTENT TYPE: SINGLE-SUBJECT PERSON VIDEO (LANDSCAPE)")
-        lines.append("   Signal detector identified this as a real person filmed in landscape orientation.")
-        lines.append("   IMPORTANT: The following are NORMAL for this content type — do NOT treat as AI signals:")
-        lines.append("   • Low saturation variance — skin tones + clothing naturally dominate the frame")
-        lines.append("   • Consistent edge density — camera is focused on one subject")
-        lines.append("   • Uniform sharpness across frame — camera locked onto a single person")
-        lines.append("   • Smooth steady motion — a person moving normally has no emergency reaction spikes")
-        lines.append("   • High skin ratio confirms a real human is the primary subject")
-        lines.append("   For this content type, ONLY flag AI if you see: unnatural skin smoothness,")
-        lines.append("   missing pores/imperfections, AI-typical hair or clothing texture,")
-        lines.append("   background inconsistencies, or morphing/glitching artifacts.")
-        lines.append("   A realistic person filmed on a camera is almost certainly REAL.\n")
-    elif is_selfie:
-        lines.append("📱 CONTENT TYPE: SELFIE / STATIC PORTRAIT")
-        lines.append("   Signal detector identified this as a phone selfie or portrait video.\n")
-
-    if signal_score is not None:
-        label = ("HIGH — strong AI indicators" if signal_score > 60
-                 else "LOW — consistent with real video" if signal_score < 40
-                 else "MODERATE — ambiguous")
-        lines.append(f"Overall AI signal score: {signal_score}/100 ({label})")
-
-    # ── Physics / motion ──
-    if vert_flow is not None:
-        if vert_flow < -1.0:
-            lines.append(f"⚠ GRAVITY VIOLATION: Mean vertical flow = {vert_flow:.2f} "
-                         f"(negative = upward motion against gravity). "
-                         f"Look for the person rising or floating above the surface.")
-        elif vert_flow < -0.3:
-            lines.append(f"⚠ Upward motion tendency: vertical flow = {vert_flow:.2f}. "
-                         f"Check if person appears to defy gravity.")
-        else:
-            lines.append(f"✓ Gravity-consistent motion: vertical flow = {vert_flow:.2f}.")
-
-    if upward_ratio is not None:
-        pct = upward_ratio * 100
-        if pct > 25:
-            lines.append(f"⚠ {pct:.0f}% of frames show strong upward motion — "
-                         f"physically impossible for slide/action content.")
-        elif pct < 10:
-            lines.append(f"✓ Only {pct:.0f}% upward-motion frames — consistent with real physics.")
-
-    if accel_std is not None:
-        if accel_std < 1.5:
-            lines.append(f"⚠ Unnaturally smooth trajectory (accel_std={accel_std:.2f}). "
-                         f"Real action is chaotic. AI motion is smooth.")
-        else:
-            lines.append(f"✓ Natural chaotic trajectory (accel_std={accel_std:.2f}).")
-
-    if low_corr is not None and low_corr > 5:
-        lines.append(f"⚠ {low_corr} frame discontinuities — content jumps typical of AI generation.")
-
-    # ── Color / lighting ──
-    if saturation is not None and saturation > 100:
-        lines.append(f"⚠ Over-saturated colors (saturation={saturation:.0f}) — "
-                     f"real outdoor footage is typically less saturated.")
-
-    if sat_std is not None:
-        if sat_std < 5.0 and not is_talking_head and not is_selfie and not is_single_subject:
-            lines.append(f"⚠ Frozen lighting detected (sat_std={sat_std:.2f}) — "
-                         f"natural lighting always varies. Possible AI render. "
-                         f"Look for unnaturally perfect, studio-quality lighting on the subject.")
-        elif sat_std < 5.0 and (is_talking_head or is_selfie or is_single_subject):
-            lines.append(f"✓ Low sat variance (sat_std={sat_std:.2f}) — expected for person video with skin/neutral tones.")
-        elif sat_std > 22.0:
-            lines.append(f"⚠ Unstable color/lighting (sat_std={sat_std:.2f}) — "
-                         f"flickering or inconsistent saturation typical of AI generation artifacts.")
-        else:
-            lines.append(f"✓ Natural lighting variation (sat_std={sat_std:.2f}).")
-
-    # ── Background stability ──
-    if bg_drift is not None:
-        if bg_drift < 3.0:
-            lines.append(f"⚠ Frozen background (bg_drift={bg_drift:.2f}) — "
-                         f"background corners are nearly static, suggesting a rendered/AI scene. "
-                         f"Look for a background that appears painted or computer-generated.")
-        elif bg_drift > 25.0:
-            lines.append(f"⚠ Warping background (bg_drift={bg_drift:.2f}) — "
-                         f"background is shifting unnaturally between frames, a common AI artifact. "
-                         f"Look for background elements that change or morph.")
-        else:
-            lines.append(f"✓ Natural background movement (bg_drift={bg_drift:.2f}).")
-
-    # ── Temporal consistency ──
-    if flicker_std is not None:
-        if flicker_std > 4.0:
-            lines.append(f"⚠ High temporal inconsistency (flicker_std={flicker_std:.2f}) — "
-                         f"frames are inconsistently rendered, typical of AI video generation. "
-                         f"Look for subtle frame-to-frame changes in texture, lighting, or detail.")
-        elif flicker_std < 1.0:
-            lines.append(f"✓ Temporally consistent frames (flicker_std={flicker_std:.2f}).")
-
-    if sharpness is not None and sharpness < 150:
-        lines.append(f"⚠ Low sharpness ({sharpness:.0f}) — AI videos tend to be softer than real camera footage.")
-
-    # ── v6: Render uniformity signals ──
-    if quad_cov is not None:
-        if quad_cov < 0.40:
-            lines.append(f"⚠ UNIFORM RENDER FOCUS (quad_cov={quad_cov:.3f}) — "
-                         f"sharpness is identical across all frame quadrants. "
-                         f"Real cameras have natural depth-of-field variation. "
-                         f"This is a strong AI render signature. Look for unnaturally "
-                         f"sharp subjects against suspiciously blurred/rendered backgrounds.")
-        elif quad_cov < 0.50 and not is_talking_head and not is_single_subject:
-            lines.append(f"⚠ Low depth-of-field variation (quad_cov={quad_cov:.3f}) — "
-                         f"focus is more uniform than expected for real camera footage.")
-
-    if fg_bg_ratio is not None and fg_bg_ratio > 900:
-        lines.append(f"⚠ EXTREME SUBJECT/BACKGROUND CONTRAST (fg_bg={fg_bg_ratio:.0f}) — "
-                     f"the subject is rendered at extreme sharpness vs the background. "
-                     f"This unnatural depth ratio is a strong AI compositing signature.")
-
-    if motion_sync is not None and motion_sync < 0.09 and not is_talking_head and not is_selfie and not is_single_subject:
-        lines.append(f"⚠ LOCKSTEP CROWD MOTION (sync={motion_sync:.3f}) — "
-                     f"left and right halves of frame move in near-identical patterns. "
-                     f"Real crowds have independent chaotic movement. AI crowds are scripted.")
-
-    lines.append("\n═══════════════════════════════════════")
-    lines.append("Now examine the frames with this context in mind.")
-    if bg_drift is not None and bg_drift < 3.0:
-        lines.append("→ Pay close attention to whether the background looks rendered or artificial.")
-    if sat_std is not None and sat_std < 5.0 and not is_talking_head and not is_selfie:
-        lines.append("→ Check if the subject's fur, skin, or texture looks unnaturally smooth or plastic.")
-        lines.append("→ For animals: look closely at fur for individual hair strands (real) vs smooth mass (AI).")
-        lines.append("→ Check animal eyes — AI eyes have large symmetric catchlights and look too bright.")
-    if is_talking_head:
-        lines.append("→ PORTRAIT FOCUS: Examine skin texture for natural pores, imperfections, subtle redness.")
-        lines.append("→ Check hair for individual strands, fly-aways, and natural lighting on hair tips.")
-        lines.append("→ Look for natural micro-expressions and spontaneous blinks/eye movement.")
-        lines.append("→ Check teeth, ears, and hands if visible — these are hard for AI to render naturally.")
-    if is_single_subject:
-        lines.append("→ PERSON FOCUS: Examine skin texture for natural pores, imperfections, and natural color variation.")
-        lines.append("→ Check clothing for realistic fabric wrinkles and natural lighting shadows.")
-        lines.append("→ Look for natural body movement — real people have subtle weight shifts and micro-movements.")
-        lines.append("→ Check the background for natural depth blur and environmental consistency.")
-    if flicker_std is not None and flicker_std > 4.0:
-        lines.append("→ Look for inconsistencies in fine details between frames.")
-    if quad_cov is not None and quad_cov < 0.50 and not is_talking_head and not is_single_subject:
-        lines.append("→ RENDER FLAG: Focus is suspiciously uniform. Check if this looks like a CGI render.")
-        lines.append("  Look for the 'uncanny valley' quality — too perfect to be real camera footage.")
-    if flow_entropy is not None and flow_entropy < 1.5:
-        lines.append("→ BEHAVIORAL FLAG: Motion analysis detected unnaturally uniform crowd/scene movement.")
-        lines.append("  Look carefully at whether bystanders react with appropriate urgency and chaos.")
-        lines.append("  Real emergencies produce unpredictable individual movement — AI scenes do not.")
-    if peak_ratio is not None and peak_ratio < 3.0 and not is_talking_head and not is_single_subject:
-        lines.append("→ BEHAVIORAL FLAG: No dramatic motion spikes detected — real emergency footage")
-        lines.append("  always has sudden reaction bursts. This scene's motion is too smooth/gradual.")
-    lines.append("")
-
-    return "\n".join(lines)
 
 
