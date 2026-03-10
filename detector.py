@@ -654,12 +654,16 @@ def detect_ai(video_path: str) -> int:
         ai_score += 6
 
     # ── 6. DCT grid artifact ─────────────────────────────────
-    _dct_reliable = (cap_w >= 480 and cap_h >= 480)
+    # Require at least one dimension >= 480 for reliable DCT block analysis.
+    # Portrait videos (320x568, 360x640) are common AI output formats — use height.
+    _dct_reliable = (cap_w >= 480 or cap_h >= 480)
     if _dct_reliable:
         if avg_dct_grid > 8.0:
             ai_score += 10
+            log.info("DCT %.3f → strong grid artifact → +10", avg_dct_grid)
         elif avg_dct_grid > 4.0:
             ai_score += 5
+            log.info("DCT %.3f → moderate grid artifact → +5", avg_dct_grid)
         elif avg_dct_grid > 2.0:
             ai_score += 2
         elif avg_dct_grid < 0.9:
@@ -810,6 +814,23 @@ def detect_ai(video_path: str) -> int:
         ai_score -= 6
         log.info("SAT_STD %.2f → natural range → -6", sat_frame_std)
 
+    # ── 16b. Absolute saturation level — hyperreal AI rendering ──
+    # AI video generators (Sora, Kling, RunwayML) render with hyperreal oversaturated
+    # color palettes far beyond what real camera sensors produce.
+    # Real cameras (outdoor bright): sat mean ~70-105
+    # Real cameras (indoor/skin): sat mean ~50-90
+    # AI hyperreal style (children, nature, animals): sat mean ~120-160
+    # Key: HIGH absolute saturation + FROZEN std = AI hyperreal rendering signature.
+    # Calibrated: AI_Child sat=138 sat_std=1.78 → fires; Real_Video_2 sat=89.8 → safe.
+    if avg_saturation > 130 and sat_frame_std < 8.0:
+        ai_score += 12
+        log.info("SAT_HYPERREAL sat=%.0f std=%.2f → frozen hyperreal AI color → +12",
+                 avg_saturation, sat_frame_std)
+    elif avg_saturation > 120 and sat_frame_std < 8.0:
+        ai_score += 7
+        log.info("SAT_HYPERREAL sat=%.0f std=%.2f → elevated frozen saturation → +7",
+                 avg_saturation, sat_frame_std)
+
     # ── 17. Background corner drift (NEW v4) ─────────────────
     # AI backgrounds: frozen (drift<2, Monkey=1.3) OR wildly warping (Bus=25.7, Moose=45.7).
     # Real: natural drift from camera movement (5–18).
@@ -923,22 +944,42 @@ def detect_ai(video_path: str) -> int:
     # Guard: only meaningful when multiple people / crowd is present
     # Selfie/talking-head guard: single person moves as one unit → naturally high sync
     # Action guard: single-subject action videos naturally have correlated L/R motion
+    # EXCEPTION: portrait action videos — these are often AI-generated person/child videos
+    # where the subject + background are both synthetic. Re-enable with tighter threshold.
     _sync_thresh_strong = 0.05 if is_action_content else 0.06
     _sync_thresh_med    = 0.07 if is_action_content else 0.09
     _sync_thresh_slight = 0.09 if is_action_content else 0.105
-    if avg_motion > 3.0 and not is_static_content and not _is_selfie_content and not _is_talking_head and not _is_single_subject and not (_is_portrait and avg_edge < 30.0):
-        if motion_sync < _sync_thresh_strong:
-            ai_score += 14
-            log.info("MOTION_SYNC %.3f → extreme lockstep crowd → +14", motion_sync)
-        elif motion_sync < _sync_thresh_med:
-            ai_score += 8
-            log.info("MOTION_SYNC %.3f → lockstep crowd → +8", motion_sync)
-        elif motion_sync < _sync_thresh_slight:
-            ai_score += 3
-            log.info("MOTION_SYNC %.3f → slightly synchronized → +3", motion_sync)
-        elif motion_sync > 0.13:
-            ai_score -= 4
-            log.info("MOTION_SYNC %.3f → natural independent motion → -4", motion_sync)
+    _portrait_action    = is_action_content and _is_portrait
+    # Portrait action: suppress the broad action guard — use tighter portrait-specific thresholds
+    _sync_guard = (
+        is_static_content or
+        _is_selfie_content or
+        _is_talking_head or
+        _is_single_subject or
+        (is_action_content and not _is_portrait and avg_edge < 30.0)  # landscape action with low edges only
+    )
+    if avg_motion > 3.0 and not _sync_guard:
+        if _portrait_action:
+            # Portrait action: tighter thresholds — suppress mild sync, catch extreme lockstep
+            if motion_sync < 0.07:
+                ai_score += 10
+                log.info("MOTION_SYNC %.3f → portrait action lockstep (AI subject) → +10", motion_sync)
+            elif motion_sync < 0.09:
+                ai_score += 5
+                log.info("MOTION_SYNC %.3f → portrait action moderate sync → +5", motion_sync)
+        else:
+            if motion_sync < _sync_thresh_strong:
+                ai_score += 14
+                log.info("MOTION_SYNC %.3f → extreme lockstep crowd → +14", motion_sync)
+            elif motion_sync < _sync_thresh_med:
+                ai_score += 8
+                log.info("MOTION_SYNC %.3f → lockstep crowd → +8", motion_sync)
+            elif motion_sync < _sync_thresh_slight:
+                ai_score += 3
+                log.info("MOTION_SYNC %.3f → slightly synchronized → +3", motion_sync)
+            elif motion_sync > 0.13:
+                ai_score -= 4
+                log.info("MOTION_SYNC %.3f → natural independent motion → -4", motion_sync)
 
     # ── 23. Hue entropy — color palette diversity (NEW v5) ───
     # AI videos use a limited/curated color palette (low hue entropy).
