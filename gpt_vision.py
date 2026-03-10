@@ -469,13 +469,18 @@ def _build_physics_summary(ctx: dict) -> str:
     # ── Content type notice ──
     if is_talking_head:
         lines.append("📱 CONTENT TYPE: TALKING-HEAD / ACTIVE PORTRAIT")
-        lines.append("   Signal detector identified this as a real person talking/moving on camera.")
-        lines.append("   Key real-world characteristics for this content type:")
-        lines.append("   • Low saturation variance is NORMAL (skin tones + neutral clothing dominate)")
-        lines.append("   • Consistent edge density is NORMAL (single subject, indoor scene)")
-        lines.append("   • High motion sync is NORMAL (one person moves as one unit)")
-        lines.append("   Focus your analysis on: face texture realism, natural micro-expressions,")
-        lines.append("   hair strand detail, skin pores/imperfections, and lighting consistency.\n")
+        lines.append("   Signal detector identified this as a real person talking, walking, or moving on camera.")
+        lines.append("   IMPORTANT: The following are NORMAL for this content type — do NOT treat as AI signals:")
+        lines.append("   • Low saturation variance — skin tones + neutral clothing naturally dominate")
+        lines.append("   • Consistent edge density — single subject in a scene, not a crowd")
+        lines.append("   • Uniform motion sync — one person moves as one unit, not a scripted crowd")
+        lines.append("   • Uniform sharpness across frame — phone cameras focus on one subject")
+        lines.append("   • Smooth steady motion — a person walking or talking moves smoothly by nature")
+        lines.append("   • No sudden motion spikes — walking/talking has no emergency reaction bursts")
+        lines.append("   For this content type, ONLY flag AI if you see: unnatural skin smoothness,")
+        lines.append("   missing pores/imperfections, AI-typical hair (too perfect or floating),")
+        lines.append("   inconsistent lighting across frames, or morphing/glitching artifacts.")
+        lines.append("   A realistic-looking person on a phone video is almost certainly REAL.\n")
     elif is_selfie:
         lines.append("📱 CONTENT TYPE: SELFIE / STATIC PORTRAIT")
         lines.append("   Signal detector identified this as a phone selfie or portrait video.\n")
@@ -567,7 +572,7 @@ def _build_physics_summary(ctx: dict) -> str:
                          f"Real cameras have natural depth-of-field variation. "
                          f"This is a strong AI render signature. Look for unnaturally "
                          f"sharp subjects against suspiciously blurred/rendered backgrounds.")
-        elif quad_cov < 0.50:
+        elif quad_cov < 0.50 and not is_talking_head:
             lines.append(f"⚠ Low depth-of-field variation (quad_cov={quad_cov:.3f}) — "
                          f"focus is more uniform than expected for real camera footage.")
 
@@ -596,14 +601,14 @@ def _build_physics_summary(ctx: dict) -> str:
         lines.append("→ Check teeth, ears, and hands if visible — these are hard for AI to render naturally.")
     if flicker_std is not None and flicker_std > 4.0:
         lines.append("→ Look for inconsistencies in fine details between frames.")
-    if quad_cov is not None and quad_cov < 0.50:
+    if quad_cov is not None and quad_cov < 0.50 and not is_talking_head:
         lines.append("→ RENDER FLAG: Focus is suspiciously uniform. Check if this looks like a CGI render.")
         lines.append("  Look for the 'uncanny valley' quality — too perfect to be real camera footage.")
     if flow_entropy is not None and flow_entropy < 1.5:
         lines.append("→ BEHAVIORAL FLAG: Motion analysis detected unnaturally uniform crowd/scene movement.")
         lines.append("  Look carefully at whether bystanders react with appropriate urgency and chaos.")
         lines.append("  Real emergencies produce unpredictable individual movement — AI scenes do not.")
-    if peak_ratio is not None and peak_ratio < 3.0:
+    if peak_ratio is not None and peak_ratio < 3.0 and not is_talking_head:
         lines.append("→ BEHAVIORAL FLAG: No dramatic motion spikes detected — real emergency footage")
         lines.append("  always has sudden reaction bursts. This scene's motion is too smooth/gradual.")
     lines.append("")
