@@ -521,19 +521,27 @@ def detect_ai(video_path: str) -> int:
 
     # ── Content type auto-detection ─────────────────────────
     # Used to guard v4 signals that overlap with fast-action real content
-    is_action_content = (avg_motion > 8.0 and avg_edge > 3.0)
+    # Edge threshold raised from 3 → 12: real action (sports, crowds, waterfalls)
+    # has rich edge content (20-40+). AI animal/nature videos have high motion but
+    # sparse edges (dark fur, smooth backgrounds) — edge=9 on Gorilla AI, 24 on Real_Video_2.
+    is_action_content = (avg_motion > 8.0 and avg_edge > 12.0)
     is_static_content = (avg_motion < 3.0)
 
     # ── Selfie / talking-head detection (v8) ────────────────
     # Portrait phone selfie: vertical aspect ratio + low motion + moderate sharpness.
     # These videos have naturally stable bg, stable lighting, low sync —
     # signals built for AI crowd detection must be suppressed for them.
+    # SKIN GATE: a real selfie always has a person — require skin_ratio > 0.05.
+    # This prevents AI animal/nature portrait videos (moose, gorilla in portrait mode)
+    # from falsely triggering the selfie guard and receiving a -12 real bonus.
+    # Calibrated: AI Moose Snow skin_ratio=0.000 → selfie=False ✓
     _is_portrait        = (cap_h > cap_w * 1.5)
     _is_selfie_content  = (
         _is_portrait                    # vertical phone video
         and avg_motion < 6.0            # mostly static subject
         and avg_edge < 20.0             # not busy/crowded scene
         and avg_sharpness > 100         # real camera sharpness (not AI-smooth 50-80)
+        and skin_ratio > 0.05           # must have a person — gates out AI animal videos
     )
 
     # ── Talking-head / active portrait detection (v9) ────────
@@ -599,18 +607,28 @@ def detect_ai(video_path: str) -> int:
     # ── 1. Sensor noise ──────────────────────────────────────
     # High Laplacian variance can also come from high-res AI renders.
     # Reduce negative adjustments to avoid masking other AI signals.
+    # Resolution-aware: a 720p/1080p video with noise=216 is LOW (AI-smooth).
+    # Real HD cameras produce noise 800-5000+. Scale the "real grain" lower
+    # bound by pixel count — larger frames naturally have higher Laplacian variance.
+    _px_count = cap_w * cap_h
+    _noise_real_low  = 300  if _px_count > 500_000 else 150   # HD: 720p+ needs 300+
+    _noise_real_high = 1000 if _px_count > 500_000 else 500
     if avg_noise < 45:
         ai_score += 12
     elif avg_noise < 60:
         ai_score += 5
     elif avg_noise < 80:
         ai_score += 2
-    if avg_noise > 500:
-        ai_score -= 8    # reduced from -16: high-res AI also scores high here
-    elif avg_noise > 150:
-        ai_score -= 5    # reduced from -10
+    elif avg_noise > _noise_real_high:
+        ai_score -= 8
+        log.info("NOISE %.1f → strong real camera grain → -8", avg_noise)
+    elif avg_noise > _noise_real_low:
+        ai_score -= 5
+        log.info("NOISE %.1f → real camera grain → -5", avg_noise)
     elif avg_noise > 100:
-        ai_score -= 2    # reduced from -5
+        ai_score -= 2
+    else:
+        log.info("NOISE %.1f → below real-camera threshold (%.0f) → no bonus", avg_noise, _noise_real_low)
 
     # ── 2. Frame sharpness ───────────────────────────────────
     # Reduced weight for cinematic content — high-res AI renders are very sharp.
@@ -656,9 +674,15 @@ def detect_ai(video_path: str) -> int:
     # ── 6. DCT grid artifact ─────────────────────────────────
     # Require at least one dimension >= 480 for reliable DCT block analysis.
     # Portrait videos (320x568, 360x640) are common AI output formats — use height.
+    # Extreme tier added: DCT>20 indicates heavily re-encoded AI generation artifact
+    # (AI video → social media compression → re-upload cycle amplifies DCT blocks).
+    # Calibrated: AI Moose Snow=29.2, AI Gorilla=19.1 vs Real_Video_2=5.1
     _dct_reliable = (cap_w >= 480 or cap_h >= 480)
     if _dct_reliable:
-        if avg_dct_grid > 8.0:
+        if avg_dct_grid > 20.0:
+            ai_score += 14
+            log.info("DCT %.3f → extreme grid artifact → +14", avg_dct_grid)
+        elif avg_dct_grid > 8.0:
             ai_score += 10
             log.info("DCT %.3f → strong grid artifact → +10", avg_dct_grid)
         elif avg_dct_grid > 4.0:
@@ -684,18 +708,6 @@ def detect_ai(video_path: str) -> int:
     # ── 9. Color channel correlation ─────────────────────────
     if avg_color_corr > 0.92:
         ai_score += 4
-
-    # ── 9b. Sensor noise bonus ───────────────────────────────
-    # Real cameras always have natural sensor/grain noise (8-20).
-    # AI renders are virtually noise-free (1-5).
-    # Only apply when not a screengrab/broadcast (low noise is normal there).
-    _is_broadcast_noise = (avg_saturation > 140)   # broadcast/studio has clean low noise
-    if avg_noise > 8.0 and not _is_broadcast_noise:
-        ai_score -= 5
-        log.info("NOISE %.1f → real camera grain → -5", avg_noise)
-    elif avg_noise > 6.0 and not _is_broadcast_noise:
-        ai_score -= 2
-        log.info("NOISE %.1f → moderate grain → -2", avg_noise)
 
     # ── 9c. Selfie bonus (v8) ────────────────────────────────
     # Portrait phone selfies are overwhelmingly real-world content.
