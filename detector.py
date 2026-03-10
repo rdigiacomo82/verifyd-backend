@@ -862,16 +862,18 @@ def detect_ai(video_path: str) -> int:
     # AI crowds have unnaturally uniform movement (low entropy).
     # Real emergency/crowd footage has chaotic multi-directional movement (high entropy).
     # Calibrated: Bus AI=1.73, Moose AI=2.34 vs Real action ~2.8+
-    # Only meaningful when significant motion is present
+    # Only meaningful when significant motion is present.
+    # Action guard: real action/sport videos have coordinated directional movement
+    # (e.g. a single athlete moving across frame) — suppress minor penalties for them.
     if avg_motion > 3.0 and len(flow_dir_scores) > 5 and not _is_short_clip:
         if avg_flow_dir_entropy < 1.5:
-            # Very uniform flow — strong AI crowd signal
+            # Very uniform flow — strong AI crowd signal (fires even for action)
             ai_score += 12
             log.info("FLOW_ENTROPY %.3f → uniform AI motion → +12", avg_flow_dir_entropy)
-        elif avg_flow_dir_entropy < 2.0:
+        elif avg_flow_dir_entropy < 2.0 and not is_action_content:
             ai_score += 7
             log.info("FLOW_ENTROPY %.3f → somewhat uniform → +7", avg_flow_dir_entropy)
-        elif avg_flow_dir_entropy < 2.5:
+        elif avg_flow_dir_entropy < 2.5 and not is_action_content:
             ai_score += 3
             log.info("FLOW_ENTROPY %.3f → slightly uniform → +3", avg_flow_dir_entropy)
         elif avg_flow_dir_entropy > 2.8:
@@ -884,13 +886,16 @@ def detect_ai(video_path: str) -> int:
     # AI videos have unnaturally smooth motion curves — no dramatic spikes.
     # Calibrated: Bus AI=21 (has 1 big cut spike), Moose AI=1.5 (no spikes at all)
     # Real emergencies: typically 5-30+ with multiple spikes throughout
-    # Guard: only meaningful for non-static content
+    # Guard: only meaningful for non-static content.
+    # Action guard: continuous action/sport videos have sustained high motion throughout
+    # — no "reaction spikes" is expected and normal, not an AI signal for them.
+    # Require motion_var > 5 for action content: truly flat AI motion has near-zero variance.
     if avg_motion > 3.0 and not is_static_content and not _is_short_clip and not _is_talking_head and not _is_single_subject and not (_is_portrait and avg_edge < 30.0):
-        if peak_to_mean_ratio < 2.0:
+        if peak_to_mean_ratio < 2.0 and not (is_action_content and motion_var > 3.0):
             # Completely flat motion — no reactions at all (Moose-style)
             ai_score += 10
             log.info("PEAK_RATIO %.2f → no reaction spikes → +10", peak_to_mean_ratio)
-        elif peak_to_mean_ratio < 3.5:
+        elif peak_to_mean_ratio < 3.5 and not is_action_content:
             ai_score += 5
             log.info("PEAK_RATIO %.2f → weak reaction spikes → +5", peak_to_mean_ratio)
 
@@ -959,18 +964,21 @@ def detect_ai(video_path: str) -> int:
     # with equal computational precision (low CoV = too uniform).
     # Calibrated: Gorilla=0.365, Bus=0.433, Moose=0.498
     #             Real Slide1=0.916, Real Slide2=0.581, Real Pres=0.725
-    # Portrait phone videos (h > w*1.5) have naturally lower quad CoV — relax thresholds
+    # Portrait phone videos (h > w*1.5) have naturally lower quad CoV — relax thresholds.
+    # Action guard: fast motion causes global motion blur across the entire frame,
+    # making all quadrants uniformly blurry — identical artifact to AI render uniformity.
+    # Real_Video_2: quad_cov=0.165 with is_action=True — all quadrants ~4000-6000 (sharp+blur mixed).
     _is_portrait = (cap_h > cap_w * 1.5)
     _quad_thresh_strong = 0.18 if _is_portrait else 0.40
     _quad_thresh_med    = 0.30 if _is_portrait else 0.50
     _quad_thresh_slight = 0.55 if _is_portrait else 0.55
-    if quad_cov < _quad_thresh_strong and not _is_talking_head and not _is_single_subject:
+    if quad_cov < _quad_thresh_strong and not _is_talking_head and not _is_single_subject and not is_action_content:
         ai_score += 14
         log.info("QUAD_COV %.3f → very uniform render focus → +14", quad_cov)
-    elif quad_cov < _quad_thresh_med and not _is_talking_head and not _is_single_subject:
+    elif quad_cov < _quad_thresh_med and not _is_talking_head and not _is_single_subject and not is_action_content:
         ai_score += 8
         log.info("QUAD_COV %.3f → uniform render focus → +8", quad_cov)
-    elif quad_cov < _quad_thresh_slight:
+    elif quad_cov < _quad_thresh_slight and not is_action_content:
         ai_score += 3
         log.info("QUAD_COV %.3f → slightly uniform → +3", quad_cov)
     elif quad_cov > 0.75:
