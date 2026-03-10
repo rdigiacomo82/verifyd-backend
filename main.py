@@ -1014,18 +1014,27 @@ def admin_reset_user(email: str = "", key: str = ""):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     if not email:
         return JSONResponse({"error": "email required"}, status_code=400)
-    import sqlite3
-    from datetime import datetime, timezone
-    db_path = "/data/verifyd.db" if os.path.isdir("/data") else "verifyd.db"
     try:
-        conn = sqlite3.connect(db_path)
-        conn.execute(
-            "UPDATE users SET period_uses=0, period_start=? WHERE email_lower=?",
-            (datetime.now(timezone.utc).isoformat(), email.lower())
-        )
-        conn.commit()
-        conn.close()
+        reset_period_uses(email)
         return {"status": "reset", "email": email}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/admin-upgrade-user/")
+def admin_upgrade_user(email: str = "", plan: str = "enterprise", key: str = ""):
+    """Upgrade a user to a paid plan. Admin only."""
+    if not _is_admin(key):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    if not email:
+        return JSONResponse({"error": "email required"}, status_code=400)
+    valid_plans = ["free", "creator", "pro", "enterprise"]
+    if plan not in valid_plans:
+        return JSONResponse({"error": f"invalid plan, must be one of {valid_plans}"}, status_code=400)
+    try:
+        get_or_create_user(email)
+        upgrade_user_plan(email, plan)
+        return {"status": "upgraded", "email": email, "plan": plan}
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
