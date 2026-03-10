@@ -531,7 +531,7 @@ def detect_ai(video_path: str) -> int:
     # Edge density stays consistent (single subject indoors) → LOW edge_std (not AI signal).
     # These are REAL characteristics that the AI-crowd signals incorrectly penalize.
     _talking_head_skin  = False
-    if _is_portrait and avg_motion > 8.0 and avg_edge > 25.0:
+    if _is_portrait and avg_motion > 8.0 and avg_edge > 18.0:
         # Quick skin tone check using center of frame
         try:
             sample_frame = gray_buffer[len(gray_buffer)//2]
@@ -549,7 +549,7 @@ def detect_ai(video_path: str) -> int:
     _is_talking_head = (
         _is_portrait
         and avg_motion > 8.0            # active — person is moving/talking
-        and avg_edge > 25.0             # rich edge content (hair, clothing, face detail)
+        and avg_edge > 18.0             # rich edge content (hair, clothing, face detail)
         and not _is_selfie_content      # not a static hold selfie
     )
 
@@ -849,7 +849,7 @@ def detect_ai(video_path: str) -> int:
     # Calibrated: Bus AI=21 (has 1 big cut spike), Moose AI=1.5 (no spikes at all)
     # Real emergencies: typically 5-30+ with multiple spikes throughout
     # Guard: only meaningful for non-static content
-    if avg_motion > 3.0 and not is_static_content and not _is_short_clip:
+    if avg_motion > 3.0 and not is_static_content and not _is_short_clip and not _is_talking_head and not (_is_portrait and avg_edge < 30.0):
         if peak_to_mean_ratio < 2.0:
             # Completely flat motion — no reactions at all (Moose-style)
             ai_score += 10
@@ -885,7 +885,7 @@ def detect_ai(video_path: str) -> int:
     _sync_thresh_strong = 0.05 if is_action_content else 0.06
     _sync_thresh_med    = 0.07 if is_action_content else 0.09
     _sync_thresh_slight = 0.09 if is_action_content else 0.105
-    if avg_motion > 3.0 and not is_static_content and not _is_selfie_content and not _is_talking_head:
+    if avg_motion > 3.0 and not is_static_content and not _is_selfie_content and not _is_talking_head and not (_is_portrait and avg_edge < 30.0):
         if motion_sync < _sync_thresh_strong:
             ai_score += 14
             log.info("MOTION_SYNC %.3f → extreme lockstep crowd → +14", motion_sync)
@@ -925,13 +925,13 @@ def detect_ai(video_path: str) -> int:
     #             Real Slide1=0.916, Real Slide2=0.581, Real Pres=0.725
     # Portrait phone videos (h > w*1.5) have naturally lower quad CoV — relax thresholds
     _is_portrait = (cap_h > cap_w * 1.5)
-    _quad_thresh_strong = 0.30 if _is_portrait else 0.40
-    _quad_thresh_med    = 0.40 if _is_portrait else 0.50
+    _quad_thresh_strong = 0.18 if _is_portrait else 0.40
+    _quad_thresh_med    = 0.30 if _is_portrait else 0.50
     _quad_thresh_slight = 0.55 if _is_portrait else 0.55
-    if quad_cov < _quad_thresh_strong:
+    if quad_cov < _quad_thresh_strong and not _is_talking_head:
         ai_score += 14
         log.info("QUAD_COV %.3f → very uniform render focus → +14", quad_cov)
-    elif quad_cov < _quad_thresh_med:
+    elif quad_cov < _quad_thresh_med and not _is_talking_head:
         ai_score += 8
         log.info("QUAD_COV %.3f → uniform render focus → +8", quad_cov)
     elif quad_cov < _quad_thresh_slight:
