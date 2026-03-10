@@ -676,7 +676,9 @@ def detect_ai(video_path: str) -> int:
     # Portrait videos (320x568, 360x640) are common AI output formats — use height.
     # Extreme tier added: DCT>20 indicates heavily re-encoded AI generation artifact
     # (AI video → social media compression → re-upload cycle amplifies DCT blocks).
-    # Calibrated: AI Moose Snow=29.2, AI Gorilla=19.1 vs Real_Video_2=5.1
+    # Calibrated: AI Moose Snow=29.2, AI Gorilla=19.1, AI Child=8.9 vs Real1=5.8, Real2=5.1
+    # Gap between real (~5) and AI (~9+) is clear — raised moderate threshold from 4.0→6.0
+    # so real videos with DCT 4-6 get +2 (minor) instead of +5 (moderate).
     _dct_reliable = (cap_w >= 480 or cap_h >= 480)
     if _dct_reliable:
         if avg_dct_grid > 20.0:
@@ -685,7 +687,7 @@ def detect_ai(video_path: str) -> int:
         elif avg_dct_grid > 8.0:
             ai_score += 10
             log.info("DCT %.3f → strong grid artifact → +10", avg_dct_grid)
-        elif avg_dct_grid > 4.0:
+        elif avg_dct_grid > 6.0:
             ai_score += 5
             log.info("DCT %.3f → moderate grid artifact → +5", avg_dct_grid)
         elif avg_dct_grid > 2.0:
@@ -734,6 +736,22 @@ def detect_ai(video_path: str) -> int:
     if _is_single_subject:
         ai_score -= 8
         log.info("SINGLE_SUBJECT landscape person video → real subject bonus → -8")
+
+    # ── 9f. Compound real-evidence bonus ─────────────────────
+    # When multiple independent real-camera signals fire simultaneously, the
+    # probability of AI generation is extremely low. Each signal alone is
+    # explainable, but 4+ together is a very strong real-camera fingerprint.
+    # Criteria: strong sensor noise + high sharpness + real person + natural palette.
+    # Calibrated: Real Video 1 hits all 4; AI videos have at most 1-2.
+    _compound_real = (
+        avg_noise       > 2000   and   # strong real sensor noise (AI renders: <500)
+        avg_sharpness   > 1000   and   # high camera sharpness (AI soft renders: <500)
+        (_is_talking_head or _is_selfie_content or _is_single_subject) and  # real person confirmed
+        hue_entropy     > 2.6          # natural color palette (AI: <2.5)
+    )
+    if _compound_real:
+        ai_score -= 8
+        log.info("COMPOUND_REAL noise+sharp+person+palette → strong real fingerprint → -8")
 
     # ── 10. Saturation mean ──────────────────────────────────
     if avg_saturation > 160:
