@@ -611,8 +611,17 @@ def detect_ai(video_path: str) -> int:
     # Real HD cameras produce noise 800-5000+. Scale the "real grain" lower
     # bound by pixel count — larger frames naturally have higher Laplacian variance.
     _px_count = cap_w * cap_h
-    _noise_real_low  = 300  if _px_count > 500_000 else 150   # HD: 720p+ needs 300+
-    _noise_real_high = 1000 if _px_count > 500_000 else 500
+    # Resolution-aware noise thresholds:
+    #   HD (>500k px, e.g. 720p+): real grain starts at 300, strong at 1000
+    #   Medium (250k-500k px, e.g. 480p): real grain starts at 150, strong at 500
+    #   Low-res (<250k px, e.g. 320x568=181k): real grain starts at 80, strong at 300
+    #   At 320px wide, Laplacian variance of 138 scales to ~2900 at full HD — definitely real.
+    if _px_count > 500_000:
+        _noise_real_low, _noise_real_high = 300, 1000
+    elif _px_count > 250_000:
+        _noise_real_low, _noise_real_high = 150, 500
+    else:
+        _noise_real_low, _noise_real_high = 80, 300
     if avg_noise < 45:
         ai_score += 12
     elif avg_noise < 60:
@@ -679,12 +688,15 @@ def detect_ai(video_path: str) -> int:
     # Calibrated: AI Moose Snow=29.2, AI Gorilla=19.1, AI Child=8.9 vs Real1=5.8, Real2=5.1
     # Gap between real (~5) and AI (~9+) is clear — raised moderate threshold from 4.0→6.0
     # so real videos with DCT 4-6 get +2 (minor) instead of +5 (moderate).
-    _dct_reliable = (cap_w >= 480 or cap_h >= 480)
+    _dct_reliable   = (cap_w >= 480 or cap_h >= 480)
+    _dct_extreme_ok = (cap_w >= 480)   # extreme tier requires width>=480; narrow portrait phones misfire
     if _dct_reliable:
-        if avg_dct_grid > 20.0:
+        if avg_dct_grid > 20.0 and _dct_extreme_ok:
             ai_score += 14
             log.info("DCT %.3f → extreme grid artifact → +14", avg_dct_grid)
-        elif avg_dct_grid > 8.0:
+        elif avg_dct_grid > 8.0 and _dct_extreme_ok:
+            # Strong tier also requires width>=480 — narrow portrait phones have inflated DCT.
+            # Real 320x568 phone: DCT=26.4 falls through to moderate (+5) rather than +10.
             ai_score += 10
             log.info("DCT %.3f → strong grid artifact → +10", avg_dct_grid)
         elif avg_dct_grid > 6.0:
@@ -825,6 +837,16 @@ def detect_ai(video_path: str) -> int:
     elif is_action_content and sat_frame_std < 6.0:
         # Action video with stable sat — natural (overcast sky, indoor sport, etc.)
         log.info("SAT_STD %.2f → action content stable sat → no penalty", sat_frame_std)
+    elif skin_ratio > 0.30 and 4.0 <= sat_frame_std < 8.0:
+        # Real person (high skin coverage) with naturally low sat_std (4–8 range).
+        # When a large person fills the frame, skin tones (low-saturation) pull sat_std down.
+        # This is a real human characteristic, not an AI frozen render.
+        # LOWER BOUND sat_std >= 4.0: values below 4 are "frozen" territory (AI render signal)
+        # and should not be excused by skin ratio alone — e.g. AI Gorilla has skin=0.475 (fur
+        # tones match skin HSV range) AND sat_std=2.92 — that 2.92 is genuinely AI-frozen.
+        # Calibrated: Real phone 320x568: skin=0.696, sat_std=5.57 → no penalty ✓
+        #             AI Gorilla: skin=0.475, sat_std=2.92 < 4.0 → guard skips, +14 fires ✓
+        log.info("SAT_STD %.2f → high-skin person video (4-8 range) → no penalty", sat_frame_std)
     elif _stable_is_ai_render:
         # Frozen lighting on low-sat NON-action content = AI animal/nature render (Gorilla, Monkey)
         ai_score += 14
@@ -881,7 +903,10 @@ def detect_ai(video_path: str) -> int:
         # Wildly warping non-action — AI generation artifact
         ai_score += 8
         log.info("BG_DRIFT %.2f → warping bg → +8", bg_drift)
-    elif bg_drift > 20.0 and not is_action_content:
+    elif bg_drift > 20.0 and not is_action_content and not (avg_motion > 12.0):
+        # High bg_drift with high overall motion = camera moving, not AI warp artifact.
+        # avg_motion > 12 means the camera itself is moving — bg drift is just parallax.
+        # Calibrated: Real handheld phone video had motion=15.4, bg_drift=29.4 → was +4 misfiring.
         ai_score += 4
         log.info("BG_DRIFT %.2f → unstable bg → +4", bg_drift)
     elif 5.0 <= bg_drift <= 18.0 and not is_action_content:
@@ -917,14 +942,18 @@ def detect_ai(video_path: str) -> int:
     # Action guard: real action/sport videos have coordinated directional movement
     # (e.g. a single athlete moving across frame) — suppress minor penalties for them.
     if avg_motion > 3.0 and len(flow_dir_scores) > 5 and not _is_short_clip:
-        if avg_flow_dir_entropy < 1.5:
-            # Very uniform flow — strong AI crowd signal (fires even for action)
+        if avg_flow_dir_entropy < 1.5 and not (avg_flow_var > 20.0):
+            # Very uniform flow — strong AI crowd signal (fires even for action).
+            # GUARD: avg_flow_var > 20 means camera is panning — all vectors point same
+            # direction naturally (low entropy) but it's NOT AI render uniform motion.
+            # Calibrated: Real 320x568 phone pan had flow_var=53.5 → was +12 misfiring.
             ai_score += 12
             log.info("FLOW_ENTROPY %.3f → uniform AI motion → +12", avg_flow_dir_entropy)
-        elif avg_flow_dir_entropy < 2.0 and not is_action_content:
+        elif avg_flow_dir_entropy < 2.0 and not is_action_content and not (avg_flow_var > 20.0):
+            # Camera pan guard: high flow_var means panning — low entropy expected.
             ai_score += 7
             log.info("FLOW_ENTROPY %.3f → somewhat uniform → +7", avg_flow_dir_entropy)
-        elif avg_flow_dir_entropy < 2.5 and not is_action_content:
+        elif avg_flow_dir_entropy < 2.5 and not is_action_content and not (avg_flow_var > 20.0):
             ai_score += 3
             log.info("FLOW_ENTROPY %.3f → slightly uniform → +3", avg_flow_dir_entropy)
         elif avg_flow_dir_entropy > 2.8:
