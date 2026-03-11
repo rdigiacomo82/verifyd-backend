@@ -84,8 +84,12 @@ pip install --upgrade "yt-dlp[default,curl-cffi]"
 # Install yt-dlp-ejs for YouTube JS challenge solving (requires node)
 pip install --upgrade yt-dlp-ejs
 
-# Smoke-test key imports
-python -c "import cv2, numpy, fastapi, uvicorn, yt_dlp, curl_cffi, redis, rq, mediapipe, scipy; print('Python deps OK')"
+# Smoke-test key imports (hard fail — these are required)
+python -c "import cv2, numpy, fastapi, uvicorn, yt_dlp, curl_cffi, redis, rq, scipy; print('Python deps OK')"
+
+# MediaPipe smoke test — warning only (rPPG falls back to Haar cascade if unavailable)
+python -c "import mediapipe; print('mediapipe OK:', mediapipe.__version__)" \
+    || echo "WARNING: mediapipe import failed — rPPG engine will use Haar cascade fallback"
 
 # Verify yt-dlp CLI is available
 yt-dlp --version && echo "yt-dlp OK" || { echo "ERROR: yt-dlp not found"; exit 1; }

@@ -36,6 +36,12 @@ rq>=1.16.0
 # PostgreSQL
 psycopg2-binary>=2.9.0
 
-# Audio analysis (AI voice synthesis detection)
+# Signal processing (rPPG bandpass filter, FFT, peak detection)
+scipy>=1.11.0
+
+# Face detection / landmark tracking (rPPG engine — falls back to Haar if unavailable)
+mediapipe>=0.10.0
+
+# Audio analysis (audio_detector.py)
 librosa>=0.10.0
 soundfile>=0.12.0
