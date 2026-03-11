@@ -667,6 +667,51 @@ def _build_physics_summary(ctx: dict) -> str:
             "Score 0-3 if genuinely real; score 7-9 if unnaturally perfect."
         )
 
+    # ── Animal / Wildlife / Pet content hint ────────────────
+    # AI-generated animal videos are extremely common on TikTok/social media.
+    # Generators like Sora, Kling, and Hailuo produce convincing but detectable
+    # animal renders. Key tells are different from human deepfakes.
+    avg_noise = ctx.get("avg_noise", 999)
+    is_low_noise = avg_noise is not None and avg_noise < 300
+    if content_type in ("cinematic", "action") and not is_person and skin_ratio < 0.15:
+        hints.append(
+            "🐾 ANIMAL / WILDLIFE CONTENT DETECTED: Apply these AI-specific checks:\n"
+            "  FUR TEXTURE: Real animal fur has individual strand variation, matting, "
+            "and directional flow that shifts with movement. AI fur is uniformly rendered — "
+            "every strand perfectly rendered, no clumping or texture irregularity.\n"
+            "  MOVEMENT PHYSICS: Real animals have weight — inertia, momentum, joint "
+            "constraints. AI animals often move with uncanny smoothness or unnatural "
+            "flexibility. Check paw/hoof placement, body sway, and reaction to terrain.\n"
+            "  ENVIRONMENT INTERACTION: Real animals disturb their environment — "
+            "grass bends underfoot, water splashes realistically, dust kicks up. "
+            "AI renders often have the animal 'floating' above the environment.\n"
+            "  BACKGROUND CONSISTENCY: AI animal videos frequently have background "
+            "that looks rendered/painted — check for unnaturally smooth bokeh, "
+            "repetitive vegetation patterns, or too-perfect depth separation.\n"
+            "  EYE QUALITY: Real animal eyes have catchlights, moisture, iris detail. "
+            "AI eyes are often glassy, symmetrically perfect, or anatomically off.\n"
+            "→ Score skin_texture, background_realism, physics_violations carefully."
+        )
+
+    # ── Sports / outdoor real-camera hint ──────────────────
+    # Real sports/action phone videos have characteristics that look like AI signals
+    # but are actually camera physics: telephoto blur (ball vs crowd), limited color
+    # palette (grass + dirt + sky), and motion blur artifacts.
+    # Help GPT understand when these are real physics, not AI renders.
+    avg_noise_val = ctx.get("avg_noise", 0)
+    if content_type in ("action", "cinematic") and avg_noise_val > 400:
+        hints.append(
+            "📷 REAL CAMERA INDICATORS DETECTED (noise={:.0f}): "
+            "High sensor noise confirms real camera capture. "
+            "In sports/outdoor video this means:\n"
+            "  • Telephoto blur (ball/subject vs blurred crowd) is natural DOF, not AI render\n"
+            "  • Limited color palette (grass/dirt/sky) is the real scene, not AI curation\n"
+            "  • Motion blur on fast objects (balls, birds) is real shutter physics\n"
+            "  • Compression artifacts from social media re-encoding are normal\n"
+            "→ Only flag background_realism or color_naturalism as AI if you see "
+            "RENDERED/PAINTED qualities, not just blur or palette limitation.".format(avg_noise_val)
+        )
+
     if hints:
         lines.append("VISUAL INSPECTION PRIORITIES:")
         for h in hints:

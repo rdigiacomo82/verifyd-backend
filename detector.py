@@ -740,17 +740,29 @@ def detect_ai(video_path: str) -> int:
     # Calibrated: AI Moose Snow=29.2, AI Gorilla=19.1, AI Child=8.9 vs Real1=5.8, Real2=5.1
     # Gap between real (~5) and AI (~9+) is clear — raised moderate threshold from 4.0→6.0
     # so real videos with DCT 4-6 get +2 (minor) instead of +5 (moderate).
+    #
+    # NOISE GUARD v8: Real phone cameras filming sports/outdoors then uploaded to social
+    # media undergo heavy H.264 re-encoding which inflates DCT block scores.
+    # If noise > 500 (real camera grain confirmed) AND DCT < 20, downgrade strong
+    # tier (+10) to moderate (+5) — the noise is the counterevidence for DCT.
+    # AI renders have low noise (<200) AND high DCT — both must be present for full score.
     _dct_reliable   = (cap_w >= 480 or cap_h >= 480)
     _dct_extreme_ok = (cap_w >= 480)   # extreme tier requires width>=480; narrow portrait phones misfire
+    _dct_real_noise = (avg_noise > 500)  # confirmed real camera grain
     if _dct_reliable:
         if avg_dct_grid > 20.0 and _dct_extreme_ok:
             ai_score += 14
             log.info("DCT %.3f → extreme grid artifact → +14", avg_dct_grid)
         elif avg_dct_grid > 8.0 and _dct_extreme_ok:
-            # Strong tier also requires width>=480 — narrow portrait phones have inflated DCT.
-            # Real 320x568 phone: DCT=26.4 falls through to moderate (+5) rather than +10.
-            ai_score += 10
-            log.info("DCT %.3f → strong grid artifact → +10", avg_dct_grid)
+            # Strong tier: downgrade to moderate if real camera noise present
+            # (social media recompression inflates DCT on real videos)
+            if _dct_real_noise:
+                ai_score += 5
+                log.info("DCT %.3f → strong grid BUT noise=%.0f real camera → moderate +5",
+                         avg_dct_grid, avg_noise)
+            else:
+                ai_score += 10
+                log.info("DCT %.3f → strong grid artifact → +10", avg_dct_grid)
         elif avg_dct_grid > 6.0:
             ai_score += 5
             log.info("DCT %.3f → moderate grid artifact → +5", avg_dct_grid)
@@ -1117,15 +1129,25 @@ def detect_ai(video_path: str) -> int:
     # AI renders: subject is 1000–2000x sharper than background.
     # Real cameras: natural depth-of-field gives ratio 300–800.
     # Calibrated: Bus AI=2145, Moose AI=1525 vs Real=335–798
-    if fg_bg_ratio > 1200:
+    #
+    # NOISE GUARD v8: If avg_noise > 500 (clear real camera grain), elevated
+    # fg_bg is natural telephoto/DOF physics, not AI rendering.
+    # A flying baseball, bird in flight, or close-up animal shot on a real phone
+    # camera can reach fg_bg=600–900 due to shallow DOF + blurred background.
+    # Real camera noise is the distinguishing factor — AI renders are clean/noiseless.
+    _fgbg_noise_guard = (avg_noise > 500)
+    if fg_bg_ratio > 1200 and not _fgbg_noise_guard:
         ai_score += 14
         log.info("FG_BG %.0f → extreme AI depth → +14", fg_bg_ratio)
-    elif fg_bg_ratio > 900:
+    elif fg_bg_ratio > 900 and not _fgbg_noise_guard:
         ai_score += 8
         log.info("FG_BG %.0f → high AI depth → +8", fg_bg_ratio)
-    elif fg_bg_ratio > 600:
+    elif fg_bg_ratio > 600 and not _fgbg_noise_guard:
         ai_score += 3
         log.info("FG_BG %.0f → elevated depth → +3", fg_bg_ratio)
+    elif fg_bg_ratio > 600 and _fgbg_noise_guard:
+        log.info("FG_BG %.0f → elevated BUT noise=%.0f → real camera DOF, suppressed",
+                 fg_bg_ratio, avg_noise)
     elif fg_bg_ratio < 400:
         ai_score -= 4
         log.info("FG_BG %.0f → natural depth → -4", fg_bg_ratio)
@@ -1178,15 +1200,33 @@ def detect_ai(video_path: str) -> int:
     # AI videos use a limited/curated color palette (low hue entropy).
     # Real cameras capture the full natural spectrum (high entropy).
     # Calibrated: Bus AI=1.62, Monkey AI=1.29 vs Real=2.76–3.19
+    #
+    # OUTDOOR/SPORTS GUARD v8: Outdoor scenes (sports field, park, sky) naturally
+    # have limited hue diversity (green grass + brown dirt + blue sky = 3 colors)
+    # that mimics AI palette scores. The distinguishing factor is camera noise:
+    # real outdoor video has noise > 400, AI renders are clean (noise < 200).
+    # If noise > 400 AND hue_ent in the moderate range (1.8–2.5), suppress the
+    # moderate AI penalty — it's an outdoor scene, not an AI palette limitation.
+    _hue_real_outdoor = (avg_noise > 400)
     if hue_entropy < 1.8:
+        # Very limited palette — strong AI signal even outdoors (1.8 is extreme)
         ai_score += 12
         log.info("HUE_ENT %.3f → very limited AI palette → +12", hue_entropy)
     elif hue_entropy < 2.2:
-        ai_score += 7
-        log.info("HUE_ENT %.3f → limited AI palette → +7", hue_entropy)
+        if _hue_real_outdoor:
+            ai_score += 3
+            log.info("HUE_ENT %.3f → limited palette BUT noise=%.0f outdoor/real → reduced +3",
+                     hue_entropy, avg_noise)
+        else:
+            ai_score += 7
+            log.info("HUE_ENT %.3f → limited AI palette → +7", hue_entropy)
     elif hue_entropy < 2.5:
-        ai_score += 3
-        log.info("HUE_ENT %.3f → somewhat limited palette → +3", hue_entropy)
+        if not _hue_real_outdoor:
+            ai_score += 3
+            log.info("HUE_ENT %.3f → somewhat limited palette → +3", hue_entropy)
+        else:
+            log.info("HUE_ENT %.3f → somewhat limited BUT noise=%.0f outdoor/real → suppressed",
+                     hue_entropy, avg_noise)
     elif hue_entropy > 2.6:
         # Rich natural palette — real video signal.
         # BUT: suppress the real-bonus when saturation is clearly hyperreal (>130).
