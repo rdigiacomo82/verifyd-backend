@@ -631,11 +631,24 @@ def _build_physics_summary(ctx: dict) -> str:
         )
 
     if flicker_std is not None and flicker_std > 4.0:
-        hints.append(
-            f"⚠ FRAME FLICKER (flicker_std={flicker_std:.2f}). "
-            "Compare frames for subtle texture or geometry changes. "
-            "→ If confirmed: score temporal_stability 7-9."
-        )
+        n_cuts_val = ctx.get("n_scene_cuts", 0)
+        if n_cuts_val >= 3 or flicker_std > 8.0:
+            # High flicker + multiple cuts = likely stitched AI compilation
+            hints.append(
+                f"⚠ TEMPORAL INSTABILITY (flicker_std={flicker_std:.2f}, cuts={n_cuts_val}). "
+                "This video may be multiple AI-generated clips stitched together. "
+                "Look for: subject/background inconsistencies between segments, "
+                "subtle lighting color shifts at cuts, animal/person rendered "
+                "slightly differently in each clip, environment resets between segments. "
+                "Also check within each segment for AI texture shimmer/flicker. "
+                "→ Score temporal_stability 7-9 if confirmed."
+            )
+        else:
+            hints.append(
+                f"⚠ FRAME FLICKER (flicker_std={flicker_std:.2f}). "
+                "Compare frames for subtle texture or geometry changes between frames. "
+                "→ If confirmed: score temporal_stability 7-9."
+            )
 
     if quad_cov is not None and quad_cov < 0.40:
         hints.append(
@@ -665,6 +678,24 @@ def _build_physics_summary(ctx: dict) -> str:
             "Real skin has pores, redness variation, fine lines. "
             "AI skin is porcelain-smooth and uniformly colored. "
             "Score 0-3 if genuinely real; score 7-9 if unnaturally perfect."
+        )
+
+    # ── AI Compilation hint ──────────────────────────────────
+    n_cuts = ctx.get("n_scene_cuts", 0)
+    is_comp = ctx.get("is_compilation", False)
+    if is_comp and n_cuts >= 5:
+        avg_clip_dur = ctx.get("avg_saturation", 0)  # use video_duration / n_cuts
+        hints.append(
+            (
+                f"COMPILATION DETECTED ({n_cuts} scene cuts). "
+                "This video is multiple short AI-generated clips stitched together. "
+                "Look for: inconsistent lighting between cuts, subject appears "
+                "slightly different in each clip (re-rendered), background changes "
+                "subtly at cuts despite same apparent location, behavior resets "
+                "unnaturally between clips. "
+                "Score temporal_stability 8-10. Evaluate background_realism and "
+                "physics_violations across clips, not just within one."
+            )
         )
 
     # ── Animal / Wildlife / Pet content hint ────────────────

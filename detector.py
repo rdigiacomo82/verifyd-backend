@@ -228,16 +228,8 @@ def _temporal_flicker_std(frames_gray: List[np.ndarray]) -> float:
 
 def _has_scene_cut(frames_gray: List[np.ndarray], brightness_jump_threshold: float = 40.0) -> bool:
     """
-    Detect if the video contains a hard scene cut — a sudden large change in
-    mean brightness between consecutive sampled frames.
-
-    A scene cut produces extreme flicker_std values (e.g. 38+) that look like
-    AI temporal flicker but are actually just two different scenes in one clip.
-    When a scene cut is detected, flicker_std is unreliable as an AI signal.
-
-    Calibrated: AI_President_1 brightness drops 122→31 at t=23s → True.
-    Uses a 40-point threshold: normal scene lighting variation is <10 points;
-    a real hard cut is typically 30-80+ points.
+    Detect if the video contains a hard scene cut.
+    Returns True if any single brightness jump > threshold.
     """
     if len(frames_gray) < 2:
         return False
@@ -246,6 +238,47 @@ def _has_scene_cut(frames_gray: List[np.ndarray], brightness_jump_threshold: flo
         if abs(means[i] - means[i-1]) > brightness_jump_threshold:
             return True
     return False
+
+
+def _count_scene_cuts(frames_gray: List[np.ndarray], brightness_jump_threshold: float = 35.0) -> int:
+    """
+    Count total hard scene cuts. Used to detect AI compilation videos.
+    AI generators produce many short clips (2-6s each) which creators stitch
+    together. Real phone recordings typically have 0-2 cuts; AI compilations 5+.
+    Calibrated:
+      Possible_AI-Bird.mp4: 14 cuts in 31.7s (15 clips x ~2s) -> AI compilation
+      AI_President_1.mp4:   1 cut at t=23s -> not a compilation signal
+    """
+    if len(frames_gray) < 2:
+        return 0
+    means = [f.mean() for f in frames_gray]
+    n_cuts = 0
+    for i in range(1, len(means)):
+        if abs(means[i] - means[i-1]) > brightness_jump_threshold:
+            n_cuts += 1
+    return n_cuts
+
+
+def _has_scene_cut_from_means(means: List[float], threshold: float = 40.0) -> bool:
+    """Detect scene cut from pre-computed brightness means (all 60 sampled frames)."""
+    for i in range(1, len(means)):
+        if abs(means[i] - means[i-1]) > threshold:
+            return True
+    return False
+
+
+def _count_scene_cuts_from_means(means: List[float], threshold: float = 35.0) -> int:
+    """
+    Count scene cuts from pre-computed brightness means (all 60 sampled frames).
+    More reliable than v4_gray_frames (~10 frames) for detecting frequent cuts.
+    Calibrated: Bird: 14 cuts in 31.7s (60 samples -> cuts appear every ~4 samples).
+    Threshold 35: normal lighting variation <10, hard cut = 30-80+.
+    """
+    n_cuts = 0
+    for i in range(1, len(means)):
+        if abs(means[i] - means[i-1]) > threshold:
+            n_cuts += 1
+    return n_cuts
 
 
 # ── NEW v5: Foreground/background sharpness ratio ───────────
@@ -397,6 +430,7 @@ def detect_ai(video_path: str) -> int:
     sharpness_scores:        List[float] = []
     texture_var_scores:      List[float] = []
     gray_buffer:             List[np.ndarray] = []  # rolling 10-frame window for flicker/residual
+    all_sampled_means:       List[float] = []       # mean brightness of every sampled frame (cut detection)
     v4_gray_frames:          List[np.ndarray] = []  # full sample list for v4 signals
     v5_bgr_frames:           List[np.ndarray] = []  # full sample BGR frames for v5 hue entropy
     flow_dir_scores:         List[float] = []       # flow direction entropy (crowd behavior)
@@ -426,6 +460,7 @@ def detect_ai(video_path: str) -> int:
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
+        all_sampled_means.append(float(gray.mean()))  # for scene cut counting
         noise_scores.append(_noise_score(gray))
         freq_scores.append(_frequency_score(gray))
         edge_scores.append(_edge_quality(gray))
@@ -506,7 +541,10 @@ def detect_ai(video_path: str) -> int:
     sat_frame_std  = _saturation_frame_std(saturation_scores)
     bg_drift       = _background_corner_drift(v4_gray_frames)
     flicker_std    = _temporal_flicker_std(v4_gray_frames)
-    _scene_cut     = _has_scene_cut(v4_gray_frames)  # Fix: suppress flicker if hard cut present
+    # Scene cut detection on full 60-sample brightness sequence
+    # (v4_gray_frames is only ~10 frames — too sparse to detect frequent cuts)
+    _scene_cut     = _has_scene_cut_from_means(all_sampled_means)
+    _n_scene_cuts  = _count_scene_cuts_from_means(all_sampled_means)  # compilation detection (v8)
 
     # ── NEW v4b: Crowd/scene behavioral signals ─────────────
     avg_flow_dir_entropy = float(np.mean(flow_dir_scores)) if flow_dir_scores else 3.0
@@ -1033,6 +1071,43 @@ def detect_ai(video_path: str) -> int:
         ai_score += 5
         log.info("FLICKER_STD %.3f → unnaturally smooth → +5", flicker_std)
 
+    # ── 18b. AI Compilation detection (NEW v8) ──────────────
+    # AI video generators produce short clips (typically 2-6s each).
+    # Creators stitch multiple AI clips together into one longer video.
+    # This produces a characteristic pattern: many hard scene cuts in a
+    # short video, each segment brief, with inconsistent lighting between clips.
+    #
+    # Real phone recordings of the same subject: typically 1 continuous shot.
+    # A genuine TikTok reaction video might have 2-3 edits at most.
+    # 5+ cuts in a 30s video with each clip <6s = strong AI compilation signal.
+    #
+    # Calibrated: Possible_AI-Bird.mp4: 14 cuts in 31.7s (avg clip=2.1s) → AI
+    # AI_President_1.mp4: 1 cut → NOT compilation signal
+    # Guard: only meaningful for videos >= 10s (short clips can't be compilations)
+    _is_compilation = False
+    if not _is_short_clip and _n_scene_cuts >= 5:
+        avg_clip_duration = video_duration / max(_n_scene_cuts + 1, 1)
+        if avg_clip_duration < 7.0:
+            # Many short clips = AI generator batch output stitched together
+            _is_compilation = True
+            if _n_scene_cuts >= 10:
+                ai_score += 18
+                log.info("COMPILATION: %d cuts, avg_clip=%.1fs → AI batch output → +18",
+                         _n_scene_cuts, avg_clip_duration)
+            elif _n_scene_cuts >= 7:
+                ai_score += 12
+                log.info("COMPILATION: %d cuts, avg_clip=%.1fs → likely AI stitched → +12",
+                         _n_scene_cuts, avg_clip_duration)
+            else:
+                ai_score += 7
+                log.info("COMPILATION: %d cuts, avg_clip=%.1fs → possible AI compilation → +7",
+                         _n_scene_cuts, avg_clip_duration)
+        else:
+            log.info("COMPILATION: %d cuts but avg_clip=%.1fs → legitimate edit, not AI",
+                     _n_scene_cuts, avg_clip_duration)
+    elif _n_scene_cuts > 0:
+        log.info("COMPILATION: %d cuts → single edit, not compilation", _n_scene_cuts)
+
     # ── 19. Flow direction entropy (NEW v4b) ─────────────────
     # Measures how varied optical flow directions are across the scene.
     # AI crowds have unnaturally uniform movement (low entropy).
@@ -1300,5 +1375,7 @@ def detect_ai(video_path: str) -> int:
         "min_vert_flow":  min_vert_flow,   # peak upward flow event
         "upward_frac":    upward_frame_frac, # fraction of frames with upward motion
         "flow_dir_entropy": avg_flow_dir_entropy,
+        "n_scene_cuts":   _n_scene_cuts,        # number of hard scene cuts (compilation detection)
+        "is_compilation": _is_compilation,       # True if many short AI-stitched clips detected
     }
     return int(round(ai_score)), signal_context
