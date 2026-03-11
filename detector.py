@@ -1202,5 +1202,7 @@ def detect_ai(video_path: str) -> int:
         "quad_cov":       quad_cov,
         "fg_bg_ratio":    fg_bg_ratio,
         "motion_sync":    motion_sync,
+        "skin_ratio":     skin_ratio,      # used by GPT hint to detect person in action videos
+        "avg_noise":      avg_noise,       # used by GPT hint for noise-based context
     }
     return int(round(ai_score)), signal_context

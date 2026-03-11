@@ -113,9 +113,12 @@ _CONTENT_WEIGHTS = {
         "background_realism": 1.5, "motion_physics": 1.2,
     },
     "action": {
-        "motion_physics": 2.5, "physics_violations": 2.5,
-        "temporal_stability": 1.5, "crowd_behavior": 1.5,
-        "skin_texture": 0.7, "hair_detail": 0.5,
+        "motion_physics": 2.0, "physics_violations": 2.5,
+        "temporal_stability": 1.5, "crowd_behavior": 1.2,
+        "color_naturalism": 1.8,   # boosted: hypersat is a key AI tell in action videos
+        "background_realism": 1.4, # AI action has rendered backgrounds
+        "skin_texture": 1.0,       # raised from 0.7: person action videos need skin check
+        "hair_detail": 0.7,
     },
     "cinematic": {
         "background_realism": 2.0, "lighting_coherence": 1.8,
@@ -401,8 +404,11 @@ def analyze_frames_with_gpt(frames_b64: list, physics_summary: str = "",
         import json
         import time
 
-        # Higher detail for person content where texture matters most
-        img_detail = "high" if content_type in ("talking_head", "selfie", "single_subject") else "low"
+        # Higher detail for person content where texture matters most.
+        # Also use high detail for action content — we need to see skin/color
+        # quality in child/person action videos (AI_Child: action but person visible).
+        # Low detail only for truly non-person content (cinematic/animal/static).
+        img_detail = "low" if content_type in ("cinematic", "static") else "high"
 
         content = [
             {
@@ -577,18 +583,23 @@ def _build_physics_summary(ctx: dict) -> str:
             "→ If confirmed: score physics_violations 8-10."
         )
 
-    if sat_std is not None and sat_std < 3.0 and not is_person:
+    if sat_std is not None and sat_std < 3.0:
+        # Frozen lighting is an AI signal regardless of content type.
+        # Previously suppressed for person content — but AI_Child is action AND has frozen sat.
+        # Only suppress if it's a known legitimate case (indoor selfie with sat_std 3-8).
         hints.append(
             f"⚠ FROZEN LIGHTING (sat_std={sat_std:.2f}). "
-            "Look for unnaturally perfect AI-render lighting with no variation. "
-            "→ If confirmed: score lighting_coherence 7-9."
+            "Color saturation is unnaturally constant across all frames — real footage "
+            "always has variation from motion, lighting shifts, and camera response. "
+            "→ If confirmed: score lighting_coherence 7-9 and color_naturalism 7-9."
         )
 
     if avg_saturation is not None and avg_saturation > 130:
         hints.append(
-            f"⚠ HYPERREAL SATURATION (sat_mean={avg_saturation:.0f}). "
-            "Look for candy-colored, oversaturated palette. "
-            "→ If confirmed: score color_naturalism 7-9."
+            f"⚠ HYPERREAL SATURATION (sat_mean={avg_saturation:.0f}, normal real video: 50-110). "
+            "Colors are significantly oversaturated beyond any real camera. "
+            "Look for candy-colored skin tones, unnatural greens, electric blues. "
+            "→ If confirmed: score color_naturalism 8-10."
         )
 
     if bg_drift is not None and bg_drift < 3.0:
@@ -626,10 +637,13 @@ def _build_physics_summary(ctx: dict) -> str:
             "→ If confirmed: score crowd_behavior 7-9."
         )
 
-    if is_person:
+    skin_ratio = ctx.get("skin_ratio", 0)
+    if is_person or (skin_ratio is not None and skin_ratio > 0.10):
         hints.append(
-            "✓ PERSON CONTENT: Focus closely on skin_texture, hair_detail, eye_quality. "
-            "Score 0-3 if skin/hair/eyes look genuinely real with natural imperfections."
+            "✓ PERSON VISIBLE: Inspect skin_texture, hair_detail, eye_quality carefully. "
+            "Real skin has pores, redness variation, fine lines. "
+            "AI skin is porcelain-smooth and uniformly colored. "
+            "Score 0-3 if genuinely real; score 7-9 if unnaturally perfect."
         )
 
     if hints:
