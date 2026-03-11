@@ -53,6 +53,28 @@ fi
 export PATH="$NODE_DIR/bin:$PATH"
 echo "node OK: $(node --version)"
 
+# ── MediaPipe face landmarker model (rPPG engine) ────────────
+# Downloaded at build time so the worker has no outbound network dependency at runtime.
+# face_landmarker.task: 478-point face mesh — forehead + cheek landmark ROI for CHROM rPPG.
+# Pinned to float16/v1 — stable versioned URL, not "latest".
+MP_DIR="/opt/render/project/.render/mediapipe_models"
+MP_MODEL="$MP_DIR/face_landmarker.task"
+if [ ! -f "$MP_MODEL" ]; then
+    echo "Downloading MediaPipe face landmarker model (~12MB)..."
+    mkdir -p "$MP_DIR"
+    curl -sL \
+        "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task" \
+        -o "$MP_MODEL"
+    if [ -f "$MP_MODEL" ] && [ -s "$MP_MODEL" ]; then
+        echo "MediaPipe face landmarker downloaded: $(du -sh $MP_MODEL | cut -f1)"
+    else
+        echo "WARNING: MediaPipe model download failed — rPPG will fall back to Haar cascade"
+        rm -f "$MP_MODEL"
+    fi
+else
+    echo "MediaPipe face landmarker already present — skipping ($(du -sh $MP_MODEL | cut -f1))"
+fi
+
 # ── Python dependencies ───────────────────────────────────────
 pip install --upgrade pip
 pip install -r requirements.txt
@@ -63,7 +85,7 @@ pip install --upgrade "yt-dlp[default,curl-cffi]"
 pip install --upgrade yt-dlp-ejs
 
 # Smoke-test key imports
-python -c "import cv2, numpy, fastapi, uvicorn, yt_dlp, curl_cffi, redis, rq; print('Python deps OK')"
+python -c "import cv2, numpy, fastapi, uvicorn, yt_dlp, curl_cffi, redis, rq, mediapipe, scipy; print('Python deps OK')"
 
 # Verify yt-dlp CLI is available
 yt-dlp --version && echo "yt-dlp OK" || { echo "ERROR: yt-dlp not found"; exit 1; }
