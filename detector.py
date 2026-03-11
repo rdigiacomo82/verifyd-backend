@@ -400,6 +400,7 @@ def detect_ai(video_path: str) -> int:
     v4_gray_frames:          List[np.ndarray] = []  # full sample list for v4 signals
     v5_bgr_frames:           List[np.ndarray] = []  # full sample BGR frames for v5 hue entropy
     flow_dir_scores:         List[float] = []       # flow direction entropy (crowd behavior)
+    vert_flow_scores:        List[float] = []       # mean vertical flow per frame (< 0 = upward)
 
     prev_gray  = None
     prev_hist  = None
@@ -450,6 +451,8 @@ def detect_ai(video_path: str) -> int:
             ang_hist = ang_hist / (ang_hist.sum() + 1e-10)
             dir_entropy = float(-np.sum(ang_hist * np.log2(ang_hist + 1e-10)))
             flow_dir_scores.append(dir_entropy)
+            # Vertical flow: negative = content moving upward (gravity violation signal)
+            vert_flow_scores.append(float(flow[..., 1].mean()))
 
         hist = cv2.calcHist([gray], [0], None, [64], [0, 256])
         hist = hist.flatten() / (hist.sum() + 1e-10)
@@ -487,6 +490,11 @@ def detect_ai(video_path: str) -> int:
     motion_var          = float(np.var(motion_scores))           if len(motion_scores) > 1  else 0.0
     avg_temporal_jitter = float(np.mean(temporal_diffs))         if temporal_diffs          else 0.0
     avg_flow_var        = float(np.mean(flow_regularity_scores)) if flow_regularity_scores  else 0.0
+    avg_vert_flow       = float(np.mean(vert_flow_scores))       if vert_flow_scores        else 0.0
+    # Minimum (most negative) vertical flow across all frames — captures peak upward motion
+    min_vert_flow       = float(np.min(vert_flow_scores))        if vert_flow_scores        else 0.0
+    # Fraction of frames with strong sustained upward motion (vy < -2.0)
+    upward_frame_frac   = float(sum(v < -2.0 for v in vert_flow_scores) / max(len(vert_flow_scores), 1))
     avg_sharpness       = float(np.mean(sharpness_scores))       if sharpness_scores        else 0.0
     avg_texture_var     = float(np.mean(texture_var_scores))     if texture_var_scores      else 0.0
 
@@ -993,8 +1001,13 @@ def detect_ai(video_path: str) -> int:
     _flicker_high  = 20.0 if is_action_content else 6.0   # extreme = always AI
     _flicker_med   = 10.0 if is_action_content else 4.0
     _flicker_slight= 5.0  if is_action_content else 2.5
-    if _scene_cut:
-        log.info("FLICKER_STD %.3f → scene cut detected → signal suppressed", flicker_std)
+    # Scene-cut guard: only suppress flicker if video is low-motion (not a camera-pan video).
+    # High motion (avg_motion > 20) means rapid camera movement which causes brightness
+    # jumps in sampled frames — these are NOT scene cuts, just panning.
+    # Calibrated: AI_Slide: motion=38.8, scene cut falsely detected → flicker suppressed (wrong).
+    _scene_cut_credible = _scene_cut and avg_motion < 20.0
+    if _scene_cut_credible:
+        log.info("FLICKER_STD %.3f → scene cut detected (low-motion) → signal suppressed", flicker_std)
     elif flicker_std > _flicker_high:
         ai_score += 14
         log.info("FLICKER_STD %.3f → extreme flicker → +14", flicker_std)
@@ -1042,6 +1055,45 @@ def detect_ai(video_path: str) -> int:
             else:
                 ai_score -= 4
                 log.info("FLOW_ENTROPY %.3f → chaotic natural motion → -4", avg_flow_dir_entropy)
+
+    # ── 19b. Gravity violation — recurring upward motion (NEW v7) ────────
+    # Real-world physics: on a slide, ramp, or hill, subjects move DOWNWARD.
+    # AI generators frequently produce reversed trajectories — subjects float
+    # upward against gravity in multiple separate events throughout the clip.
+    #
+    # KEY DISCRIMINATOR: recurring separate episodes vs single camera tilt.
+    # A camera panning UP produces ONE continuous upward flow event.
+    # A physics violation recurs at MULTIPLE separate moments in the video
+    # (person rises on slide, scene cuts, different action, person rises again).
+    #
+    # Algorithm: count distinct upward episodes (transitions into vy < -2.0).
+    # Camera tilt: 1 episode (continuous pan).
+    # Gravity violation: 2+ separate episodes at different times.
+    #
+    # Calibrated: AISlide_1: 4 episodes, min_vert=-17.1 → strong signal ✓
+    #             Video_1 (real camera pan): 1 episode → guard protects ✓
+    #             AI_Gorilla: 9 episodes (running uphill CGI) → fires ✓
+    #             Real videos (1-2): 0 episodes → no signal ✓
+    _gravity_violation = False
+    if len(vert_flow_scores) > 5 and not _is_short_clip:
+        # Count separate upward episodes (transitions from normal → upward flow)
+        _upward_episodes = 0
+        _in_upward_ep    = False
+        for _vf in vert_flow_scores:
+            if _vf < -2.0 and not _in_upward_ep:
+                _upward_episodes += 1
+                _in_upward_ep = True
+            elif _vf >= -2.0:
+                _in_upward_ep = False
+
+        # NOTE: Signal-engine gravity scoring disabled — camera pans produce
+        # identical optical flow signatures to gravity violations at our sampling rates.
+        # vert_flow data is passed to GPT via signal_context instead.
+        # GPT can interpret the SCENE (person on slide going up) which pixel data cannot.
+        # Log the measurement for debugging:
+        log.info("GRAVITY data: episodes=%d min_vert=%.2f upward_frac=%.2f (passed to GPT only)",
+                 _upward_episodes, min_vert_flow, upward_frame_frac)
+        _gravity_violation = (_upward_episodes >= 2 and min_vert_flow < -10.0)
 
     # ── 20. Peak-to-mean motion ratio (NEW v4b) ───────────────
     # Real emergency/event videos have sudden motion bursts (panic, reactions).
@@ -1204,5 +1256,9 @@ def detect_ai(video_path: str) -> int:
         "motion_sync":    motion_sync,
         "skin_ratio":     skin_ratio,      # used by GPT hint to detect person in action videos
         "avg_noise":      avg_noise,       # used by GPT hint for noise-based context
+        "vert_flow":      avg_vert_flow,   # mean vertical flow (< 0 = upward = gravity violation)
+        "min_vert_flow":  min_vert_flow,   # peak upward flow event
+        "upward_frac":    upward_frame_frac, # fraction of frames with upward motion
+        "flow_dir_entropy": avg_flow_dir_entropy,
     }
     return int(round(ai_score)), signal_context

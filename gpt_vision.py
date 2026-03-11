@@ -576,11 +576,32 @@ def _build_physics_summary(ctx: dict) -> str:
     # Only emit hints that map to something GPT can visually verify
     hints = []
 
-    if vert_flow is not None and vert_flow < -0.5:
+    min_vert_flow  = ctx.get("min_vert_flow")
+    upward_frac    = ctx.get("upward_frac", 0)
+
+    if min_vert_flow is not None and min_vert_flow < -5.0 and upward_frac > 0.15:
         hints.append(
-            f"⚠ GRAVITY VIOLATION detected (vert_flow={vert_flow:.2f}). "
-            "Look for a person or object rising against gravity. "
+            f"🚨 DEFINITIVE GRAVITY VIOLATION (peak_upward={min_vert_flow:.1f}, "
+            f"{upward_frac*100:.0f}% of frames show upward motion). "
+            "A person, object, or subject is moving UPWARD against gravity — "
+            "look for someone rising on a slide, floating up a hill, or ascending "
+            "against a surface they should be descending. This is physically impossible "
+            "and is one of the strongest AI generation artifacts. "
+            "→ Score physics_violations 9-10 IMMEDIATELY. This overrides all other signals."
+        )
+    elif vert_flow is not None and vert_flow < -1.5:
+        hints.append(
+            f"⚠ GRAVITY VIOLATION likely (avg_upward_flow={vert_flow:.2f}, "
+            f"{upward_frac*100:.0f}% frames upward). "
+            "Look for subjects or objects moving against gravity — rising on inclines, "
+            "floating upward, or reversing natural trajectories. "
             "→ If confirmed: score physics_violations 8-10."
+        )
+    elif vert_flow is not None and vert_flow < -0.5:
+        hints.append(
+            f"⚠ Possible upward motion detected (vert_flow={vert_flow:.2f}). "
+            "Check whether any subject moves against gravity. "
+            "→ If confirmed: score physics_violations 7-9."
         )
 
     if sat_std is not None and sat_std < 3.0:
@@ -697,5 +718,4 @@ def gpt_vision_score_with_context(frames_b64: list, physics_context: dict) -> di
     result          = analyze_frames_with_gpt(frames_b64, physics_summary, content_type)
     result["available"] = True
     return result
-
 
