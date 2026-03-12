@@ -1590,6 +1590,15 @@ def widget_embed(key: str = ""):
   .powered-by a {{ color: #4b5563; text-decoration: none; }}
   .powered-by a:hover {{ color: {brand_color}; }}
   .error-msg {{ color: #ef4444; font-size: 13px; margin-top: 10px; text-align: center; }}
+  .download-btn {{
+    display: block; width: 100%; margin-top: 12px;
+    padding: 13px; border-radius: 8px; border: none;
+    font-size: 14px; font-weight: 700; cursor: pointer;
+    background: #22c55e; color: #000;
+    text-decoration: none; text-align: center;
+    transition: opacity 0.2s;
+  }}
+  .download-btn:hover {{ opacity: 0.85; }}
 </style>
 </head>
 <body>
@@ -1629,7 +1638,11 @@ def widget_embed(key: str = ""):
   <div class="result-label" id="resultLabel"></div>
   <div class="result-score" id="resultScore"></div>
   <div class="result-reasoning" id="resultReasoning"></div>
-  <button class="reset-btn" onclick="resetWidget()">Verify another video</button>
+  <a class="download-btn" id="downloadBtn" href="#" target="_blank"
+     style="display:none;">
+    ⬇ Download Certified Video
+  </a>
+  <button class="reset-btn" onclick="resetWidget()" style="margin-top:10px;">Verify another video</button>
 </div>
 
 <div class="error-msg" id="errorMsg"></div>
@@ -1681,11 +1694,13 @@ function resetWidget() {{
   document.getElementById('filePreview').style.display = 'none';
   document.getElementById('dropZone').style.display    = '';
   document.getElementById('analyzeBtn').disabled        = true;
-  document.getElementById('resultBox').style.display   = 'none';
-  document.getElementById('progressWrap').style.display= 'none';
-  document.getElementById('errorMsg').textContent       = '';
-  document.getElementById('analyzeBtn').textContent     = 'Verify Video';
-  document.getElementById('analyzeBtn').disabled        = false;
+  document.getElementById('resultBox').style.display    = 'none';
+  document.getElementById('progressWrap').style.display = 'none';
+  document.getElementById('errorMsg').textContent        = '';
+  document.getElementById('downloadBtn').style.display   = 'none';
+  document.getElementById('downloadBtn').href             = '#';
+  document.getElementById('analyzeBtn').textContent      = 'Verify Video';
+  document.getElementById('analyzeBtn').disabled         = false;
   notifyResize();
 }}
 
@@ -1762,6 +1777,16 @@ function showResult(data) {{
   var reasoning = data.gpt_reasoning || '';
   document.getElementById('resultReasoning').textContent = reasoning;
   document.getElementById('resultReasoning').style.display = reasoning ? '' : 'none';
+
+  // Show download button if certified video is available
+  var dlBtn = document.getElementById('downloadBtn');
+  if (data.download_url) {{
+    dlBtn.href = data.download_url;
+    dlBtn.style.display = 'block';
+  }} else {{
+    dlBtn.style.display = 'none';
+  }}
+
   box.style.display = 'block';
   document.getElementById('analyzeBtn').textContent = 'Verify Video';
   document.getElementById('analyzeBtn').disabled    = false;
