@@ -1,45 +1,32 @@
 # ============================================================
 #  VeriFYD — detection.py  v4
 #
-#  N-ENGINE ARCHITECTURE:
-#    Engine 1: detector.py        — pixel-level signal analysis
-#    Engine 2: gpt_vision.py      — GPT-4o 12-dimension rubric
-#    Engine 3: metadata_detector.py — container/encoder forensics
-#    Engine 4: audio_detector.py  — spectral/voice synthesis
+#  DUAL ENGINE:
+#    1. detector.py   — signal-based (pixel-level evidence)
+#    2. gpt_vision.py — GPT-4o semantic (visual reasoning)
 #
-#  Each engine runs independently and returns a 0–100 AI score
-#  plus a confidence level. The final score is a weighted blend
-#  where weights depend on content type and per-engine confidence.
+#  HARD OVERRIDE (checked BEFORE engines run):
+#    0. Metadata pre-check — AIGC tag, TikTok AI label, known
+#       generator encoder signatures → instant AI result
 #
-#  BLEND PHILOSOPHY:
-#    - Signal engine is the anchor — has direct pixel measurement.
-#      When it's highly confident (score <35 or >75), it gets
-#      elevated weight and can override low-confidence engines.
-#    - GPT engine provides semantic reasoning. After v5 rubric
-#      rewrite, it's now more consistent and debuggable.
-#    - Metadata engine is low-weight but high-precision: a strong
-#      metadata AI signal (e.g. known AI encoder) can boost score;
-#      a strong real signal (camera make/model + GPS) reduces it.
-#    - Audio engine catches a dimension no visual engine can: voice
-#      synthesis artifacts and missing environmental audio.
-#    - When engines clash, signal wins over GPT (validated in testing).
-#      Metadata and audio are treated as auxiliary boosters.
-#
-#  CONTENT-TYPE WEIGHTS:
-#    talking_head / selfie  → GPT weight elevated (texture analysis)
-#    action / cinematic     → Signal weight elevated (physics)
-#    all types              → Metadata/audio contribute as auxiliary
-#
-#  DETAIL DICT:
-#    Every engine's score, confidence, evidence, and GPT dimension
-#    scores are stored in the detail dict for logging and feedback.
+#  WEIGHTING RULES (in priority order):
+#    1. GPT failed            → signal 100%
+#    2. Both agree strongly   → combined ± 5pt bonus
+#    3. CLASH: signal<50, GPT>60 (GPT says AI, signal says real)
+#              → signal 90% (GPT is wrong in every tested case)
+#    4. CLASH: signal>65, GPT<40 (signal says AI, GPT misses it)
+#              → signal 70% / GPT 30%
+#    5. Signal confident (<35 or >75) → signal 60% / GPT 40%
+#    6. Default               → signal 40% / GPT 60%
 # ============================================================
 
+import json
 import logging
-from detector          import detect_ai
-from gpt_vision        import gpt_vision_score_with_context, extract_key_frames
-from metadata_detector import analyze_metadata
-from audio_detector    import analyze_audio
+import os
+import subprocess
+
+from detector    import detect_ai
+from gpt_vision  import gpt_vision_score_with_context, extract_key_frames
 
 log = logging.getLogger("verifyd.detection")
 
@@ -47,146 +34,206 @@ THRESHOLD_REAL         = 55
 THRESHOLD_UNDETERMINED = 40
 
 # ─────────────────────────────────────────────────────────────
-#  Per-content-type base weights for signal + GPT engines
-#  (metadata and audio are always auxiliary — see _aux_adjustment)
+#  Metadata pre-check — hard override before signal/GPT engines
 # ─────────────────────────────────────────────────────────────
-_ENGINE_WEIGHTS = {
-    #                       signal  gpt
-    "talking_head":         (0.35,  0.65),
-    "selfie":               (0.35,  0.65),
-    "single_subject":       (0.45,  0.55),
-    "action":               (0.60,  0.40),
-    "cinematic":            (0.55,  0.45),
-    "static":               (0.50,  0.50),
-    "default":              (0.45,  0.55),
-}
+
+def _check_metadata(video_path: str) -> dict | None:
+    """
+    Extract MP4/MOV format-level metadata via ffprobe and check for
+    known AI-generation signatures embedded by generators or platforms.
+
+    Returns a result dict (same shape as run_detection return) if a
+    definitive AI signal is found, otherwise returns None so normal
+    detection proceeds.
+
+    Known signals checked:
+      1. aigc_info tag — TikTok/Douyin official AI content label
+         {"aigc_label_type": 2} = fully AI generated
+         {"aigc_label_type": 1} = AI assisted
+      2. Encoder fingerprint — known AI video generator encoders
+         Lavf + no camera vendor = re-encoded AI output
+      3. vendor_id "[0][0][0][0]" — stripped/generic vendor (AI pipeline)
+    """
+    try:
+        ffprobe_bin = os.environ.get("FFPROBE_BIN", "ffprobe")
+        result = subprocess.run(
+            [ffprobe_bin, "-v", "quiet", "-print_format", "json",
+             "-show_format", "-show_streams", video_path],
+            capture_output=True, text=True, timeout=30
+        )
+        if result.returncode != 0:
+            return None
+
+        data       = json.loads(result.stdout)
+        fmt_tags   = data.get("format", {}).get("tags", {})
+        streams    = data.get("streams", [])
+        video_tags = next(
+            (s.get("tags", {}) for s in streams if s.get("codec_type") == "video"),
+            {}
+        )
+
+        # ── Signal 1: TikTok/Douyin AIGC label ───────────────
+        aigc_raw = fmt_tags.get("aigc_info", "")
+        if aigc_raw:
+            try:
+                aigc = json.loads(aigc_raw)
+                aigc_type = int(aigc.get("aigc_label_type", -1))
+                if aigc_type == 2:
+                    log.info("METADATA_OVERRIDE: aigc_label_type=2 → FULLY AI GENERATED")
+                    return _metadata_ai_result(
+                        "TikTok/Douyin AIGC label: officially marked as AI-generated content",
+                        ai_score=97
+                    )
+                elif aigc_type == 1:
+                    log.info("METADATA_OVERRIDE: aigc_label_type=1 → AI ASSISTED")
+                    return _metadata_ai_result(
+                        "TikTok/Douyin AIGC label: officially marked as AI-assisted content",
+                        ai_score=85
+                    )
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+        # ── Signal 2: Known AI generator comment/tag patterns ─
+        comment = fmt_tags.get("comment", "").lower()
+        title   = fmt_tags.get("title",   "").lower()
+        for field in (comment, title):
+            for marker in ("aigc", "ai generated", "ai-generated", "sora", "kling",
+                           "runway", "pika", "hailuo", "luma", "vidu", "cogvideo"):
+                if marker in field:
+                    log.info("METADATA_OVERRIDE: AI marker '%s' in tags", marker)
+                    return _metadata_ai_result(
+                        f"Metadata tag contains AI generation marker: '{marker}'",
+                        ai_score=90
+                    )
+
+        # ── Signal 3: Encoder + vendor fingerprint ────────────
+        encoder   = fmt_tags.get("encoder", "")
+        vendor_id = video_tags.get("vendor_id", "")
+        # Lavf (FFmpeg libavformat) with stripped vendor = re-encoded AI output
+        # Real camera videos have camera vendor IDs: "appl", "FFMP", manufacturer codes
+        # "[0][0][0][0]" is the null vendor — AI pipelines strip camera provenance
+        is_lavf_reencoded = encoder.startswith("Lavf") and vendor_id == "[0][0][0][0]"
+        # Only use encoder alone as a weak supporting signal (not a hard override)
+        # — it's common in legitimate re-uploads too.
+        if is_lavf_reencoded:
+            log.info(
+                "METADATA: Lavf encoder + null vendor_id detected "
+                "(AI pipeline fingerprint — weak signal, not override)"
+            )
+            # Return None — let signal+GPT engines handle it, but log the evidence
+            # This is available in the logs for debugging but doesn't hard-override
+            # because many re-uploaded real videos also go through FFmpeg pipelines.
+
+        return None
+
+    except Exception as e:
+        log.warning("Metadata pre-check failed: %s", e)
+        return None
+
+
+def _metadata_ai_result(reason: str, ai_score: int = 95) -> tuple:
+    """Build a complete run_detection-compatible return tuple for metadata overrides."""
+    authenticity = 100 - ai_score
+    label = "AI" if authenticity < THRESHOLD_UNDETERMINED else "UNDETERMINED"
+    detail = {
+        "ai_score":        ai_score,
+        "authenticity":    authenticity,
+        "label":           label,
+        "signal_ai_score": ai_score,
+        "gpt_ai_score":    ai_score,
+        "gpt_available":   False,
+        "gpt_reasoning":   reason,
+        "gpt_flags":       [reason],
+        "weight_signal":   1.0,
+        "weight_gpt":      0.0,
+        "blend_mode":      "metadata-override",
+        "threshold_real":  THRESHOLD_REAL,
+        "threshold_undet": THRESHOLD_UNDETERMINED,
+        "metadata_override": True,
+        "metadata_reason": reason,
+    }
+    log.info("Metadata override → ai_score=%d authenticity=%d label=%s | %s",
+             ai_score, authenticity, label, reason)
+    return authenticity, label, detail
 
 
 def run_detection(video_path: str) -> tuple:
-    """
-    Run all available detection engines and blend into final verdict.
+    # ── Engine 0: Metadata pre-check (hard override) ──────────
+    metadata_result = _check_metadata(video_path)
+    if metadata_result is not None:
+        return metadata_result
 
-    Returns:
-        authenticity : int 0–100 (100 = definitely real, 0 = definitely AI)
-        label        : "REAL" | "UNDETERMINED" | "AI"
-        detail       : dict with all engine scores and metadata
-    """
-
-    # ══════════════════════════════════════════════════════════
-    # ENGINE 1: Signal detector (pixel-level)
-    # ══════════════════════════════════════════════════════════
+    # ── Engine 1: Signal detector ─────────────────────────────
     signal_ai_score, signal_context = detect_ai(video_path)
-    content_type = signal_context.get("content_type", "default")
-    log.info("Engine 1 — Signal: ai_score=%d  content_type=%s",
-             signal_ai_score, content_type)
+    log.info("Signal detector ai_score: %d  content_type: %s",
+             signal_ai_score, signal_context.get("content_type", "unknown"))
 
-    # ══════════════════════════════════════════════════════════
-    # ENGINE 2: GPT-4o 12-dimension rubric
-    # ══════════════════════════════════════════════════════════
-    frames_b64 = extract_key_frames(video_path)
-    gpt_result = gpt_vision_score_with_context(frames_b64, signal_context)
-    gpt_ai_score  = gpt_result["ai_probability"]
-    gpt_available = gpt_result.get("available", False)
-    gpt_scores    = gpt_result.get("scores", {})
-    log.info("Engine 2 — GPT: ai_score=%d  available=%s  generator=%s",
-             gpt_ai_score, gpt_available, gpt_result.get("generator_guess", "?"))
+    # ── Engine 2: GPT-4o ──────────────────────────────────────
+    frames_b64      = extract_key_frames(video_path)
+    gpt_result      = gpt_vision_score_with_context(frames_b64, signal_context)
+    gpt_ai_score    = gpt_result["ai_probability"]
+    gpt_available   = gpt_result.get("available", False)
+    log.info("GPT-4o ai_probability: %d  available: %s", gpt_ai_score, gpt_available)
 
-    # ══════════════════════════════════════════════════════════
-    # ENGINE 3: Metadata forensics
-    # ══════════════════════════════════════════════════════════
-    meta_result     = analyze_metadata(video_path)
-    meta_ai_score   = meta_result["metadata_ai_score"]
-    meta_confidence = meta_result["confidence"]
-    log.info("Engine 3 — Metadata: ai_score=%d  confidence=%s",
-             meta_ai_score, meta_confidence)
-
-    # ══════════════════════════════════════════════════════════
-    # ENGINE 4: Audio analysis
-    # ══════════════════════════════════════════════════════════
-    audio_result     = analyze_audio(video_path)
-    audio_ai_score   = audio_result["audio_ai_score"]
-    audio_confidence = audio_result["confidence"]
-    audio_available  = audio_result.get("available", False)
-    log.info("Engine 4 — Audio: ai_score=%d  confidence=%s",
-             audio_ai_score, audio_confidence)
-
-    # ══════════════════════════════════════════════════════════
-    # BLEND — signal + GPT (primary)
-    # ══════════════════════════════════════════════════════════
+    # ── Combine ───────────────────────────────────────────────
     gpt_failed = (
         not gpt_available or
         gpt_result.get("reasoning", "").startswith("GPT analysis error")
     )
 
     if gpt_failed:
-        combined_primary = float(signal_ai_score)
-        w_sig, w_gpt     = 1.0, 0.0
-        blend_mode       = "signal-only (GPT failed)"
-    else:
-        w_sig, w_gpt = _ENGINE_WEIGHTS.get(content_type, _ENGINE_WEIGHTS["default"])
+        combined      = float(signal_ai_score)
+        w_sig, w_gpt  = 1.0, 0.0
+        mode          = "signal-only (GPT failed)"
 
-        # Override weights based on confidence / clash patterns
-        clash_real = signal_ai_score < 50 and gpt_ai_score > 50
-        clash_ai   = signal_ai_score > 65 and gpt_ai_score < 40
-        both_real  = signal_ai_score < 45 and gpt_ai_score < 45
-        both_ai    = signal_ai_score > 65 and gpt_ai_score > 65
-        sig_confident = signal_ai_score < 35 or signal_ai_score > 75
+    else:
+        # Determine blend mode
+        clash_real  = signal_ai_score < 50 and gpt_ai_score > 50   # GPT uncertain/wrong, signal says real
+        clash_ai    = signal_ai_score > 65 and gpt_ai_score < 40   # signal says AI, GPT misses it
+        both_real   = signal_ai_score < 45 and gpt_ai_score < 45
+        both_ai     = signal_ai_score > 65 and gpt_ai_score > 65
+        confident   = signal_ai_score < 35 or signal_ai_score > 75
 
         if clash_real:
-            # Signal has pixel evidence of real — GPT over-calling AI
-            w_sig, w_gpt = 0.90, 0.10
-            blend_mode   = "clash→real (signal wins)"
+            # Signal has pixel evidence of real — GPT is over-calling AI
+            combined, w_sig, w_gpt = (
+                signal_ai_score * 0.90 + gpt_ai_score * 0.10,
+                0.90, 0.10
+            )
+            mode = "clash→real (signal wins)"
         elif clash_ai:
-            # Signal caught AI artifacts — GPT under-calling
-            w_sig, w_gpt = 0.70, 0.30
-            blend_mode   = "clash→AI (signal leads)"
+            # Signal caught AI artifacts — GPT is under-calling
+            combined, w_sig, w_gpt = (
+                signal_ai_score * 0.70 + gpt_ai_score * 0.30,
+                0.70, 0.30
+            )
+            mode = "clash→AI (signal leads)"
         elif both_real:
+            combined  = signal_ai_score * 0.40 + gpt_ai_score * 0.60 - 5
             w_sig, w_gpt = 0.40, 0.60
-            blend_mode   = "both-real"
+            mode = "both-real bonus"
         elif both_ai:
+            combined  = signal_ai_score * 0.40 + gpt_ai_score * 0.60 + 5
             w_sig, w_gpt = 0.40, 0.60
-            blend_mode   = "both-AI"
-        elif sig_confident:
-            # Keep content-type weights but floor signal at 60%
-            w_sig = max(w_sig, 0.60)
-            w_gpt = 1.0 - w_sig
-            blend_mode = "signal-confident"
+            mode = "both-AI bonus"
+        elif confident:
+            combined, w_sig, w_gpt = (
+                signal_ai_score * 0.60 + gpt_ai_score * 0.40,
+                0.60, 0.40
+            )
+            mode = "signal-confident"
         else:
-            blend_mode = f"default ({content_type})"
+            combined, w_sig, w_gpt = (
+                signal_ai_score * 0.40 + gpt_ai_score * 0.60,
+                0.40, 0.60
+            )
+            mode = "default"
 
-        combined_primary = signal_ai_score * w_sig + gpt_ai_score * w_gpt
+        log.info("Blend mode: %s | signal=%d gpt=%d w_sig=%.0f%% w_gpt=%.0f%%",
+                 mode, signal_ai_score, gpt_ai_score, w_sig*100, w_gpt*100)
 
-        # Both-agree bonus/penalty
-        if both_real:
-            combined_primary -= 5
-        elif both_ai:
-            combined_primary += 5
-
-    log.info("Primary blend: mode=%s  signal=%d  gpt=%d  w_sig=%.0f%%  w_gpt=%.0f%%  combined=%.1f",
-             blend_mode, signal_ai_score, gpt_ai_score, w_sig*100, w_gpt*100, combined_primary)
-
-    # ══════════════════════════════════════════════════════════
-    # AUXILIARY ADJUSTMENTS — metadata + audio
-    # These engines are capped to ±12 adjustment each so they
-    # can't flip a verdict alone, but they push ambiguous cases.
-    # ══════════════════════════════════════════════════════════
-    meta_adjustment  = _aux_adjustment(meta_ai_score,  meta_confidence,  cap=12)
-    audio_adjustment = _aux_adjustment(audio_ai_score, audio_confidence, cap=10)
-
-    # Suppress audio adjustment for no_audio confidence (it's already baked in)
-    if audio_confidence == "no_audio":
-        audio_adjustment = _aux_adjustment(audio_ai_score, "low", cap=6)
-
-    combined_final = combined_primary + meta_adjustment + audio_adjustment
-    combined_final = max(0.0, min(100.0, combined_final))
-
-    log.info("Aux adjustments: meta=%+.1f  audio=%+.1f  final=%.1f",
-             meta_adjustment, audio_adjustment, combined_final)
-
-    # ══════════════════════════════════════════════════════════
-    # VERDICT
-    # ══════════════════════════════════════════════════════════
-    authenticity = 100 - int(round(combined_final))
+    combined_ai_score = max(0.0, min(100.0, combined))
+    authenticity      = 100 - int(round(combined_ai_score))
 
     if authenticity >= THRESHOLD_REAL:
         label = "REAL"
@@ -195,82 +242,28 @@ def run_detection(video_path: str) -> tuple:
     else:
         label = "AI"
 
-    # ── Detail dict — full evidence trail ────────────────────
     detail = {
-        # Final verdict
-        "ai_score":        int(round(combined_final)),
+        "ai_score":        int(round(combined_ai_score)),
         "authenticity":    authenticity,
         "label":           label,
-        "blend_mode":      blend_mode,
-
-        # Engine 1 — Signal
         "signal_ai_score": signal_ai_score,
-        "content_type":    content_type,
-
-        # Engine 2 — GPT
         "gpt_ai_score":    gpt_ai_score,
         "gpt_available":   gpt_available,
         "gpt_reasoning":   gpt_result.get("reasoning", ""),
         "gpt_flags":       gpt_result.get("flags", []),
-        "gpt_scores":      gpt_scores,               # NEW: per-dimension breakdown
-        "generator_guess": gpt_result.get("generator_guess", "Unknown"),  # NEW
-
-        # Engine 3 — Metadata
-        "metadata_ai_score":  meta_ai_score,
-        "metadata_confidence":meta_confidence,
-        "metadata_evidence":  meta_result.get("evidence", []),
-        "metadata_adjustment":meta_adjustment,
-
-        # Engine 4 — Audio
-        "audio_ai_score":    audio_ai_score,
-        "audio_confidence":  audio_confidence,
-        "audio_evidence":    audio_result.get("evidence", []),
-        "audio_available":   audio_available,
-        "audio_adjustment":  audio_adjustment,
-
-        # Blend weights
         "weight_signal":   w_sig,
         "weight_gpt":      w_gpt,
-
-        # Thresholds (for frontend display)
+        "blend_mode":      mode if not gpt_failed else "signal-only",
         "threshold_real":  THRESHOLD_REAL,
         "threshold_undet": THRESHOLD_UNDETERMINED,
     }
 
     log.info(
-        "Detection complete | signal=%d gpt=%d meta=%d audio=%d "
-        "combined=%.1f auth=%d label=%s",
-        signal_ai_score, gpt_ai_score, meta_ai_score, audio_ai_score,
-        combined_final, authenticity, label,
+        "Detection complete | signal=%d gpt=%d combined=%d authenticity=%d label=%s",
+        signal_ai_score, gpt_ai_score,
+        int(round(combined_ai_score)), authenticity, label,
     )
-
     return authenticity, label, detail
-
-
-# ─────────────────────────────────────────────────────────────
-#  Auxiliary engine adjustment helper
-# ─────────────────────────────────────────────────────────────
-def _aux_adjustment(ai_score: int, confidence: str, cap: int = 12) -> float:
-    """
-    Convert an auxiliary engine score into a ±cap adjustment
-    for the primary blend. Neutral (50) = 0 adjustment.
-    High confidence amplifies; low confidence attenuates.
-    """
-    if confidence == "low":
-        multiplier = 0.25
-    elif confidence == "medium":
-        multiplier = 0.55
-    elif confidence == "high":
-        multiplier = 0.85
-    elif confidence == "no_audio":
-        multiplier = 0.30
-    else:
-        multiplier = 0.30
-
-    # Raw deviation from neutral (50) → ±cap
-    deviation = (ai_score - 50) / 50.0 * cap * multiplier
-    return round(deviation, 2)
-
 
 
 

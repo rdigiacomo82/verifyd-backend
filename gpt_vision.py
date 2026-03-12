@@ -671,6 +671,58 @@ def _build_physics_summary(ctx: dict) -> str:
             "→ If confirmed: score crowd_behavior 7-9."
         )
 
+    # ── Motion periodicity hint (v7) ────────────────────────
+    motion_period = ctx.get("motion_period", 0)
+    avg_motion_val = ctx.get("avg_motion", 0)
+    if motion_period is not None and motion_period > 0.55 and avg_motion_val > 5.0:
+        hints.append(
+            f"🚨 CYCLIC MOTION DETECTED (periodicity={motion_period:.3f}, "
+            f"motion={avg_motion_val:.1f}). "
+            "The optical flow signal repeats with unnatural regularity — "
+            "a hallmark of AI video generators which interpolate motion from "
+            "a fixed latent code. Real human movement (jogging, walking, sports) "
+            "has natural stride variation: no two steps identical in timing or force. "
+            "LOOK FOR:\\n"
+            "  • Jogging/running with unnaturally even, robotic stride rhythm\\n"
+            "  • Limbs swinging with mechanical regularity — no fatigue variation\\n"
+            "  • Hair/clothing movement that perfectly repeats each cycle\\n"
+            "  • Background scroll that loops or repeats subtly\\n"
+            "  • Foot-ground contact that lacks impact compression or weight\\n"
+            "→ Score motion_physics 7-10 if stride/movement is unnaturally uniform. "
+            "→ Score physics_violations 7-9 if movement defies natural human biomechanics."
+        )
+
+    # ── Portrait high-motion / AI jogging hint (v7) ─────────
+    _is_portrait_motion = (
+        content_type == "action"
+        and ctx.get("avg_motion", 0) > 15.0
+        and ctx.get("skin_ratio", 0) > 0.10
+    )
+    if _is_portrait_motion:
+        hints.append(
+            "🏃 PORTRAIT-MODE PERSON IN MOTION detected. "
+            "AI jogging/running/exercise videos are extremely common on TikTok. "
+            "Generators like Kling and Hailuo produce convincing but detectable "
+            "person-in-motion videos. Key tells:\\n"
+            "  SKIN DURING MOTION: Real skin shows motion blur, sweat sheen, "
+            "natural color variation from exertion (redness in cheeks/neck). "
+            "AI skin stays porcelain-smooth even during vigorous movement.\\n"
+            "  STRIDE PHYSICS: Real jogging has weight — foot-strike causes "
+            "visible body compression, head bobs unevenly, arms swing with "
+            "asymmetric natural variation. AI jogging is fluid and frictionless.\\n"
+            "  CLOTHING PHYSICS: Real fabric wrinkles, stretches, and lags "
+            "slightly behind body movement. AI clothing deforms too smoothly "
+            "or stays impossibly wrinkle-free during motion.\\n"
+            "  HAIR PHYSICS: Real hair bounces with impact variation and "
+            "strand-level chaos. AI hair moves as a uniform mass.\\n"
+            "  BACKGROUND: Real outdoor running has natural camera shake, "
+            "depth-varied bokeh, environmental context (dirt, grass texture). "
+            "AI background is rendered/smooth or subtly loops.\\n"
+            "→ Score skin_texture, motion_physics, and physics_violations carefully. "
+            "Do not give real bonuses just because the person looks convincing — "
+            "inspect the physics of movement, not just appearance."
+        )
+
     skin_ratio = ctx.get("skin_ratio", 0)
     if is_person or (skin_ratio is not None and skin_ratio > 0.10):
         hints.append(
