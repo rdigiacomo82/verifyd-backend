@@ -1599,6 +1599,15 @@ def widget_embed(key: str = ""):
     transition: opacity 0.2s;
   }}
   .download-btn:hover {{ opacity: 0.85; }}
+  .copy-link-btn {{
+    display: block; width: 100%; margin-top: 8px;
+    padding: 11px; border-radius: 8px;
+    font-size: 13px; font-weight: 600; cursor: pointer;
+    background: transparent; color: #9ca3af;
+    border: 1px solid #374151; text-align: center;
+    transition: border-color 0.2s, color 0.2s;
+  }}
+  .copy-link-btn:hover {{ border-color: #22c55e; color: #22c55e; }}
 </style>
 </head>
 <body>
@@ -1642,6 +1651,10 @@ def widget_embed(key: str = ""):
      style="display:none;">
     ⬇ Download Certified Video
   </a>
+  <button class="copy-link-btn" id="copyLinkBtn" onclick="copyCertLink()"
+     style="display:none;">
+    🔗 Copy Certified Link
+  </button>
   <button class="reset-btn" onclick="resetWidget()" style="margin-top:10px;">Verify another video</button>
 </div>
 
@@ -1697,8 +1710,11 @@ function resetWidget() {{
   document.getElementById('resultBox').style.display    = 'none';
   document.getElementById('progressWrap').style.display = 'none';
   document.getElementById('errorMsg').textContent        = '';
-  document.getElementById('downloadBtn').style.display   = 'none';
-  document.getElementById('downloadBtn').href             = '#';
+  document.getElementById('downloadBtn').style.display    = 'none';
+  document.getElementById('downloadBtn').href              = '#';
+  document.getElementById('copyLinkBtn').style.display    = 'none';
+  document.getElementById('copyLinkBtn').textContent      = '🔗 Copy Certified Link';
+  window._certLink = '';
   document.getElementById('analyzeBtn').textContent      = 'Verify Video';
   document.getElementById('analyzeBtn').disabled         = false;
   notifyResize();
@@ -1778,19 +1794,59 @@ function showResult(data) {{
   document.getElementById('resultReasoning').textContent = reasoning;
   document.getElementById('resultReasoning').style.display = reasoning ? '' : 'none';
 
-  // Show download button if certified video is available
-  var dlBtn = document.getElementById('downloadBtn');
+  // Show download + copy link buttons if certified video is available
+  var dlBtn   = document.getElementById('downloadBtn');
+  var copyBtn = document.getElementById('copyLinkBtn');
   if (data.download_url) {{
     dlBtn.href = data.download_url;
     dlBtn.style.display = 'block';
+    // Build the public certificate URL
+    var certId = data.certificate_id || '';
+    window._certLink = certId
+      ? 'https://vfvid.com/v/' + certId
+      : data.download_url;
+    copyBtn.style.display = 'block';
+    copyBtn.textContent = '🔗 Copy Certified Link';
   }} else {{
-    dlBtn.style.display = 'none';
+    dlBtn.style.display  = 'none';
+    copyBtn.style.display = 'none';
   }}
 
   box.style.display = 'block';
   document.getElementById('analyzeBtn').textContent = 'Verify Video';
   document.getElementById('analyzeBtn').disabled    = false;
   notifyResize();
+}}
+
+function copyCertLink() {{
+  var link = window._certLink || '';
+  if (!link) return;
+  if (navigator.clipboard && navigator.clipboard.writeText) {{
+    navigator.clipboard.writeText(link).then(function() {{
+      var btn = document.getElementById('copyLinkBtn');
+      btn.textContent = '✓ Link Copied!';
+      btn.style.color = '#22c55e';
+      btn.style.borderColor = '#22c55e';
+      setTimeout(function() {{
+        btn.textContent = '🔗 Copy Certified Link';
+        btn.style.color = '';
+        btn.style.borderColor = '';
+      }}, 2500);
+    }});
+  }} else {{
+    // Fallback for older browsers
+    var ta = document.createElement('textarea');
+    ta.value = link;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+    var btn = document.getElementById('copyLinkBtn');
+    btn.textContent = '✓ Link Copied!';
+    setTimeout(function() {{ btn.textContent = '🔗 Copy Certified Link'; }}, 2500);
+  }}
 }}
 
 function showError(msg) {{
