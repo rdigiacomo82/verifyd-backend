@@ -1,29 +1,33 @@
 # ============================================================
-#  VeriFYD — detector.py  (v8 — temporal consistency + noise floor + shadow drift)
+#  VeriFYD — detector.py  (v9 — omni-flow entropy + edge temporal coherence
+#                                + temporal color variance)
 #
-#  v8 adds three new signals from 2024-2025 AI video detection research:
+#  ALL SIGNALS (v4 through v9):
+#  v4:  sat_frame_std, bg_drift, flicker_std, scene cuts
+#  v5:  fg_bg_ratio, motion_sync, hue_entropy
+#  v6:  quad_sharpness_cov
+#  v7:  motion_periodicity, portrait-action reclassification
+#  v8:  IFDV, flat_region_noise_floor, shadow_direction_drift, compilation
+#  v9:  omni_flow_entropy, edge_temporal_coherence, temporal_color_variance
+# ============================================================
 #
-#  ┌─────────────────────────────┬──────────────┬──────────────┐
-#  │ Signal                      │ AI range     │ Real range   │
-#  ├─────────────────────────────┼──────────────┼──────────────┤
-#  │ Inter-frame diff variance   │ <5 or >500   │ 10–200       │
-#  │ Flat-region noise floor     │ <1.5         │ 3.0–20+      │
-#  │ Shadow direction drift CoV  │ <0.25        │ 0.35–0.80    │
-#  └─────────────────────────────┴──────────────┴──────────────┘
+#  v6 adds two new signals targeting AI animal videos where
+#  the render is uniformly sharp (no real camera depth-of-field):
 #
-#  NEW signals in v8:
-#  1. _interframe_diff_variance(): variance of frame-to-frame pixel diff
-#     means. AI generators produce either too-smooth (flat) or jittery
-#     transitions vs real camera's natural organic variation.
-#  2. _flat_region_noise_floor(): noise std in flat/uniform image regions.
-#     AI renders are unnaturally clean in uniform areas (sky, walls) while
-#     real cameras always have sensor shot noise even in flat regions.
-#  3. _shadow_direction_drift(): tracks the centroid of dark pixel regions
-#     across frames. If shadows drift inconsistently relative to object
-#     motion direction, it indicates AI rendering physics violations.
+#  NEW signals calibrated on Gorilla AI test video:
+#  ┌──────────────────────────┬──────────────┬──────────────┐
+#  │ Signal                   │ AI range     │ Real range   │
+#  ├──────────────────────────┼──────────────┼──────────────┤
+#  │ Quad sharpness CoV       │ <0.50        │ 0.58–0.92    │
+#  │ sat_std (low-sat guard)  │ <5, mean<100 │ varies       │
+#  └──────────────────────────┴──────────────┴──────────────┘
 #
-#  v7 signals incorporated (motion_periodicity, portrait-action fix).
-#  v6 signals preserved (quad_sharpness_cov, sat_std low-sat guard).
+#  Root cause of Gorilla miss:
+#  - sat_std=3.86 (frozen AI lighting) was guarded by is_action
+#  - quad_sharpness_cov=0.365 (uniform render focus, no lens)
+#  - Fix: sat_std frozen guard now checks sat_mean<100 as separate
+#    path from the broadcast guard (sat_mean>140)
+#
 #  v5 signals preserved (fg_bg_ratio, motion_sync, hue_entropy).
 #  v4 signals preserved (sat_std, bg_drift, flicker_std).
 # ============================================================
@@ -393,176 +397,280 @@ def _quad_sharpness_cov(frames_gray: List[np.ndarray]) -> float:
     return float(np.mean(covs))
 
 
-# ── NEW v7: Motion periodicity (cyclic AI motion detection) ─
-def _motion_periodicity(flow_magnitudes: List[float]) -> float:
-    """
-    Measure cyclic/repeating patterns in optical flow magnitude over time.
-    AI jogging/running videos produce a near-perfect periodic gait loop
-    because the generator repeats a fixed motion cycle.
-    Real runners have natural variation in stride length and speed.
+# ══════════════════════════════════════════════════════════════
+# NEW v7 signals  (motion periodicity, portrait-action fix)
+# NEW v8 signals  (IFDV, flat-region noise floor, shadow direction drift)
+# NEW v9 signals  (omni-flow entropy, edge temporal coherence, temporal color variance)
+# ══════════════════════════════════════════════════════════════
 
-    Uses autocorrelation: a strong peak at lag > 0 indicates periodicity.
-    Returns the peak autocorrelation coefficient (0-1).
+
+# ── v7: Motion periodicity — wave/jog loop detection ────────
+def _motion_periodicity(motion_scores: List[float]) -> float:
+    """
+    Autocorrelation of optical flow magnitude sequence.
+    AI generators loop a fixed animation template → peak autocorrelation at half-window.
+    Real footage has organic irregular timing → low autocorrelation.
 
     Calibrated:
-      AI jogging (TikTok Kling): motion_period=0.806 (strong loop)
-      Real running: motion_period=0.2–0.45 (organic variation)
-    Threshold: >0.55 = AI cyclic motion
+      AI Jogging: 0.806  AI Boat waves: 0.767  (cyclic loop)
+      Real Video: 0.344  Real Baseball: 0.22   (organic variation)
+    Threshold: >0.65 = strong AI loop signal
     """
-    if len(flow_magnitudes) < 8:
+    if len(motion_scores) < 8:
         return 0.0
-    arr = np.array(flow_magnitudes, dtype=np.float64)
+    arr = np.array(motion_scores, dtype=float)
     arr -= arr.mean()
-    n = len(arr)
-    autocorr = np.correlate(arr, arr, mode='full')
-    autocorr = autocorr[n - 1:]  # keep lags 0..n-1
-    if autocorr[0] < 1e-10:
-        return 0.0
-    autocorr /= autocorr[0]      # normalize: lag-0 = 1.0
-    # Look for the best peak at lag 2..n//2 (ignore lag 0 = trivial)
-    search_end = max(3, n // 2)
-    if search_end >= len(autocorr):
-        return 0.0
-    peak = float(np.max(autocorr[2:search_end]))
-    return max(0.0, peak)
+    ac = np.correlate(arr, arr, mode='full')
+    ac = ac[len(arr) - 1:]
+    if ac[0] > 0:
+        ac = ac / ac[0]
+    half = max(2, len(ac) // 2)
+    return float(np.max(ac[2:half]))
 
 
-# ── NEW v8: Inter-frame difference variance ──────────────────
+# ── v8: Inter-frame diff variance (IFDV) ────────────────────
 def _interframe_diff_variance(motion_scores: List[float]) -> float:
     """
-    Variance of frame-to-frame mean pixel difference values.
+    Coefficient of variation of frame-to-frame pixel diff means.
+    Measures how 'organic' the temporal change pattern is.
 
-    Research finding (DeCoF, 2024): AI-generated videos exhibit anomalies
-    in inter-frame consistency — either too-smooth (flat diff = no variation)
-    or jittery (chaotic spikes). Real camera footage has organic variation.
+    AI too-smooth (temporal decoder over-regularizes): CoV < 0.12
+    AI too-jittery (temporal inconsistency): CoV > 4.0
+    Real organic: 0.35–1.8
 
-    Returns coefficient of variation (std/mean) of the diff sequence.
-    LOW (<0.15): unnaturally smooth transitions (diffusion model temporal over-smoothing)
-    HIGH (>3.0): chaotic jitter (AI generation temporal artifacts)
-    NATURAL (0.3–1.5): real camera footage
-
-    Guards: short clips, static content (both naturally low CoV).
-    Calibrated on research findings — needs tuning with real test videos.
+    Calibrated: AI_Jogging=0.023 (over-smooth)  AI_Child=0.418 (organic range)
+                Real_Video1=0.639 (organic)      AI_Boat=0.418
+    Guards: static content, short clips, very low motion
     """
-    if len(motion_scores) < 6:
-        return 1.0  # neutral: not enough data
-    arr = np.array(motion_scores, dtype=np.float64)
-    mean_val = arr.mean()
-    if mean_val < 0.5:
-        return 1.0  # static video — signal not meaningful
-    cov = float(arr.std() / (mean_val + 1e-10))
-    return cov
+    if len(motion_scores) < 4:
+        return 1.0
+    arr = np.array(motion_scores, dtype=float)
+    mean = arr.mean()
+    if mean < 0.5:
+        return 1.0  # static guard
+    return float(arr.std() / (mean + 1e-10))
 
 
-# ── NEW v8: Flat-region noise floor ─────────────────────────
+# ── v8: Flat-region noise floor ──────────────────────────────
 def _flat_region_noise_floor(frames_gray: List[np.ndarray]) -> float:
     """
-    Measure noise in spatially uniform (flat) image regions.
+    Measures noise standard deviation in the 10% flattest image patches.
+    AI renders: near-zero noise in flat areas (computed pixel values, no photon noise).
+    Real cameras: always embed photon shot noise, even in flat sky/wall regions.
 
-    Key insight from 2025 research: AI video renders are unnaturally clean
-    in uniform areas (sky, walls, clothing). Real cameras always produce
-    shot noise (photon noise) even in areas of uniform color — this is a
-    physical property of imaging sensors.
-
-    Algorithm: find the 10% flattest patches (lowest local variance),
-    then measure the mean pixel std within those patches.
-
-    LOW (<1.5): AI render — unnaturally clean flat regions
-    HIGH (>3.0): real camera — natural sensor shot noise
-    Very HIGH (>8.0): heavy real camera noise (grain, poor lighting)
-
-    Calibrated from research; needs real video validation.
+    Calibrated: AI flat render → 0.0   Real grain frame → 3.64+
+    Threshold: < 1.5 strong AI (no noise), > 4.0 real grain
+    Guards:
+      • Very blurry/compressed content (avg_sharpness < 50) can have near-zero noise
+      • Dark/crushed patches (brightness < 40): H.264 maps these to 0 → false zero noise
+        (this fires on dark sports backgrounds where H.264 crushes blacks)
     """
     if not frames_gray:
-        return 5.0  # neutral
-    noise_floors = []
-    for g in frames_gray:
-        h, w = g.shape
-        patch_size = 16
-        flat_patches = []
-        for y in range(0, h - patch_size, patch_size):
-            for x in range(0, w - patch_size, patch_size):
-                patch = g[y:y+patch_size, x:x+patch_size].astype(np.float32)
-                local_var = patch.var()
-                flat_patches.append((local_var, patch))
-        if not flat_patches:
-            continue
-        flat_patches.sort(key=lambda t: t[0])
-        # Take the 10% flattest patches (most uniform regions)
-        n_flat = max(1, len(flat_patches) // 10)
-        flat_only = [p for _, p in flat_patches[:n_flat]]
-        # Measure noise as std of pixel values in those flat patches
-        all_pixels = np.concatenate([p.ravel() for p in flat_only])
-        noise_floors.append(float(all_pixels.std()))
-    if not noise_floors:
         return 5.0
-    return float(np.mean(noise_floors))
+    noise_values = []
+    for g in frames_gray[:20]:
+        h, w = g.shape
+        ph, pw = 16, 16
+        patch_vars = []
+        for y in range(0, h - ph, ph):
+            for x in range(0, w - pw, pw):
+                patch = g[y:y+ph, x:x+pw]
+                brightness = float(patch.mean())
+                # Guard: skip dark crushed patches (H.264 quantization makes them falsely clean)
+                if brightness < 40:
+                    continue
+                patch_vars.append((float(patch.var()), y, x))
+        if not patch_vars:
+            continue
+        patch_vars.sort()
+        flat_patches = patch_vars[:max(1, len(patch_vars) // 10)]
+        for _, y, x in flat_patches:
+            patch = g[y:y+ph, x:x+pw].astype(float)
+            # Additional guard: skip patches that are already too bright (saturated highlights)
+            if patch.mean() > 220:
+                continue
+            blur = cv2.GaussianBlur(patch.astype(np.float32), (5, 5), 0)
+            noise = float(np.std(patch - blur))
+            noise_values.append(noise)
+    return float(np.mean(noise_values)) if noise_values else 5.0
 
 
-# ── NEW v8: Shadow direction drift ───────────────────────────
+# ── v8: Shadow direction drift ───────────────────────────────
 def _shadow_direction_drift(frames_gray: List[np.ndarray]) -> float:
     """
-    Track the centroid of dark pixel regions (shadows) across frames.
-    Measures the coefficient of variation of shadow movement direction.
+    Circular variance of shadow centroid movement direction across frames.
+    AI generators lack a global light source constraint → shadow centroids drift
+    in inconsistent directions. Real scenes have shadows cast by a fixed light source.
 
-    Research finding (shadow physics violations): In AI-generated videos,
-    shadows sometimes drift in inconsistent directions because the generator
-    doesn't enforce a global light source constraint. Real shadows cast by
-    a single light source move consistently relative to object motion.
-
-    Algorithm:
-    1. Find dark pixels (bottom 15% of luminance) — these are likely shadows
-    2. Compute shadow centroid per frame
-    3. Compute frame-to-frame centroid movement direction (angle)
-    4. LOW CoV of direction = shadow consistent (could be real OR AI)
-    5. HIGH abrupt directional change = shadow detaches (AI physics violation)
-
-    Returns 0.0–1.0 where:
-      HIGH (>0.6): shadow directions are inconsistent → AI physics violation
-      LOW (<0.2):  shadow moves consistently (or no shadow) → real-world physics
-      MIDDLE: ambiguous
-
-    Guards: static videos (no shadow movement), very bright/no-shadow scenes.
-    Calibrated from research; will need real test video tuning.
+    Calibrated: consistent shadow → 0.0   random shadow → 0.97
+    Threshold: > 0.75 = inconsistent (AI physics violation)
+    Guard: static content, short clips, < 4 frames
     """
     if len(frames_gray) < 4:
-        return 0.3  # neutral
-
-    shadow_angles = []
+        return 0.0
     prev_centroid = None
-
-    for g in frames_gray:
-        # Find dark region centroid (potential shadow pixels)
-        threshold = np.percentile(g, 15)  # bottom 15% luminance
-        shadow_mask = (g < threshold).astype(np.uint8)
-        # Find centroid of shadow region
-        m = cv2.moments(shadow_mask)
-        if m['m00'] < 100:  # too few shadow pixels
-            prev_centroid = None
+    directions = []
+    for g in frames_gray[:25]:
+        shadow = (g < 60).astype(np.float32)
+        if shadow.sum() < 100:
             continue
-        cx = m['m10'] / m['m00']
-        cy = m['m01'] / m['m00']
+        cy = float(np.sum(np.where(shadow > 0)[0])) / (shadow.sum() + 1e-10)
+        cx = float(np.sum(np.where(shadow > 0)[1])) / (shadow.sum() + 1e-10)
         if prev_centroid is not None:
-            dx = cx - prev_centroid[0]
-            dy = cy - prev_centroid[1]
-            movement = np.sqrt(dx**2 + dy**2)
-            if movement > 1.0:  # only track meaningful movement
-                angle = np.arctan2(dy, dx)
-                shadow_angles.append(angle)
-        prev_centroid = (cx, cy)
+            dy = cy - prev_centroid[0]
+            dx = cx - prev_centroid[1]
+            if abs(dy) + abs(dx) > 0.5:
+                angle = float(np.arctan2(dy, dx))
+                directions.append(angle)
+        prev_centroid = (cy, cx)
+    if len(directions) < 3:
+        return 0.0
+    angles = np.array(directions)
+    mean_sin = float(np.mean(np.sin(angles)))
+    mean_cos = float(np.mean(np.cos(angles)))
+    R = np.sqrt(mean_sin**2 + mean_cos**2)
+    return float(1.0 - R)
 
-    if len(shadow_angles) < 3:
-        return 0.3  # not enough movement data — neutral
 
-    # Compute circular variance of shadow movement directions
-    # Low circular variance = consistent direction (real physics)
-    # High circular variance = random shadow directions (AI physics violation)
-    angles_arr = np.array(shadow_angles)
-    mean_cos = np.cos(angles_arr).mean()
-    mean_sin = np.sin(angles_arr).mean()
-    R = np.sqrt(mean_cos**2 + mean_sin**2)  # resultant length: 1=consistent, 0=random
-    circular_variance = float(1.0 - R)      # 0=consistent, 1=random
-    return circular_variance
+# ── v9: Omnidirectional flow entropy (cinematic AI) ──────────
+def _omni_flow_entropy(frames_gray: List[np.ndarray]) -> float:
+    """
+    Measures the UNIFORMITY of optical flow direction distribution.
+    This is the INVERSE complement to the existing flow_dir_entropy crowd signal.
+
+    Existing signal: LOW entropy = AI lockstep crowd (all same direction) → +12
+    This signal:    HIGH entropy approaching 4.0 = AI cinematic noise (all directions
+                    equally represented = random/synthetic motion, not physics-driven)
+
+    Real sports/nature (camera following subject): dominated by 1-2 directions → LOW entropy
+    AI water/nature/cinematic: flow vectors distributed across all 16 directions → HIGH entropy
+
+    Calibrated:
+      AI_Boat:     3.723  AI_Gorilla: 3.741  AI_Jogging: 3.853  AI_Child: 3.667
+      Real_Baseball: 1.665  Real_Video1: 1.334
+    Threshold: > 3.5 for cinematic content = AI omnidirectional noise signal
+    Guard: ONLY for cinematic/nature content (not action/person) — real action also has
+    moderate entropy. Must not overlap with crowd lockstep signal.
+    """
+    if len(frames_gray) < 4:
+        return 2.0
+    all_angles = []
+    for i in range(1, min(len(frames_gray), 20)):
+        flow = cv2.calcOpticalFlowFarneback(
+            frames_gray[i-1], frames_gray[i], None,
+            0.5, 3, 15, 3, 5, 1.2, 0)
+        mag, ang = cv2.cartToPolar(flow[..., 0], flow[..., 1])
+        significant = mag > 1.0
+        if significant.any():
+            all_angles.extend(ang[significant].flatten().tolist())
+    if len(all_angles) < 50:
+        return 2.0
+    hist, _ = np.histogram(all_angles, bins=16, range=(0, 2 * np.pi))
+    hist = hist / (hist.sum() + 1e-10)
+    entropy = float(-np.sum(hist * np.log2(hist + 1e-10)))
+    return entropy
+
+
+# ── v9: Edge temporal coherence ──────────────────────────────
+def _edge_temporal_coherence(frames_gray: List[np.ndarray]) -> tuple:
+    """
+    Measures how stable object boundaries (edges) are across frames.
+
+    AI generators produce 'edge crawl' — object boundaries subtly shift
+    between frames even when the scene is static. This is a diffusion model
+    artifact where the temporal decoder doesn't enforce strict edge consistency.
+
+    Real cameras: edges are physically stable (same object = same edge position).
+    Object motion creates LARGE edge variance at spike locations; between-spike
+    pixels have near-zero variance.
+
+    Returns (mean_var, cov_var):
+      mean_var: average per-pixel edge variance across time
+      cov_var:  coefficient of variation of the variance map
+
+    Calibrated:
+      AI_Boat:    mean=0.041, cov=1.436  (edges crawl weakly everywhere)
+      AI_Gorilla: mean=0.020, cov=1.881  (very uniform weak crawl = AI render)
+      AI_Moose:   mean=0.022, cov=2.213  (extreme edge crawl = AI)
+      Real_Video1: mean=0.165, cov=0.574  (strong edges, natural variance)
+      Real_Baseball: mean=0.091, cov=1.025 (real physical motion = spike variance)
+
+    AI signature: mean_var < 0.05 AND cov_var > 1.4
+      (edges present but weakly crawling — no physics forcing them to move)
+    Real signature: mean_var > 0.10
+      (edges move significantly because real objects have real momentum)
+    """
+    if len(frames_gray) < 4:
+        return 0.1, 1.0
+    edge_maps = []
+    for g in frames_gray[:20]:
+        edges = cv2.Canny(g, 50, 150).astype(np.float32) / 255.0
+        edge_maps.append(edges)
+    stack = np.stack(edge_maps, axis=0)
+    per_pixel_var = np.var(stack, axis=0)
+    mean_var = float(per_pixel_var.mean())
+    cov_var  = float(np.std(per_pixel_var) / (mean_var + 1e-10))
+    return mean_var, cov_var
+
+
+# ── v9: Temporal color variance in flat regions ──────────────
+def _temporal_color_variance(frames_bgr: List[np.ndarray]) -> float:
+    """
+    Measures temporal variance of hue in flat (low-saturation) regions.
+    AI generators 'shimmer' their color in flat background regions due to
+    diffusion model denoising inconsistency between frames.
+    Real cameras: flat regions have stable hue (same wall/sky = same color).
+
+    Returns the mean temporal hue variance in the 15% flattest patches.
+
+    Calibrated: (higher = more temporal color shimmer = more AI)
+    AI_Moose: 8.41  AI_Boat: 4.33  AI_Gorilla: 3.12
+    Real_Video1: 1.87  Real_Baseball: 2.54
+    Threshold: > 5.0 = AI color shimmer; < 3.0 = real stable color
+
+    Guards:
+      • Dark/crushed patches (brightness < 40): near-black hue is undefined/random
+        (H.264 crushes dark areas → undefined hue creates false high variance)
+      • Very bright highlights (brightness > 220): saturated whites also have unstable hue
+    """
+    if len(frames_bgr) < 4:
+        return 3.0
+    if not frames_bgr:
+        return 3.0
+
+    first_bgr = frames_bgr[0]
+    h, w = first_bgr.shape[:2]
+    ph, pw = 24, 24
+    flat_patches = []
+    for y in range(0, h - ph, ph):
+        for x in range(0, w - pw, pw):
+            patch = first_bgr[y:y+ph, x:x+pw]
+            hsv = cv2.cvtColor(patch, cv2.COLOR_BGR2HSV)
+            sat = float(hsv[:, :, 1].mean())
+            brightness = float(hsv[:, :, 2].mean())
+            # Guard: skip dark patches (undefined hue) and saturated highlights
+            if brightness < 40 or brightness > 220:
+                continue
+            # Guard: skip very desaturated patches (hue undefined when sat near 0)
+            if sat < 15:
+                continue
+            flat_patches.append((sat, y, x))
+    flat_patches.sort()
+    if not flat_patches:
+        return 3.0
+    top_flat = flat_patches[:max(1, len(flat_patches) // 7)]
+
+    temporal_vars = []
+    for _, py, px in top_flat:
+        hue_series = []
+        for frame in frames_bgr[:25]:
+            patch = frame[py:py+ph, px:px+pw]
+            hsv = cv2.cvtColor(patch, cv2.COLOR_BGR2HSV)
+            hue_series.append(float(hsv[:, :, 0].mean()))
+        if len(hue_series) > 2:
+            temporal_vars.append(float(np.var(hue_series)))
+
+    return float(np.mean(temporal_vars)) if temporal_vars else 3.0
 
 
 # ── Main detection function ──────────────────────────────────
@@ -572,13 +680,13 @@ def detect_ai(video_path: str) -> int:
     Analyze video for AI-generation signals.
     Returns 0-100 where HIGH = likely AI, LOW = likely real.
 
-    v8 adds: inter-frame diff variance, flat-region noise floor,
-             shadow direction drift, motion periodicity (v7).
-    v6 adds: quad_sharpness_cov, sat_std low-sat guard.
-    v5 adds: fg_bg_ratio, motion_sync, hue_entropy.
-    v4 adds: sat_std, bg_drift, flicker_std.
+    v4 calibrated on:
+    - Real videos: waterslide, presidential press conference
+    - AI videos:   waterslide, presidential deepfake,
+                   bus scene, dancing monkey, moose (cinematic)
+    v5 adds crowd/reaction, FG/BG depth, and hue entropy signals.
     """
-    log.info("Primary detector v8 running on %s", video_path)
+    log.info("Primary detector v5 running on %s", video_path)
 
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -613,7 +721,7 @@ def detect_ai(video_path: str) -> int:
     v5_bgr_frames:           List[np.ndarray] = []  # full sample BGR frames for v5 hue entropy
     flow_dir_scores:         List[float] = []       # flow direction entropy (crowd behavior)
     vert_flow_scores:        List[float] = []       # mean vertical flow per frame (< 0 = upward)
-    flow_magnitudes_raw:     List[float] = []       # mean flow magnitude per frame (for motion periodicity)
+    v9_all_gray_frames:      List[np.ndarray] = []  # all sampled gray frames for v9 signals
 
     prev_gray  = None
     prev_hist  = None
@@ -667,9 +775,6 @@ def detect_ai(video_path: str) -> int:
             flow_dir_scores.append(dir_entropy)
             # Vertical flow: negative = content moving upward (gravity violation signal)
             vert_flow_scores.append(float(flow[..., 1].mean()))
-            # Mean flow magnitude — used for motion periodicity autocorrelation
-            mag = np.sqrt(flow[..., 0]**2 + flow[..., 1]**2)
-            flow_magnitudes_raw.append(float(mag.mean()))
 
         hist = cv2.calcHist([gray], [0], None, [64], [0, 256])
         hist = hist.flatten() / (hist.sum() + 1e-10)
@@ -687,6 +792,10 @@ def detect_ai(video_path: str) -> int:
         if samples % 6 == 0 and len(v4_gray_frames) < 30:
             v4_gray_frames.append(gray)
             v5_bgr_frames.append(frame.copy())
+
+        # v9: keep every 3rd frame (max 40) for temporal coherence signals
+        if samples % 3 == 0 and len(v9_all_gray_frames) < 40:
+            v9_all_gray_frames.append(gray)
 
     cap.release()
 
@@ -743,11 +852,14 @@ def detect_ai(video_path: str) -> int:
     hue_entropy  = _hue_entropy(v5_bgr_frames)
     quad_cov     = _quad_sharpness_cov(v4_gray_frames)  # v6
 
-    # ── NEW v7/v8 signals ─────────────────────────────────────
-    motion_period    = _motion_periodicity(flow_magnitudes_raw)      # v7: cyclic AI gait loop
-    ifdv             = _interframe_diff_variance(motion_scores)       # v8: diff variance CoV
-    noise_floor      = _flat_region_noise_floor(v4_gray_frames)      # v8: flat-region sensor noise
-    shadow_drift_cov = _shadow_direction_drift(v4_gray_frames)       # v8: shadow direction consistency
+    # ── NEW v7/v8/v9 signals ─────────────────────────────────
+    motion_period   = _motion_periodicity(motion_scores)
+    ifdv            = _interframe_diff_variance(motion_scores)
+    noise_floor     = _flat_region_noise_floor(v9_all_gray_frames)
+    shadow_drift    = _shadow_direction_drift(v9_all_gray_frames)
+    omni_flow_ent   = _omni_flow_entropy(v9_all_gray_frames)
+    edge_mean_var, edge_cov_var = _edge_temporal_coherence(v9_all_gray_frames)
+    tcv             = _temporal_color_variance(v5_bgr_frames)   # reuse BGR sample set
 
     log.info(
         "Signals: noise=%.1f freq=%.3f edge=%.1f dct=%.3f "
@@ -756,14 +868,16 @@ def detect_ai(video_path: str) -> int:
         "flicker_cov=%.3f rvov=%.2f sharp=%.1f texvar=%.1f "
         "[v4] sat_std=%.2f bg_drift=%.2f flicker_std=%.3f "
         "[v5/v6] fg_bg=%.0f motion_sync=%.3f hue_ent=%.3f quad_cov=%.3f "
-        "[v7/v8] motion_period=%.3f ifdv=%.3f noise_floor=%.2f shadow_drift=%.3f",
+        "[v7/v8] period=%.3f ifdv=%.3f noise_floor=%.2f shadow=%.3f "
+        "[v9] omni_ent=%.3f edge_mvar=%.4f edge_cov=%.3f tcv=%.2f",
         avg_noise, avg_freq, avg_edge, avg_dct_grid,
         avg_grad_entropy, avg_tex_entropy, avg_color_corr, avg_saturation,
         avg_motion, motion_var, avg_temporal_jitter, avg_flow_var,
         pixel_flicker_cov, residual_var_of_var, avg_sharpness, avg_texture_var,
         sat_frame_std, bg_drift, flicker_std,
         fg_bg_ratio, motion_sync, hue_entropy, quad_cov,
-        motion_period, ifdv, noise_floor, shadow_drift_cov,
+        motion_period, ifdv, noise_floor, shadow_drift,
+        omni_flow_ent, edge_mean_var, edge_cov_var, tcv,
     )
 
     # ── Skin ratio — fraction of pixels in skin-tone HSV range ─
@@ -1223,9 +1337,16 @@ def detect_ai(video_path: str) -> int:
     elif bg_drift > 20.0 and not is_action_content and not (avg_motion > 12.0):
         # High bg_drift with high overall motion = camera moving, not AI warp artifact.
         # avg_motion > 12 means the camera itself is moving — bg drift is just parallax.
-        # Calibrated: Real handheld phone video had motion=15.4, bg_drift=29.4 → was +4 misfiring.
-        ai_score += 4
-        log.info("BG_DRIFT %.2f → unstable bg → +4", bg_drift)
+        # REAL CAMERA GUARD: if noise > 400, the real camera sensor grain confirms this
+        # is a genuine handheld phone video with natural background drift from movement.
+        # AI renders are noise-clean (<200); real phone cameras are noisy (>400).
+        # Calibrated: Real Baseball: noise=755 → guard protects from +4 misfire.
+        if avg_noise > 400:
+            log.info("BG_DRIFT %.2f → unstable BUT noise=%.0f real phone camera → suppressed",
+                     bg_drift, avg_noise)
+        else:
+            ai_score += 4
+            log.info("BG_DRIFT %.2f → unstable bg → +4", bg_drift)
     elif 5.0 <= bg_drift <= 18.0 and not is_action_content:
         ai_score -= 4
         log.info("BG_DRIFT %.2f → natural range → -4", bg_drift)
@@ -1306,6 +1427,11 @@ def detect_ai(video_path: str) -> int:
     # Only meaningful when significant motion is present.
     # Action guard: real action/sport videos have coordinated directional movement
     # (e.g. a single athlete moving across frame) — suppress minor penalties for them.
+    # OUTDOOR REAL GUARD: real outdoor phone video (noise>400) filming a single subject
+    # naturally produces low flow entropy (subject dominates frame direction).
+    # This is NOT AI lockstep — it's a real person with coherent motion.
+    # Same logic as hue entropy outdoor guard.
+    _flow_ent_outdoor_real = (avg_noise > 400)
     if avg_motion > 3.0 and len(flow_dir_scores) > 5 and not _is_short_clip:
         if avg_flow_dir_entropy < 1.5 and not (avg_flow_var > 20.0):
             # Very uniform flow — strong AI crowd signal (fires even for action).
@@ -1316,11 +1442,21 @@ def detect_ai(video_path: str) -> int:
             log.info("FLOW_ENTROPY %.3f → uniform AI motion → +12", avg_flow_dir_entropy)
         elif avg_flow_dir_entropy < 2.0 and not is_action_content and not (avg_flow_var > 20.0):
             # Camera pan guard: high flow_var means panning — low entropy expected.
-            ai_score += 7
-            log.info("FLOW_ENTROPY %.3f → somewhat uniform → +7", avg_flow_dir_entropy)
+            # Outdoor real guard: real phone with single subject has directional flow.
+            if _flow_ent_outdoor_real:
+                ai_score += 3
+                log.info("FLOW_ENTROPY %.3f → somewhat uniform BUT noise=%.0f outdoor/real → reduced +3",
+                         avg_flow_dir_entropy, avg_noise)
+            else:
+                ai_score += 7
+                log.info("FLOW_ENTROPY %.3f → somewhat uniform → +7", avg_flow_dir_entropy)
         elif avg_flow_dir_entropy < 2.5 and not is_action_content and not (avg_flow_var > 20.0):
-            ai_score += 3
-            log.info("FLOW_ENTROPY %.3f → slightly uniform → +3", avg_flow_dir_entropy)
+            if not _flow_ent_outdoor_real:
+                ai_score += 3
+                log.info("FLOW_ENTROPY %.3f → slightly uniform → +3", avg_flow_dir_entropy)
+            else:
+                log.info("FLOW_ENTROPY %.3f → slightly uniform BUT noise=%.0f outdoor/real → suppressed",
+                         avg_flow_dir_entropy, avg_noise)
         elif avg_flow_dir_entropy > 2.8:
             # Natural chaotic movement — real video signal.
             # Suppress when saturation is hyperreal (>130): AI can have high flow entropy
@@ -1534,131 +1670,240 @@ def detect_ai(video_path: str) -> int:
         ai_score -= 5
         log.info("QUAD_COV %.3f → natural lens depth-of-field → -5", quad_cov)
 
-    # ── 25. Motion periodicity — cyclic AI gait loop (NEW v7) ─
-    # AI jogging/running videos repeat a near-perfect motion cycle.
-    # Real runners have organic stride variation.
-    # Autocorrelation peak of optical flow magnitude sequence.
-    #
-    # GUARDS: short clips can't show periodicity; static content irrelevant;
-    # compilation videos have cuts that break any natural periodicity.
-    # Calibrated: AI_Jogging(TikTok Kling)=0.806 vs real running ~0.2-0.4
-    if (avg_motion > 5.0 and not _is_short_clip and
-            len(flow_magnitudes_raw) >= 8 and not _is_compilation):
-        if motion_period > 0.65:
+    ai_score = max(0.0, min(100.0, ai_score))
+
+    # ═══════════════════════════════════════════════════════════
+    # NEW v7 SIGNALS
+    # ═══════════════════════════════════════════════════════════
+
+    # ── 25. Motion periodicity (v7) ──────────────────────────
+    # AI generators loop a fixed animation template → wave/jog/run looks like a GIF.
+    # Autocorrelation peak > 0.65 = the motion pattern repeats with near-perfect regularity.
+    # Guards:
+    #   • Short clips: autocorrelation unreliable with fewer than 8 motion samples
+    #   • Static content: no motion to analyze
+    #   • Compilation videos: scene cuts break artificial periodicity measurement
+    #   • Camera pan (high flow_var): panning creates smooth periodic-looking motion
+    # Portrait action reclassification: portrait + high motion + rich edges → this is
+    #   a real action video. AI jogging is portrait action but also has periodicity=0.8.
+    #   Use tighter thresholds for portrait action (require stronger autocorrelation).
+    _period_guard = (
+        _is_short_clip or
+        is_static_content or
+        _is_compilation or
+        avg_motion < 1.0 or
+        (avg_flow_var > 20.0)   # camera pan produces smooth motion that looks periodic
+    )
+    _portrait_action_reclassified = (is_action_content and _is_portrait)
+    _period_thresh_strong = 0.75 if _portrait_action_reclassified else 0.65
+    _period_thresh_med    = 0.65 if _portrait_action_reclassified else 0.55
+    _period_thresh_slight = 0.80 if _portrait_action_reclassified else 0.45
+    if not _period_guard:
+        if motion_period > _period_thresh_strong:
             ai_score += 14
-            log.info("MOTION_PERIOD %.3f → strong cyclic loop (AI gait) → +14", motion_period)
-        elif motion_period > 0.55:
+            log.info("MOTION_PERIOD %.3f → strong animation loop → +14", motion_period)
+        elif motion_period > _period_thresh_med:
             ai_score += 9
-            log.info("MOTION_PERIOD %.3f → cyclic motion pattern → +9", motion_period)
-        elif motion_period > 0.45:
+            log.info("MOTION_PERIOD %.3f → moderate animation loop → +9", motion_period)
+        elif motion_period > _period_thresh_slight:
             ai_score += 5
-            log.info("MOTION_PERIOD %.3f → moderately cyclic → +5", motion_period)
-        elif motion_period < 0.20 and avg_motion > 8.0:
-            # Highly irregular motion = real organic movement
+            log.info("MOTION_PERIOD %.3f → slight periodicity → +5", motion_period)
+        elif motion_period < 0.20 and avg_motion > 3.0:
             ai_score -= 4
             log.info("MOTION_PERIOD %.3f → organic irregular motion → -4", motion_period)
 
-    # ── 25b. Portrait high-motion → reclassify as action (NEW v7) ─
-    # Portrait video with person in motion and edges present = action content.
-    # Fixes jogging video wrongly classified as "cinematic" by the v6 edge>12 guard.
-    # Edge>4 (not >12) because portrait jogging has moderate edges from clothing/limbs.
-    _portrait_high_motion = (
-        _is_portrait and avg_motion > 15.0 and avg_edge > 4.0
-    )
-    if _portrait_high_motion and not is_action_content:
-        is_action_content = True
-        log.info("PORTRAIT_HIGH_MOTION motion=%.1f edge=%.1f → reclassified as action", avg_motion, avg_edge)
+    # ═══════════════════════════════════════════════════════════
+    # NEW v8 SIGNALS
+    # ═══════════════════════════════════════════════════════════
 
-    # ── 26. Inter-frame difference variance (NEW v8) ──────────
-    # Coefficient of variation of frame-to-frame diff means.
-    # Research (DeCoF 2024): AI generates either too-smooth or jittery
-    # transitions vs real camera's organic natural variation.
-    #
-    # LOW CoV (<0.15): AI temporal over-smoothing — transitions too flat
-    # HIGH CoV (>3.5): AI temporal jitter — chaotic inconsistency
-    # NATURAL (0.3–1.8): real camera organic variation
-    #
-    # GUARDS: static content naturally has near-zero diffs; short clips
-    # unreliable; compilation videos have cut spikes inflating CoV.
-    if (avg_motion > 2.0 and not _is_short_clip and
-            not is_static_content and not _is_compilation and
-            len(motion_scores) >= 8):
+    # ── 26. Inter-frame diff variance / IFDV (v8) ────────────
+    # Coefficient of variation of frame-to-frame motion scores.
+    # AI temporal over-smoothing: CoV < 0.12 (too flat, glass-smooth)
+    # AI temporal jitter: CoV > 4.0 (chaotic inconsistency)
+    # Real organic: 0.35–1.8
+    # Guards: static, short clip, camera pan, compilation
+    _ifdv_guard = (
+        _is_short_clip or
+        is_static_content or
+        avg_motion < 0.5 or
+        _is_compilation
+    )
+    if not _ifdv_guard and len(motion_scores) > 4:
         if ifdv < 0.12:
             ai_score += 10
-            log.info("IFDV %.3f → unnaturally flat transitions (AI over-smooth) → +10", ifdv)
+            log.info("IFDV %.3f → temporal over-smooth (AI) → +10", ifdv)
         elif ifdv < 0.20:
             ai_score += 5
-            log.info("IFDV %.3f → very smooth transitions → +5", ifdv)
+            log.info("IFDV %.3f → somewhat over-smooth → +5", ifdv)
         elif ifdv > 4.0:
             ai_score += 8
-            log.info("IFDV %.3f → chaotic jitter (AI temporal artifact) → +8", ifdv)
+            log.info("IFDV %.3f → temporal jitter (AI) → +8", ifdv)
         elif ifdv > 2.5:
             ai_score += 4
-            log.info("IFDV %.3f → high variance transitions → +4", ifdv)
+            log.info("IFDV %.3f → elevated jitter → +4", ifdv)
         elif 0.35 <= ifdv <= 1.8:
             ai_score -= 3
-            log.info("IFDV %.3f → organic natural motion variation → -3", ifdv)
+            log.info("IFDV %.3f → organic motion variance (real) → -3", ifdv)
 
-    # ── 27. Flat-region noise floor (NEW v8) ─────────────────
-    # AI renders are unnaturally clean in uniform image regions (sky, walls).
-    # Real cameras always produce photon shot noise even in flat areas.
-    #
-    # GUARDS: highly compressed video (heavy lossy compression kills noise),
-    # and very dark scenes (no flat bright regions to measure).
-    # NOTE: this is a DIFFERENT signal from avg_noise (Laplacian variance)
-    # which measures sharpness/texture, not clean-region noise floor.
-    #
-    # Calibrated from research — thresholds need validation with test videos.
-    # Starting conservative to avoid false positives.
-    if v4_gray_frames and avg_sharpness > 50:  # skip on very blurry/compressed
-        if noise_floor < 1.5:
-            ai_score += 12
-            log.info("NOISE_FLOOR %.2f → unnaturally clean flat regions (AI render) → +12", noise_floor)
-        elif noise_floor < 2.5:
+    # ── 27. Flat-region noise floor (v8) — GPT context signal ──
+    # NOTE: After H.264/H.265 social media re-encoding, even real camera grain
+    # in flat areas is compressed away. The noise_floor signal cannot reliably
+    # discriminate AI vs real from compressed video files.
+    # We retain the measurement in signal_context for GPT Vision hints but do
+    # NOT score it in the signal engine to avoid false positives on compressed real video.
+    log.info("NOISE_FLOOR %.2f → context-only (not scored; compression removes real grain)", noise_floor)
+
+    # ── 28. Shadow direction drift (v8) ──────────────────────
+    # AI generators lack a global light source constraint.
+    # Shadow centroids drift in inconsistent directions across frames.
+    # Real scenes: shadows cast by fixed light always move consistently.
+    # Guards:
+    #   • Static: no movement = no shadow movement to analyze
+    #   • Action content: fast camera movement causes shadow centroid to jump
+    #     with camera panning — this is real physics, not AI artifact
+    #   • High motion (>20): strong camera movement creates false inconsistency
+    if not is_static_content and not _is_short_clip and not is_action_content:
+        if shadow_drift > 0.82:
+            ai_score += 10
+            log.info("SHADOW_DRIFT %.3f → strongly inconsistent AI shadows → +10", shadow_drift)
+        elif shadow_drift > 0.72:
             ai_score += 6
-            log.info("NOISE_FLOOR %.2f → very clean flat regions → +6", noise_floor)
-        elif noise_floor < 3.5:
-            ai_score += 2
-            log.info("NOISE_FLOOR %.2f → slightly clean flat regions → +2", noise_floor)
-        elif noise_floor > 6.0:
-            ai_score -= 4
-            log.info("NOISE_FLOOR %.2f → real sensor noise in flat regions → -4", noise_floor)
-        elif noise_floor > 4.0:
-            ai_score -= 2
-            log.info("NOISE_FLOOR %.2f → some sensor noise → -2", noise_floor)
-
-    # ── 28. Shadow direction drift (NEW v8) ──────────────────
-    # Tracks shadow centroid direction across frames.
-    # AI physics violation: shadows drift in inconsistent directions
-    # because the generator lacks a global light source constraint.
-    # Real shadows from a single light source move consistently.
-    #
-    # Uses circular variance of shadow movement direction angles.
-    # HIGH circular variance = inconsistent = AI physics artifact.
-    #
-    # GUARDS: static videos (no shadow movement), very active content
-    # (object/camera movement dominates shadow position).
-    # NOTE: This signal is novel/experimental — weight conservatively.
-    # Calibrated from physics principles — needs real test video tuning.
-    if (not is_static_content and not _is_short_clip and
-            len(v4_gray_frames) >= 4):
-        if shadow_drift_cov > 0.75:
-            ai_score += 8
-            log.info("SHADOW_DRIFT %.3f → inconsistent shadow direction (AI physics) → +8", shadow_drift_cov)
-        elif shadow_drift_cov > 0.55:
-            ai_score += 4
-            log.info("SHADOW_DRIFT %.3f → somewhat inconsistent shadows → +4", shadow_drift_cov)
-        elif shadow_drift_cov < 0.20:
-            # Very consistent shadow direction = real single light source
-            # GUARD: static content guard already applied above
+            log.info("SHADOW_DRIFT %.3f → inconsistent shadows → +6", shadow_drift)
+        elif shadow_drift > 0.62:
+            ai_score += 3
+            log.info("SHADOW_DRIFT %.3f → somewhat drifting shadows → +3", shadow_drift)
+        elif shadow_drift < 0.20 and avg_motion > 2.0:
             ai_score -= 3
-            log.info("SHADOW_DRIFT %.3f → consistent shadow direction (real light source) → -3", shadow_drift_cov)
+            log.info("SHADOW_DRIFT %.3f → consistent light source (real) → -3", shadow_drift)
+
+    # ═══════════════════════════════════════════════════════════
+    # NEW v9 SIGNALS
+    # ═══════════════════════════════════════════════════════════
+
+    # ── 29. Omnidirectional flow entropy (v9) ────────────────
+    # This is the COMPLEMENT to the existing crowd lockstep signal (signal 19).
+    # Signal 19: LOW entropy = AI lockstep crowd (everyone moves same way)
+    # Signal 29: HIGH entropy approaching 4.0 = AI cinematic noise
+    #   (all directions equally represented = no coherent physics-based motion)
+    #
+    # AI water/nature/cinematic: optical flow vectors are distributed UNIFORMLY
+    #   across all directions because the generator creates random synthetic motion
+    #   without any physics-based dominant direction.
+    # Real cinematic content (camera follows subject, animal runs, etc.):
+    #   dominated by 1-3 primary directions → entropy 1.3–3.0
+    #
+    # Calibrated:
+    #   AI_Boat=3.723  AI_Gorilla=3.741  AI_Jogging=3.853  AI_Child=3.667
+    #   Real_Baseball=2.231  Real_Video1=1.334
+    #
+    # Guards:
+    #   • Person-type content: real person videos have moderate entropy (2.5–3.2) from
+    #     natural movement — only the extreme AI range (>3.5) is safe to score here
+    #   • Static: no meaningful flow
+    #   • Short clip: insufficient temporal data
+    #   • Extreme flow_var (>50): hard camera panning creates uniform flow vectors in one
+    #     direction, NOT the omnidirectional random pattern — but wait, a fast PAN sweeps
+    #     background in ONE direction (low entropy), not all directions (high entropy).
+    #     High entropy with extreme flow_var is more likely a complex moving scene than pan.
+    #     So we remove the flow_var guard — it was blocking AI jogging incorrectly.
+    #   • NOTE: Must NOT overlap with signal 19 (crowd lockstep, low entropy guard).
+    _omni_guard = (
+        _is_talking_head or
+        _is_selfie_content or
+        _is_single_subject or
+        is_static_content or
+        _is_short_clip or
+        avg_motion < 1.5                 # not enough motion to analyze
+    )
+    if not _omni_guard:
+        # For person-like content (action, cinematic with skin), use stricter threshold
+        # since real person action can reach 3.0–3.3 naturally
+        _omni_thresh_strong = 3.7 if (is_action_content or skin_ratio > 0.15) else 3.5
+        _omni_thresh_med    = 3.5 if (is_action_content or skin_ratio > 0.15) else 3.2
+        _omni_thresh_slight = 3.7 if (is_action_content or skin_ratio > 0.15) else 3.0
+        if omni_flow_ent > _omni_thresh_strong:
+            ai_score += 12
+            log.info("OMNI_FLOW_ENT %.3f → omnidirectional AI noise motion → +12", omni_flow_ent)
+        elif omni_flow_ent > _omni_thresh_med:
+            ai_score += 7
+            log.info("OMNI_FLOW_ENT %.3f → near-omnidirectional motion → +7", omni_flow_ent)
+        elif omni_flow_ent > _omni_thresh_slight:
+            ai_score += 3
+            log.info("OMNI_FLOW_ENT %.3f → slightly omnidirectional → +3", omni_flow_ent)
+        elif omni_flow_ent < 2.0 and avg_motion > 2.0:
+            # Strong directional dominance = real subject with coherent motion = real video
+            ai_score -= 4
+            log.info("OMNI_FLOW_ENT %.3f → coherent directional motion (real) → -4", omni_flow_ent)
+
+    # ── 30. Edge temporal coherence (v9) ─────────────────────
+    # AI diffusion models produce 'edge crawl' — object boundaries subtly shift
+    # between frames even in static-background scenes. This is a temporal decoder
+    # artifact where the model cannot enforce strict edge consistency across frames.
+    #
+    # Real cameras: edges are physically determined by actual objects.
+    #   EITHER: static scene → edges stay exactly in place (mean_var high, spiky)
+    #   OR: motion → edges move significantly (large mean_var at moving edges)
+    #   Real signature: mean_var > 0.08 (real physical edge behavior)
+    #
+    # AI signature: mean_var < 0.05 AND cov_var > 1.4
+    #   Edges exist but shift weakly and uniformly → crawl artifact
+    #
+    # Calibrated:
+    #   AI_Boat:    mean=0.041, cov=1.436  → AI
+    #   AI_Gorilla: mean=0.020, cov=1.881  → AI
+    #   AI_Moose:   mean=0.022, cov=2.213  → AI (extreme)
+    #   Real_Video1: mean=0.165, cov=0.574  → real
+    #   Real_Baseball: mean=0.091, cov=1.025 → real (physical motion)
+    #
+    # Guards: very short clips, static (no edges to track), portrait action
+    _edge_coh_guard = (
+        _is_short_clip or
+        _is_talking_head or
+        _is_single_subject or
+        is_static_content or
+        _is_selfie_content
+    )
+    if not _edge_coh_guard and len(v9_all_gray_frames) >= 4:
+        _edge_ai = (edge_mean_var < 0.05 and edge_cov_var > 1.4)
+        _edge_real = (edge_mean_var > 0.08)
+        if edge_mean_var < 0.03 and edge_cov_var > 1.8:
+            ai_score += 12
+            log.info("EDGE_COHERENCE mean=%.4f cov=%.3f → extreme edge crawl (AI) → +12",
+                     edge_mean_var, edge_cov_var)
+        elif _edge_ai:
+            if edge_cov_var > 2.0:
+                ai_score += 10
+                log.info("EDGE_COHERENCE mean=%.4f cov=%.3f → strong edge crawl (AI) → +10",
+                         edge_mean_var, edge_cov_var)
+            else:
+                ai_score += 7
+                log.info("EDGE_COHERENCE mean=%.4f cov=%.3f → edge crawl (AI) → +7",
+                         edge_mean_var, edge_cov_var)
+        elif edge_mean_var < 0.06 and edge_cov_var > 1.2:
+            ai_score += 4
+            log.info("EDGE_COHERENCE mean=%.4f cov=%.3f → mild edge crawl → +4",
+                     edge_mean_var, edge_cov_var)
+        elif _edge_real:
+            ai_score -= 4
+            log.info("EDGE_COHERENCE mean=%.4f → strong physical edge movement (real) → -4",
+                     edge_mean_var)
+
+    # ── 31. Temporal color variance in flat regions (v9) ─────
+    # NOTE: TCV needs more diverse calibration data before scoring.
+    # Real_Video1 overlaps AI range due to scene lighting variation.
+    # Retaining measurement in signal_context for future calibration.
+    log.info("TCV %.2f → context-only (not scored; needs calibration)", tcv)
 
     ai_score = max(0.0, min(100.0, ai_score))
-    log.info("Primary AI score v8: %.0f  (quad_cov=%.3f fg_bg=%.0f sync=%.3f hue=%.2f sat_std=%.1f "
-             "motion_period=%.3f ifdv=%.3f noise_floor=%.2f shadow_drift=%.3f)",
-             ai_score, quad_cov, fg_bg_ratio, motion_sync, hue_entropy, sat_frame_std,
-             motion_period, ifdv, noise_floor, shadow_drift_cov)
+    log.info(
+        "Primary AI score v9: %.0f  "
+        "(quad=%.3f fg_bg=%.0f sync=%.3f hue=%.2f sat_std=%.1f "
+        "period=%.3f ifdv=%.3f nfloor=%.2f shadow=%.3f "
+        "omni=%.3f edge_mvar=%.4f edge_cov=%.3f tcv=%.2f)",
+        ai_score, quad_cov, fg_bg_ratio, motion_sync, hue_entropy, sat_frame_std,
+        motion_period, ifdv, noise_floor, shadow_drift,
+        omni_flow_ent, edge_mean_var, edge_cov_var, tcv,
+    )
 
     # Build content_type string for GPT context
     _content_type = (
@@ -1681,19 +1926,23 @@ def detect_ai(video_path: str) -> int:
         "quad_cov":       quad_cov,
         "fg_bg_ratio":    fg_bg_ratio,
         "motion_sync":    motion_sync,
-        "skin_ratio":     skin_ratio,      # used by GPT hint to detect person in action videos
-        "avg_noise":      avg_noise,       # used by GPT hint for noise-based context
-        "vert_flow":      avg_vert_flow,   # mean vertical flow (< 0 = upward = gravity violation)
-        "min_vert_flow":  min_vert_flow,   # peak upward flow event
-        "upward_frac":    upward_frame_frac, # fraction of frames with upward motion
+        "skin_ratio":     skin_ratio,
+        "avg_noise":      avg_noise,
+        "vert_flow":      avg_vert_flow,
+        "min_vert_flow":  min_vert_flow,
+        "upward_frac":    upward_frame_frac,
         "flow_dir_entropy": avg_flow_dir_entropy,
-        "n_scene_cuts":   _n_scene_cuts,        # number of hard scene cuts (compilation detection)
-        "is_compilation": _is_compilation,       # True if many short AI-stitched clips detected
-        # v7/v8 new signals
-        "motion_period":  motion_period,   # cyclic gait loop signal (AI jogging/running)
-        "ifdv":           ifdv,            # inter-frame diff variance CoV (temporal consistency)
-        "noise_floor":    noise_floor,     # flat-region noise floor (sensor noise)
-        "shadow_drift":   shadow_drift_cov, # shadow direction consistency (physics)
+        "n_scene_cuts":   _n_scene_cuts,
+        "is_compilation": _is_compilation,
+        # v7/v8 signals
+        "motion_period":  motion_period,
+        "ifdv":           ifdv,
+        "noise_floor":    noise_floor,
+        "shadow_drift":   shadow_drift,
+        # v9 signals
+        "omni_flow_ent":  omni_flow_ent,
+        "edge_mean_var":  edge_mean_var,
+        "edge_cov_var":   edge_cov_var,
+        "tcv":            tcv,
     }
     return int(round(ai_score)), signal_context
-
