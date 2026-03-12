@@ -799,6 +799,91 @@ def analyze_link(request: Request, video_url: str, email: str = ""):
             pass
 
 
+@app.get("/analyze-link-json/")
+async def analyze_link_json(request: Request, video_url: str, email: str = ""):
+    """
+    JSON-returning async version of /analyze-link/ for the React frontend.
+    Uses the RQ worker queue — same pipeline as /upload/.
+    """
+    if not video_url.startswith("http"):
+        return JSONResponse({"error": "Invalid URL — must start with http."}, status_code=400)
+
+    # ── Email resolution ──────────────────────────────────────
+    if not email or not is_valid_email(email):
+        session_token = request.cookies.get("vfy_session", "")
+        if session_token and session_token in _session_store:
+            email = _session_store[session_token]["email"]
+        else:
+            email = "anonymous@verifyd.com"
+
+    # ── Email verification check ──────────────────────────────
+    if email != "anonymous@verifyd.com" and not is_email_verified(email):
+        return JSONResponse({
+            "error":   "email_not_verified",
+            "message": "Please verify your email address before analyzing.",
+        }, status_code=403)
+
+    # ── Usage limit check ─────────────────────────────────────
+    if email != "anonymous@verifyd.com":
+        status = get_user_status(email)
+        if not status["allowed"]:
+            return JSONResponse({
+                "error":     "limit_reached",
+                "plan":      status["plan"],
+                "uses_left": 0,
+                "limit":     status["limit"],
+            }, status_code=402)
+
+    # ── Enqueue link job ──────────────────────────────────────
+    job_id = str(uuid.uuid4())
+    try:
+        enqueue_link(job_id, video_url, email)
+        log.info("analyze-link-json: queued job %s for %s url=%s", job_id, email, video_url[:80])
+    except Exception as e:
+        log.warning("analyze-link-json: queue unavailable (%s) — running sync", e)
+        tmp_path = os.path.join(tempfile.gettempdir(), f"{job_id}.mp4")
+        try:
+            download_video_ytdlp(video_url, tmp_path)
+            authenticity, label, detail, ui_text, color, certify, clip_path = _run_analysis(tmp_path)
+            if email != "anonymous@verifyd.com":
+                increment_user_uses(email)
+            insert_certificate(cert_id=job_id, email=email, original_file=video_url[:100],
+                               label=label, authenticity=authenticity,
+                               ai_score=detail["ai_score"], sha256=None)
+            return JSONResponse({
+                "status": ui_text, "authenticity_score": authenticity,
+                "color": color, "label": label,
+                "gpt_reasoning": detail.get("gpt_reasoning", ""),
+                "gpt_flags": detail.get("gpt_flags", []),
+                "signal_score": detail.get("signal_ai_score", 0),
+                "gpt_score": detail.get("gpt_ai_score", 0),
+            })
+        except RuntimeError as re:
+            return JSONResponse({"error": str(re)}, status_code=400)
+        except Exception as e2:
+            return JSONResponse({"error": "Analysis failed. Please try again."}, status_code=500)
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+    # ── Poll for worker result ────────────────────────────────
+    import asyncio
+    for _ in range(120):   # up to 6 minutes
+        await asyncio.sleep(3)
+        result = get_job_result(job_id)
+        if result and result.get("job_status") == "complete":
+            result.pop("job_status", None)
+            return JSONResponse(result)
+        if result and result.get("job_status") == "error":
+            raw_error = result.get("error", "")
+            is_tb = "Traceback" in raw_error or "File /opt" in raw_error or len(raw_error) > 200
+            safe  = "Analysis failed. Please try again." if is_tb else (raw_error or "Analysis failed.")
+            log.error("analyze-link-json job error: %s", raw_error[:300])
+            return JSONResponse({"error": safe}, status_code=500)
+
+    return JSONResponse({"error": "Analysis timed out. Please try again."}, status_code=504)
+
+
 # ─────────────────────────────────────────────
 #  PayPal Webhook Handler
 #
