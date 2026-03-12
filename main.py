@@ -28,7 +28,9 @@ from emailer  import send_otp_email, send_certification_email
 from database import (init_db, insert_certificate, increment_downloads,
                       get_or_create_user, get_user_status, increment_user_uses,
                       is_valid_email, FREE_USES, get_certificate,
-                      is_email_verified, create_otp, verify_otp)
+                      is_email_verified, create_otp, verify_otp,
+                      create_api_key, get_api_key, increment_api_key_uses,
+                      revoke_api_key, list_api_keys, update_api_key_branding)
 from video import clip_first_6_seconds, stamp_video, download_video_ytdlp
 
 log = logging.getLogger("verifyd.main")
@@ -922,67 +924,6 @@ async def paypal_webhook(request: Request):
         return JSONResponse({"error": "processing error"}, status_code=500)
 
 
-# ─────────────────────────────────────────────────────────────
-#  Manual Subscription Activation
-#
-#  Called by the frontend after a successful PayPal payment
-#  when the user's PayPal email differs from their VeriFYD email.
-#
-#  The PayPalSubscriptionButton component prompts the user for
-#  their VeriFYD email + the plan they subscribed to, then
-#  posts here to activate the correct account.
-#
-#  Endpoint: POST /activate-subscription/
-#  Body (x-www-form-urlencoded): email=...&plan=...
-# ─────────────────────────────────────────────────────────────
-
-@app.post("/activate-subscription/")
-async def activate_subscription(request: Request):
-    """
-    Manually activate a paid plan for a VeriFYD email after PayPal payment.
-    Used when the PayPal account email differs from the VeriFYD account email.
-    """
-    try:
-        body = await request.form()
-        email = (body.get("email") or "").strip().lower()
-        plan  = (body.get("plan")  or "").strip().lower()
-
-        if not email:
-            return JSONResponse({"error": "email required"}, status_code=400)
-
-        # Normalise plan name — accept "creator", "pro", "pro ai", "pro_ai"
-        plan_map = {
-            "creator": "creator",
-            "pro":     "pro",
-            "pro ai":  "pro",
-            "pro_ai":  "pro",
-        }
-        plan_name = plan_map.get(plan)
-        if not plan_name:
-            return JSONResponse(
-                {"error": f"invalid plan '{plan}'. Must be 'creator' or 'pro'"},
-                status_code=400
-            )
-
-        # Make sure the user exists in the DB first
-        user = get_or_create_user(email)
-        if not user:
-            return JSONResponse({"error": "user not found"}, status_code=404)
-
-        upgrade_user_plan(email, plan_name)
-        log.info("Manual activation: %s → %s", email, plan_name)
-
-        return JSONResponse({
-            "status":  "activated",
-            "email":   email,
-            "plan":    plan_name,
-        })
-
-    except Exception as e:
-        log.exception("activate_subscription error: %s", e)
-        return JSONResponse({"error": "activation failed"}, status_code=500)
-
-
 @app.get("/admin-data/")
 def admin_data(key: str = ""):
     """
@@ -1194,6 +1135,663 @@ def test_resend(key: str = ""):
         return {"error": f"HTTP {e.code}", "detail": e.read().decode()}
     except Exception as e:
         return {"error": str(e)}
+
+
+# ═══════════════════════════════════════════════════════════════
+#  ENTERPRISE API — Embeddable Widget
+#
+#  How it works:
+#    1. Admin provisions an Enterprise customer via /admin-create-api-key/
+#       → generates key like: vfyd_live_abc123...
+#    2. Customer drops ONE script tag on their site:
+#       <div id="verifyd-widget"></div>
+#       <script src="https://verifyd-backend.onrender.com/widget.js
+#                    ?key=vfyd_live_abc123"></script>
+#    3. Script injects an iframe pointing to /widget/embed/?key=...
+#    4. iframe is a fully self-contained upload UI served from this backend
+#    5. Detection runs through the normal queue pipeline
+#    6. Results displayed inside the iframe — no data leaves VeriFYD
+#
+#  Branding config (per API key, stored in DB):
+#    company_name  — shown in widget header ("Verified by [company]")
+#    logo_url      — customer's logo URL (shown in header)
+#    brand_color   — hex color for buttons/accents (default: VeriFYD gold #f59e0b)
+#    widget_domains — comma-separated allowed origins (CORS, default: *)
+# ═══════════════════════════════════════════════════════════════
+
+def _validate_api_key(key: str):
+    """
+    Validate an API key from query param or Authorization header.
+    Returns the key record dict or None.
+    """
+    if not key:
+        return None
+    return get_api_key(key)
+
+
+# ─────────────────────────────────────────────
+#  Admin: provision Enterprise API key
+# ─────────────────────────────────────────────
+@app.post("/admin-create-api-key/")
+def admin_create_api_key(
+    owner_email:    str = "",
+    company_name:   str = "",
+    logo_url:       str = "",
+    brand_color:    str = "#f59e0b",
+    widget_domains: str = "*",
+    key:            str = "",
+):
+    """
+    Admin-only. Provisions a new Enterprise API key.
+    The generated key is shown ONCE — store it securely.
+
+    Example:
+      POST /admin-create-api-key/?key=Honda%236915
+        &owner_email=client@company.com
+        &company_name=Acme+News
+        &logo_url=https://acme.com/logo.png
+        &brand_color=%23ff0000
+        &widget_domains=acme.com,www.acme.com
+    """
+    if not _is_admin(key):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    if not owner_email or not is_valid_email(owner_email):
+        return JSONResponse({"error": "valid owner_email required"}, status_code=400)
+
+    record = create_api_key(
+        owner_email=owner_email,
+        company_name=company_name,
+        logo_url=logo_url,
+        brand_color=brand_color,
+        widget_domains=widget_domains,
+    )
+    log.info("Admin provisioned Enterprise key for %s", owner_email)
+    return {
+        "status":       "created",
+        "api_key":      record["api_key"],
+        "owner_email":  record["owner_email"],
+        "company_name": record["company_name"],
+        "embed_script": (
+            f'<div id="verifyd-widget"></div>\n'
+            f'<script src="{BASE_URL}/widget.js?key={record["api_key"]}"></script>'
+        ),
+    }
+
+
+@app.get("/admin-list-api-keys/")
+def admin_list_api_keys(owner_email: str = "", key: str = ""):
+    """Admin-only. List all Enterprise API keys."""
+    if not _is_admin(key):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    keys = list_api_keys(owner_email if owner_email else None)
+    # Mask key in list output — show first 20 chars only
+    for k in keys:
+        k["api_key"] = k["api_key"][:20] + "..."
+    return {"keys": keys}
+
+
+@app.post("/admin-revoke-api-key/")
+def admin_revoke_api_key(api_key: str = "", key: str = ""):
+    """Admin-only. Revoke an Enterprise API key."""
+    if not _is_admin(key):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    if not api_key:
+        return JSONResponse({"error": "api_key required"}, status_code=400)
+    revoke_api_key(api_key)
+    return {"status": "revoked"}
+
+
+@app.post("/admin-update-api-key/")
+def admin_update_api_key(
+    api_key:        str = "",
+    company_name:   str = "",
+    logo_url:       str = "",
+    brand_color:    str = "",
+    widget_domains: str = "",
+    key:            str = "",
+):
+    """Admin-only. Update branding config for an Enterprise key."""
+    if not _is_admin(key):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    if not api_key:
+        return JSONResponse({"error": "api_key required"}, status_code=400)
+    updated = update_api_key_branding(
+        api_key=api_key,
+        company_name=company_name   or None,
+        logo_url=logo_url           or None,
+        brand_color=brand_color     or None,
+        widget_domains=widget_domains or None,
+    )
+    if not updated:
+        return JSONResponse({"error": "API key not found"}, status_code=404)
+    return {"status": "updated", "record": updated}
+
+
+# ─────────────────────────────────────────────
+#  Public: widget config (used by widget.js)
+# ─────────────────────────────────────────────
+@app.get("/widget-config/")
+def widget_config(key: str = ""):
+    """
+    Returns branding config for a given API key.
+    Called by widget.js on load to get customer branding.
+    No sensitive data exposed — only visual config.
+    """
+    record = _validate_api_key(key)
+    if not record:
+        return JSONResponse({"error": "invalid or inactive API key"}, status_code=401)
+
+    return {
+        "company_name": record["company_name"] or "VeriFYD",
+        "logo_url":     record["logo_url"] or "",
+        "brand_color":  record["brand_color"] or "#f59e0b",
+        "powered_by":   True,   # always show "Powered by VeriFYD"
+    }
+
+
+# ─────────────────────────────────────────────
+#  Public: serve widget.js loader script
+# ─────────────────────────────────────────────
+@app.get("/widget.js")
+def widget_js(key: str = ""):
+    """
+    Loader script the Enterprise customer drops on their site.
+    Validates the key, fetches branding, injects the iframe.
+
+    Usage:
+      <div id="verifyd-widget"></div>
+      <script src="https://verifyd-backend.onrender.com/widget.js?key=vfyd_live_..."></script>
+    """
+    record = _validate_api_key(key)
+    if not record:
+        # Return a no-op script so the page doesn't break
+        js = "console.warn('VeriFYD: invalid API key');"
+        return HTMLResponse(content=js, media_type="application/javascript")
+
+    embed_url = f"{BASE_URL}/widget/embed/?key={key}"
+    brand_color = record.get("brand_color", "#f59e0b")
+
+    js = f"""
+(function() {{
+  var containerId = 'verifyd-widget';
+  var container = document.getElementById(containerId);
+  if (!container) {{
+    console.warn('VeriFYD: element #' + containerId + ' not found');
+    return;
+  }}
+
+  var iframe = document.createElement('iframe');
+  iframe.src = '{embed_url}';
+  iframe.style.cssText = [
+    'width: 100%',
+    'min-height: 520px',
+    'border: none',
+    'border-radius: 12px',
+    'box-shadow: 0 4px 24px rgba(0,0,0,0.18)',
+    'background: #0a0a0a',
+    'display: block',
+  ].join(';');
+  iframe.allow = 'clipboard-write';
+  iframe.title = 'VeriFYD Video Verification';
+
+  container.appendChild(iframe);
+
+  // Listen for height resize messages from the widget
+  window.addEventListener('message', function(e) {{
+    if (e.data && e.data.type === 'verifyd-resize') {{
+      iframe.style.minHeight = e.data.height + 'px';
+    }}
+  }});
+}})();
+""".strip()
+
+    return HTMLResponse(content=js, media_type="application/javascript")
+
+
+# ─────────────────────────────────────────────
+#  Public: serve the embeddable widget HTML
+# ─────────────────────────────────────────────
+@app.get("/widget/embed/")
+def widget_embed(key: str = ""):
+    """
+    The actual iframe content. Self-contained HTML+JS upload UI.
+    Validates the API key, applies customer branding, runs detection
+    through the normal upload pipeline with a special widget email.
+    """
+    record = _validate_api_key(key)
+    if not record:
+        return HTMLResponse(
+            "<html><body style='background:#0a0a0a;color:#f87171;font-family:sans-serif;"
+            "padding:32px;text-align:center'><p>Invalid or expired API key.</p></body></html>",
+            status_code=401
+        )
+
+    company_name = record.get("company_name") or "VeriFYD"
+    logo_url     = record.get("logo_url") or ""
+    brand_color  = record.get("brand_color") or "#f59e0b"
+    backend_url  = BASE_URL
+
+    logo_html = (
+        f'<img src="{logo_url}" alt="{company_name}" '
+        f'style="height:32px;max-width:160px;object-fit:contain;margin-right:10px">'
+        if logo_url else ""
+    )
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{company_name} — Video Verification</title>
+<style>
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{
+    background: #0a0a0a;
+    color: #e5e7eb;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    padding: 24px;
+    min-height: 480px;
+  }}
+  .header {{
+    display: flex;
+    align-items: center;
+    margin-bottom: 20px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid #1f2937;
+  }}
+  .header-text h2 {{
+    font-size: 16px;
+    font-weight: 700;
+    color: #f9fafb;
+  }}
+  .header-text p {{
+    font-size: 12px;
+    color: #6b7280;
+    margin-top: 2px;
+  }}
+  .drop-zone {{
+    border: 2px dashed #374151;
+    border-radius: 10px;
+    padding: 36px 20px;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color 0.2s, background 0.2s;
+    margin-bottom: 16px;
+    position: relative;
+  }}
+  .drop-zone:hover, .drop-zone.drag-over {{
+    border-color: {brand_color};
+    background: rgba(245,158,11,0.04);
+  }}
+  .drop-zone input {{
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    cursor: pointer;
+    width: 100%;
+    height: 100%;
+  }}
+  .drop-icon {{ font-size: 36px; margin-bottom: 10px; }}
+  .drop-label {{ font-size: 14px; color: #9ca3af; }}
+  .drop-label span {{ color: {brand_color}; font-weight: 600; }}
+  .drop-sub {{ font-size: 11px; color: #4b5563; margin-top: 6px; }}
+  .file-preview {{
+    display: none;
+    align-items: center;
+    gap: 10px;
+    background: #111827;
+    border-radius: 8px;
+    padding: 10px 14px;
+    margin-bottom: 16px;
+    font-size: 13px;
+  }}
+  .file-preview .fname {{ color: #e5e7eb; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+  .file-preview .fsize {{ color: #6b7280; font-size: 11px; }}
+  .file-preview .remove {{ color: #ef4444; cursor: pointer; font-size: 18px; line-height: 1; }}
+  .btn {{
+    width: 100%;
+    padding: 13px;
+    border-radius: 8px;
+    border: none;
+    font-size: 15px;
+    font-weight: 700;
+    cursor: pointer;
+    background: {brand_color};
+    color: #0a0a0a;
+    transition: opacity 0.2s, transform 0.1s;
+    letter-spacing: 0.3px;
+  }}
+  .btn:hover:not(:disabled) {{ opacity: 0.88; transform: translateY(-1px); }}
+  .btn:disabled {{ opacity: 0.45; cursor: not-allowed; transform: none; }}
+  .progress-wrap {{
+    display: none;
+    margin: 16px 0;
+  }}
+  .progress-bar {{
+    height: 4px;
+    background: #1f2937;
+    border-radius: 2px;
+    overflow: hidden;
+  }}
+  .progress-fill {{
+    height: 100%;
+    background: {brand_color};
+    width: 0%;
+    transition: width 0.3s;
+    border-radius: 2px;
+  }}
+  .progress-label {{ font-size: 12px; color: #6b7280; margin-top: 6px; text-align: center; }}
+  .result-box {{
+    display: none;
+    border-radius: 10px;
+    padding: 20px;
+    text-align: center;
+    margin-top: 16px;
+  }}
+  .result-box.green {{ background: rgba(16,185,129,0.10); border: 1px solid rgba(16,185,129,0.3); }}
+  .result-box.red   {{ background: rgba(239,68,68,0.10);  border: 1px solid rgba(239,68,68,0.3); }}
+  .result-box.blue  {{ background: rgba(59,130,246,0.10); border: 1px solid rgba(59,130,246,0.3); }}
+  .result-label {{ font-size: 20px; font-weight: 800; margin-bottom: 6px; }}
+  .result-label.green {{ color: #10b981; }}
+  .result-label.red   {{ color: #ef4444; }}
+  .result-label.blue  {{ color: #3b82f6; }}
+  .result-score {{ font-size: 13px; color: #9ca3af; margin-bottom: 10px; }}
+  .result-reasoning {{ font-size: 12px; color: #6b7280; line-height: 1.6; text-align: left; margin-top: 8px; }}
+  .reset-btn {{
+    margin-top: 14px;
+    padding: 8px 20px;
+    background: transparent;
+    border: 1px solid #374151;
+    border-radius: 6px;
+    color: #9ca3af;
+    font-size: 13px;
+    cursor: pointer;
+    transition: border-color 0.2s;
+  }}
+  .reset-btn:hover {{ border-color: {brand_color}; color: {brand_color}; }}
+  .powered-by {{
+    margin-top: 18px;
+    text-align: center;
+    font-size: 11px;
+    color: #374151;
+  }}
+  .powered-by a {{ color: #4b5563; text-decoration: none; }}
+  .powered-by a:hover {{ color: {brand_color}; }}
+  .error-msg {{ color: #ef4444; font-size: 13px; margin-top: 10px; text-align: center; }}
+</style>
+</head>
+<body>
+
+<div class="header">
+  {logo_html}
+  <div class="header-text">
+    <h2>Video Authenticity Verification</h2>
+    <p>Powered by VeriFYD AI Detection</p>
+  </div>
+</div>
+
+<div class="drop-zone" id="dropZone">
+  <input type="file" id="fileInput" accept="video/*,.mp4,.mov,.avi,.webm,.mkv">
+  <div class="drop-icon">🎬</div>
+  <div class="drop-label">Drop video here or <span>browse</span></div>
+  <div class="drop-sub">MP4, MOV, AVI, WEBM · Max 500MB</div>
+</div>
+
+<div class="file-preview" id="filePreview">
+  <span style="font-size:20px">🎬</span>
+  <span class="fname" id="fileName"></span>
+  <span class="fsize" id="fileSize"></span>
+  <span class="remove" id="removeFile">×</span>
+</div>
+
+<button class="btn" id="analyzeBtn" disabled onclick="startAnalysis()">
+  Verify Video
+</button>
+
+<div class="progress-wrap" id="progressWrap">
+  <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+  <div class="progress-label" id="progressLabel">Uploading…</div>
+</div>
+
+<div class="result-box" id="resultBox">
+  <div class="result-label" id="resultLabel"></div>
+  <div class="result-score" id="resultScore"></div>
+  <div class="result-reasoning" id="resultReasoning"></div>
+  <button class="reset-btn" onclick="resetWidget()">Verify another video</button>
+</div>
+
+<div class="error-msg" id="errorMsg"></div>
+
+<div class="powered-by">
+  Powered by <a href="https://vfvid.com" target="_blank" rel="noopener">VeriFYD</a>
+</div>
+
+<script>
+var BACKEND = '{backend_url}';
+var API_KEY  = '{key}';
+// Widget uses a synthetic enterprise email keyed to the API key
+// so uses are tracked per Enterprise account, not per end-user
+var WIDGET_EMAIL = 'widget_' + API_KEY.slice(-12) + '@verifyd-enterprise.com';
+
+var selectedFile = null;
+
+// ── Drag & drop ──────────────────────────────────────────────
+var dz = document.getElementById('dropZone');
+dz.addEventListener('dragover',  function(e) {{ e.preventDefault(); dz.classList.add('drag-over'); }});
+dz.addEventListener('dragleave', function()  {{ dz.classList.remove('drag-over'); }});
+dz.addEventListener('drop', function(e) {{
+  e.preventDefault();
+  dz.classList.remove('drag-over');
+  var files = e.dataTransfer.files;
+  if (files.length) setFile(files[0]);
+}});
+document.getElementById('fileInput').addEventListener('change', function(e) {{
+  if (e.target.files.length) setFile(e.target.files[0]);
+}});
+document.getElementById('removeFile').addEventListener('click', function(e) {{
+  e.stopPropagation();
+  resetWidget();
+}});
+
+function setFile(f) {{
+  selectedFile = f;
+  document.getElementById('fileName').textContent = f.name;
+  document.getElementById('fileSize').textContent = (f.size / 1048576).toFixed(1) + ' MB';
+  document.getElementById('filePreview').style.display = 'flex';
+  document.getElementById('dropZone').style.display    = 'none';
+  document.getElementById('analyzeBtn').disabled        = false;
+  document.getElementById('errorMsg').textContent       = '';
+}}
+
+function resetWidget() {{
+  selectedFile = null;
+  document.getElementById('fileInput').value           = '';
+  document.getElementById('filePreview').style.display = 'none';
+  document.getElementById('dropZone').style.display    = '';
+  document.getElementById('analyzeBtn').disabled        = true;
+  document.getElementById('resultBox').style.display   = 'none';
+  document.getElementById('progressWrap').style.display= 'none';
+  document.getElementById('errorMsg').textContent       = '';
+  document.getElementById('analyzeBtn').textContent     = 'Verify Video';
+  document.getElementById('analyzeBtn').disabled        = false;
+  notifyResize();
+}}
+
+function setProgress(pct, label) {{
+  document.getElementById('progressFill').style.width  = pct + '%';
+  document.getElementById('progressLabel').textContent = label;
+}}
+
+function notifyResize() {{
+  try {{ window.parent.postMessage({{ type: 'verifyd-resize', height: document.body.scrollHeight + 40 }}, '*'); }} catch(e) {{}}
+}}
+
+function startAnalysis() {{
+  if (!selectedFile) return;
+  document.getElementById('analyzeBtn').disabled        = true;
+  document.getElementById('analyzeBtn').textContent     = 'Analyzing…';
+  document.getElementById('progressWrap').style.display = 'block';
+  document.getElementById('resultBox').style.display    = 'none';
+  document.getElementById('errorMsg').textContent        = '';
+  setProgress(10, 'Uploading video…');
+  notifyResize();
+
+  var fd = new FormData();
+  fd.append('file',  selectedFile);
+  fd.append('email', WIDGET_EMAIL);
+
+  var xhr = new XMLHttpRequest();
+  xhr.open('POST', BACKEND + '/widget-upload/?key=' + API_KEY);
+
+  xhr.upload.onprogress = function(e) {{
+    if (e.lengthComputable) {{
+      var pct = Math.round((e.loaded / e.total) * 60);
+      setProgress(10 + pct, 'Uploading… ' + Math.round(e.loaded/e.total*100) + '%');
+    }}
+  }};
+
+  xhr.onload = function() {{
+    setProgress(95, 'Finalizing result…');
+    try {{
+      var data = JSON.parse(xhr.responseText);
+      if (xhr.status >= 400 || data.error) {{
+        showError(data.error || 'Verification failed. Please try again.');
+        return;
+      }}
+      showResult(data);
+    }} catch(e) {{
+      showError('Unexpected response. Please try again.');
+    }}
+  }};
+
+  xhr.onerror = function() {{
+    showError('Network error. Please check your connection and try again.');
+  }};
+
+  // Simulate analysis progress while waiting
+  var pct = 70;
+  var progressTimer = setInterval(function() {{
+    if (pct < 92) {{ pct += 2; setProgress(pct, 'Running AI analysis…'); }}
+    else clearInterval(progressTimer);
+  }}, 1200);
+
+  xhr.send(fd);
+}}
+
+function showResult(data) {{
+  document.getElementById('progressWrap').style.display = 'none';
+  var box = document.getElementById('resultBox');
+  var color = (data.color || 'blue').toLowerCase();
+  box.className = 'result-box ' + color;
+  document.getElementById('resultLabel').className = 'result-label ' + color;
+  document.getElementById('resultLabel').textContent = data.status || 'RESULT';
+  document.getElementById('resultScore').textContent =
+    'Authenticity Score: ' + (data.authenticity_score || 0) + ' / 100';
+  var reasoning = data.gpt_reasoning || '';
+  document.getElementById('resultReasoning').textContent = reasoning;
+  document.getElementById('resultReasoning').style.display = reasoning ? '' : 'none';
+  box.style.display = 'block';
+  document.getElementById('analyzeBtn').textContent = 'Verify Video';
+  document.getElementById('analyzeBtn').disabled    = false;
+  notifyResize();
+}}
+
+function showError(msg) {{
+  document.getElementById('progressWrap').style.display = 'none';
+  document.getElementById('errorMsg').textContent        = msg;
+  document.getElementById('analyzeBtn').textContent      = 'Verify Video';
+  document.getElementById('analyzeBtn').disabled          = false;
+  notifyResize();
+}}
+
+notifyResize();
+</script>
+</body>
+</html>"""
+
+    return HTMLResponse(content=html)
+
+
+# ─────────────────────────────────────────────
+#  Enterprise: widget upload endpoint
+#  Identical to /upload/ but authenticated by
+#  API key instead of user email + OTP.
+# ─────────────────────────────────────────────
+@app.post("/widget-upload/")
+async def widget_upload(
+    request: Request,
+    file:    UploadFile = File(...),
+    email:   str        = Form(...),
+    key:     str        = "",
+):
+    """
+    Upload endpoint for the embedded widget.
+    Authenticated by API key (query param ?key=).
+    No OTP / email verification required — the Enterprise
+    customer has already authenticated via their API key.
+    Usage is tracked against the API key, not the end-user email.
+    """
+    # ── Validate API key ──────────────────────────────────────
+    if not key:
+        key = request.query_params.get("key", "")
+    record = _validate_api_key(key)
+    if not record:
+        return JSONResponse({"error": "Invalid or inactive API key."}, status_code=401)
+
+    # ── Save file to disk then enqueue ────────────────────────
+    job_id   = str(uuid.uuid4())
+    raw_path = f"{UPLOAD_DIR}/{job_id}_{file.filename}"
+
+    with open(raw_path, "wb") as f:
+        while chunk := await file.read(1024 * 1024):
+            f.write(chunk)
+
+    # Use a synthetic enterprise email for tracking
+    tracking_email = f"widget_{key[-12:]}@verifyd-enterprise.com"
+
+    try:
+        enqueue_upload(job_id, raw_path, file.filename, tracking_email)
+        log.info("widget-upload: queued job %s for key %s...", job_id, key[:20])
+    except Exception as e:
+        log.warning("Queue unavailable for widget upload (%s) — sync fallback", e)
+        try:
+            sha256 = _sha256(raw_path)
+            authenticity, label, detail, ui_text, color, certify, clip_path = _run_analysis(raw_path)
+            increment_api_key_uses(key)
+            cid = job_id
+            insert_certificate(
+                cert_id=cid, email=tracking_email, original_file=file.filename,
+                label=label, authenticity=authenticity,
+                ai_score=detail["ai_score"], sha256=sha256,
+            )
+            if os.path.exists(clip_path):
+                os.remove(clip_path)
+            return {"status": ui_text, "authenticity_score": authenticity,
+                    "color": color,
+                    "gpt_reasoning": detail.get("gpt_reasoning", ""),
+                    "gpt_flags":     detail.get("gpt_flags", []),
+                    "signal_score":  detail.get("signal_ai_score", 0),
+                    "gpt_score":     detail.get("gpt_ai_score", 0)}
+        except Exception as e2:
+            log.exception("Widget sync fallback failed: %s", e2)
+            return JSONResponse({"error": str(e2)}, status_code=500)
+
+    # ── Poll for worker result ────────────────────────────────
+    import asyncio
+    for _ in range(120):
+        await asyncio.sleep(3)
+        result = get_job_result(job_id)
+        if result and result.get("job_status") == "complete":
+            result.pop("job_status", None)
+            increment_api_key_uses(key)
+            return JSONResponse(result)
+        if result and result.get("job_status") == "error":
+            return JSONResponse(
+                {"error": result.get("error", "Analysis failed.")},
+                status_code=500
+            )
+
+    return JSONResponse({"error": "Analysis timed out. Please try again."}, status_code=504)
 
 
 

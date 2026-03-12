@@ -106,61 +106,21 @@ def init_db() -> None:
             )
         """)
 
-        # ── Detection Results (per-engine scores, for feedback/tuning) ──
+        # ── Enterprise API Keys ───────────────────────────────
         cur.execute("""
-            CREATE TABLE IF NOT EXISTS detection_results (
-                id                  SERIAL PRIMARY KEY,
-                cert_id             TEXT    UNIQUE NOT NULL,
-                job_id              TEXT,
-                created_at          TEXT    NOT NULL,
-                -- Final verdict
-                label               TEXT    NOT NULL,
-                authenticity        INTEGER,
-                ai_score            INTEGER,
-                blend_mode          TEXT,
-                content_type        TEXT,
-                -- Engine 1: Signal
-                signal_ai_score     INTEGER,
-                -- Engine 2: GPT
-                gpt_ai_score        INTEGER,
-                gpt_available       INTEGER DEFAULT 1,
-                gpt_reasoning       TEXT,
-                gpt_flags           TEXT,     -- JSON array
-                gpt_scores          TEXT,     -- JSON object (12 dimensions)
-                generator_guess     TEXT,
-                -- Engine 3: Metadata
-                metadata_ai_score   INTEGER,
-                metadata_confidence TEXT,
-                metadata_evidence   TEXT,     -- JSON array
-                metadata_adjustment REAL,
-                -- Engine 4: Audio
-                audio_ai_score      INTEGER,
-                audio_confidence    TEXT,
-                audio_evidence      TEXT,     -- JSON array
-                audio_adjustment    REAL,
-                -- Feedback (filled in post-hoc by admin or user)
-                correct_label       TEXT,     -- NULL = unreviewed, else "REAL"|"AI"|"UNDETERMINED"
-                is_false_positive   INTEGER,  -- 1 = we said AI but it was real
-                is_false_negative   INTEGER,  -- 1 = we said REAL but it was AI
-                reviewed_at         TEXT,
-                reviewer_note       TEXT
-            )
-        """)
-
-        # ── Corrections log (admin manual overrides) ─────────
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS corrections (
+            CREATE TABLE IF NOT EXISTS api_keys (
                 id              SERIAL PRIMARY KEY,
-                cert_id         TEXT    NOT NULL,
-                submitted_at    TEXT    NOT NULL,
-                original_label  TEXT    NOT NULL,
-                correct_label   TEXT    NOT NULL,
-                error_type      TEXT,   -- "false_positive" | "false_negative" | "uncertain"
-                reviewer        TEXT,   -- "admin" | "user" | "auto"
-                note            TEXT,
-                signal_ai_score INTEGER,
-                gpt_ai_score    INTEGER,
-                content_type    TEXT
+                api_key         TEXT    UNIQUE NOT NULL,
+                owner_email     TEXT    NOT NULL,
+                company_name    TEXT    NOT NULL DEFAULT '',
+                logo_url        TEXT    NOT NULL DEFAULT '',
+                brand_color     TEXT    NOT NULL DEFAULT '#f59e0b',
+                widget_domains  TEXT    NOT NULL DEFAULT '*',
+                plan            TEXT    NOT NULL DEFAULT 'enterprise',
+                active          INTEGER NOT NULL DEFAULT 1,
+                total_uses      INTEGER NOT NULL DEFAULT 0,
+                created_at      TEXT    NOT NULL,
+                last_used       TEXT
             )
         """)
 
@@ -475,156 +435,113 @@ def verify_otp(email: str, code: str) -> tuple:
     return True, "Email verified successfully."
 
 # ─────────────────────────────────────────────────────────────
-#  Detection results — per-engine score storage
+#  Enterprise API Key management
 # ─────────────────────────────────────────────────────────────
 
-def insert_detection_result(cert_id: str, job_id: str, detail: dict) -> None:
-    """Store full per-engine detection scores for a completed job."""
-    import json as _json
-    from datetime import datetime, timezone
+def _generate_api_key() -> str:
+    """Generate a secure API key in format: vfyd_live_<32 hex chars>"""
+    import secrets
+    return "vfyd_live_" + secrets.token_hex(16)
+
+
+def create_api_key(
+    owner_email:   str,
+    company_name:  str = "",
+    logo_url:      str = "",
+    brand_color:   str = "#f59e0b",
+    widget_domains: str = "*",
+) -> dict:
+    """Create a new Enterprise API key. Returns the full key record."""
+    key = _generate_api_key()
     now = datetime.now(timezone.utc).isoformat()
 
     with get_db() as conn:
         cur = conn.cursor()
-        cur.execute("""
-            INSERT INTO detection_results (
-                cert_id, job_id, created_at,
-                label, authenticity, ai_score, blend_mode, content_type,
-                signal_ai_score,
-                gpt_ai_score, gpt_available, gpt_reasoning, gpt_flags,
-                gpt_scores, generator_guess,
-                metadata_ai_score, metadata_confidence, metadata_evidence, metadata_adjustment,
-                audio_ai_score, audio_confidence, audio_evidence, audio_adjustment
-            ) VALUES (
-                %s, %s, %s,
-                %s, %s, %s, %s, %s,
-                %s,
-                %s, %s, %s, %s,
-                %s, %s,
-                %s, %s, %s, %s,
-                %s, %s, %s, %s
+        cur.execute(
+            """
+            INSERT INTO api_keys
+                (api_key, owner_email, company_name, logo_url,
+                 brand_color, widget_domains, plan, active, total_uses, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, 'enterprise', 1, 0, %s)
+            RETURNING *
+            """,
+            (key, owner_email.lower().strip(), company_name,
+             logo_url, brand_color, widget_domains, now)
+        )
+        row = cur.fetchone()
+    log.info("API key created for %s: %s...", owner_email, key[:20])
+    return dict(row)
+
+
+def get_api_key(api_key: str) -> Optional[dict]:
+    """Look up an API key. Returns None if not found or inactive."""
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT * FROM api_keys WHERE api_key = %s AND active = 1",
+            (api_key,)
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+
+def increment_api_key_uses(api_key: str) -> None:
+    """Increment usage counter and update last_used timestamp."""
+    now = datetime.now(timezone.utc).isoformat()
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            UPDATE api_keys
+            SET total_uses = total_uses + 1,
+                last_used  = %s
+            WHERE api_key = %s
+            """,
+            (now, api_key)
+        )
+
+
+def revoke_api_key(api_key: str) -> None:
+    """Deactivate an API key without deleting it (preserves usage history)."""
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE api_keys SET active = 0 WHERE api_key = %s",
+            (api_key,)
+        )
+    log.info("API key revoked: %s...", api_key[:20])
+
+
+def list_api_keys(owner_email: Optional[str] = None) -> list:
+    """List all API keys, optionally filtered by owner."""
+    with get_db() as conn:
+        cur = conn.cursor()
+        if owner_email:
+            cur.execute(
+                "SELECT * FROM api_keys WHERE owner_email = %s ORDER BY created_at DESC",
+                (owner_email.lower().strip(),)
             )
-            ON CONFLICT (cert_id) DO NOTHING
-        """, (
-            cert_id, job_id, now,
-            detail.get("label"),
-            detail.get("authenticity"),
-            detail.get("ai_score"),
-            detail.get("blend_mode"),
-            detail.get("content_type"),
-            detail.get("signal_ai_score"),
-            detail.get("gpt_ai_score"),
-            int(detail.get("gpt_available", True)),
-            detail.get("gpt_reasoning", "")[:500],
-            _json.dumps(detail.get("gpt_flags", [])),
-            _json.dumps(detail.get("gpt_scores", {})),
-            detail.get("generator_guess", "Unknown"),
-            detail.get("metadata_ai_score"),
-            detail.get("metadata_confidence"),
-            _json.dumps(detail.get("metadata_evidence", [])),
-            detail.get("metadata_adjustment"),
-            detail.get("audio_ai_score"),
-            detail.get("audio_confidence"),
-            _json.dumps(detail.get("audio_evidence", [])),
-            detail.get("audio_adjustment"),
-        ))
-    log.info("Stored detection result for cert_id=%s", cert_id)
+        else:
+            cur.execute("SELECT * FROM api_keys ORDER BY created_at DESC")
+        return [dict(r) for r in cur.fetchall()]
 
 
-def insert_correction(cert_id: str, original_label: str, correct_label: str,
-                       error_type: str, reviewer: str = "admin",
-                       note: str = "", detail: dict = None) -> None:
-    """Log a manual correction for a misclassified video."""
-    from datetime import datetime, timezone
-    now = datetime.now(timezone.utc).isoformat()
-    detail = detail or {}
-
+def update_api_key_branding(
+    api_key:       str,
+    company_name:  Optional[str] = None,
+    logo_url:      Optional[str] = None,
+    brand_color:   Optional[str] = None,
+    widget_domains: Optional[str] = None,
+) -> Optional[dict]:
+    """Update branding config for an existing API key."""
     with get_db() as conn:
         cur = conn.cursor()
-        cur.execute("""
-            INSERT INTO corrections (
-                cert_id, submitted_at, original_label, correct_label,
-                error_type, reviewer, note,
-                signal_ai_score, gpt_ai_score, content_type
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """, (
-            cert_id, now, original_label, correct_label,
-            error_type, reviewer, note,
-            detail.get("signal_ai_score"),
-            detail.get("gpt_ai_score"),
-            detail.get("content_type"),
-        ))
-
-        # Also update detection_results with the correction
-        is_fp = 1 if error_type == "false_positive" else 0
-        is_fn = 1 if error_type == "false_negative" else 0
-        cur.execute("""
-            UPDATE detection_results
-            SET correct_label = %s,
-                is_false_positive = %s,
-                is_false_negative = %s,
-                reviewed_at = %s,
-                reviewer_note = %s
-            WHERE cert_id = %s
-        """, (correct_label, is_fp, is_fn, now, note, cert_id))
-
-    log.info("Correction logged: cert=%s  %s→%s  type=%s",
-             cert_id, original_label, correct_label, error_type)
-
-
-def get_false_positive_rate(days: int = 30) -> dict:
-    """Return false positive/negative rates over the last N days."""
-    from datetime import datetime, timezone, timedelta
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
-
-    with get_db() as conn:
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT
-                COUNT(*)                                    AS total_reviewed,
-                SUM(CASE WHEN is_false_positive = 1 THEN 1 ELSE 0 END) AS false_positives,
-                SUM(CASE WHEN is_false_negative = 1 THEN 1 ELSE 0 END) AS false_negatives
-            FROM detection_results
-            WHERE reviewed_at IS NOT NULL AND reviewed_at >= %s
-        """, (cutoff,))
-        row = dict(cur.fetchone() or {})
-
-    total = row.get("total_reviewed") or 0
-    fp    = row.get("false_positives") or 0
-    fn    = row.get("false_negatives") or 0
-    return {
-        "total_reviewed":      total,
-        "false_positives":     fp,
-        "false_negatives":     fn,
-        "fp_rate":             round(fp / total, 3) if total else None,
-        "fn_rate":             round(fn / total, 3) if total else None,
-        "period_days":         days,
-    }
-
-
-def list_detection_results(limit: int = 100, label: str = None,
-                            unreviewed_only: bool = False) -> list:
-    """List recent detection results, optionally filtered."""
-    with get_db() as conn:
-        cur = conn.cursor()
-        conditions = []
-        params = []
-        if label:
-            conditions.append("label = %s")
-            params.append(label)
-        if unreviewed_only:
-            conditions.append("reviewed_at IS NULL")
-        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
-        cur.execute(f"""
-            SELECT cert_id, created_at, label, authenticity, ai_score,
-                   content_type, signal_ai_score, gpt_ai_score,
-                   generator_guess, metadata_ai_score, audio_ai_score,
-                   correct_label, is_false_positive, is_false_negative,
-                   reviewed_at
-            FROM detection_results
-            {where}
-            ORDER BY created_at DESC
-            LIMIT %s
-        """, params + [limit])
-        rows = cur.fetchall()
-        return [dict(r) for r in rows] if rows else []
+        if company_name  is not None:
+            cur.execute("UPDATE api_keys SET company_name  = %s WHERE api_key = %s", (company_name,  api_key))
+        if logo_url      is not None:
+            cur.execute("UPDATE api_keys SET logo_url      = %s WHERE api_key = %s", (logo_url,      api_key))
+        if brand_color   is not None:
+            cur.execute("UPDATE api_keys SET brand_color   = %s WHERE api_key = %s", (brand_color,   api_key))
+        if widget_domains is not None:
+            cur.execute("UPDATE api_keys SET widget_domains = %s WHERE api_key = %s", (widget_domains, api_key))
+    return get_api_key(api_key)
