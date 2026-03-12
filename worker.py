@@ -47,7 +47,7 @@ def process_upload_job(
     from rq        import get_current_job
     from detection import run_detection
     from video     import clip_first_6_seconds, stamp_video
-    from database  import insert_certificate, increment_user_uses, insert_detection_result
+    from database  import insert_certificate, increment_user_uses
     from config    import CERT_DIR, BASE_URL
     from emailer   import send_certification_email
 
@@ -105,11 +105,6 @@ def process_upload_job(
             ai_score      = detail["ai_score"],
             sha256        = sha256,
         )
-        # ── Log full detection result for analytics/feedback ─
-        try:
-            insert_detection_result(cert_id=job_id, job_id=job_id, detail=detail)
-        except Exception as _db_err:
-            log.warning("Failed to log detection result: %s", _db_err)
 
         # ── Build result ──────────────────────────────────────
         result = {
@@ -180,7 +175,7 @@ def process_link_job(
     """
     from detection import run_detection
     from video     import download_video_ytdlp, clip_first_6_seconds, stamp_video
-    from database  import insert_certificate, increment_user_uses, insert_detection_result
+    from database  import insert_certificate, increment_user_uses
     from config    import CERT_DIR, BASE_URL
     from emailer   import send_certification_email
 
@@ -269,3 +264,4 @@ def process_link_job(
     finally:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
+

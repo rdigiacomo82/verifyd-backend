@@ -371,7 +371,7 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
                 if is_traceback
                 else raw_error or "Analysis failed. Please try again."
             )
-            log.error("Widget job error for key %s...: %s", key[:16], raw_error[:300])
+            log.error("Job error: %s", raw_error[:300])
             return JSONResponse({"error": safe_error}, status_code=500)
 
     return JSONResponse({"error": "Analysis timed out. Please try again."}, status_code=504)
@@ -1866,10 +1866,11 @@ async def widget_upload(
                 if is_traceback
                 else raw_error or "Analysis failed. Please try again."
             )
-            log.error("Widget job error for key %s...: %s", key[:16], raw_error[:300])
+            log.error("Job error: %s", raw_error[:300])
             return JSONResponse({"error": safe_error}, status_code=500)
 
     return JSONResponse({"error": "Analysis timed out. Please try again."}, status_code=504)
+
 
 
 
