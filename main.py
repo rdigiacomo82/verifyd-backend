@@ -363,10 +363,16 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
             result.pop("job_status", None)
             return JSONResponse(result)
         if result and result.get("job_status") == "error":
-            return JSONResponse(
-                {"error": result.get("error", "Analysis failed.")},
-                status_code=500
+            # Never expose raw tracebacks to widget end-users
+            raw_error = result.get("error", "")
+            is_traceback = ("Traceback" in raw_error or "File /opt" in raw_error or len(raw_error) > 200)
+            safe_error = (
+                "Analysis failed. Please try again or contact support."
+                if is_traceback
+                else raw_error or "Analysis failed. Please try again."
             )
+            log.error("Widget job error for key %s...: %s", key[:16], raw_error[:300])
+            return JSONResponse({"error": safe_error}, status_code=500)
 
     return JSONResponse({"error": "Analysis timed out. Please try again."}, status_code=504)
 
@@ -1852,10 +1858,16 @@ async def widget_upload(
             increment_api_key_uses(key)
             return JSONResponse(result)
         if result and result.get("job_status") == "error":
-            return JSONResponse(
-                {"error": result.get("error", "Analysis failed.")},
-                status_code=500
+            # Never expose raw tracebacks to widget end-users
+            raw_error = result.get("error", "")
+            is_traceback = ("Traceback" in raw_error or "File /opt" in raw_error or len(raw_error) > 200)
+            safe_error = (
+                "Analysis failed. Please try again or contact support."
+                if is_traceback
+                else raw_error or "Analysis failed. Please try again."
             )
+            log.error("Widget job error for key %s...: %s", key[:16], raw_error[:300])
+            return JSONResponse({"error": safe_error}, status_code=500)
 
     return JSONResponse({"error": "Analysis timed out. Please try again."}, status_code=504)
 
