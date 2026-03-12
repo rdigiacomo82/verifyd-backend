@@ -268,3 +268,236 @@ def send_certification_email(
         "subject": f"&#10003; Your video has been certified — VeriFYD #{short_id}",
         "html":    html,
     })
+
+
+def send_enterprise_welcome_email(
+    to_email:     str,
+    company_name: str,
+    api_key:      str,
+    brand_color:  str = "#f59e0b",
+) -> bool:
+    """
+    Sent automatically when an Enterprise PayPal subscription activates.
+    Contains the embed code, API key, and quick-start instructions.
+    """
+    embed_script = (
+        f'&lt;div id="verifyd-widget"&gt;&lt;/div&gt;\n'
+        f'&lt;script src="{BACKEND_URL}/widget.js?key={api_key}"&gt;&lt;/script&gt;'
+    )
+    raw_script = (
+        f'<div id="verifyd-widget"></div>\n'
+        f'<script src="{BACKEND_URL}/widget.js?key={api_key}"></script>'
+    )
+    short_key = api_key[:24] + "..."
+
+    html = f"""
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="margin:0;padding:0;background-color:#0a0a0a;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#0a0a0a;padding:40px 20px;">
+    <tr>
+      <td align="center">
+        <table width="560" cellpadding="0" cellspacing="0"
+               style="background-color:#111111;border-radius:12px;border:1px solid #222222;
+                      overflow:hidden;max-width:560px;width:100%;">
+          {_header_html()}
+
+          <!-- Hero -->
+          <tr>
+            <td style="padding:40px 32px 24px;text-align:center;">
+              <div style="display:inline-block;background:#0c1a07;border:1px solid #f59e0b;
+                          border-radius:100px;padding:8px 20px;margin-bottom:24px;">
+                <span style="color:#f59e0b;font-size:13px;font-weight:700;
+                             letter-spacing:1px;text-transform:uppercase;">
+                  &#9889;&nbsp; Enterprise Plan Active
+                </span>
+              </div>
+              <h2 style="margin:0 0 10px;font-size:24px;font-weight:800;color:#ffffff;">
+                Welcome to VeriFYD Enterprise
+              </h2>
+              <p style="margin:0;color:#888888;font-size:15px;line-height:1.7;">
+                Your subscription is active. Below is everything you need to embed
+                the VeriFYD detection widget on <strong style="color:#ccc;">{company_name}</strong>.
+              </p>
+            </td>
+          </tr>
+
+          <!-- API Key -->
+          <tr>
+            <td style="padding:0 32px 28px;">
+              <p style="margin:0 0 10px;color:#9ca3af;font-size:12px;
+                        letter-spacing:2px;text-transform:uppercase;font-weight:600;">
+                Your API Key — keep this private
+              </p>
+              <div style="background:#0f0f0f;border:1px solid #374151;border-radius:10px;
+                          padding:16px 20px;">
+                <code style="color:#f59e0b;font-size:14px;font-family:'Courier New',monospace;
+                             word-break:break-all;letter-spacing:0.5px;">
+                  {api_key}
+                </code>
+              </div>
+              <p style="margin:8px 0 0;color:#4b5563;font-size:11px;line-height:1.6;">
+                This key authenticates all widget requests. Do not share it publicly
+                or commit it to source control.
+              </p>
+            </td>
+          </tr>
+
+          <!-- Embed Code -->
+          <tr>
+            <td style="padding:0 32px 28px;">
+              <p style="margin:0 0 10px;color:#9ca3af;font-size:12px;
+                        letter-spacing:2px;text-transform:uppercase;font-weight:600;">
+                Embed Code — paste into your website
+              </p>
+              <div style="background:#0f0f0f;border:1px solid #374151;border-radius:10px;
+                          padding:16px 20px;">
+                <code style="color:#a78bfa;font-size:12px;font-family:'Courier New',monospace;
+                             white-space:pre-wrap;word-break:break-all;line-height:1.8;
+                             display:block;">
+{embed_script}
+                </code>
+              </div>
+              <p style="margin:8px 0 0;color:#4b5563;font-size:11px;line-height:1.6;">
+                Add a <code style="color:#9ca3af;">&lt;div id="verifyd-widget"&gt;&lt;/div&gt;</code>
+                where you want the widget, then paste the script tag anywhere below it.
+              </p>
+            </td>
+          </tr>
+
+          <!-- Quick Start Steps -->
+          <tr>
+            <td style="padding:0 32px 28px;">
+              <p style="margin:0 0 16px;color:#9ca3af;font-size:12px;
+                        letter-spacing:2px;text-transform:uppercase;font-weight:600;">
+                Quick Start
+              </p>
+              <!-- Step 1 -->
+              <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:12px;">
+                <tr>
+                  <td width="32" valign="top">
+                    <div style="width:24px;height:24px;background:#f59e0b;border-radius:50%;
+                                text-align:center;line-height:24px;font-size:12px;
+                                font-weight:800;color:#000;">1</div>
+                  </td>
+                  <td style="padding-left:12px;">
+                    <p style="margin:0;color:#d1d5db;font-size:14px;font-weight:600;">
+                      Paste the embed code
+                    </p>
+                    <p style="margin:4px 0 0;color:#6b7280;font-size:12px;line-height:1.6;">
+                      Add both lines to any page on your site — CMS, React, plain HTML.
+                      The widget renders automatically.
+                    </p>
+                  </td>
+                </tr>
+              </table>
+              <!-- Step 2 -->
+              <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:12px;">
+                <tr>
+                  <td width="32" valign="top">
+                    <div style="width:24px;height:24px;background:#f59e0b;border-radius:50%;
+                                text-align:center;line-height:24px;font-size:12px;
+                                font-weight:800;color:#000;">2</div>
+                  </td>
+                  <td style="padding-left:12px;">
+                    <p style="margin:0;color:#d1d5db;font-size:14px;font-weight:600;">
+                      Customize your branding
+                    </p>
+                    <p style="margin:4px 0 0;color:#6b7280;font-size:12px;line-height:1.6;">
+                      Email <a href="mailto:support@vfvid.com" style="color:#f59e0b;">
+                      support@vfvid.com</a> with your logo URL and brand color
+                      to apply your custom branding to the widget.
+                    </p>
+                  </td>
+                </tr>
+              </table>
+              <!-- Step 3 -->
+              <table width="100%" cellpadding="0" cellspacing="0">
+                <tr>
+                  <td width="32" valign="top">
+                    <div style="width:24px;height:24px;background:#f59e0b;border-radius:50%;
+                                text-align:center;line-height:24px;font-size:12px;
+                                font-weight:800;color:#000;">3</div>
+                  </td>
+                  <td style="padding-left:12px;">
+                    <p style="margin:0;color:#d1d5db;font-size:14px;font-weight:600;">
+                      Go live
+                    </p>
+                    <p style="margin:4px 0 0;color:#6b7280;font-size:12px;line-height:1.6;">
+                      Your users can now verify videos directly on your platform.
+                      Unlimited verifications — no usage caps.
+                    </p>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <!-- What's included -->
+          <tr>
+            <td style="padding:0 32px 28px;">
+              <div style="background:#0f172a;border:1px solid #1e3a5f;border-radius:10px;padding:20px;">
+                <p style="margin:0 0 12px;color:#60a5fa;font-size:12px;font-weight:700;
+                           letter-spacing:1px;text-transform:uppercase;">
+                  What's included in Enterprise
+                </p>
+                <table width="100%" cellpadding="0" cellspacing="0">
+                  <tr>
+                    <td width="50%" valign="top">
+                      <p style="margin:0 0 8px;color:#d1d5db;font-size:13px;">
+                        ✓ &nbsp;Unlimited verifications
+                      </p>
+                      <p style="margin:0 0 8px;color:#d1d5db;font-size:13px;">
+                        ✓ &nbsp;White-label widget
+                      </p>
+                      <p style="margin:0;color:#d1d5db;font-size:13px;">
+                        ✓ &nbsp;Custom branding
+                      </p>
+                    </td>
+                    <td width="50%" valign="top">
+                      <p style="margin:0 0 8px;color:#d1d5db;font-size:13px;">
+                        ✓ &nbsp;API key access
+                      </p>
+                      <p style="margin:0 0 8px;color:#d1d5db;font-size:13px;">
+                        ✓ &nbsp;Priority processing
+                      </p>
+                      <p style="margin:0;color:#d1d5db;font-size:13px;">
+                        ✓ &nbsp;Dedicated support
+                      </p>
+                    </td>
+                  </tr>
+                </table>
+              </div>
+            </td>
+          </tr>
+
+          <!-- Support CTA -->
+          <tr>
+            <td style="padding:0 32px 32px;text-align:center;">
+              <a href="mailto:support@vfvid.com"
+                 style="display:inline-block;background:#1a1a1a;color:#f59e0b;
+                        text-decoration:none;padding:14px 28px;border-radius:8px;
+                        font-size:14px;font-weight:700;border:1px solid #333;">
+                Contact Enterprise Support
+              </a>
+            </td>
+          </tr>
+
+          {_footer_html()}
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>"""
+
+    return _send({
+        "from":    f"{FROM_NAME} <{FROM_ADDRESS}>",
+        "to":      [to_email],
+        "subject": f"🚀 Your VeriFYD Enterprise account is ready — {company_name}",
+        "html":    html,
+    })
