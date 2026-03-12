@@ -24,7 +24,7 @@ from config import (                  # single source of truth for all settings
     BASE_URL,
     UPLOAD_DIR, CERT_DIR, TMP_DIR,
 )
-from emailer  import send_otp_email, send_certification_email
+from emailer  import send_otp_email, send_certification_email, send_enterprise_welcome_email
 from database import (init_db, insert_certificate, increment_downloads,
                       get_or_create_user, get_user_status, increment_user_uses,
                       is_valid_email, FREE_USES, get_certificate,
@@ -814,8 +814,9 @@ from database import upgrade_user_plan, reset_period_uses
 # Map PayPal plan IDs → VeriFYD plan names
 def _get_plan_map() -> dict:
     return {
-        os.environ.get("PAYPAL_PLAN_ID",     ""): "creator",
-        os.environ.get("PAYPAL_PLAN_ID_PRO", ""): "pro",
+        os.environ.get("PAYPAL_PLAN_ID",            ""): "creator",
+        os.environ.get("PAYPAL_PLAN_ID_PRO",        ""): "pro",
+        os.environ.get("PAYPAL_PLAN_ID_ENTERPRISE", ""): "enterprise",
     }
 
 
@@ -912,10 +913,60 @@ async def paypal_webhook(request: Request):
             upgrade_user_plan(email, plan_name, paypal_sub_id=sub_id)
             log.info("Upgraded %s to %s (sub: %s)", email, plan_name, sub_id)
 
+            # ── Enterprise: auto-provision API key + send welcome email ──
+            if plan_name == "enterprise" and event_type == "BILLING.SUBSCRIPTION.ACTIVATED":
+                try:
+                    # Check if they already have an active key (e.g. resubscribe)
+                    existing_keys = list_api_keys(email)
+                    active_keys   = [k for k in existing_keys if k.get("active")]
+
+                    if active_keys:
+                        # Re-activate existing key rather than creating a duplicate
+                        key_record = active_keys[0]
+                        log.info("Enterprise re-activation — reusing key for %s", email)
+                    else:
+                        # New Enterprise customer — provision fresh key
+                        # Extract company name from PayPal subscriber data if available
+                        company_name = (
+                            resource.get("subscriber", {})
+                            .get("name", {})
+                            .get("full_name", "")
+                            or email.split("@")[0].replace(".", " ").title()
+                        )
+                        key_record = create_api_key(
+                            owner_email=email,
+                            company_name=company_name,
+                        )
+                        log.info("Enterprise API key provisioned for %s: %s...",
+                                 email, key_record["api_key"][:20])
+
+                    # Send welcome email with embed code
+                    send_enterprise_welcome_email(
+                        to_email=email,
+                        company_name=key_record.get("company_name", ""),
+                        api_key=key_record["api_key"],
+                    )
+                    log.info("Enterprise welcome email sent to %s", email)
+
+                except Exception as e:
+                    # Don't fail the webhook — key provisioning failure is recoverable
+                    # Admin can manually provision via /admin-create-api-key/
+                    log.error("Enterprise key provisioning failed for %s: %s", email, e)
+
         elif event_type in ("BILLING.SUBSCRIPTION.CANCELLED", "BILLING.SUBSCRIPTION.EXPIRED"):
             if email:
                 upgrade_user_plan(email, "free")
                 log.info("Downgraded %s to free (sub cancelled/expired)", email)
+
+                # Revoke Enterprise API key if they had one
+                try:
+                    existing_keys = list_api_keys(email)
+                    for k in existing_keys:
+                        if k.get("active"):
+                            revoke_api_key(k["api_key"])
+                            log.info("Enterprise API key revoked for %s on cancellation", email)
+                except Exception as e:
+                    log.error("Failed to revoke Enterprise key for %s: %s", email, e)
 
         return JSONResponse({"status": "ok"}, status_code=200)
 
@@ -1206,11 +1257,26 @@ def admin_create_api_key(
         widget_domains=widget_domains,
     )
     log.info("Admin provisioned Enterprise key for %s", owner_email)
+
+    # Send welcome email with API key and embed code
+    email_sent = False
+    try:
+        email_sent = send_enterprise_welcome_email(
+            to_email=owner_email,
+            company_name=company_name or owner_email.split("@")[0].title(),
+            api_key=record["api_key"],
+            brand_color=brand_color,
+        )
+        log.info("Enterprise welcome email sent to %s: %s", owner_email, email_sent)
+    except Exception as e:
+        log.error("Enterprise welcome email failed for %s: %s", owner_email, e)
+
     return {
         "status":       "created",
         "api_key":      record["api_key"],
         "owner_email":  record["owner_email"],
         "company_name": record["company_name"],
+        "email_sent":   email_sent,
         "embed_script": (
             f'<div id="verifyd-widget"></div>\n'
             f'<script src="{BASE_URL}/widget.js?key={record["api_key"]}"></script>'
@@ -1792,6 +1858,7 @@ async def widget_upload(
             )
 
     return JSONResponse({"error": "Analysis timed out. Please try again."}, status_code=504)
+
 
 
 
