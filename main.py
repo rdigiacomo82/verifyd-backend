@@ -922,6 +922,67 @@ async def paypal_webhook(request: Request):
         return JSONResponse({"error": "processing error"}, status_code=500)
 
 
+# ─────────────────────────────────────────────────────────────
+#  Manual Subscription Activation
+#
+#  Called by the frontend after a successful PayPal payment
+#  when the user's PayPal email differs from their VeriFYD email.
+#
+#  The PayPalSubscriptionButton component prompts the user for
+#  their VeriFYD email + the plan they subscribed to, then
+#  posts here to activate the correct account.
+#
+#  Endpoint: POST /activate-subscription/
+#  Body (x-www-form-urlencoded): email=...&plan=...
+# ─────────────────────────────────────────────────────────────
+
+@app.post("/activate-subscription/")
+async def activate_subscription(request: Request):
+    """
+    Manually activate a paid plan for a VeriFYD email after PayPal payment.
+    Used when the PayPal account email differs from the VeriFYD account email.
+    """
+    try:
+        body = await request.form()
+        email = (body.get("email") or "").strip().lower()
+        plan  = (body.get("plan")  or "").strip().lower()
+
+        if not email:
+            return JSONResponse({"error": "email required"}, status_code=400)
+
+        # Normalise plan name — accept "creator", "pro", "pro ai", "pro_ai"
+        plan_map = {
+            "creator": "creator",
+            "pro":     "pro",
+            "pro ai":  "pro",
+            "pro_ai":  "pro",
+        }
+        plan_name = plan_map.get(plan)
+        if not plan_name:
+            return JSONResponse(
+                {"error": f"invalid plan '{plan}'. Must be 'creator' or 'pro'"},
+                status_code=400
+            )
+
+        # Make sure the user exists in the DB first
+        user = get_or_create_user(email)
+        if not user:
+            return JSONResponse({"error": "user not found"}, status_code=404)
+
+        upgrade_user_plan(email, plan_name)
+        log.info("Manual activation: %s → %s", email, plan_name)
+
+        return JSONResponse({
+            "status":  "activated",
+            "email":   email,
+            "plan":    plan_name,
+        })
+
+    except Exception as e:
+        log.exception("activate_subscription error: %s", e)
+        return JSONResponse({"error": "activation failed"}, status_code=500)
+
+
 @app.get("/admin-data/")
 def admin_data(key: str = ""):
     """
