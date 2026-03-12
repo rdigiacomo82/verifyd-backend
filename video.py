@@ -299,8 +299,46 @@ def _try_smvd_tiktok(url: str, output_path: str) -> bool:
     if not video_url:
         return False
 
-    _download_from_url(video_url, output_path)
-    size = os.path.getsize(output_path)
+    # TikTok CDN requires realistic browser headers + Referer to serve from datacenter IPs
+    tiktok_headers = {
+        "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Referer":         "https://www.tiktok.com/",
+        "Accept":          "video/webm,video/mp4,video/*;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Origin":          "https://www.tiktok.com",
+        "Sec-Fetch-Dest":  "video",
+        "Sec-Fetch-Mode":  "no-cors",
+        "Sec-Fetch-Site":  "cross-site",
+        "Range":           "bytes=0-",
+    }
+    try:
+        r = requests.get(video_url, stream=True, timeout=60, headers=tiktok_headers)
+        r.raise_for_status()
+        with open(output_path, "wb") as f:
+            for chunk in r.iter_content(chunk_size=65536):
+                if chunk:
+                    f.write(chunk)
+    except Exception as e:
+        log.warning("SMVD TikTok: download failed with browser headers: %s", e)
+        # Try SMVD proxied fallback — pass URL back through SMVD proxy endpoint
+        try:
+            proxy_resp = requests.get(
+                f"{SMVD_BASE}/proxy/stream",
+                headers={"x-rapidapi-key": RAPIDAPI_KEY, "x-rapidapi-host": SMVD_HOST},
+                params={"url": video_url},
+                stream=True,
+                timeout=60,
+            )
+            proxy_resp.raise_for_status()
+            with open(output_path, "wb") as f:
+                for chunk in proxy_resp.iter_content(chunk_size=65536):
+                    if chunk:
+                        f.write(chunk)
+        except Exception as e2:
+            log.warning("SMVD TikTok: proxy fallback also failed: %s", e2)
+            return False
+
+    size = os.path.getsize(output_path) if os.path.exists(output_path) else 0
     if size > 1024:
         log.info("SMVD TikTok: success — %d bytes", size)
         return True
