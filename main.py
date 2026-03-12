@@ -1801,10 +1801,8 @@ function showResult(data) {{
     dlBtn.href = data.download_url;
     dlBtn.style.display = 'block';
     // Build the public certificate URL
-    var certId = data.certificate_id || '';
-    window._certLink = certId
-      ? 'https://vfvid.com/v/' + certId
-      : data.download_url;
+    // Copy link = direct video stream so it plays inline on social media
+    window._certLink = data.download_url || '';
     copyBtn.style.display = 'block';
     copyBtn.textContent = '🔗 Copy Certified Link';
   }} else {{
