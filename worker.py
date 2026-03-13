@@ -197,7 +197,15 @@ def process_link_job(
             raise RuntimeError(f"Download produced no file: {video_url}")
 
         log.info("Worker: starting detection for link job=%s", job_id)
-        authenticity, label, detail = run_detection(tmp_path)
+        # Clip first 6 seconds — same pipeline as upload job
+        try:
+            clip_path = clip_first_6_seconds(tmp_path)
+        except Exception as clip_err:
+            log.warning("Worker: clip failed for link job=%s, using full video: %s", job_id, clip_err)
+            clip_path = tmp_path
+        authenticity, label, detail = run_detection(clip_path)
+        if clip_path != tmp_path and os.path.exists(clip_path):
+            os.remove(clip_path)
         ui_text, color, certify = LABEL_UI.get(label, ("VIDEO UNDETERMINED", "blue", False))
 
         uses = 2 if double_count else 1
