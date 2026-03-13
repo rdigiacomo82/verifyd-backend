@@ -1004,6 +1004,9 @@ def detect_ai(video_path: str) -> int:
              "static"          if is_static_content   else "cinematic",
              avg_motion, avg_edge, _is_portrait, _is_selfie_content, _is_talking_head, skin_ratio, _is_single_subject)
 
+    # Pre-compute animal render flag — needed early for noise suppression
+    _animal_render_flag = (skin_ratio > 0.55 and motion_period > 0.75)
+
     ai_score = 30.0   # base: lean real until AI signals accumulate
 
     # ═══════════════════════════════════════════════════════════
@@ -1182,7 +1185,6 @@ def detect_ai(video_path: str) -> int:
     # Skin presence confirms human subject (not AI animal/cinematic render).
     # High skin ratio with strong motion period = likely AI animal render (e.g. bunny, dog)
     # Bunny/animal fur triggers skin HSV detection at 0.50-0.70 — not a real person
-    _animal_render_flag = (skin_ratio > 0.55 and motion_period > 0.75)
     if _animal_render_flag:
         ai_score += 10
         log.info("ANIMAL_RENDER: high skin-range ratio=%.3f + strong period=%.3f → likely AI creature render → +10", skin_ratio, motion_period)
