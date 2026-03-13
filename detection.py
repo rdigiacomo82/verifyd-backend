@@ -1,13 +1,9 @@
 # ============================================================
-#  VeriFYD — detection.py  v4
+#  VeriFYD — detection.py  v3
 #
 #  DUAL ENGINE:
 #    1. detector.py   — signal-based (pixel-level evidence)
 #    2. gpt_vision.py — GPT-4o semantic (visual reasoning)
-#
-#  HARD OVERRIDE (checked BEFORE engines run):
-#    0. Metadata pre-check — AIGC tag, TikTok AI label, known
-#       generator encoder signatures → instant AI result
 #
 #  WEIGHTING RULES (in priority order):
 #    1. GPT failed            → signal 100%
@@ -20,11 +16,7 @@
 #    6. Default               → signal 40% / GPT 60%
 # ============================================================
 
-import json
 import logging
-import os
-import subprocess
-
 from detector    import detect_ai
 from gpt_vision  import gpt_vision_score_with_context, extract_key_frames
 
@@ -33,135 +25,91 @@ log = logging.getLogger("verifyd.detection")
 THRESHOLD_REAL         = 55
 THRESHOLD_UNDETERMINED = 40
 
-# ─────────────────────────────────────────────────────────────
-#  Metadata pre-check — hard override before signal/GPT engines
-# ─────────────────────────────────────────────────────────────
 
-def _check_metadata(video_path: str) -> dict | None:
+def _check_metadata_override(video_path: str) -> tuple:
     """
-    Extract MP4/MOV format-level metadata via ffprobe and check for
-    known AI-generation signatures embedded by generators or platforms.
-
-    Returns a result dict (same shape as run_detection return) if a
-    definitive AI signal is found, otherwise returns None so normal
-    detection proceeds.
-
-    Known signals checked:
-      1. aigc_info tag — TikTok/Douyin official AI content label
-         {"aigc_label_type": 2} = fully AI generated
-         {"aigc_label_type": 1} = AI assisted
-      2. Encoder fingerprint — known AI video generator encoders
-         Lavf + no camera vendor = re-encoded AI output
-      3. vendor_id "[0][0][0][0]" — stripped/generic vendor (AI pipeline)
+    Check for definitive metadata signals before running engines.
+    Returns (override: bool, ai_score: int, label: str, reason: str)
     """
+    import subprocess, json as _json, os
+
+    # 1. Check sidecar file written by SMVD TikTok downloader
+    sidecar = video_path.replace(".mp4", ".meta.json")
+    if os.path.exists(sidecar):
+        try:
+            with open(sidecar) as sf:
+                meta = _json.load(sf)
+            aigc = int(meta.get("aigc_label_type", 0))
+            log.info("METADATA: sidecar aigc_label_type=%d source=%s", aigc, meta.get("source", "?"))
+            if aigc == 2:
+                reason = "TikTok/Douyin AIGC label: officially marked as AI-generated content"
+                log.info("METADATA_OVERRIDE: aigc_label_type=2 → FULLY AI GENERATED")
+                return True, 97, "AI", reason
+            elif aigc == 1:
+                reason = "TikTok/Douyin AIGC label: AI-assisted content"
+                log.info("METADATA: aigc_label_type=1 → AI assisted (weak signal, not override)")
+        except Exception as e:
+            log.warning("METADATA: sidecar read error: %s", e)
+
+    # 2. Check MP4 format tags via ffprobe (uploaded files)
     try:
-        ffprobe_bin = os.environ.get("FFPROBE_BIN", "ffprobe")
         result = subprocess.run(
-            [ffprobe_bin, "-v", "quiet", "-print_format", "json",
+            ["ffprobe", "-v", "quiet", "-print_format", "json",
              "-show_format", "-show_streams", video_path],
-            capture_output=True, text=True, timeout=30
+            capture_output=True, text=True, timeout=15
         )
-        if result.returncode != 0:
-            return None
+        data = _json.loads(result.stdout)
+        fmt_tags = data.get("format", {}).get("tags", {})
+        encoder  = fmt_tags.get("encoder", fmt_tags.get("ENCODER", "")).lower()
+        vendor   = ""
+        for s in data.get("streams", []):
+            vendor = s.get("tags", {}).get("vendor_id", "")
+            if vendor:
+                break
 
-        data       = json.loads(result.stdout)
-        fmt_tags   = data.get("format", {}).get("tags", {})
-        streams    = data.get("streams", [])
-        video_tags = next(
-            (s.get("tags", {}) for s in streams if s.get("codec_type") == "video"),
-            {}
-        )
-
-        # ── Signal 1: TikTok/Douyin AIGC label ───────────────
-        aigc_raw = fmt_tags.get("aigc_info", "")
-        if aigc_raw:
+        # TikTok/Douyin AIGC tag in format tags
+        aigc_info = fmt_tags.get("aigc_info", "")
+        if aigc_info:
             try:
-                aigc = json.loads(aigc_raw)
-                aigc_type = int(aigc.get("aigc_label_type", -1))
-                if aigc_type == 2:
+                aigc_data  = _json.loads(aigc_info)
+                aigc_label = int(aigc_data.get("aigc_label_type", 0))
+                if aigc_label == 2:
+                    reason = "TikTok/Douyin AIGC label: officially marked as AI-generated content"
                     log.info("METADATA_OVERRIDE: aigc_label_type=2 → FULLY AI GENERATED")
-                    return _metadata_ai_result(
-                        "TikTok/Douyin AIGC label: officially marked as AI-generated content",
-                        ai_score=97
-                    )
-                elif aigc_type == 1:
-                    log.info("METADATA_OVERRIDE: aigc_label_type=1 → AI ASSISTED")
-                    return _metadata_ai_result(
-                        "TikTok/Douyin AIGC label: officially marked as AI-assisted content",
-                        ai_score=85
-                    )
-            except (json.JSONDecodeError, ValueError):
+                    return True, 97, "AI", reason
+                elif aigc_label == 1:
+                    log.info("METADATA: aigc_label_type=1 → AI assisted (weak signal, not override)")
+            except Exception:
                 pass
 
-        # ── Signal 2: Known AI generator comment/tag patterns ─
-        comment = fmt_tags.get("comment", "").lower()
-        title   = fmt_tags.get("title",   "").lower()
-        for field in (comment, title):
-            for marker in ("aigc", "ai generated", "ai-generated", "sora", "kling",
-                           "runway", "pika", "hailuo", "luma", "vidu", "cogvideo"):
-                if marker in field:
-                    log.info("METADATA_OVERRIDE: AI marker '%s' in tags", marker)
-                    return _metadata_ai_result(
-                        f"Metadata tag contains AI generation marker: '{marker}'",
-                        ai_score=90
-                    )
-
-        # ── Signal 3: Encoder + vendor fingerprint ────────────
-        encoder   = fmt_tags.get("encoder", "")
-        vendor_id = video_tags.get("vendor_id", "")
-        # Lavf (FFmpeg libavformat) with stripped vendor = re-encoded AI output
-        # Real camera videos have camera vendor IDs: "appl", "FFMP", manufacturer codes
-        # "[0][0][0][0]" is the null vendor — AI pipelines strip camera provenance
-        is_lavf_reencoded = encoder.startswith("Lavf") and vendor_id == "[0][0][0][0]"
-        # Only use encoder alone as a weak supporting signal (not a hard override)
-        # — it's common in legitimate re-uploads too.
-        if is_lavf_reencoded:
-            log.info(
-                "METADATA: Lavf encoder + null vendor_id detected "
-                "(AI pipeline fingerprint — weak signal, not override)"
-            )
-            # Return None — let signal+GPT engines handle it, but log the evidence
-            # This is available in the logs for debugging but doesn't hard-override
-            # because many re-uploaded real videos also go through FFmpeg pipelines.
-
-        return None
+        # Lavf encoder + null vendor = AI pipeline fingerprint (weak, not override)
+        if "lavf" in encoder and vendor in ("[0][0][0][0]", "", "0000"):
+            log.info("METADATA: Lavf encoder + null vendor_id detected (AI pipeline fingerprint — weak signal, not override)")
 
     except Exception as e:
-        log.warning("Metadata pre-check failed: %s", e)
-        return None
+        log.warning("METADATA: ffprobe error: %s", e)
 
-
-def _metadata_ai_result(reason: str, ai_score: int = 95) -> tuple:
-    """Build a complete run_detection-compatible return tuple for metadata overrides."""
-    authenticity = 100 - ai_score
-    label = "AI" if authenticity < THRESHOLD_UNDETERMINED else "UNDETERMINED"
-    detail = {
-        "ai_score":        ai_score,
-        "authenticity":    authenticity,
-        "label":           label,
-        "signal_ai_score": ai_score,
-        "gpt_ai_score":    ai_score,
-        "gpt_available":   False,
-        "gpt_reasoning":   reason,
-        "gpt_flags":       [reason],
-        "weight_signal":   1.0,
-        "weight_gpt":      0.0,
-        "blend_mode":      "metadata-override",
-        "threshold_real":  THRESHOLD_REAL,
-        "threshold_undet": THRESHOLD_UNDETERMINED,
-        "metadata_override": True,
-        "metadata_reason": reason,
-    }
-    log.info("Metadata override → ai_score=%d authenticity=%d label=%s | %s",
-             ai_score, authenticity, label, reason)
-    return authenticity, label, detail
+    return False, 0, "", ""
 
 
 def run_detection(video_path: str) -> tuple:
-    # ── Engine 0: Metadata pre-check (hard override) ──────────
-    metadata_result = _check_metadata(video_path)
-    if metadata_result is not None:
-        return metadata_result
+    # ── Pre-check: Metadata override ─────────────────────────
+    override, ov_ai_score, ov_label, ov_reason = _check_metadata_override(video_path)
+    if override:
+        authenticity = 100 - ov_ai_score
+        log.info("Metadata override → ai_score=%d authenticity=%d label=%s | %s",
+                 ov_ai_score, authenticity, ov_label, ov_reason)
+        return authenticity, ov_label, {
+            "ai_score":        ov_ai_score,
+            "signal_ai_score": ov_ai_score,
+            "gpt_ai_score":    ov_ai_score,
+            "gpt_reasoning":   ov_reason,
+            "gpt_flags":       ["metadata_override"],
+            "content_type":    "unknown",
+            "blend_mode":      "metadata-override",
+            "weight_signal":   1.0,
+            "weight_gpt":      0.0,
+        }
 
     # ── Engine 1: Signal detector ─────────────────────────────
     signal_ai_score, signal_context = detect_ai(video_path)
@@ -188,14 +136,24 @@ def run_detection(video_path: str) -> tuple:
 
     else:
         # Determine blend mode
-        clash_real  = signal_ai_score < 50 and gpt_ai_score > 50   # GPT uncertain/wrong, signal says real
+        # clash_real: signal says real BUT only override GPT if GPT is not highly confident
+        # If GPT >= 75, it's seeing strong AI artifacts — don't let signal dismiss it
+        clash_real  = signal_ai_score < 50 and gpt_ai_score > 50 and gpt_ai_score < 75
         clash_ai    = signal_ai_score > 65 and gpt_ai_score < 40   # signal says AI, GPT misses it
+        gpt_dominant = gpt_ai_score >= 75 and signal_ai_score < 60  # GPT highly confident AI, signal unsure
         both_real   = signal_ai_score < 45 and gpt_ai_score < 45
         both_ai     = signal_ai_score > 65 and gpt_ai_score > 65
         confident   = signal_ai_score < 35 or signal_ai_score > 75
 
-        if clash_real:
-            # Signal has pixel evidence of real — GPT is over-calling AI
+        if gpt_dominant:
+            # GPT is highly confident AI but signal is borderline — trust GPT heavily
+            combined, w_sig, w_gpt = (
+                signal_ai_score * 0.25 + gpt_ai_score * 0.75,
+                0.25, 0.75
+            )
+            mode = "gpt-dominant (GPT highly confident AI)"
+        elif clash_real:
+            # Signal has pixel evidence of real — GPT is moderately calling AI
             combined, w_sig, w_gpt = (
                 signal_ai_score * 0.90 + gpt_ai_score * 0.10,
                 0.90, 0.10

@@ -291,6 +291,27 @@ def _try_smvd_tiktok(url: str, output_path: str) -> bool:
     if not contents:
         return False
 
+    # Extract AIGC label from SMVD post metadata and save as sidecar
+    # so detection.py can apply the same metadata override as uploaded files
+    try:
+        post_meta = contents[0] if contents else {}
+        aigc_label = (
+            post_meta.get("aigc_label_type") or
+            post_meta.get("aigc_label") or
+            data.get("aigc_label_type") or
+            data.get("aigc_label") or
+            post_meta.get("extra", {}).get("aigc_label_type") or
+            0
+        )
+        log.info("SMVD TikTok: aigc_label_type=%s", aigc_label)
+        # Write sidecar JSON — detection.py will read this
+        import json as _json
+        sidecar = output_path.replace(".mp4", ".meta.json")
+        with open(sidecar, "w") as sf:
+            _json.dump({"aigc_label_type": aigc_label, "source": "tiktok_smvd"}, sf)
+    except Exception as meta_err:
+        log.warning("SMVD TikTok: could not extract AIGC metadata: %s", meta_err)
+
     videos = contents[0].get("videos", [])
     if not videos:
         return False
@@ -627,6 +648,7 @@ def stamp_video(input_path: str, output_path: str, cert_id: str) -> None:
     finally:
         if os.path.exists(tmp_logo.name):
             os.remove(tmp_logo.name)
+
 
 
 
