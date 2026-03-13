@@ -675,6 +675,110 @@ def _temporal_color_variance(frames_bgr: List[np.ndarray]) -> float:
 
 # ── Main detection function ──────────────────────────────────
 
+def _audio_ai_signals(video_path: str) -> dict:
+    """
+    Analyze audio track for AI-generation signatures.
+
+    Two key signals:
+    1. DURATION MISMATCH: AI generators add stock audio separately →
+       audio duration often differs from video by 0.08s+.
+       Real cameras record audio+video together → < 0.05s mismatch.
+
+    2. STEREO CORRELATION: AI stock music has near-identical L/R channels
+       (mono source panned to stereo) → correlation > 0.93.
+       Real ambient audio has spatial variation → lower correlation.
+
+    Returns dict with: dur_mismatch, stereo_corr, has_audio, ai_score_contribution
+    """
+    import tempfile as _tempfile
+    result = {
+        "has_audio": False,
+        "dur_mismatch": 0.0,
+        "stereo_corr": 0.0,
+        "ai_score_contribution": 0,
+        "reason": "",
+    }
+    try:
+        # Get audio/video duration from ffprobe
+        probe = subprocess.run([
+            "ffprobe", "-v", "quiet", "-print_format", "json",
+            "-show_streams", video_path
+        ], capture_output=True, text=True, timeout=15)
+        import json as _json
+        streams = _json.loads(probe.stdout).get("streams", [])
+
+        video_dur = 0.0
+        audio_dur = 0.0
+        has_audio = False
+        for s in streams:
+            if s.get("codec_type") == "video":
+                video_dur = float(s.get("duration", 0) or 0)
+            if s.get("codec_type") == "audio":
+                audio_dur = float(s.get("duration", 0) or 0)
+                has_audio = True
+
+        if not has_audio:
+            result["reason"] = "no audio track"
+            return result
+
+        result["has_audio"] = True
+        dur_mismatch = abs(audio_dur - video_dur)
+        result["dur_mismatch"] = dur_mismatch
+
+        # Extract stereo audio as PCM
+        tmp_wav = _tempfile.mktemp(suffix=".wav")
+        try:
+            subprocess.run([
+                "ffmpeg", "-y", "-i", video_path,
+                "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "2",
+                tmp_wav
+            ], capture_output=True, timeout=30)
+
+            if os.path.exists(tmp_wav) and os.path.getsize(tmp_wav) > 100:
+                with open(tmp_wav, "rb") as wf:
+                    raw = wf.read()
+                samples = np.frombuffer(raw[44:], dtype=np.int16).astype(np.float32)
+                if len(samples) >= 200:
+                    L = samples[0::2]
+                    R = samples[1::2]
+                    min_len = min(len(L), len(R))
+                    if min_len > 100:
+                        stereo_corr = float(np.corrcoef(L[:min_len], R[:min_len])[0, 1])
+                        result["stereo_corr"] = stereo_corr
+        finally:
+            if os.path.exists(tmp_wav):
+                os.remove(tmp_wav)
+
+        # Score the signals
+        score = 0
+        reasons = []
+
+        # Duration mismatch — audio added separately
+        if dur_mismatch > 0.10:
+            score += 6
+            reasons.append(f"audio_dur_mismatch={dur_mismatch:.3f}s→+6")
+        elif dur_mismatch > 0.07:
+            score += 3
+            reasons.append(f"audio_dur_mismatch={dur_mismatch:.3f}s→+3")
+
+        # Stereo correlation — stock music signature
+        sc = result["stereo_corr"]
+        if sc > 0.93:
+            score += 8
+            reasons.append(f"stereo_corr={sc:.3f}→+8")
+        elif sc > 0.87:
+            score += 4
+            reasons.append(f"stereo_corr={sc:.3f}→+4")
+
+        result["ai_score_contribution"] = score
+        result["reason"] = " | ".join(reasons) if reasons else "no AI audio signals"
+
+    except Exception as e:
+        result["reason"] = f"audio analysis error: {e}"
+
+    return result
+
+
 def _color_channel_correlation(video_path: str, n_frames: int = 20) -> float:
     """
     Measure inter-channel correlation between R, G, B channels.
@@ -1188,6 +1292,20 @@ def detect_ai(video_path: str) -> int:
     if _animal_render_flag:
         ai_score += 10
         log.info("ANIMAL_RENDER: high skin-range ratio=%.3f + strong period=%.3f → likely AI creature render → +10", skin_ratio, motion_period)
+
+    # ── AUDIO AI SIGNALS (v10) ───────────────────────────────
+    # Check audio track for stock-music and added-audio signatures.
+    # AI generators add stock audio separately → duration mismatch + high stereo correlation.
+    # Only runs when video has an audio track.
+    _audio = _audio_ai_signals(video_path)
+    if _audio["has_audio"]:
+        if _audio["ai_score_contribution"] > 0:
+            ai_score += _audio["ai_score_contribution"]
+            log.info("AUDIO_AI: %s → +%d", _audio["reason"], _audio["ai_score_contribution"])
+        else:
+            log.info("AUDIO_AI: %s (no AI signal)", _audio["reason"])
+    else:
+        log.info("AUDIO_AI: %s", _audio["reason"])
 
     # ── COLOR CHANNEL CORRELATION (v10) ──────────────────────
     # AI video generators render R,G,B channels jointly → high inter-channel correlation.
@@ -2012,5 +2130,10 @@ def detect_ai(video_path: str) -> int:
         "edge_mean_var":  edge_mean_var,
         "edge_cov_var":   edge_cov_var,
         "tcv":            tcv,
+        # v10 audio signals
+        "audio_dur_mismatch": _audio.get("dur_mismatch", 0),
+        "audio_stereo_corr":  _audio.get("stereo_corr", 0),
+        "audio_has_signal":   _audio.get("ai_score_contribution", 0) > 0,
+        "audio_reason":       _audio.get("reason", ""),
     }
     return int(round(ai_score)), signal_context

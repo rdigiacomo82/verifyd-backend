@@ -784,6 +784,36 @@ def _build_physics_summary(ctx: dict) -> str:
             "RENDERED/PAINTED qualities, not just blur or palette limitation.".format(avg_noise_val)
         )
 
+    # ── Audio mismatch hint ─────────────────────────────────
+    audio_has_signal = ctx.get("audio_has_signal", False)
+    audio_dur_mismatch = ctx.get("audio_dur_mismatch", 0)
+    audio_stereo_corr = ctx.get("audio_stereo_corr", 0)
+    audio_reason = ctx.get("audio_reason", "")
+
+    if audio_has_signal:
+        hint_parts = []
+        if audio_dur_mismatch > 0.07:
+            hint_parts.append(
+                f"audio track is {audio_dur_mismatch:.3f}s longer than video "
+                f"(typical of stock audio added after generation)"
+            )
+        if audio_stereo_corr > 0.87:
+            hint_parts.append(
+                f"stereo L/R channels are nearly identical (corr={audio_stereo_corr:.3f}) "
+                f"— stock music panned to stereo, not real ambient sound"
+            )
+        if hint_parts:
+            hints.append(
+                "🎵 AI AUDIO SIGNATURES DETECTED: " + "; ".join(hint_parts) + ".\n"
+                "  This strongly suggests the audio was added after video generation, "
+                "not recorded with the scene.\n"
+                "  → Check: does the audio match the environment? "
+                "Is there natural ambient sound (wind, crowd noise, room tone)? "
+                "Does the audio feel 'placed on top' rather than captured with the video?\n"
+                "  → If audio feels artificial or mismatched: "
+                "score temporal_stability 7-9 and color_naturalism 7-8."
+            )
+
     if hints:
         lines.append("VISUAL INSPECTION PRIORITIES:")
         for h in hints:
