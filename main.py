@@ -763,6 +763,20 @@ def analyze_link(request: Request, video_url: str, email: str = ""):
             ai_score      = detail["ai_score"],
         )
 
+        # Return JSON if client accepts it (React frontend), HTML otherwise (legacy/direct browser)
+        accept = request.headers.get("accept", "")
+        if "application/json" in accept or "text/html" not in accept:
+            return JSONResponse({
+                "status":             ui_text,
+                "authenticity_score": authenticity,
+                "color":              color,
+                "label":              label,
+                "gpt_reasoning":      detail.get("gpt_reasoning", ""),
+                "gpt_flags":          detail.get("gpt_flags", []),
+                "signal_score":       detail.get("signal_ai_score", 0),
+                "gpt_score":          detail.get("gpt_ai_score", 0),
+            })
+
         html = f"""
         <html>
         <body style="background:black;color:white;text-align:center;
@@ -777,13 +791,22 @@ def analyze_link(request: Request, video_url: str, email: str = ""):
         return HTMLResponse(html)
 
     except RuntimeError as e:
+        accept = request.headers.get("accept", "")
+        if "application/json" in accept or "text/html" not in accept:
+            return JSONResponse({"error": str(e)}, status_code=400)
         return HTMLResponse(_error_html(str(e)), status_code=400)
 
     except ValueError as e:
+        accept = request.headers.get("accept", "")
+        if "application/json" in accept or "text/html" not in accept:
+            return JSONResponse({"error": str(e)}, status_code=400)
         return HTMLResponse(_error_html(str(e)), status_code=400)
 
     except Exception as e:
         log.exception("analyze-link failed for %s", video_url)
+        accept = request.headers.get("accept", "")
+        if "application/json" in accept or "text/html" not in accept:
+            return JSONResponse({"error": "Could not process this video. Please try again."}, status_code=500)
         return HTMLResponse(_error_html(
             "Could not process this video. Please try again."
         ), status_code=500)
@@ -2034,6 +2057,7 @@ async def widget_upload(
             return JSONResponse({"error": safe_error}, status_code=500)
 
     return JSONResponse({"error": "Analysis timed out. Please try again."}, status_code=504)
+
 
 
 
