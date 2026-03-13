@@ -295,50 +295,38 @@ def _try_smvd_tiktok(url: str, output_path: str) -> bool:
     if not videos:
         return False
 
-    video_url = videos[0].get("url", "")
+    # Log all available qualities for debugging
+    for v in videos:
+        log.info("SMVD TikTok available: quality=%s size=%s url_preview=%s",
+                 v.get("quality", v.get("label", "unknown")),
+                 v.get("size", "?"),
+                 v.get("url", "")[:60])
+
+    # Prefer lowest quality — matches what users manually download from TikTok
+    # and produces more consistent detection results. High-res SMVD encodes
+    # have different noise characteristics that confuse the signal detector.
+    preferred_qualities = ["low", "normal", "sd", "360p", "480p", "720p", "hd", "1080p"]
+    video_url = None
+    for q in preferred_qualities:
+        for v in videos:
+            quality = str(v.get("quality", v.get("label", ""))).lower()
+            if q in quality:
+                video_url = v.get("url", "")
+                log.info("SMVD TikTok: selected quality=%s", quality)
+                break
+        if video_url:
+            break
+
+    # Fallback: take last video (usually lowest quality)
+    if not video_url:
+        video_url = videos[-1].get("url", "")
+        log.info("SMVD TikTok: fallback to last video in list")
+
     if not video_url:
         return False
 
-    # TikTok CDN requires realistic browser headers + Referer to serve from datacenter IPs
-    tiktok_headers = {
-        "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Referer":         "https://www.tiktok.com/",
-        "Accept":          "video/webm,video/mp4,video/*;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Origin":          "https://www.tiktok.com",
-        "Sec-Fetch-Dest":  "video",
-        "Sec-Fetch-Mode":  "no-cors",
-        "Sec-Fetch-Site":  "cross-site",
-        "Range":           "bytes=0-",
-    }
-    try:
-        r = requests.get(video_url, stream=True, timeout=60, headers=tiktok_headers)
-        r.raise_for_status()
-        with open(output_path, "wb") as f:
-            for chunk in r.iter_content(chunk_size=65536):
-                if chunk:
-                    f.write(chunk)
-    except Exception as e:
-        log.warning("SMVD TikTok: download failed with browser headers: %s", e)
-        # Try SMVD proxied fallback — pass URL back through SMVD proxy endpoint
-        try:
-            proxy_resp = requests.get(
-                f"{SMVD_BASE}/proxy/stream",
-                headers={"x-rapidapi-key": RAPIDAPI_KEY, "x-rapidapi-host": SMVD_HOST},
-                params={"url": video_url},
-                stream=True,
-                timeout=60,
-            )
-            proxy_resp.raise_for_status()
-            with open(output_path, "wb") as f:
-                for chunk in proxy_resp.iter_content(chunk_size=65536):
-                    if chunk:
-                        f.write(chunk)
-        except Exception as e2:
-            log.warning("SMVD TikTok: proxy fallback also failed: %s", e2)
-            return False
-
-    size = os.path.getsize(output_path) if os.path.exists(output_path) else 0
+    _download_from_url(video_url, output_path)
+    size = os.path.getsize(output_path)
     if size > 1024:
         log.info("SMVD TikTok: success — %d bytes", size)
         return True
@@ -386,7 +374,33 @@ def _try_smvd_instagram(url: str, output_path: str) -> bool:
     if not videos:
         return False
 
-    video_url = videos[0].get("url", "")
+    # Log all available qualities for debugging
+    for v in videos:
+        log.info("SMVD TikTok available: quality=%s size=%s url_preview=%s",
+                 v.get("quality", v.get("label", "unknown")),
+                 v.get("size", "?"),
+                 v.get("url", "")[:60])
+
+    # Prefer lowest quality — matches what users manually download from TikTok
+    # and produces more consistent detection results. High-res SMVD encodes
+    # have different noise characteristics that confuse the signal detector.
+    preferred_qualities = ["low", "normal", "sd", "360p", "480p", "720p", "hd", "1080p"]
+    video_url = None
+    for q in preferred_qualities:
+        for v in videos:
+            quality = str(v.get("quality", v.get("label", ""))).lower()
+            if q in quality:
+                video_url = v.get("url", "")
+                log.info("SMVD TikTok: selected quality=%s", quality)
+                break
+        if video_url:
+            break
+
+    # Fallback: take last video (usually lowest quality)
+    if not video_url:
+        video_url = videos[-1].get("url", "")
+        log.info("SMVD TikTok: fallback to last video in list")
+
     if not video_url:
         return False
 
@@ -613,6 +627,7 @@ def stamp_video(input_path: str, output_path: str, cert_id: str) -> None:
     finally:
         if os.path.exists(tmp_logo.name):
             os.remove(tmp_logo.name)
+
 
 
 
