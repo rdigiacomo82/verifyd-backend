@@ -1146,7 +1146,7 @@ def detect_ai(video_path: str) -> int:
     # Skin presence confirms human subject (not AI animal/cinematic render).
     # High skin ratio with strong motion period = likely AI animal render (e.g. bunny, dog)
     # Bunny/animal fur triggers skin HSV detection at 0.50-0.70 — not a real person
-    _animal_render_flag = (skin_ratio > 0.55 and period > 0.75)
+    _animal_render_flag = (skin_ratio > 0.55 and motion_period > 0.75)
     if _animal_render_flag:
         ai_score += 10
         log.info("ANIMAL_RENDER: high skin-range ratio=%.3f + strong period=%.3f → likely AI creature render → +10", skin_ratio, period)
