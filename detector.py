@@ -1149,7 +1149,7 @@ def detect_ai(video_path: str) -> int:
     _animal_render_flag = (skin_ratio > 0.55 and motion_period > 0.75)
     if _animal_render_flag:
         ai_score += 10
-        log.info("ANIMAL_RENDER: high skin-range ratio=%.3f + strong period=%.3f → likely AI creature render → +10", skin_ratio, period)
+        log.info("ANIMAL_RENDER: high skin-range ratio=%.3f + strong period=%.3f → likely AI creature render → +10", skin_ratio, motion_period)
 
     if _is_talking_head:
         ai_score -= 12
