@@ -549,12 +549,6 @@ def _build_physics_summary(ctx: dict) -> str:
     avg_saturation = ctx.get("avg_saturation")
     flow_entropy   = ctx.get("flow_dir_entropy")
     vert_flow      = ctx.get("vert_flow")
-    # v7/v8 new signals
-    motion_period  = ctx.get("motion_period")
-    ifdv           = ctx.get("ifdv")
-    noise_floor    = ctx.get("noise_floor")
-    shadow_drift   = ctx.get("shadow_drift")
-    skin_ratio_raw = ctx.get("skin_ratio", 0)
 
     is_person = content_type in ("talking_head", "selfie", "single_subject")
     is_action = content_type == "action"
@@ -686,157 +680,6 @@ def _build_physics_summary(ctx: dict) -> str:
             "Score 0-3 if genuinely real; score 7-9 if unnaturally perfect."
         )
 
-    # ── Motion periodicity hint (v7) ─────────────────────────
-    # High autocorrelation of optical flow = AI generator repeating a fixed motion loop.
-    # Common in: AI jogging, AI running, AI cycling, AI swimming, AI ocean waves.
-    if motion_period is not None and motion_period > 0.55:
-        action_type = "running/jogging" if is_action else "movement"
-        hints.append(
-            f"🔄 CYCLIC MOTION LOOP DETECTED (periodicity={motion_period:.2f}, threshold=0.55). "
-            f"The {action_type} follows an unnaturally repetitive cycle — the same motion "
-            "pattern repeating with near-perfect regularity. AI generators produce this by "
-            f"looping a fixed animation template. Real {action_type} has organic variation, "
-            "speed changes, and weight shifts that break perfect periodicity.\n"
-            "  CHECK: Does the subject's motion feel like a seamlessly looping GIF? "
-            "Does each stride/wave/movement look identical? Is there any acceleration, "
-            "stumble, or natural rhythm variation, or does it feel machine-stamped?\n"
-            "→ If confirmed: score physics_violations 7-9 and temporal_stability 7-9."
-        )
-
-    # ── Inter-frame diff variance hint (v8) ──────────────────
-    # IFDV < 0.20 = AI temporal over-smoothing (too-flat transitions)
-    # IFDV > 3.5  = AI temporal jitter (chaotic inconsistency)
-    if ifdv is not None:
-        if ifdv < 0.18:
-            hints.append(
-                f"⚠ TEMPORAL OVER-SMOOTHING (ifdv={ifdv:.3f}). "
-                "Frame-to-frame changes are unnaturally flat — transitions are too smooth "
-                "and consistent to be real. This is a diffusion model artifact where the "
-                "temporal decoder over-regularizes motion between frames, producing glass-smooth "
-                "transitions that real camera footage never has.\n"
-                "  CHECK: Does the video feel almost too fluid, like a 3D render rather than "
-                "a real recording? Do objects move with perfect, slightly inhuman smoothness? "
-                "Is there any camera shake, motion blur variation, or organic micro-jitter?\n"
-                "→ If confirmed: score temporal_stability 7-9."
-            )
-        elif ifdv > 3.5:
-            hints.append(
-                f"⚠ TEMPORAL JITTER (ifdv={ifdv:.3f}). "
-                "Frame-to-frame changes are chaotically inconsistent — transitions spike and "
-                "drop in a pattern inconsistent with real camera footage. This is a diffusion "
-                "model artifact where temporal consistency breaks down.\n"
-                "  CHECK: Do textures 'crawl' or shimmer on surfaces? "
-                "Are there subtle geometry shifts or flickering edges between frames? "
-                "Do backgrounds subtly morph when they should be stationary?\n"
-                "→ If confirmed: score temporal_stability 7-9."
-            )
-
-    # ── Flat-region noise floor hint (v8) ────────────────────
-    # Very clean flat regions = AI render (no sensor photon noise)
-    if noise_floor is not None and noise_floor < 2.5:
-        hints.append(
-            f"⚠ UNNATURALLY CLEAN FLAT REGIONS (noise_floor={noise_floor:.2f}). "
-            "Uniform areas like sky, walls, water surface, and clothing are perfectly clean "
-            "— no sensor noise. Real cameras always embed photon shot noise even in "
-            "flat-color areas (you can see this as subtle grain). AI renders compute "
-            "pixel values directly with no physical noise process.\n"
-            "  CHECK: Look at the sky, any flat walls, calm water surface, or solid-color "
-            "clothing. Does it look eerily smooth, like a painted surface or CGI? "
-            "Zoom in mentally: would you expect grain here on a real camera?\n"
-            "→ If confirmed: score background_realism 7-8."
-        )
-
-    # ── Shadow direction drift hint (v8) ──────────────────────
-    # High circular variance of shadow movement = AI physics violation
-    if shadow_drift is not None and shadow_drift > 0.70:
-        hints.append(
-            f"⚠ INCONSISTENT SHADOW BEHAVIOR (shadow_drift={shadow_drift:.3f}). "
-            "Shadow regions shift in inconsistent directions across frames — a known "
-            "AI generation artifact where the model lacks a global light source constraint. "
-            "Real shadows cast by sunlight or a fixed indoor light always move consistently "
-            "relative to object motion.\n"
-            "  CHECK: Watch the shadows cast by the subject, objects, or environment. "
-            "Do they move in a consistent direction as the scene progresses? "
-            "Or do they shift, jump, or drift independently from their source object? "
-            "Does the shadow direction change without any corresponding change in lighting?\n"
-            "→ If confirmed: score lighting_coherence 7-9."
-        )
-
-    # ── Water / Ocean / Nature scene hint ────────────────────
-    # Boat-on-water, ocean, river, waterfall, and nature landscape videos are
-    # among the most commonly shared AI-generated content on TikTok/social media.
-    # Generators (Kling, Sora, Hailuo) produce convincing but physically flawed water.
-    # These specific AI failure modes are NOT caught by standard deepfake signals.
-    #
-    # Physics research (arXiv 2024): "A Misleading Gallery of Fluid Motion by Generative
-    # AI" — AI models are NOT adequately trained on real fluid dynamics.
-    # Key failure modes documented across Sora, Kling, RunwayML, Stable Diffusion:
-    #
-    # 1. WAVE REPETITION: Ocean/river waves loop with near-perfect periodicity.
-    #    Real water has chaotic, never-repeating wave interference patterns.
-    # 2. WAKE/BOW WAVE PHYSICS: A moving boat creates a V-shaped Kelvin wake
-    #    at a fixed ~19.5° angle regardless of speed (Kelvin wake invariance).
-    #    AI boats often have incorrect wake angles, symmetric wakes, or no wake at all.
-    # 3. WATER-OBJECT BOUNDARY: Real boats sit IN the water with hull displacement,
-    #    visible waterline, and displaced spray. AI boats often float ON top of water
-    #    with an unnaturally perfect, uniform boundary.
-    # 4. REFLECTION CONSISTENCY: Water reflections must match the sky/subject above.
-    #    AI water reflections are often generic, uncorrelated with actual sky content,
-    #    or show a different color temperature than what's above the waterline.
-    # 5. SPRAY AND FOAM: Real boats and waves produce irregular white foam that
-    #    persists and dissipates organically. AI foam is either absent, too symmetric,
-    #    or disappears/reappears unnaturally.
-    # 6. SURFACE TEXTURE UNIFORMITY: Real open water has spatially chaotic texture
-    #    (different wavelengths, ripples, chop). AI water often has repetitive or
-    #    tile-like texture especially in the background water areas.
-    # 7. HORIZON LINE: Real ocean horizon is a razor-sharp contrast line. AI horizons
-    #    sometimes warp, blur, or have incorrect perspective foreshortening.
-    #
-    # DETECTION: These are SCENE-LEVEL signals GPT can see directly in frames.
-    # No pixel measurement needed — purely visual physical plausibility assessment.
-    avg_noise_raw = ctx.get("avg_noise", 9999)
-    _motion_period_high = motion_period is not None and motion_period > 0.55
-    # Heuristic: water/outdoor nature scene = cinematic/action, low skin, high saturation
-    _is_water_nature = (
-        content_type in ("cinematic", "action", "static") and
-        skin_ratio_raw < 0.20 and
-        (avg_saturation is None or avg_saturation > 90)
-    )
-    if _is_water_nature or _motion_period_high:
-        hints.append(
-            "🌊 WATER / NATURE / OUTDOOR SCENE DETECTED: Apply these AI-specific checks "
-            "(research shows AI generators systematically fail on fluid physics):\n\n"
-            "  WAVE PATTERN REGULARITY: Real ocean/river waves are NEVER perfectly repetitive. "
-            "Natural water has chaotic interference from wind, depth, and current — every wave "
-            "is unique. AI water often repeats the same wave pattern in a loop, or has "
-            "waves that are too regular, too symmetric, or too uniform in size/spacing. "
-            "Ask yourself: does this water look like a tiling animation or real chaos?\n\n"
-            "  BOAT WAKE PHYSICS (if boat/vessel present): A real moving boat creates a "
-            "distinctive V-shaped Kelvin wake at a fixed ~19.5° angle (this is a law of "
-            "physics, independent of speed). AI boats frequently show: wrong wake angle, "
-            "perfectly symmetric wake, no wake despite fast motion, or wake that appears "
-            "and disappears. Also check — does the boat sit IN the water (with visible "
-            "hull displacement and waterline) or does it float ON TOP like a sticker?\n\n"
-            "  WATER REFLECTIONS: Sky/sun reflections in water must match what's above "
-            "the waterline. Check: does the reflection color/brightness correspond to "
-            "the actual sky? AI reflections are often generic blue/white regardless of "
-            "cloud patterns, and may show a different color temperature than the scene above.\n\n"
-            "  SPRAY AND FOAM: Real wave spray and boat foam is irregular, asymmetric, "
-            "and persists/dissipates organically. AI foam is often: too symmetric, "
-            "appears in the same pattern repeatedly, disappears between frames, or "
-            "looks painted-on rather than physically driven.\n\n"
-            "  WATER SURFACE TEXTURE: Look at the background water far from the subject. "
-            "Real open water has chaotic variation — different wavelengths, glints, "
-            "patches of chop. AI water often has repetitive or tile-like texture in the "
-            "background, or unnaturally uniform sheen.\n\n"
-            "  HORIZON LINE: Real ocean/lake horizon is razor-sharp with correct "
-            "atmospheric haze. AI horizons sometimes warp, have incorrect perspective, "
-            "or blend into the sky unnaturally.\n\n"
-            "→ Score physics_violations 7-9 for wake/float errors, "
-            "background_realism 7-9 for repetitive/tile water, "
-            "lighting_coherence 7-9 for reflection mismatches."
-        )
-
     # ── AI Compilation hint ──────────────────────────────────
     n_cuts = ctx.get("n_scene_cuts", 0)
     is_comp = ctx.get("is_compilation", False)
@@ -881,15 +724,54 @@ def _build_physics_summary(ctx: dict) -> str:
             "→ Score skin_texture, background_realism, physics_violations carefully."
         )
 
+    # ── High-skin-ratio creature / AI animal render hint ───
+    # When the signal detector sees very high skin-range color ratio (>0.50) combined
+    # with a strong motion period, this is likely an AI-generated animal/creature video.
+    # Bunny, dog, cat, fox fur all trigger HSV skin detection at 0.50-0.70.
+    # These are among the most common AI video types on TikTok (Kling, Hailuo, Sora).
+    period_val = ctx.get("motion_period", ctx.get("period", 0))
+    if skin_ratio is not None and skin_ratio > 0.50 and period_val > 0.70:
+        hints.append(
+            "🚨 HIGH PROBABILITY AI CREATURE/ANIMAL VIDEO "
+            "(warm-color-ratio={:.2f}, motion_loop={:.3f}):\n"
+            "The signal detector found very high warm-tone color coverage typical of animal fur "
+            "(bunny, dog, cat, fox) combined with a strong animation loop signature. "
+            "This combination is a strong indicator of AI-generated animal content "
+            "from Kling, Hailuo, or Sora.\n"
+            "  CRITICAL CHECKS:\n"
+            "  FUR QUALITY: Zoom into the fur texture. AI fur looks perfectly rendered — "
+            "every strand identical, no matting, no directional clumping from motion. "
+            "Real fur has irregular texture, compression artifacts, and shifts direction "
+            "naturally with movement.\n"
+            "  LOOPING MOTION: AI animal videos often have subtle looping animation — "
+            "the creature repeats the same motion cycle. Watch for: identical head tilt "
+            "sequence, same ear flick repeating, body sway that loops. "
+            "Real animals have natural variation.\n"
+            "  EYE REALISM: AI animal eyes are often glassy, too symmetrical, or have "
+            "unnaturally perfect catchlights. Real animal eyes have moisture, iris "
+            "variation, and asymmetry.\n"
+            "  BACKGROUND RENDER: AI backgrounds behind animals are often too smooth — "
+            "painted-looking bokeh, repetitive foliage patterns, or unnaturally uniform "
+            "depth separation.\n"
+            "  ENVIRONMENT CONTACT: Does the animal touch/disturb the environment "
+            "naturally? AI animals often float slightly above surfaces or leave no "
+            "physical trace.\n"
+            "  BODY PROPORTIONS: AI generators often slightly distort limb ratios — "
+            "legs too long, ears too large, or facial features that shift between frames.\n"
+            "→ Score fur as skin_texture, motion loop as temporal_stability, "
+            "background as background_realism. Be AGGRESSIVE — these videos are "
+            "almost always AI.\n"
+            "→ If you see ANY of the above: score ai_probability 75-95."
+            .format(skin_ratio, period_val)
+        )
+
     # ── Sports / outdoor real-camera hint ──────────────────
     # Real sports/action phone videos have characteristics that look like AI signals
     # but are actually camera physics: telephoto blur (ball vs crowd), limited color
     # palette (grass + dirt + sky), and motion blur artifacts.
-    # GUARD: suppress if water/nature scene already flagged — avg_noise conflates
-    # Laplacian sharpness with sensor noise for high-sharpness renders.
+    # Help GPT understand when these are real physics, not AI renders.
     avg_noise_val = ctx.get("avg_noise", 0)
-    if (content_type in ("action", "cinematic") and avg_noise_val > 400
-            and not _is_water_nature):
+    if content_type in ("action", "cinematic") and avg_noise_val > 400:
         hints.append(
             "📷 REAL CAMERA INDICATORS DETECTED (noise={:.0f}): "
             "High sensor noise confirms real camera capture. "
@@ -953,4 +835,5 @@ def gpt_vision_score_with_context(frames_b64: list, physics_context: dict) -> di
     result          = analyze_frames_with_gpt(frames_b64, physics_summary, content_type)
     result["available"] = True
     return result
+
 

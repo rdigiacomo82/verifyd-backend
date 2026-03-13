@@ -947,6 +947,10 @@ def detect_ai(video_path: str) -> int:
                                         # head/body movement. AI_President_1: motion=7.88.
         and avg_edge > 18.0             # rich edge content (hair, clothing, face detail)
         and not _is_selfie_content      # not a static hold selfie
+        and skin_ratio > 0.04           # some human skin must be present
+        and skin_ratio < 0.50           # guard: >0.50 = likely animal fur false positive
+                                        # (bunny/dog fur hits HSV skin range at 0.50-0.70)
+                                        # Real human talking-head skin ratios: 0.05-0.45
     )
 
     # ── Single-subject landscape person detection (v10) ─────────
@@ -1140,10 +1144,17 @@ def detect_ai(video_path: str) -> int:
     # Active portrait of a real person: strongest real-video signal.
     # Portrait + motion + edges = somebody real talking/moving on camera.
     # Skin presence confirms human subject (not AI animal/cinematic render).
+    # High skin ratio with strong motion period = likely AI animal render (e.g. bunny, dog)
+    # Bunny/animal fur triggers skin HSV detection at 0.50-0.70 — not a real person
+    _animal_render_flag = (skin_ratio > 0.55 and period > 0.75)
+    if _animal_render_flag:
+        ai_score += 10
+        log.info("ANIMAL_RENDER: high skin-range ratio=%.3f + strong period=%.3f → likely AI creature render → +10", skin_ratio, period)
+
     if _is_talking_head:
         ai_score -= 12
         log.info("TALKING_HEAD portrait+motion+edges → real person video → -12")
-    if _is_talking_head and _talking_head_skin:
+    if _is_talking_head and _talking_head_skin and skin_ratio < 0.50:
         ai_score -= 6
         log.info("TALKING_HEAD skin confirmed → real person bonus → -6")
 
