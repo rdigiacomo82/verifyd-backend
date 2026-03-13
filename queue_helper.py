@@ -43,10 +43,12 @@ def enqueue_upload(job_id: str, file_path: str, filename: str, email: str) -> No
     q = Queue(QUEUE_NAME, connection=r)
     q.enqueue(
         "worker.process_upload_job",
-        file_key=file_key,
-        filename=filename,
-        email=email,
-        job_id=job_id,        # RQ uses this as the job's own ID
+        kwargs={
+            "file_key": file_key,
+            "filename": filename,
+            "email":    email,
+        },
+        job_id=job_id,
         job_timeout=600,
         result_ttl=RESULT_TTL,
     )
@@ -61,10 +63,13 @@ def enqueue_link(job_id: str, video_url: str, email: str, double_count: bool = F
     q = Queue(QUEUE_NAME, connection=r)
     q.enqueue(
         "worker.process_link_job",
+        kwargs={
+            "job_id":       job_id,
+            "video_url":    video_url,
+            "email":        email,
+            "double_count": double_count,
+        },
         job_id=job_id,
-        video_url=video_url,
-        email=email,
-        double_count=double_count,
         job_timeout=600,
         result_ttl=RESULT_TTL,
     )
