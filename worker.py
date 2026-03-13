@@ -197,15 +197,59 @@ def process_link_job(
             raise RuntimeError(f"Download produced no file: {video_url}")
 
         log.info("Worker: starting detection for link job=%s", job_id)
+
+        # Normalize resolution to max 720px wide — matches typical manual download
+        # characteristics and prevents SMVD high-res encodes from skewing signal scores
+        from config import FFMPEG_BIN, TMP_DIR
+        norm_path = os.path.join(TMP_DIR, f"{job_id}_norm.mp4")
+        try:
+            import subprocess
+            probe = subprocess.run([
+                "ffprobe", "-v", "quiet", "-select_streams", "v:0",
+                "-show_entries", "stream=width,height",
+                "-of", "csv=p=0", tmp_path
+            ], capture_output=True, text=True, timeout=15)
+            dims = probe.stdout.strip().split(",")
+            width = int(dims[0]) if len(dims) >= 1 and dims[0] else 9999
+            height = int(dims[1]) if len(dims) >= 2 and dims[1] else 9999
+            log.info("Worker: downloaded video dimensions %dx%d for job=%s", width, height, job_id)
+
+            # Only downscale if wider than 720px — use scale filter preserving aspect ratio
+            if width > 720:
+                result_norm = subprocess.run([
+                    FFMPEG_BIN, "-y", "-i", tmp_path,
+                    "-vf", "scale=720:-2",
+                    "-c:v", "libx264", "-crf", "23", "-preset", "fast",
+                    "-c:a", "copy",
+                    norm_path
+                ], capture_output=True, timeout=120)
+                if result_norm.returncode == 0 and os.path.exists(norm_path):
+                    log.info("Worker: normalized to 720px wide for job=%s", job_id)
+                    detect_path = norm_path
+                else:
+                    log.warning("Worker: normalization failed, using original for job=%s", job_id)
+                    detect_path = tmp_path
+            else:
+                log.info("Worker: video already <= 720px wide, skipping normalization job=%s", job_id)
+                detect_path = tmp_path
+        except Exception as norm_err:
+            log.warning("Worker: normalization error for job=%s: %s", job_id, norm_err)
+            detect_path = tmp_path
+
         # Clip first 6 seconds — same pipeline as upload job
         try:
-            clip_path = clip_first_6_seconds(tmp_path)
+            clip_path = clip_first_6_seconds(detect_path)
         except Exception as clip_err:
             log.warning("Worker: clip failed for link job=%s, using full video: %s", job_id, clip_err)
-            clip_path = tmp_path
+            clip_path = detect_path
         authenticity, label, detail = run_detection(clip_path)
-        if clip_path != tmp_path and os.path.exists(clip_path):
+        if clip_path != detect_path and os.path.exists(clip_path):
             os.remove(clip_path)
+        if os.path.exists(norm_path) and norm_path != tmp_path:
+            try:
+                os.remove(norm_path)
+            except Exception:
+                pass
         ui_text, color, certify = LABEL_UI.get(label, ("VIDEO UNDETERMINED", "blue", False))
 
         uses = 2 if double_count else 1
