@@ -86,6 +86,33 @@ def _check_metadata_override(video_path: str) -> tuple:
         if "lavf" in encoder and vendor in ("[0][0][0][0]", "", "0000"):
             log.info("METADATA: Lavf encoder + null vendor_id detected (AI pipeline fingerprint — weak signal, not override)")
 
+        # Android/iOS device metadata = definitive real camera recording
+        # These tags are written by the device OS and cannot be faked by AI generators
+        android_ver = fmt_tags.get("com.android.version", "")
+        apple_make  = fmt_tags.get("com.apple.quicktime.make", "")
+        apple_model = fmt_tags.get("com.apple.quicktime.model", "")
+        major_brand = fmt_tags.get("major_brand", "")
+        creation_time = fmt_tags.get("creation_time", "")
+
+        is_android = bool(android_ver)
+        is_apple   = bool(apple_make or apple_model)
+        # mp42/isom with creation_time and no Lavf encoder = real device recording
+        is_real_container = (
+            major_brand in ("mp42", "isom", "M4V ", "qt  ") and
+            bool(creation_time) and
+            "lavf" not in encoder.lower()
+        )
+
+        if is_android:
+            log.info("METADATA: Android device recording detected (version=%s) → real camera", android_ver)
+            return True, 3, "REAL", f"Android device recording (Android {android_ver})"
+        elif is_apple:
+            log.info("METADATA: Apple device recording detected → real camera")
+            return True, 3, "REAL", f"Apple device recording ({apple_make} {apple_model})"
+        elif is_real_container:
+            log.info("METADATA: Real device container (brand=%s, creation_time=%s) → likely real camera", major_brand, creation_time[:10])
+            return True, 15, "REAL", f"Real device container (brand={major_brand}, recorded {creation_time[:10]})"
+
     except Exception as e:
         log.warning("METADATA: ffprobe error: %s", e)
 
@@ -95,11 +122,11 @@ def _check_metadata_override(video_path: str) -> tuple:
 def run_detection(video_path: str) -> tuple:
     # ── Pre-check: Metadata override ─────────────────────────
     override, ov_ai_score, ov_label, ov_reason = _check_metadata_override(video_path)
-    if override:
+    if override and ov_label == "AI":
         authenticity = 100 - ov_ai_score
-        log.info("Metadata override → ai_score=%d authenticity=%d label=%s | %s",
-                 ov_ai_score, authenticity, ov_label, ov_reason)
-        return authenticity, ov_label, {
+        log.info("Metadata override → ai_score=%d authenticity=%d label=AI | %s",
+                 ov_ai_score, authenticity, ov_reason)
+        return authenticity, "AI", {
             "ai_score":        ov_ai_score,
             "signal_ai_score": ov_ai_score,
             "gpt_ai_score":    ov_ai_score,
@@ -110,6 +137,12 @@ def run_detection(video_path: str) -> tuple:
             "weight_signal":   1.0,
             "weight_gpt":      0.0,
         }
+    elif override and ov_label == "REAL":
+        # Device metadata confirms real camera — still run full detection
+        # but pass the device confirmation as a strong prior to both engines
+        log.info("Metadata real-device signal → ai_score=%d | %s (running full detection)", 
+                 ov_ai_score, ov_reason)
+        # ov_ai_score is very low (3-15) — will be incorporated via signal_context
 
     # ── Engine 1: Signal detector ─────────────────────────────
     signal_ai_score, signal_context = detect_ai(video_path)

@@ -831,8 +831,22 @@ def detect_ai(video_path: str) -> int:
     fps = cap.get(cv2.CAP_PROP_FPS)
     video_duration = total_frames / fps if fps > 0 else 0.0
     _is_short_clip = video_duration < 4.0   # guard: unreliable temporal signals on short clips
-    log.info("Video dimensions: %dx%d  frames=%d  fps=%.1f  duration=%.1fs",
-             cap_w, cap_h, total_frames, fps, video_duration)
+
+    # Get codec name via ffprobe for codec-aware signal guards
+    video_codec = "unknown"
+    try:
+        _probe = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-select_streams", "v:0",
+             "-show_entries", "stream=codec_name",
+             "-of", "csv=p=0", video_path],
+            capture_output=True, text=True, timeout=10
+        )
+        video_codec = _probe.stdout.strip().lower() or "unknown"
+    except Exception:
+        pass
+
+    log.info("Video dimensions: %dx%d  frames=%d  fps=%.1f  duration=%.1fs  codec=%s",
+             cap_w, cap_h, total_frames, fps, video_duration, video_codec)
 
     noise_scores:            List[float] = []
     freq_scores:             List[float] = []
@@ -1311,20 +1325,36 @@ def detect_ai(video_path: str) -> int:
     # AI video generators render R,G,B channels jointly → high inter-channel correlation.
     # Real cameras capture channels independently with sensor noise → lower correlation.
     # Validated: AI=0.68-0.99, Real=0.00-0.50. Threshold 0.75 → 6/7 accuracy.
+    #
+    # GUARDS (do not score):
+    # 1. Short clips (<4s) — too few frames for reliable measurement
+    # 2. HEVC codec at 1080p+ — chroma subsampling increases correlation in real recordings
+    #    Real Samsung/iPhone HEVC at 1920x1080 scores 0.89-0.95 (false positive)
+    # 3. Very high noise (>1200) AND large resolution — definitive real camera, not AI
+    _is_hevc_hd = (video_codec == "hevc" and _px_count >= 1920 * 1080)
+    _is_high_noise_real = (avg_noise > 1200 and _px_count >= 1280 * 720)
+    _chan_corr_skip = _is_short_clip or _is_hevc_hd or _is_high_noise_real
+
     _chan_corr = _color_channel_correlation(video_path)
-    log.info("CHAN_CORR: inter-channel correlation=%.4f", _chan_corr)
-    if _chan_corr > 0.90:
-        ai_score += 12
-        log.info("CHAN_CORR %.4f → very high AI render correlation → +12", _chan_corr)
-    elif _chan_corr > 0.80:
-        ai_score += 8
-        log.info("CHAN_CORR %.4f → high AI render correlation → +8", _chan_corr)
-    elif _chan_corr > 0.75:
-        ai_score += 4
-        log.info("CHAN_CORR %.4f → moderate AI render correlation → +4", _chan_corr)
-    elif _chan_corr < 0.50 and _chan_corr > 0.01:
-        ai_score -= 4
-        log.info("CHAN_CORR %.4f → low correlation → real camera noise → -4", _chan_corr)
+    log.info("CHAN_CORR: inter-channel correlation=%.4f (skip=%s hevc_hd=%s hi_noise=%s short=%s)",
+             _chan_corr, _chan_corr_skip, _is_hevc_hd, _is_high_noise_real, _is_short_clip)
+
+    if not _chan_corr_skip:
+        if _chan_corr > 0.90:
+            ai_score += 12
+            log.info("CHAN_CORR %.4f → very high AI render correlation → +12", _chan_corr)
+        elif _chan_corr > 0.80:
+            ai_score += 8
+            log.info("CHAN_CORR %.4f → high AI render correlation → +8", _chan_corr)
+        elif _chan_corr > 0.75:
+            ai_score += 4
+            log.info("CHAN_CORR %.4f → moderate AI render correlation → +4", _chan_corr)
+        elif _chan_corr < 0.50 and _chan_corr > 0.01:
+            ai_score -= 4
+            log.info("CHAN_CORR %.4f → low correlation → real camera noise → -4", _chan_corr)
+    else:
+        log.info("CHAN_CORR %.4f → skipped (guards: hevc_hd=%s hi_noise=%s short=%s)",
+                 _chan_corr, _is_hevc_hd, _is_high_noise_real, _is_short_clip)
 
     if _is_talking_head:
         ai_score -= 12
