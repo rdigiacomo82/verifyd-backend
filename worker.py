@@ -45,7 +45,7 @@ def process_upload_job(
     file_key = 'file:{job_id}' stored by main.py.
     """
     from rq        import get_current_job
-    from detection import run_detection
+    from detection import run_detection, run_detection_multiclip
     from video     import clip_first_6_seconds, stamp_video
     from database  import insert_certificate, increment_user_uses
     from config    import CERT_DIR, BASE_URL
@@ -88,7 +88,7 @@ def process_upload_job(
         log.info("Worker: starting detection for job=%s email=%s", job_id, email)
 
         # ── Run detection ─────────────────────────────────────
-        authenticity, label, detail = run_detection(tmp_path)
+        authenticity, label, detail = run_detection_multiclip(tmp_path)
         ui_text, color, certify = LABEL_UI.get(label, ("VIDEO UNDETERMINED", "blue", False))
 
         log.info("Worker: detection complete job=%s label=%s auth=%d",
@@ -186,7 +186,7 @@ def process_link_job(
     """
     Background job: download and analyze a video from a URL.
     """
-    from detection import run_detection
+    from detection import run_detection, run_detection_multiclip
     from video     import download_video_ytdlp, clip_first_6_seconds, stamp_video
     from database  import insert_certificate, increment_user_uses
     from config    import CERT_DIR, BASE_URL
@@ -250,7 +250,7 @@ def process_link_job(
         except Exception as clip_err:
             log.warning("Worker: clip failed for link job=%s, using full video: %s", job_id, clip_err)
             clip_path = detect_path
-        authenticity, label, detail = run_detection(clip_path)
+        authenticity, label, detail = run_detection_multiclip(clip_path)
         if clip_path != detect_path and os.path.exists(clip_path):
             os.remove(clip_path)
         if norm_path and os.path.exists(norm_path):
@@ -326,4 +326,3 @@ def process_link_job(
     finally:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
-
