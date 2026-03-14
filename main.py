@@ -412,6 +412,21 @@ def job_status(job_id: str):
     return JSONResponse(result)
 
 
+@app.get("/share/{cid}")
+def share_video(cid: str):
+    """
+    Redirect to the direct MP4 stream for a certified video.
+    This URL is what gets copied — it streams the video directly
+    when pasted into social media, chat apps, or browsers.
+    No certificate page — just the raw video stream.
+    """
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(
+        url=f"{BASE_URL}/download/{cid}",
+        status_code=302
+    )
+
+
 @app.get("/download/{cid}")
 def download(cid: str):
     """Serve certified video stored in Redis by the worker.
