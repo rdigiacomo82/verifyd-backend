@@ -529,7 +529,9 @@ def download_video_ytdlp(url: str, output_path: str) -> None:
 
 def clip_first_6_seconds(input_path: str) -> str:
     """
-    Stream-copy the first 6 seconds of input_path into a temp file.
+    Clip 6 seconds from input_path into a temp file for detection.
+    For videos longer than 12s, clips from 20% into the video rather than
+    the very start — avoids intro frames that may not represent the full video.
     Returns the path to the clipped file.
     Caller is responsible for deleting it after use.
     Raises ValueError if the input file is not valid video.
@@ -540,9 +542,25 @@ def clip_first_6_seconds(input_path: str) -> str:
             "Please try a direct .mp4 link or a URL from a supported platform."
         )
 
+    # Determine start offset — skip intro for longer videos
+    start_offset = 0
+    try:
+        probe = subprocess.run([
+            FFPROBE_BIN, "-v", "quiet", "-show_entries", "format=duration",
+            "-of", "csv=p=0", input_path
+        ], capture_output=True, text=True, timeout=10)
+        duration = float(probe.stdout.strip() or 0)
+        if duration > 12.0:
+            # Start at 20% in — avoids static intros that skew sat/motion stats
+            start_offset = int(duration * 0.20)
+            log.info("clip_first_6_seconds: duration=%.1fs, starting at %ds (20%%)", duration, start_offset)
+    except Exception:
+        pass
+
     clipped = os.path.join(TMP_DIR, f"{uuid.uuid4()}.mp4")
     cmd = [
         FFMPEG_BIN, "-y",
+        "-ss", str(start_offset),
         "-i", input_path,
         "-t", "6",
         "-vf", "scale='min(iw,720)':'min(ih,1280)',scale=trunc(iw/2)*2:trunc(ih/2)*2",

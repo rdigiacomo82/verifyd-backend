@@ -133,10 +133,23 @@ def process_upload_job(
                 if os.path.exists(certified_path):
                     with open(certified_path, "rb") as vf:
                         cert_bytes = vf.read()
-                    r.setex(f"cert:{job_id}", 3600, cert_bytes)  # 1 hour TTL
+                    # Plan-aware TTL:
+                    # free=24h, creator=72h, pro=7d, enterprise=30d
+                    from database import get_user_status as _gus
+                    try:
+                        _plan = _gus(email).get("plan", "free")
+                    except Exception:
+                        _plan = "free"
+                    _cert_ttl = {
+                        "free":       86400,      # 24 hours
+                        "creator":    259200,     # 72 hours
+                        "pro":        604800,     # 7 days
+                        "enterprise": 2592000,    # 30 days
+                    }.get(_plan, 86400)
+                    r.setex(f"cert:{job_id}", _cert_ttl, cert_bytes)
                     os.remove(certified_path)
-                    log.info("Worker: certified video stored in Redis: job=%s size=%d bytes",
-                             job_id, len(cert_bytes))
+                    log.info("Worker: certified video stored in Redis: job=%s size=%d bytes plan=%s ttl=%dh",
+                             job_id, len(cert_bytes), _plan, _cert_ttl//3600)
                 result["certificate_id"] = job_id
                 result["download_url"]   = download_url
                 # Send email
@@ -198,15 +211,51 @@ def process_link_job(
 
         log.info("Worker: starting detection for link job=%s", job_id)
 
+        # Normalize resolution to 576px wide — matches standard TikTok manual download
+        # SMVD serves 704x1280 or 720x1280; users upload 576x1024 or 576x1048
+        # Normalizing ensures signal scores (noise, chan_corr, flat_noise) are consistent
+        from config import FFMPEG_BIN, TMP_DIR
+        detect_path = tmp_path
+        norm_path = None
+        try:
+            _probe = subprocess.run([
+                "ffprobe", "-v", "quiet", "-select_streams", "v:0",
+                "-show_entries", "stream=width",
+                "-of", "csv=p=0", tmp_path
+            ], capture_output=True, text=True, timeout=10)
+            dl_width = int(_probe.stdout.strip()) if _probe.stdout.strip().isdigit() else 0
+            log.info("Worker: downloaded video width=%d for link job=%s", dl_width, job_id)
+
+            if dl_width > 576:
+                norm_path = os.path.join(TMP_DIR, f"{job_id}_norm.mp4")
+                norm_result = subprocess.run([
+                    FFMPEG_BIN, "-y", "-i", tmp_path,
+                    "-vf", "scale=576:-2",
+                    "-c:v", "libx264", "-crf", "23", "-preset", "fast",
+                    "-c:a", "copy",
+                    norm_path
+                ], capture_output=True, timeout=120)
+                if norm_result.returncode == 0 and os.path.exists(norm_path):
+                    log.info("Worker: normalized to 576px wide for link job=%s", job_id)
+                    detect_path = norm_path
+                else:
+                    log.warning("Worker: normalization failed for job=%s, using original", job_id)
+                    norm_path = None
+        except Exception as norm_err:
+            log.warning("Worker: normalization error for job=%s: %s", job_id, norm_err)
+
         # Clip first 6 seconds — same pipeline as upload job
         try:
-            clip_path = clip_first_6_seconds(tmp_path)
+            clip_path = clip_first_6_seconds(detect_path)
         except Exception as clip_err:
             log.warning("Worker: clip failed for link job=%s, using full video: %s", job_id, clip_err)
-            clip_path = tmp_path
+            clip_path = detect_path
         authenticity, label, detail = run_detection(clip_path)
-        if clip_path != tmp_path and os.path.exists(clip_path):
+        if clip_path != detect_path and os.path.exists(clip_path):
             os.remove(clip_path)
+        if norm_path and os.path.exists(norm_path):
+            try: os.remove(norm_path)
+            except Exception: pass
         ui_text, color, certify = LABEL_UI.get(label, ("VIDEO UNDETERMINED", "blue", False))
 
         uses = 2 if double_count else 1
@@ -235,7 +284,11 @@ def process_link_job(
             "job_status":         "complete",
         }
 
-        if certify:
+        # Link analysis: results only — no certified video stamp
+        # The submitter may not own the linked video, so we don't
+        # create a certified download or watermark it.
+        certify = False  # override regardless of label
+        if False:  # disabled for link jobs
             certified_path = os.path.join(tempfile.gettempdir(), f"cert_{job_id}.mp4")
             download_url   = f"{BASE_URL}/download/{job_id}"
             try:
@@ -273,3 +326,4 @@ def process_link_job(
     finally:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
+
