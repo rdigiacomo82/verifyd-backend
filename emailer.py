@@ -269,3 +269,113 @@ def send_certification_email(
         "html":    html,
     })
 
+
+def send_enterprise_welcome_email(
+    to_email:     str,
+    company_name: str,
+    api_key:      str,
+    brand_color:  str = "#f59e0b",
+) -> bool:
+    """
+    Sent automatically when an Enterprise PayPal subscription activates.
+    Contains the embed code, API key, and quick-start instructions.
+    """
+    embed_script = (
+        f'&lt;div id="verifyd-widget"&gt;&lt;/div&gt;\n'
+        f'&lt;script src="{BACKEND_URL}/widget.js?key={api_key}"&gt;&lt;/script&gt;'
+    )
+
+    html = f"""
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="margin:0;padding:0;background-color:#0a0a0a;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#0a0a0a;padding:40px 20px;">
+    <tr>
+      <td align="center">
+        <table width="560" cellpadding="0" cellspacing="0"
+               style="background-color:#111111;border-radius:12px;border:1px solid #222222;
+                      overflow:hidden;max-width:560px;width:100%;">
+          {_header_html()}
+
+          <tr>
+            <td style="padding:40px 32px 24px;text-align:center;">
+              <div style="display:inline-block;background:#0c1a07;border:1px solid #f59e0b;
+                          border-radius:100px;padding:8px 20px;margin-bottom:24px;">
+                <span style="color:#f59e0b;font-size:13px;font-weight:700;
+                             letter-spacing:1px;text-transform:uppercase;">
+                  &#9889;&nbsp; Enterprise Plan Active
+                </span>
+              </div>
+              <h2 style="margin:0 0 10px;font-size:24px;font-weight:800;color:#ffffff;">
+                Welcome to VeriFYD Enterprise
+              </h2>
+              <p style="margin:0;color:#888888;font-size:15px;line-height:1.7;">
+                Your subscription is active. Below is everything you need to embed
+                the VeriFYD detection widget on <strong style="color:#ccc;">{company_name}</strong>.
+              </p>
+            </td>
+          </tr>
+
+          <tr>
+            <td style="padding:0 32px 28px;">
+              <p style="margin:0 0 10px;color:#9ca3af;font-size:12px;
+                        letter-spacing:2px;text-transform:uppercase;font-weight:600;">
+                Your API Key &mdash; keep this private
+              </p>
+              <div style="background:#0f0f0f;border:1px solid #374151;border-radius:10px;
+                          padding:16px 20px;">
+                <code style="color:#f59e0b;font-size:14px;font-family:'Courier New',monospace;
+                             word-break:break-all;letter-spacing:0.5px;">
+                  {api_key}
+                </code>
+              </div>
+            </td>
+          </tr>
+
+          <tr>
+            <td style="padding:0 32px 28px;">
+              <p style="margin:0 0 10px;color:#9ca3af;font-size:12px;
+                        letter-spacing:2px;text-transform:uppercase;font-weight:600;">
+                Embed Code &mdash; paste into your website
+              </p>
+              <div style="background:#0f0f0f;border:1px solid #374151;border-radius:10px;
+                          padding:16px 20px;">
+                <code style="color:#a78bfa;font-size:12px;font-family:'Courier New',monospace;
+                             white-space:pre-wrap;word-break:break-all;line-height:1.8;
+                             display:block;">
+{embed_script}
+                </code>
+              </div>
+            </td>
+          </tr>
+
+          <tr>
+            <td style="padding:0 32px 32px;text-align:center;">
+              <a href="mailto:support@vfvid.com"
+                 style="display:inline-block;background:#1a1a1a;color:#f59e0b;
+                        text-decoration:none;padding:14px 28px;border-radius:8px;
+                        font-size:14px;font-weight:700;border:1px solid #333;">
+                Contact Enterprise Support
+              </a>
+            </td>
+          </tr>
+
+          {_footer_html()}
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>"""
+
+    return _send({
+        "from":    f"{FROM_NAME} <{FROM_ADDRESS}>",
+        "to":      [to_email],
+        "subject": f"\U0001f680 Your VeriFYD Enterprise account is ready \u2014 {company_name}",
+        "html":    html,
+    })
+
