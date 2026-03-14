@@ -35,6 +35,9 @@
 import cv2
 import logging
 import numpy as np
+import os
+import subprocess
+import tempfile
 from typing import List
 
 log = logging.getLogger("verifyd.detector")

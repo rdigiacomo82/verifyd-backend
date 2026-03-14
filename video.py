@@ -326,7 +326,7 @@ def _try_smvd_tiktok(url: str, output_path: str) -> bool:
     # Prefer lowest quality — matches what users manually download from TikTok
     # and produces more consistent detection results. High-res SMVD encodes
     # have different noise characteristics that confuse the signal detector.
-    preferred_qualities = ["low", "normal", "sd", "360p", "480p", "720p", "hd", "1080p"]
+    preferred_qualities = ["low", "normal", "sd", "360p", "480p", "540p", "lowest_540", "adapt_540", "normal_540", "720p", "hd", "1080p"]
     video_url = None
     for q in preferred_qualities:
         for v in videos:
@@ -405,7 +405,7 @@ def _try_smvd_instagram(url: str, output_path: str) -> bool:
     # Prefer lowest quality — matches what users manually download from TikTok
     # and produces more consistent detection results. High-res SMVD encodes
     # have different noise characteristics that confuse the signal detector.
-    preferred_qualities = ["low", "normal", "sd", "360p", "480p", "720p", "hd", "1080p"]
+    preferred_qualities = ["low", "normal", "sd", "360p", "480p", "540p", "lowest_540", "adapt_540", "normal_540", "720p", "hd", "1080p"]
     video_url = None
     for q in preferred_qualities:
         for v in videos:
