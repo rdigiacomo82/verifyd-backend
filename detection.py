@@ -264,3 +264,358 @@ def run_detection(video_path: str) -> tuple:
 
 
 
+
+
+
+
+# ─────────────────────────────────────────────────────────────
+#  Multi-clip detection with content-aware reasoning
+# ─────────────────────────────────────────────────────────────
+
+def _build_content_aware_reasoning(
+    label: str,
+    authenticity: int,
+    content_type: str,
+    signal_scores: list,
+    gpt_score: int,
+    hybrid_flag: bool,
+    gpt_reasoning: str,
+    gpt_flags: list,
+    n_clips: int,
+) -> str:
+    """
+    Generate concise, content-aware reasoning text shown to the user.
+    Replaces the raw GPT one-liner with something more informative and specific.
+    """
+    score_variance = max(signal_scores) - min(signal_scores) if len(signal_scores) > 1 else 0
+
+    # Content type friendly names
+    content_labels = {
+        "talking_head":  "talking head video",
+        "selfie":        "selfie video",
+        "action":        "action footage",
+        "cinematic":     "cinematic footage",
+        "static":        "static scene",
+        "single_subject":"subject video",
+    }
+    content_friendly = content_labels.get(content_type, "video")
+
+    if label == "REAL":
+        if hybrid_flag:
+            return (
+                f"This {content_friendly} is predominantly real camera footage. "
+                f"Signal analysis across {n_clips} time samples detected some AI-generated "
+                f"elements — likely added graphics, captions, or still images — but the "
+                f"underlying footage shows genuine camera characteristics including natural "
+                f"sensor noise and organic motion physics."
+            )
+        elif authenticity >= 80:
+            return (
+                f"This {content_friendly} shows strong indicators of authentic camera footage. "
+                f"Natural sensor noise, organic motion patterns, and consistent lighting "
+                f"coherence across {n_clips} sampled segment{'s' if n_clips > 1 else ''} "
+                f"are consistent with a real recording. {gpt_reasoning}"
+            )
+        else:
+            return (
+                f"This {content_friendly} appears to be genuine footage, though some elements "
+                f"were inconclusive. Sensor noise patterns and motion physics lean real, "
+                f"but compression or post-processing reduced confidence. {gpt_reasoning}"
+            )
+
+    elif label == "UNDETERMINED":
+        if hybrid_flag:
+            return (
+                f"This {content_friendly} contains a mix of real and AI-generated content. "
+                f"Analysis across {n_clips} time samples found significant variation — "
+                f"some segments show authentic camera characteristics while others show "
+                f"AI synthesis signatures. This is consistent with edited documentary or "
+                f"explainer content that combines real footage with AI-generated visuals."
+            )
+        elif score_variance > 20:
+            return (
+                f"This {content_friendly} produced inconsistent results across time samples, "
+                f"suggesting mixed content. Some sections appear authentic while others show "
+                f"possible AI enhancement. The overall authenticity score of {authenticity}% "
+                f"reflects this uncertainty. {gpt_reasoning}"
+            )
+        else:
+            return (
+                f"This {content_friendly} could not be conclusively verified. Signal analysis "
+                f"returned a borderline result of {authenticity}% — neither strong enough to "
+                f"confirm as real camera footage nor to flag as AI-generated. "
+                f"{gpt_reasoning}"
+            )
+
+    else:  # AI
+        if hybrid_flag:
+            return (
+                f"This {content_friendly} contains AI-generated content. Analysis across "
+                f"{n_clips} time samples found AI synthesis signatures in multiple segments — "
+                f"including {', '.join(gpt_flags[:2]) if gpt_flags else 'rendering artifacts and unnatural motion'}. "
+                f"While some segments may contain real footage, the AI-generated portions "
+                f"are significant enough to flag this video."
+            )
+        elif gpt_flags:
+            flag_text = gpt_flags[0] if gpt_flags else "AI rendering artifacts"
+            return (
+                f"This {content_friendly} shows clear AI generation signatures. "
+                f"Key indicators: {flag_text}. "
+                f"Signal analysis found {'extreme DCT grid artifacts, ' if gpt_score < 35 else ''}"
+                f"unnatural rendering characteristics inconsistent with real camera footage. "
+                f"Authenticity score: {authenticity}%."
+            )
+        else:
+            return (
+                f"This {content_friendly} shows strong AI generation indicators. "
+                f"Signal analysis detected rendering artifacts and motion patterns "
+                f"inconsistent with real camera footage across "
+                f"{n_clips} sampled segment{'s' if n_clips > 1 else ''}. "
+                f"Authenticity score: {authenticity}%."
+            )
+
+
+def run_detection_multiclip(video_path: str) -> tuple:
+    """
+    Multi-clip detection entry point.
+    Extracts 1-3 clips from different positions, runs signal detection
+    on each in parallel, runs GPT once with frames from all clips combined,
+    then merges results with content-aware reasoning.
+
+    Returns: (authenticity, label, detail)
+    Same signature as run_detection() — drop-in replacement.
+    """
+    import concurrent.futures
+    from video import extract_clips_for_detection
+
+    # ── Metadata override — fast path ────────────────────────
+    override, ov_ai_score, ov_label, ov_reason = _check_metadata_override(video_path)
+    if override and ov_label == "AI":
+        authenticity = 100 - ov_ai_score
+        log.info("Metadata override → ai_score=%d auth=%d label=AI", ov_ai_score, authenticity)
+        return authenticity, "AI", {
+            "ai_score":        ov_ai_score,
+            "signal_ai_score": ov_ai_score,
+            "gpt_ai_score":    ov_ai_score,
+            "gpt_reasoning":   ov_reason,
+            "gpt_flags":       ["metadata_override"],
+            "content_type":    "unknown",
+            "blend_mode":      "metadata-override",
+            "weight_signal":   1.0,
+            "weight_gpt":      0.0,
+        }
+
+    # ── Extract clips from multiple positions ─────────────────
+    try:
+        clips = extract_clips_for_detection(video_path)
+    except Exception as e:
+        log.warning("Multi-clip extraction failed (%s) — falling back to single clip", e)
+        return run_detection(video_path)
+
+    if not clips:
+        log.warning("No clips extracted — falling back to single clip detection")
+        return run_detection(video_path)
+
+    n_clips = len(clips)
+    log.info("Multi-clip detection: %d clips extracted", n_clips)
+
+    # ── Run signal detection on all clips in parallel ─────────
+    def _detect_one(clip_path_offset):
+        clip_path, offset_pct = clip_path_offset
+        try:
+            score, context = detect_ai(clip_path)
+            log.info("Clip @%.0f%%: signal_score=%d content=%s",
+                     offset_pct * 100, score, context.get("content_type", "?"))
+            return score, context, offset_pct
+        except Exception as e:
+            log.warning("Signal detection failed for clip @%.0f%%: %s", offset_pct * 100, e)
+            return None, {}, offset_pct
+
+    clip_results = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
+        futures = [ex.submit(_detect_one, c) for c in clips]
+        for f in concurrent.futures.as_completed(futures):
+            clip_results.append(f.result())
+
+    # Sort by offset for consistency
+    clip_results.sort(key=lambda x: x[2])
+
+    # Filter valid results
+    valid = [(score, ctx, pct) for score, ctx, pct in clip_results if score is not None]
+    if not valid:
+        log.warning("All clip detections failed — falling back to single clip")
+        return run_detection(video_path)
+
+    signal_scores = [score for score, _, _ in valid]
+
+    # Weighted average — weight by noise level (more noise = more real data)
+    noise_weights = []
+    for _, ctx, _ in valid:
+        noise = ctx.get("noise_laplacian", ctx.get("noise", 500))
+        noise_weights.append(float(noise))
+    total_w = sum(noise_weights) or 1.0
+    norm_weights = [w / total_w for w in noise_weights]
+
+    signal_ai_score = int(round(sum(
+        s * w for s, w in zip(signal_scores, norm_weights)
+    )))
+
+    # Use context from highest-noise clip (most data-rich)
+    best_ctx_idx = noise_weights.index(max(noise_weights))
+    signal_context = valid[best_ctx_idx][1]
+    content_type = signal_context.get("content_type", "cinematic")
+
+    # ── Hybrid detection ──────────────────────────────────────
+    score_variance = max(signal_scores) - min(signal_scores) if len(signal_scores) > 1 else 0
+    hybrid_flag = score_variance > 30
+    if hybrid_flag:
+        log.info("HYBRID FLAG: signal variance=%d across clips %s",
+                 score_variance, signal_scores)
+        # Add hybrid context to signal_context for GPT
+        signal_context["hybrid_detected"] = True
+        signal_context["clip_signal_scores"] = signal_scores
+
+    # ── GPT vision — single call with frames from all clips ───
+    all_frames = []
+    frames_per_clip = max(2, 8 // n_clips)
+    for clip_path, _ in clips:
+        try:
+            frames = extract_key_frames(clip_path, n_frames=frames_per_clip)
+            all_frames.extend(frames)
+        except Exception as e:
+            log.warning("Frame extraction failed for clip: %s", e)
+
+    if not all_frames:
+        log.warning("No frames extracted — using signal only")
+        gpt_result = {"ai_probability": 50, "reasoning": "Frame extraction failed",
+                      "flags": [], "available": False}
+    else:
+        # Add hybrid context to GPT prompt
+        if hybrid_flag:
+            signal_context["_extra_context"] = (
+                f"NOTE: This video was sampled at {n_clips} points in time. "
+                f"Signal scores varied significantly ({min(signal_scores)}-{max(signal_scores)}), "
+                f"suggesting mixed content — some segments real, some AI-generated."
+            )
+        gpt_result = gpt_vision_score_with_context(all_frames, signal_context)
+
+    gpt_ai_score  = gpt_result.get("ai_probability", 50)
+    gpt_available = gpt_result.get("available", False)
+    gpt_reasoning = gpt_result.get("reasoning", "")
+    gpt_flags     = gpt_result.get("flags", [])
+
+    log.info("Multi-clip: signal_avg=%d (clips=%s var=%d) gpt=%d hybrid=%s",
+             signal_ai_score, signal_scores, score_variance, gpt_ai_score, hybrid_flag)
+
+    # ── Blend signal + GPT (same logic as run_detection) ─────
+    gpt_failed = not gpt_available or gpt_reasoning.startswith("GPT analysis error")
+
+    if gpt_failed:
+        combined_ai_score = float(signal_ai_score)
+        w_sig, w_gpt = 1.0, 0.0
+        mode = "signal-only (GPT failed)"
+    else:
+        clash_real   = signal_ai_score < 50 and gpt_ai_score > 50 and gpt_ai_score < 75
+        clash_ai     = signal_ai_score > 65 and gpt_ai_score < 40
+        gpt_dominant = gpt_ai_score >= 75 and signal_ai_score < 60
+        both_real    = signal_ai_score < 45 and gpt_ai_score < 45
+        both_ai      = signal_ai_score > 65 and gpt_ai_score > 65
+
+        if gpt_dominant:
+            combined_ai_score = signal_ai_score * 0.25 + gpt_ai_score * 0.75
+            w_sig, w_gpt = 0.25, 0.75
+            mode = "gpt-dominant"
+        elif clash_real:
+            combined_ai_score = signal_ai_score * 0.90 + gpt_ai_score * 0.10
+            w_sig, w_gpt = 0.90, 0.10
+            mode = "clash→real"
+        elif clash_ai:
+            combined_ai_score = signal_ai_score * 0.70 + gpt_ai_score * 0.30
+            w_sig, w_gpt = 0.70, 0.30
+            mode = "clash→AI"
+        elif both_real:
+            combined_ai_score = signal_ai_score * 0.40 + gpt_ai_score * 0.60 - 5
+            w_sig, w_gpt = 0.40, 0.60
+            mode = "both-real bonus"
+        elif both_ai:
+            combined_ai_score = signal_ai_score * 0.40 + gpt_ai_score * 0.60 + 5
+            w_sig, w_gpt = 0.40, 0.60
+            mode = "both-AI bonus"
+        else:
+            combined_ai_score = signal_ai_score * 0.40 + gpt_ai_score * 0.60
+            w_sig, w_gpt = 0.40, 0.60
+            mode = "default"
+
+    # Hybrid adjustment — pull toward UNDETERMINED if mixed content
+    if hybrid_flag and not gpt_failed:
+        # Don't let hybrid content score too confidently in either direction
+        if combined_ai_score < 30:
+            combined_ai_score = max(combined_ai_score, 25)
+        elif combined_ai_score > 70:
+            combined_ai_score = min(combined_ai_score, 72)
+        log.info("Hybrid adjustment applied: combined clamped to %.1f", combined_ai_score)
+
+    combined_ai_score = max(0.0, min(100.0, combined_ai_score))
+    authenticity = 100 - int(round(combined_ai_score))
+    authenticity = max(0, min(100, authenticity))
+
+    label = (
+        "REAL"          if authenticity >= THRESHOLD_REAL        else
+        "UNDETERMINED"  if authenticity >= THRESHOLD_UNDETERMINED else
+        "AI"
+    )
+
+    # ── Content-aware reasoning ───────────────────────────────
+    user_reasoning = _build_content_aware_reasoning(
+        label=label,
+        authenticity=authenticity,
+        content_type=content_type,
+        signal_scores=signal_scores,
+        gpt_score=gpt_ai_score,
+        hybrid_flag=hybrid_flag,
+        gpt_reasoning=gpt_reasoning,
+        gpt_flags=gpt_flags,
+        n_clips=n_clips,
+    )
+
+    log.info(
+        "Multi-clip detection complete | clips=%d signal_avg=%d gpt=%d "
+        "combined=%d authenticity=%d label=%s hybrid=%s mode=%s",
+        n_clips, signal_ai_score, gpt_ai_score,
+        int(round(combined_ai_score)), authenticity, label, hybrid_flag, mode,
+    )
+
+    # Cleanup clips
+    for clip_path, _ in clips:
+        try:
+            os.remove(clip_path)
+        except Exception:
+            pass
+
+    detail = {
+        "ai_score":           int(round(combined_ai_score)),
+        "signal_ai_score":    signal_ai_score,
+        "gpt_ai_score":       gpt_ai_score,
+        "gpt_available":      gpt_available,
+        "gpt_reasoning":      user_reasoning,
+        "gpt_flags":          gpt_flags,
+        "weight_signal":      w_sig,
+        "weight_gpt":         w_gpt,
+        "blend_mode":         mode,
+        "content_type":       content_type,
+        "n_clips":            n_clips,
+        "clip_signal_scores": signal_scores,
+        "hybrid_detected":    hybrid_flag,
+        "threshold_real":     THRESHOLD_REAL,
+        "threshold_undet":    THRESHOLD_UNDETERMINED,
+    }
+    return authenticity, label, detail
+
+
+
+
+
+
+
+
+

@@ -672,3 +672,80 @@ def stamp_video(input_path: str, output_path: str, cert_id: str) -> None:
 
 
 
+def extract_clips_for_detection(video_path: str) -> list:
+    """
+    Extract 1-3 clips from different positions in the video for multi-clip detection.
+    Returns list of (clip_path, offset_pct) tuples.
+    Clips are extracted in parallel for speed.
+
+    Strategy:
+      < 12s  → 1 clip at 20%
+      12-60s → 2 clips at 20%, 65%
+      > 60s  → 3 clips at 20%, 50%, 75%
+    """
+    import concurrent.futures
+
+    if not is_valid_video(video_path):
+        raise ValueError("File does not appear to be a valid video.")
+
+    # Get duration
+    duration = 0.0
+    try:
+        probe = subprocess.run([
+            FFPROBE_BIN, "-v", "quiet", "-show_entries", "format=duration",
+            "-of", "csv=p=0", video_path
+        ], capture_output=True, text=True, timeout=10)
+        duration = float(probe.stdout.strip() or 0)
+    except Exception:
+        pass
+
+    if duration < 12.0:
+        offsets = [0.20]
+    elif duration < 60.0:
+        offsets = [0.20, 0.65]
+    else:
+        offsets = [0.20, 0.50, 0.75]
+
+    def _extract_one(offset_pct):
+        start_sec = int(duration * offset_pct) if duration > 0 else 0
+        out_path = os.path.join(TMP_DIR, f"{uuid.uuid4()}.mp4")
+        cmd = [
+            FFMPEG_BIN, "-y",
+            "-ss", str(start_sec),
+            "-i", video_path,
+            "-t", "6",
+            "-vf", "scale='min(iw,720)':'min(ih,1280)',scale=trunc(iw/2)*2:trunc(ih/2)*2",
+            "-c:v", "libx264",
+            "-preset", "ultrafast",
+            "-crf", "28",
+            "-c:a", "aac",
+            "-ar", "44100",
+            "-movflags", "+faststart",
+            out_path,
+        ]
+        r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if r.returncode != 0:
+            log.error("extract_clips: ffmpeg failed at offset %.0f%%: %s",
+                      offset_pct * 100, r.stderr.decode()[-200:])
+            return None, offset_pct
+        log.info("extract_clips: clip at %.0f%% (t=%.0fs) → %s",
+                 offset_pct * 100, start_sec, out_path)
+        return out_path, offset_pct
+
+    # Extract all clips in parallel
+    clips = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
+        futures = [ex.submit(_extract_one, pct) for pct in offsets]
+        for f in concurrent.futures.as_completed(futures):
+            clip_path, pct = f.result()
+            if clip_path and os.path.exists(clip_path):
+                clips.append((clip_path, pct))
+
+    # Sort by offset so results are in time order
+    clips.sort(key=lambda x: x[1])
+    return clips
+
+
+
+
+
