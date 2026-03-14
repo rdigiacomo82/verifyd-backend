@@ -38,6 +38,25 @@ log = logging.getLogger("verifyd.main")
 # Admin key — set ADMIN_KEY env var on Render; falls back to default for local dev
 _ADMIN_KEY = os.environ.get("ADMIN_KEY", "Honda6915")
 
+def _cleanup_old_files(max_age_hours: float = 2.0) -> None:
+    """
+    Remove uploaded and certified videos older than max_age_hours.
+    Called automatically after each upload to prevent disk fill.
+    """
+    import glob, time
+    now = time.time()
+    max_age = max_age_hours * 3600
+    for directory in (UPLOAD_DIR, CERT_DIR, TMP_DIR):
+        if not os.path.isdir(directory):
+            continue
+        for f in glob.glob(os.path.join(directory, "*")):
+            try:
+                if os.path.isfile(f) and (now - os.path.getmtime(f)) > max_age:
+                    os.remove(f)
+            except Exception:
+                pass
+
+
 def _is_admin(key: str) -> bool:
     """Check admin key — supports both URL-encoded and raw forms."""
     key = (key or "").strip()
@@ -290,6 +309,13 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
             "error":            "email_not_verified",
             "message":          "Please verify your email address before uploading.",
         }, status_code=403)
+
+    # ── Proactive disk cleanup ───────────────────────────────
+    # Run before each upload to prevent disk-full errors
+    try:
+        _cleanup_old_files(max_age_hours=2.0)
+    except Exception as _ce:
+        log.warning("Disk cleanup error: %s", _ce)
 
     # ── Usage limit check ─────────────────────────────────────
     status = get_user_status(email)
@@ -1204,6 +1230,102 @@ def admin_upgrade_user(email: str = "", plan: str = "enterprise", key: str = "")
         return {"status": "upgraded", "email": email, "plan": plan}
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/admin-disk-cleanup/")
+def admin_disk_cleanup(key: str = ""):
+    """
+    Emergency disk cleanup — removes old temp files, uploaded videos,
+    and certified videos older than 2 hours from the persistent disk.
+    Call when disk is full: /admin-disk-cleanup/?key=Honda%236915
+    """
+    if not _is_admin(key):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    import glob, time
+    removed = []
+    freed_bytes = 0
+    now = time.time()
+    errors = []
+
+    # Directories to clean
+    dirs_to_clean = [
+        (UPLOAD_DIR,  2 * 3600,  "uploaded videos"),
+        (CERT_DIR,    2 * 3600,  "certified videos"),
+        (TMP_DIR,     1 * 3600,  "temp files"),
+        ("/tmp",      1 * 3600,  "system temp"),
+    ]
+
+    for directory, max_age, label in dirs_to_clean:
+        if not os.path.isdir(directory):
+            continue
+        try:
+            for f in glob.glob(os.path.join(directory, "*")):
+                try:
+                    age = now - os.path.getmtime(f)
+                    if age > max_age and os.path.isfile(f):
+                        size = os.path.getsize(f)
+                        os.remove(f)
+                        freed_bytes += size
+                        removed.append(f"{label}: {os.path.basename(f)} ({size//1024}KB, {age/3600:.1f}h old)")
+                except Exception as fe:
+                    errors.append(str(fe))
+        except Exception as de:
+            errors.append(f"{label}: {de}")
+
+    # Also check disk usage after cleanup
+    try:
+        import shutil
+        total, used, free = shutil.disk_usage("/data" if os.path.isdir("/data") else "/")
+        disk_info = {
+            "total_gb": round(total / 1e9, 2),
+            "used_gb":  round(used  / 1e9, 2),
+            "free_gb":  round(free  / 1e9, 2),
+            "used_pct": round(used / total * 100, 1),
+        }
+    except Exception as e:
+        disk_info = {"error": str(e)}
+
+    log.info("Disk cleanup: removed %d files, freed %d MB", len(removed), freed_bytes // 1_000_000)
+    return {
+        "status":       "complete",
+        "files_removed": len(removed),
+        "freed_mb":     round(freed_bytes / 1_000_000, 2),
+        "disk":         disk_info,
+        "removed":      removed[:50],  # cap list
+        "errors":       errors[:10],
+    }
+
+
+@app.get("/admin-disk-usage/")
+def admin_disk_usage(key: str = ""):
+    """Check disk usage and file counts."""
+    if not _is_admin(key):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    import glob, shutil
+    result = {}
+
+    for name, directory in [("upload", UPLOAD_DIR), ("cert", CERT_DIR), ("tmp", TMP_DIR)]:
+        if os.path.isdir(directory):
+            files = glob.glob(os.path.join(directory, "*"))
+            total_size = sum(os.path.getsize(f) for f in files if os.path.isfile(f))
+            result[name] = {"count": len(files), "size_mb": round(total_size/1e6, 2)}
+        else:
+            result[name] = {"count": 0, "size_mb": 0}
+
+    try:
+        total, used, free = shutil.disk_usage("/data" if os.path.isdir("/data") else "/")
+        result["disk"] = {
+            "total_gb": round(total/1e9, 2),
+            "used_gb":  round(used/1e9, 2),
+            "free_gb":  round(free/1e9, 2),
+            "used_pct": round(used/total*100, 1),
+        }
+    except Exception as e:
+        result["disk"] = {"error": str(e)}
+
+    return result
 
 
 @app.get("/test-email/")
