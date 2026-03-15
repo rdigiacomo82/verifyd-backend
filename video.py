@@ -703,12 +703,10 @@ def extract_clips_for_detection(video_path: str) -> list:
         offsets = [0.20]
     elif duration < 60.0:
         offsets = [0.20, 0.65]
-    elif duration < 180.0:
-        offsets = [0.20, 0.50, 0.75]
     else:
-        # Long videos (3min+): wider spread catches more variety
-        # 10%, 35%, 65%, 85% — avoids clustering in middle
-        offsets = [0.10, 0.35, 0.65, 0.85]
+        # Long videos: wider spread at 10%, 45%, 80%
+        # Avoids clustering in middle, catches variety across full video
+        offsets = [0.10, 0.45, 0.80]
 
     def _extract_one(offset_pct):
         start_sec = int(duration * offset_pct) if duration > 0 else 0

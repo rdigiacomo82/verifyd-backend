@@ -467,6 +467,30 @@ def analyze_frames_with_gpt(frames_b64: list, physics_summary: str = "",
         raw_text = data["choices"][0]["message"]["content"].strip()
         log.info("gpt_vision raw response: %s", raw_text[:300])
 
+        # Detect GPT content refusal — return neutral result rather than crashing
+        # Refusals happen when frames contain sensitive historical content,
+        # violence, or other flagged material. Treat as inconclusive, not error.
+        _refusal_phrases = [
+            "i'm sorry, i can't",
+            "i cannot assist",
+            "i can't assist",
+            "i'm not able to",
+            "i cannot help",
+            "i can't help",
+            "i'm unable to",
+        ]
+        if any(p in raw_text.lower() for p in _refusal_phrases):
+            log.warning("gpt_vision: GPT refused request (content policy) — returning neutral")
+            return {
+                "ai_probability":  50,
+                "reasoning":       "Visual analysis inconclusive — content review pending.",
+                "flags":           [],
+                "scores":          {},
+                "generator_guess": "Unknown",
+                "available":       True,   # True so hybrid clamping still fires
+                "gpt_refused":     True,
+            }
+
         # Strip markdown fences if present
         if "```" in raw_text:
             raw_text = raw_text.split("```")[1]
@@ -883,5 +907,6 @@ def gpt_vision_score_with_context(frames_b64: list, physics_context: dict) -> di
     result          = analyze_frames_with_gpt(frames_b64, physics_summary, content_type)
     result["available"] = True
     return result
+
 
 

@@ -532,7 +532,8 @@ def run_detection_multiclip(video_path: str) -> tuple:
              signal_ai_score, signal_scores, score_variance, gpt_ai_score, hybrid_flag)
 
     # ── Blend signal + GPT (same logic as run_detection) ─────
-    gpt_failed = not gpt_available or gpt_reasoning.startswith("GPT analysis error")
+    gpt_refused = gpt_result.get("gpt_refused", False)
+    gpt_failed = (not gpt_available or gpt_reasoning.startswith("GPT analysis error")) and not gpt_refused
 
     if gpt_failed:
         combined_ai_score = float(signal_ai_score)
