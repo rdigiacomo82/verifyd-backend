@@ -947,31 +947,14 @@ async def analyze_link_json(request: Request, video_url: str, email: str = ""):
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
 
-    # ── Poll for worker result ────────────────────────────────
-    import asyncio
-    for _ in range(120):   # up to 6 minutes
-        await asyncio.sleep(3)
-        result = get_job_result(job_id)
-        if result and result.get("job_status") == "complete":
-            result.pop("job_status", None)
-            # Cache this result for 1 hour so repeat analyses are instant
-            try:
-                import json as _json2
-                import redis as _redis3
-                _r3 = _redis3.from_url(os.environ.get("REDIS_URL","redis://localhost:6379"), decode_responses=False)
-                _r3.setex(_url_key, 3600, _json2.dumps(result))
-                log.info("analyze-link-json: cached result for %s", video_url[:80])
-            except Exception as _ce2:
-                log.warning("analyze-link-json: cache store failed: %s", _ce2)
-            return JSONResponse(result)
-        if result and result.get("job_status") == "error":
-            raw_error = result.get("error", "")
-            is_tb = "Traceback" in raw_error or "File /opt" in raw_error or len(raw_error) > 200
-            safe  = "Analysis failed. Please try again." if is_tb else (raw_error or "Analysis failed.")
-            log.error("analyze-link-json job error: %s", raw_error[:300])
-            return JSONResponse({"error": safe}, status_code=500)
-
-    return JSONResponse({"error": "Analysis timed out. Please try again."}, status_code=504)
+    # ── Return job_id immediately — frontend polls /job-status/ ─
+    # Previously this endpoint blocked for up to 6 minutes waiting for
+    # the worker. Render's 30s request timeout caused long jobs (YouTube,
+    # multi-clip) to appear to fail even when the worker completed fine.
+    # Now we return job_id immediately and the frontend polls job-status.
+    # The URL cache key is stored so the worker can write the cache result.
+    log.info("analyze-link-json: returning job_id=%s for frontend polling", job_id)
+    return JSONResponse({"job_id": job_id, "status": "queued"})
 
 
 # ─────────────────────────────────────────────

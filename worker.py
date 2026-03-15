@@ -284,6 +284,17 @@ def process_link_job(
                 log.error("Worker: stamp failed for link job %s: %s", job_id, e)
 
         _store_result(r, job_id, result)
+
+        # Write URL cache so repeat analyses of same link are instant
+        try:
+            import hashlib as _hl, json as _jc
+            _url_cache_key = "urlcache:v2:" + _hl.md5(video_url.strip().encode()).hexdigest()
+            _cache_result = {k: v for k, v in result.items() if k != "job_status"}
+            r.setex(_url_cache_key, 3600, _jc.dumps(_cache_result))
+            log.info("Worker: cached URL result for %s", video_url[:80])
+        except Exception as _ce:
+            log.warning("Worker: URL cache write failed: %s", _ce)
+
         return result
 
     except Exception as e:
