@@ -296,13 +296,14 @@ def _build_content_aware_reasoning(
     gpt_reasoning: str,
     gpt_flags: list,
     n_clips: int,
+    signal_context: dict = None,
+    blend_mode: str = "",
 ) -> str:
     """
     Build the user-facing explanation shown in the result box.
-    GPT now writes a specific 2-3 sentence explanation based on what it
-    actually observed in the frames + the signal data passed to it.
-    We use that directly, with a brief structural prefix for context.
-    Falls back to templated text only if GPT reasoning is missing/generic.
+    When signal and GPT clash, we write a signal-informed explanation
+    that explains WHY the detector overrode the visual appearance.
+    Falls back to templated text if GPT reasoning is missing/generic.
     """
     score_variance = max(signal_scores) - min(signal_scores) if len(signal_scores) > 1 else 0
 
@@ -315,6 +316,65 @@ def _build_content_aware_reasoning(
         "single_subject": "subject footage",
     }
     content_friendly = content_labels.get(content_type, "video")
+
+    # ── Detect clash: signal strongly says AI but GPT says real ────────
+    _signal_avg = sum(signal_scores) / len(signal_scores) if signal_scores else 0
+    _clash_ai   = _signal_avg > 65 and gpt_score < 45 and label == "AI"
+
+    if _clash_ai and signal_context:
+        # Build an explanation based on the actual signal evidence
+        # instead of trusting GPT's visual read of static frames
+        _ctx = signal_context or {}
+        _evidence = []
+
+        # Audio evidence (most reliable)
+        _audio = _ctx.get("audio_stereo_corr", 0)
+        if _audio >= 0.99:
+            _evidence.append("perfectly correlated stereo audio (a hallmark of synthetic pipelines)")
+        elif _audio >= 0.93:
+            _evidence.append("near-perfect stereo audio correlation typical of AI-generated content")
+
+        # HF kurtosis
+        _kurtosis = _ctx.get("hf_kurtosis", 0)
+        if _kurtosis > 80:
+            _evidence.append(f"extreme high-frequency upsampling artifacts (kurtosis {_kurtosis:.0f})")
+        elif _kurtosis > 55:
+            _evidence.append(f"high-frequency upsampling artifacts typical of AI rendering")
+
+        # Channel correlation
+        _chan = _ctx.get("chan_corr", 0)
+        if _chan > 0.93:
+            _evidence.append("unnaturally high inter-channel video correlation")
+
+        # Omni flow
+        _omni = _ctx.get("omni_flow_entropy", 0)
+        if _omni > 3.8:
+            _evidence.append("omnidirectional noise motion inconsistent with real camera movement")
+
+        # Shadow drift
+        _shadow = _ctx.get("shadow_drift", 0)
+        if _shadow > 0.9:
+            _evidence.append("strongly inconsistent shadow behavior across frames")
+
+        # Edge crawl
+        _edge_cov = _ctx.get("edge_cov_var", 0)
+        if _edge_cov > 1.5:
+            _evidence.append("edge crawl artifacts characteristic of AI upscaling")
+
+        # FLAT_NOISE
+        _flat = _ctx.get("flat_noise", 1.0)
+        if _flat < 0.3:
+            _evidence.append("absence of natural camera sensor noise (PRNU)")
+
+        if _evidence:
+            evidence_str = "; ".join(_evidence[:3])  # top 3 signals
+            return (
+                f"Despite appearing visually convincing in static frames, this {content_friendly} "
+                f"contains strong technical AI signatures: {evidence_str}. "
+                f"These artifacts are invisible to the eye but detectable in the signal data, "
+                f"which is why our detector overrides the visual appearance. "
+                f"Authenticity score: {authenticity}%."
+            )
 
     # Check if GPT produced a specific explanation (>60 chars, not a placeholder)
     _gpt_specific = (
@@ -482,6 +542,7 @@ def run_detection_multiclip(video_path: str) -> tuple:
         return run_detection(video_path)
 
     signal_scores = [score for score, _, _ in valid]
+    all_signal_contexts = [ctx for _, ctx, _ in valid]  # all clip contexts for reasoning
 
     # Weighted average — weight by noise level (more noise = more real data)
     noise_weights = []
@@ -637,6 +698,22 @@ def run_detection_multiclip(video_path: str) -> tuple:
         "AI"
     )
 
+    # ── Aggregate signal context across all clips for reasoning ─
+    # Collect the most diagnostic values from all clips
+    _agg_ctx = {}
+    for _sc in all_signal_contexts:
+        if not _sc:
+            continue
+        for _k in ("audio_stereo_corr", "hf_kurtosis", "chan_corr",
+                   "omni_flow_entropy", "shadow_drift", "edge_cov_var", "flat_noise"):
+            _v = _sc.get(_k)
+            if _v is not None:
+                # Keep the most extreme (highest AI-indicating) value
+                if _k == "flat_noise":
+                    _agg_ctx[_k] = min(_agg_ctx.get(_k, 999), _v)
+                else:
+                    _agg_ctx[_k] = max(_agg_ctx.get(_k, 0), _v)
+
     # ── Content-aware reasoning ───────────────────────────────
     user_reasoning = _build_content_aware_reasoning(
         label=label,
@@ -648,6 +725,8 @@ def run_detection_multiclip(video_path: str) -> tuple:
         gpt_reasoning=gpt_reasoning,
         gpt_flags=gpt_flags,
         n_clips=n_clips,
+        signal_context=_agg_ctx,
+        blend_mode=mode,
     )
 
     log.info(

@@ -408,8 +408,17 @@ def job_status(job_id: str):
     """Poll endpoint for direct async frontends."""
     result = get_job_result(job_id)
     if not result or result.get("job_status") == "not_found":
-        return JSONResponse({"job_status": "not_found"}, status_code=404)
-    return JSONResponse(result)
+        return JSONResponse({"status": "not_found"}, status_code=404)
+    # Normalize job_status → status so frontend can use data.status consistently
+    job_st = result.get("job_status", "")
+    result_copy = {k: v for k, v in result.items() if k != "job_status"}
+    if job_st == "complete":
+        result_copy["status"] = "complete"
+    elif job_st == "error":
+        result_copy["status"] = "error"
+    else:
+        result_copy["status"] = job_st or "processing"
+    return JSONResponse(result_copy)
 
 
 @app.get("/share/{cid}")
@@ -2203,6 +2212,7 @@ async def widget_upload(
             return JSONResponse({"error": safe_error}, status_code=500)
 
     return JSONResponse({"error": "Analysis timed out. Please try again."}, status_code=504)
+
 
 
 
