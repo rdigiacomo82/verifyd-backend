@@ -467,11 +467,22 @@ def run_detection_multiclip(video_path: str) -> tuple:
 
     # ── Hybrid detection ──────────────────────────────────────
     score_variance = max(signal_scores) - min(signal_scores) if len(signal_scores) > 1 else 0
-    hybrid_flag = score_variance > 30
+    signal_avg_pre = sum(signal_scores) / len(signal_scores)
+
+    # Primary hybrid trigger: variance > 15 between clips
+    hybrid_flag = score_variance > 15
+
+    # Secondary hybrid trigger: all clips score high AI (>75) but GPT
+    # sees mostly neutral scores (all 5s) — means GPT frames landed on
+    # real content while signal clips landed on AI segments.
+    # This is the "postal truck" pattern: AI stills scattered in real footage.
+    # We check this after GPT runs below, so set a pre-flag here.
+    _all_clips_high_ai = len(signal_scores) >= 2 and min(signal_scores) > 75
+    _pre_hybrid_candidate = _all_clips_high_ai  # refined after GPT
+
     if hybrid_flag:
-        log.info("HYBRID FLAG: signal variance=%d across clips %s",
+        log.info("HYBRID FLAG (variance): signal variance=%d across clips %s",
                  score_variance, signal_scores)
-        # Add hybrid context to signal_context for GPT
         signal_context["hybrid_detected"] = True
         signal_context["clip_signal_scores"] = signal_scores
 
@@ -503,6 +514,19 @@ def run_detection_multiclip(video_path: str) -> tuple:
     gpt_available = gpt_result.get("available", False)
     gpt_reasoning = gpt_result.get("reasoning", "")
     gpt_flags     = gpt_result.get("flags", [])
+
+    # Secondary hybrid check: all clips scored high AI but GPT is neutral (<50)
+    # This means signal clips hit AI segments but GPT frames hit real content
+    # Classic mixed/hybrid documentary pattern
+    if _pre_hybrid_candidate and not hybrid_flag and gpt_ai_score < 55:
+        hybrid_flag = True
+        log.info(
+            "HYBRID FLAG (gpt-neutral + high-signal): "
+            "all clips AI (min=%d) but gpt=%d → mixed content",
+            min(signal_scores), gpt_ai_score
+        )
+        signal_context["hybrid_detected"] = True
+        signal_context["clip_signal_scores"] = signal_scores
 
     log.info("Multi-clip: signal_avg=%d (clips=%s var=%d) gpt=%d hybrid=%s",
              signal_ai_score, signal_scores, score_variance, gpt_ai_score, hybrid_flag)
@@ -547,13 +571,18 @@ def run_detection_multiclip(video_path: str) -> tuple:
             mode = "default"
 
     # Hybrid adjustment — pull toward UNDETERMINED if mixed content
+    # Mixed videos should land in 40-60% auth (UNDETERMINED) range
     if hybrid_flag and not gpt_failed:
-        # Don't let hybrid content score too confidently in either direction
-        if combined_ai_score < 30:
-            combined_ai_score = max(combined_ai_score, 25)
-        elif combined_ai_score > 70:
-            combined_ai_score = min(combined_ai_score, 72)
-        log.info("Hybrid adjustment applied: combined clamped to %.1f", combined_ai_score)
+        if combined_ai_score > 65:
+            # Was scoring AI — pull to upper UNDETERMINED (auth ~45-55%)
+            combined_ai_score = min(combined_ai_score, 58)
+            log.info("Hybrid adjustment: high-AI clamped to %.1f (mixed content)", combined_ai_score)
+        elif combined_ai_score < 30:
+            # Was scoring very REAL — pull to lower UNDETERMINED (auth ~55-65%)
+            combined_ai_score = max(combined_ai_score, 35)
+            log.info("Hybrid adjustment: high-REAL clamped to %.1f (mixed content)", combined_ai_score)
+        else:
+            log.info("Hybrid adjustment: combined=%.1f already in mixed range", combined_ai_score)
 
     combined_ai_score = max(0.0, min(100.0, combined_ai_score))
     authenticity = 100 - int(round(combined_ai_score))
