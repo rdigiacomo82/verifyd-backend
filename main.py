@@ -898,6 +898,23 @@ async def analyze_link_json(request: Request, video_url: str, email: str = ""):
                 "limit":     status["limit"],
             }, status_code=402)
 
+    # ── URL result cache check ───────────────────────────────
+    # If this exact URL was analyzed in the last hour, return cached result.
+    # Saves SMVD render time (~40s for YouTube) and doesn't count against quota.
+    import hashlib as _hl
+    _url_key = "urlcache:" + _hl.md5(video_url.strip().encode()).hexdigest()
+    try:
+        import redis as _redis2
+        _r2 = _redis2.from_url(os.environ.get("REDIS_URL","redis://localhost:6379"), decode_responses=False)
+        _cached = _r2.get(_url_key)
+        if _cached:
+            import json as _json
+            _cached_result = _json.loads(_cached)
+            log.info("analyze-link-json: URL cache HIT for %s", video_url[:80])
+            return JSONResponse(_cached_result)
+    except Exception as _ce:
+        log.warning("analyze-link-json: cache check failed: %s", _ce)
+
     # ── Enqueue link job ──────────────────────────────────────
     job_id = str(uuid.uuid4())
     try:
@@ -937,6 +954,15 @@ async def analyze_link_json(request: Request, video_url: str, email: str = ""):
         result = get_job_result(job_id)
         if result and result.get("job_status") == "complete":
             result.pop("job_status", None)
+            # Cache this result for 1 hour so repeat analyses are instant
+            try:
+                import json as _json2
+                import redis as _redis3
+                _r3 = _redis3.from_url(os.environ.get("REDIS_URL","redis://localhost:6379"), decode_responses=False)
+                _r3.setex(_url_key, 3600, _json2.dumps(result))
+                log.info("analyze-link-json: cached result for %s", video_url[:80])
+            except Exception as _ce2:
+                log.warning("analyze-link-json: cache store failed: %s", _ce2)
             return JSONResponse(result)
         if result and result.get("job_status") == "error":
             raw_error = result.get("error", "")
