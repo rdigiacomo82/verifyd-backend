@@ -375,7 +375,7 @@ Respond ONLY with this exact JSON — no markdown, no preamble, no extra text:
     "physics_violations": <0-10>,
     "generator_artifacts": <0-10>
   },
-  "reasoning": "<one concise sentence overall assessment>",
+  "reasoning": "<2-3 sentence explanation written for a general audience — be specific about what you actually observed in these frames, reference the content type, mention specific visual evidence. Do NOT use generic phrases like 'the video appears to be' or 'analysis suggests'. Instead write exactly what you saw: e.g. 'This wildlife footage shows a moose moving with unnaturally smooth locomotion — no ground impact, floating gait, and fur texture that lacks the micro-variation of real animal coats. The background vegetation appears rendered rather than photographed.' For REAL videos: mention specific real-camera characteristics you observed. For AI: name the specific artifacts. For mixed/uncertain: explain the contradiction you see.>",
   "top_flags": ["<most significant finding>", "<second finding>", "<third finding>"],
   "generator_guess": "<Sora | Kling | Runway | Pika | HeyGen | Unknown-AI | Real>"
 }
@@ -579,7 +579,54 @@ def _build_physics_summary(ctx: dict) -> str:
 
     lines = ["═══ SIGNAL DETECTOR PRE-ANALYSIS ═══"]
     lines.append("Pixel-level detector measured these signals before you see the frames.")
-    lines.append("Use them to guide your visual inspection — confirm or override with what you observe.\n")
+    lines.append("Use them to guide your visual inspection — confirm or override with what you observe.")
+    lines.append("IMPORTANT: Your 'reasoning' field must reference what you specifically observe")
+    lines.append("in these frames — not generic phrases. Be concrete about what you see.\n")
+
+    # Pass full signal values so GPT can reference them in the explanation
+    signal_details = []
+    flat_noise  = ctx.get("flat_noise")
+    chan_corr   = ctx.get("chan_corr")
+    dct_val     = ctx.get("dct_score")
+    noise_val   = ctx.get("avg_noise")
+    omni_val    = ctx.get("omni_flow_entropy")
+    period_val2 = ctx.get("motion_period", ctx.get("period"))
+    hue_val     = ctx.get("hue_entropy")
+    n_clips_val = ctx.get("n_clips")
+    clip_scores = ctx.get("clip_signal_scores")
+    hybrid_val  = ctx.get("hybrid_detected", False)
+
+    if flat_noise is not None:
+        if flat_noise < 0.80:
+            signal_details.append(f"flat_region_noise={flat_noise:.2f} — no camera sensor fingerprint, AI-smooth flat areas")
+        elif flat_noise >= 1.40:
+            signal_details.append(f"flat_region_noise={flat_noise:.2f} — real camera PRNU sensor noise confirmed")
+    if chan_corr is not None and chan_corr > 0.85:
+        signal_details.append(f"channel_correlation={chan_corr:.3f} — very high RGB channel lock, AI render signature")
+    if dct_val is not None and dct_val > 15:
+        signal_details.append(f"dct_artifact={dct_val:.1f} — extreme compression grid pattern, AI upscaling artifact")
+    if noise_val is not None:
+        if noise_val > 600:
+            signal_details.append(f"camera_noise={noise_val:.0f} — strong real camera sensor grain")
+        elif noise_val < 200:
+            signal_details.append(f"camera_noise={noise_val:.0f} — suspiciously low noise, AI-smooth")
+    if omni_val is not None and omni_val > 3.5:
+        signal_details.append(f"motion_entropy={omni_val:.2f} — omnidirectional noise motion, AI rendering artifact")
+    if period_val2 is not None and period_val2 > 0.65:
+        signal_details.append(f"motion_periodicity={period_val2:.3f} — strong animation loop, motion repeats cyclically")
+    if hue_val is not None and hue_val < 2.0:
+        signal_details.append(f"color_palette_entropy={hue_val:.2f} — very limited color range, AI color banding")
+    if hybrid_val and clip_scores:
+        signal_details.append(
+            f"HYBRID CONTENT: signal varied across {n_clips_val} time samples "
+            f"{clip_scores} — some sections real footage, some AI-generated"
+        )
+
+    if signal_details:
+        lines.append("KEY MEASURED SIGNALS — reference these specifically in your reasoning field:")
+        for d in signal_details:
+            lines.append(f"  • {d}")
+        lines.append("")
 
     ct_labels = {
         "talking_head":   "📱 PERSON VIDEO — talking head or active portrait",

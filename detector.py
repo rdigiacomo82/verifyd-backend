@@ -1088,7 +1088,10 @@ def detect_ai(video_path: str) -> int:
     # Edge threshold raised from 3 → 12: real action (sports, crowds, waterfalls)
     # has rich edge content (20-40+). AI animal/nature videos have high motion but
     # sparse edges (dark fur, smooth backgrounds) — edge=9 on Gorilla AI, 24 on Real_Video_2.
-    is_action_content = (avg_motion > 8.0 and avg_edge > 12.0)
+    # action content: motion > 7.5 (lowered from 8.0) to avoid razor-edge
+    # classification flips between 'action' and 'cinematic' on borderline videos.
+    # A 0.1 motion difference was causing 14-point SAT_STD swings.
+    is_action_content = (avg_motion > 7.5 and avg_edge > 12.0)
     is_static_content = (avg_motion < 3.0)
 
     # ── Selfie / talking-head detection (v8) ────────────────
@@ -1360,21 +1363,26 @@ def detect_ai(video_path: str) -> int:
     # Guard: skip for very short clips — not enough flat regions to sample
     _flat_noise = _flat_region_sensor_noise(video_path)
     log.info("FLAT_NOISE (PRNU proxy): %.4f", _flat_noise)
+    # FLAT_NOISE scoring — graduated thresholds to avoid binary cliff edges
+    # that cause large swings from small encode differences.
+    # Real=1.55-2.54, AI=0.54-1.33. Buffer zones reduce sensitivity.
     if not _is_short_clip:
-        if _flat_noise >= 1.40:
+        if _flat_noise >= 1.50:
             ai_score -= 8
-            log.info("FLAT_NOISE %.4f → real sensor noise (PRNU present) → -8", _flat_noise)
-        elif _flat_noise >= 1.20:
+            log.info("FLAT_NOISE %.4f → strong real sensor noise (PRNU present) → -8", _flat_noise)
+        elif _flat_noise >= 1.25:
             ai_score -= 4
             log.info("FLAT_NOISE %.4f → moderate sensor noise → -4", _flat_noise)
-        elif _flat_noise < 0.80:
+        elif _flat_noise >= 1.00:
+            log.info("FLAT_NOISE %.4f → ambiguous range (1.00-1.25) → no signal", _flat_noise)
+        elif _flat_noise < 0.70:
             ai_score += 8
             log.info("FLAT_NOISE %.4f → AI-smooth flat regions (no PRNU) → +8", _flat_noise)
-        elif _flat_noise < 1.00:
+        elif _flat_noise < 0.90:
             ai_score += 4
             log.info("FLAT_NOISE %.4f → slightly AI-smooth → +4", _flat_noise)
         else:
-            log.info("FLAT_NOISE %.4f → ambiguous range (1.00-1.20) → no signal", _flat_noise)
+            log.info("FLAT_NOISE %.4f → ambiguous range (0.90-1.00) → no signal", _flat_noise)
     else:
         log.info("FLAT_NOISE %.4f → skipped (short clip guard)", _flat_noise)
 
@@ -2227,10 +2235,16 @@ def detect_ai(video_path: str) -> int:
         "noise_floor":    noise_floor,
         "shadow_drift":   shadow_drift,
         # v9 signals
-        "omni_flow_ent":  omni_flow_ent,
-        "edge_mean_var":  edge_mean_var,
-        "edge_cov_var":   edge_cov_var,
-        "tcv":            tcv,
+        "omni_flow_ent":     omni_flow_ent,
+        "omni_flow_entropy": omni_flow_ent,   # alias for gpt_vision
+        "edge_mean_var":     edge_mean_var,
+        "edge_cov_var":      edge_cov_var,
+        "tcv":               tcv,
+        # aliases for gpt_vision _build_physics_summary
+        "flat_noise":    _flat_noise,
+        "chan_corr":     _chan_corr,
+        "dct_score":     avg_dct_grid,
+        "hue_entropy":   hue_entropy,
         # v10 audio signals
         "audio_dur_mismatch": _audio.get("dur_mismatch", 0),
         "audio_stereo_corr":  _audio.get("stereo_corr", 0),

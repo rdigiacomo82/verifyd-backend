@@ -249,6 +249,20 @@ def run_detection(video_path: str) -> tuple:
         "threshold_undet": THRESHOLD_UNDETERMINED,
     }
 
+    # Build content-aware user-facing reasoning for single-clip path
+    user_reasoning = _build_content_aware_reasoning(
+        label=label,
+        authenticity=authenticity,
+        content_type=signal_context.get("content_type", "cinematic"),
+        signal_scores=[signal_ai_score],
+        gpt_score=gpt_ai_score,
+        hybrid_flag=False,
+        gpt_reasoning=gpt_result.get("reasoning", ""),
+        gpt_flags=gpt_result.get("flags", []),
+        n_clips=1,
+    )
+    detail["gpt_reasoning"] = user_reasoning
+
     log.info(
         "Detection complete | signal=%d gpt=%d combined=%d authenticity=%d label=%s",
         signal_ai_score, gpt_ai_score,
@@ -284,95 +298,116 @@ def _build_content_aware_reasoning(
     n_clips: int,
 ) -> str:
     """
-    Generate concise, content-aware reasoning text shown to the user.
-    Replaces the raw GPT one-liner with something more informative and specific.
+    Build the user-facing explanation shown in the result box.
+    GPT now writes a specific 2-3 sentence explanation based on what it
+    actually observed in the frames + the signal data passed to it.
+    We use that directly, with a brief structural prefix for context.
+    Falls back to templated text only if GPT reasoning is missing/generic.
     """
     score_variance = max(signal_scores) - min(signal_scores) if len(signal_scores) > 1 else 0
 
-    # Content type friendly names
     content_labels = {
-        "talking_head":  "talking head video",
-        "selfie":        "selfie video",
-        "action":        "action footage",
-        "cinematic":     "cinematic footage",
-        "static":        "static scene",
-        "single_subject":"subject video",
+        "talking_head":   "talking head video",
+        "selfie":         "selfie video",
+        "action":         "action footage",
+        "cinematic":      "cinematic footage",
+        "static":         "static scene",
+        "single_subject": "subject footage",
     }
     content_friendly = content_labels.get(content_type, "video")
 
+    # Check if GPT produced a specific explanation (>60 chars, not a placeholder)
+    _gpt_specific = (
+        gpt_reasoning
+        and len(gpt_reasoning) > 60
+        and "inconclusive" not in gpt_reasoning.lower()
+        and "pending" not in gpt_reasoning.lower()
+        and "error" not in gpt_reasoning.lower()
+    )
+
+    # ── Use GPT's specific explanation as the primary text ────
+    if _gpt_specific:
+        # Add a brief structural prefix so the user knows what the score means
+        if label == "REAL":
+            if hybrid_flag:
+                prefix = (
+                    f"This {content_friendly} is predominantly real camera footage "
+                    f"with some AI-generated elements detected across {n_clips} samples. "
+                )
+            elif authenticity >= 80:
+                prefix = f"This {content_friendly} shows strong authentic camera indicators. "
+            else:
+                prefix = f"This {content_friendly} appears to be genuine footage. "
+        elif label == "UNDETERMINED":
+            if hybrid_flag:
+                prefix = (
+                    f"This {content_friendly} contains a mix of real and AI-generated content "
+                    f"across {n_clips} sampled segments. "
+                )
+            else:
+                prefix = (
+                    f"This {content_friendly} could not be conclusively verified "
+                    f"({authenticity}% authenticity). "
+                )
+        else:  # AI
+            if hybrid_flag:
+                prefix = (
+                    f"This {content_friendly} contains AI-generated content across "
+                    f"multiple segments. "
+                )
+            else:
+                prefix = f"This {content_friendly} shows AI generation signatures. "
+
+        return prefix + gpt_reasoning
+
+    # ── Fallback templates if GPT gave a generic/failed response ──
     if label == "REAL":
         if hybrid_flag:
             return (
                 f"This {content_friendly} is predominantly real camera footage. "
-                f"Signal analysis across {n_clips} time samples detected some AI-generated "
-                f"elements — likely added graphics, captions, or still images — but the "
-                f"underlying footage shows genuine camera characteristics including natural "
-                f"sensor noise and organic motion physics."
+                f"Analysis across {n_clips} samples detected some AI-generated elements — "
+                f"likely added graphics or still images — but the underlying footage shows "
+                f"genuine sensor noise and organic motion physics."
             )
-        elif authenticity >= 80:
-            return (
-                f"This {content_friendly} shows strong indicators of authentic camera footage. "
-                f"Natural sensor noise, organic motion patterns, and consistent lighting "
-                f"coherence across {n_clips} sampled segment{'s' if n_clips > 1 else ''} "
-                f"are consistent with a real recording. {gpt_reasoning}"
-            )
-        else:
-            return (
-                f"This {content_friendly} appears to be genuine footage, though some elements "
-                f"were inconclusive. Sensor noise patterns and motion physics lean real, "
-                f"but compression or post-processing reduced confidence. {gpt_reasoning}"
-            )
+        return (
+            f"This {content_friendly} shows authentic camera characteristics. "
+            f"Sensor noise patterns, motion physics, and lighting coherence across "
+            f"{n_clips} sampled segment{'s' if n_clips > 1 else ''} are consistent "
+            f"with real camera footage. Authenticity score: {authenticity}%."
+        )
 
     elif label == "UNDETERMINED":
         if hybrid_flag:
             return (
                 f"This {content_friendly} contains a mix of real and AI-generated content. "
-                f"Analysis across {n_clips} time samples found significant variation — "
-                f"some segments show authentic camera characteristics while others show "
-                f"AI synthesis signatures. This is consistent with edited documentary or "
-                f"explainer content that combines real footage with AI-generated visuals."
+                f"Analysis across {n_clips} time samples found variation — some segments show "
+                f"authentic camera characteristics while others show AI synthesis signatures. "
+                f"Consistent with documentary or explainer content that mixes real and AI visuals."
             )
-        elif score_variance > 20:
-            return (
-                f"This {content_friendly} produced inconsistent results across time samples, "
-                f"suggesting mixed content. Some sections appear authentic while others show "
-                f"possible AI enhancement. The overall authenticity score of {authenticity}% "
-                f"reflects this uncertainty. {gpt_reasoning}"
-            )
-        else:
-            return (
-                f"This {content_friendly} could not be conclusively verified. Signal analysis "
-                f"returned a borderline result of {authenticity}% — neither strong enough to "
-                f"confirm as real camera footage nor to flag as AI-generated. "
-                f"{gpt_reasoning}"
-            )
+        return (
+            f"This {content_friendly} could not be conclusively verified. "
+            f"Signal analysis returned {authenticity}% authenticity — borderline between "
+            f"real and AI-generated. Some elements appear authentic while others are ambiguous."
+        )
 
     else:  # AI
         if hybrid_flag:
-            return (
-                f"This {content_friendly} contains AI-generated content. Analysis across "
-                f"{n_clips} time samples found AI synthesis signatures in multiple segments — "
-                f"including {', '.join(gpt_flags[:2]) if gpt_flags else 'rendering artifacts and unnatural motion'}. "
-                f"While some segments may contain real footage, the AI-generated portions "
-                f"are significant enough to flag this video."
+            flags_text = (
+                f"including {gpt_flags[0]}" if gpt_flags
+                else "including rendering artifacts and unnatural motion"
             )
-        elif gpt_flags:
-            flag_text = gpt_flags[0] if gpt_flags else "AI rendering artifacts"
             return (
-                f"This {content_friendly} shows clear AI generation signatures. "
-                f"Key indicators: {flag_text}. "
-                f"Signal analysis found {'extreme DCT grid artifacts, ' if gpt_score < 35 else ''}"
-                f"unnatural rendering characteristics inconsistent with real camera footage. "
+                f"This {content_friendly} contains AI-generated content across "
+                f"{n_clips} time samples, {flags_text}. While some segments may contain "
+                f"real footage, AI-generated portions are significant. "
                 f"Authenticity score: {authenticity}%."
             )
-        else:
-            return (
-                f"This {content_friendly} shows strong AI generation indicators. "
-                f"Signal analysis detected rendering artifacts and motion patterns "
-                f"inconsistent with real camera footage across "
-                f"{n_clips} sampled segment{'s' if n_clips > 1 else ''}. "
-                f"Authenticity score: {authenticity}%."
-            )
+        flags_text = f"Key indicators: {gpt_flags[0]}. " if gpt_flags else ""
+        return (
+            f"This {content_friendly} shows clear AI generation signatures. "
+            f"{flags_text}Signal analysis detected rendering artifacts and motion patterns "
+            f"inconsistent with real camera footage. Authenticity score: {authenticity}%."
+        )
 
 
 def run_detection_multiclip(video_path: str) -> tuple:
