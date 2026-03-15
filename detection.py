@@ -606,19 +606,26 @@ def run_detection_multiclip(video_path: str) -> tuple:
             w_sig, w_gpt = 0.40, 0.60
             mode = "default"
 
-    # Hybrid adjustment — pull toward UNDETERMINED if mixed content
-    # Mixed videos should land in 40-60% auth (UNDETERMINED) range
-    if hybrid_flag and not gpt_failed:
+    # Hybrid adjustment — only clamp when clips GENUINELY disagree
+    # True hybrid = some clips real (<45) AND some clips AI (>65)
+    # NOT hybrid = all clips agree on AI with varying confidence
+    _has_real_clips   = any(s < 45 for s in signal_scores)
+    _has_ai_clips     = any(s > 65 for s in signal_scores)
+    _true_hybrid      = hybrid_flag and _has_real_clips and _has_ai_clips
+    _both_engines_ai  = signal_ai_score > 70 and gpt_ai_score > 65
+
+    if _true_hybrid and not gpt_failed and not _both_engines_ai:
+        # Genuine mixed content — pull toward UNDETERMINED
         if combined_ai_score > 65:
-            # Was scoring AI — pull to upper UNDETERMINED (auth ~45-55%)
             combined_ai_score = min(combined_ai_score, 58)
-            log.info("Hybrid adjustment: high-AI clamped to %.1f (mixed content)", combined_ai_score)
+            log.info("Hybrid adjustment: high-AI clamped to %.1f (genuine mixed content)", combined_ai_score)
         elif combined_ai_score < 30:
-            # Was scoring very REAL — pull to lower UNDETERMINED (auth ~55-65%)
             combined_ai_score = max(combined_ai_score, 35)
-            log.info("Hybrid adjustment: high-REAL clamped to %.1f (mixed content)", combined_ai_score)
+            log.info("Hybrid adjustment: high-REAL clamped to %.1f (genuine mixed content)", combined_ai_score)
         else:
             log.info("Hybrid adjustment: combined=%.1f already in mixed range", combined_ai_score)
+    elif hybrid_flag and not _true_hybrid:
+        log.info("Hybrid flag set but all clips agree (%s) — no clamping applied", signal_scores)
 
     combined_ai_score = max(0.0, min(100.0, combined_ai_score))
     authenticity = 100 - int(round(combined_ai_score))

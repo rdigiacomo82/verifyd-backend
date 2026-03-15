@@ -978,12 +978,17 @@ def detect_ai(video_path: str) -> int:
     frame_count = 0
     samples     = 0
 
+    # For high-fps videos (60fps), sample every 10th frame instead of 5th
+    # This keeps ~same number of samples but reads half as many frames
+    _sample_every = 10 if fps > 45 else 5
+    log.info("Frame sampling: every %dth frame (fps=%.0f)", _sample_every, fps)
+
     while True:
         ret, frame = cap.read()
         if not ret:
             break
         frame_count += 1
-        if frame_count % 5 != 0:
+        if frame_count % _sample_every != 0:
             continue
         if samples >= 60:
             break
