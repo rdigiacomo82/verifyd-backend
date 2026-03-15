@@ -902,7 +902,7 @@ async def analyze_link_json(request: Request, video_url: str, email: str = ""):
     # If this exact URL was analyzed in the last hour, return cached result.
     # Saves SMVD render time (~40s for YouTube) and doesn't count against quota.
     import hashlib as _hl
-    _url_key = "urlcache:" + _hl.md5(video_url.strip().encode()).hexdigest()
+    _url_key = "urlcache:v2:" + _hl.md5(video_url.strip().encode()).hexdigest()
     try:
         import redis as _redis2
         _r2 = _redis2.from_url(os.environ.get("REDIS_URL","redis://localhost:6379"), decode_responses=False)
@@ -2220,6 +2220,7 @@ async def widget_upload(
             return JSONResponse({"error": safe_error}, status_code=500)
 
     return JSONResponse({"error": "Analysis timed out. Please try again."}, status_code=504)
+
 
 
 
