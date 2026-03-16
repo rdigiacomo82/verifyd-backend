@@ -37,6 +37,13 @@ def _get_npr_analyzer():
     except Exception:
         return None, None
 
+def _get_dino_analyzer():
+    try:
+        from dinov2_detector import analyze_dinov2, get_dino_contribution
+        return analyze_dinov2, get_dino_contribution
+    except Exception:
+        return None, None
+
 THRESHOLD_REAL         = 55
 THRESHOLD_UNDETERMINED = 40
 
@@ -612,6 +619,26 @@ def run_detection_multiclip(video_path: str) -> tuple:
             except Exception as e:
                 log.debug("NPR analysis skipped for clip @%.0f%%: %s", offset_pct * 100, e)
 
+            # DINOv2 feature-based analysis — tie-breaker for ambiguous clips
+            # Only runs when signal score is in ambiguous range (35-72)
+            # to avoid adding noise to already-confident detections
+            try:
+                analyze_dinov2, get_dino_contribution = _get_dino_analyzer()
+                if analyze_dinov2 and 35 <= score <= 72:
+                    dino_score, dino_signals = analyze_dinov2(clip_path)
+                    dino_contribution = get_dino_contribution(dino_score, score)
+                    context["dino_score"] = dino_score
+                    context["dino_signals"] = dino_signals
+                    context["dino_contribution"] = dino_contribution
+                    if dino_contribution != 0:
+                        log.info("DINOv2 @%.0f%%: score=%d contribution=%+d (signal=%d ambiguous)",
+                                 offset_pct * 100, dino_score, dino_contribution, score)
+                        score = int(round(min(100, max(0, score + dino_contribution))))
+                elif analyze_dinov2:
+                    log.debug("DINOv2 @%.0f%%: skipped (signal=%d not ambiguous)", offset_pct * 100, score)
+            except Exception as e:
+                log.debug("DINOv2 analysis skipped for clip @%.0f%%: %s", offset_pct * 100, e)
+
             log.info("Clip @%.0f%%: signal_score=%d content=%s",
                      offset_pct * 100, score, context.get("content_type", "?"))
             return score, context, offset_pct
@@ -779,7 +806,27 @@ def run_detection_multiclip(video_path: str) -> tuple:
         else:
             log.info("Hybrid adjustment: combined=%.1f already in mixed range", combined_ai_score)
     elif hybrid_flag and not _true_hybrid:
-        log.info("Hybrid flag set but all clips agree (%s) — no clamping applied", signal_scores)
+        # Check for high-variance mixed content (documentary with AI inserts)
+        # clips agree on direction (all AI) but variance is high (>35)
+        # AND not all clips are strongly AI (some below 70)
+        # → these are real videos with some AI-generated segments
+        # → should land UNDETERMINED not AI
+        _high_variance   = score_variance > 35
+        _not_all_strong  = any(s < 70 for s in signal_scores)
+        _both_engines_ambiguous = signal_ai_score < 80 and gpt_ai_score < 65
+
+        if _high_variance and _not_all_strong and _both_engines_ambiguous:
+            # Pull toward UNDETERMINED for mixed-content videos
+            old_score = combined_ai_score
+            combined_ai_score = min(combined_ai_score, 58)
+            log.info(
+                "Hybrid adjustment: high-variance mixed content "
+                "([%s] var=%d) → clamped %.1f→%.1f (UNDETERMINED territory)",
+                ",".join(str(s) for s in signal_scores), score_variance,
+                old_score, combined_ai_score
+            )
+        else:
+            log.info("Hybrid flag set but all clips agree (%s) — no clamping applied", signal_scores)
 
     combined_ai_score = max(0.0, min(100.0, combined_ai_score))
     authenticity = 100 - int(round(combined_ai_score))
