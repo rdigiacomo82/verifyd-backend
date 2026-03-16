@@ -44,6 +44,13 @@ mediapipe>=0.10.0
 librosa>=0.10.0
 soundfile>=0.12.0
 
+# DINOv2 ViT-Small feature-based detection (Engine 6)
+# 21.7M params, ~350MB RAM — loads once at worker startup
+# Used as tie-breaker for ambiguous signal scores (35-72 range)
+torch>=2.0.0
+torchvision>=0.15.0
+transformers>=4.40.0
+
 # C2PA content provenance verification (Engine 5)
 # Reads cryptographic content credentials from media files
 # Identifies AI generators (OpenAI, Adobe Firefly, Runway etc)
