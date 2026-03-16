@@ -322,14 +322,17 @@ def analyze_dinov2(video_path: str) -> Tuple[int, Dict]:
         # Real video: scene changes + noise → lower CLS consistency
         # AI video: generator produces consistent global features
         # across frames (same style, same rendering artifacts)
-        if cls_consistency > 0.92:
-            cc_score = 18
-        elif cls_consistency > 0.87:
-            cc_score = 12
-        elif cls_consistency > 0.82:
-            cc_score = 6
+        # CALIBRATION NOTE: Real static-subject videos (talking heads,
+        # single subjects) legitimately score 0.90-0.96 because the
+        # subject doesn't change. Only flag at very high thresholds.
+        if cls_consistency > 0.97:
+            cc_score = 15   # Near-perfect consistency → AI generator
+        elif cls_consistency > 0.95:
+            cc_score = 8    # Very high → suspicious but not definitive
+        elif cls_consistency > 0.93:
+            cc_score = 3    # Slightly elevated
         elif cls_consistency < 0.55:
-            cc_score = -5  # Real signal (lots of natural variation)
+            cc_score = -5   # Very low → lots of natural scene variation
         elif cls_consistency < 0.65:
             cc_score = -2
         else:

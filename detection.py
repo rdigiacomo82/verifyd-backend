@@ -571,13 +571,18 @@ def run_detection_multiclip(video_path: str) -> tuple:
                 if analyze_npr:
                     npr_score, npr_signals = analyze_npr(clip_path)
 
-                    # Detect social media compression via noise level
-                    # Low noise (<500) = heavily compressed, NPR less reliable
+                    # Detect social media compression via noise level + source
+                    # TikTok re-encoding creates trc artifacts (0.70+) on real videos
+                    # even when noise is high, so we also check the video source
                     noise_level = context.get("avg_noise", context.get("noise_laplacian", 1000))
                     codec = context.get("codec", "")
+                    _video_source = context.get("source", "")
+                    _is_social_source = any(s in _video_source.lower()
+                                            for s in ("tiktok", "smvd", "instagram", "youtube"))
                     is_social_compressed = (
-                        noise_level < 600 or          # Low noise = over-compressed
-                        "h264" in str(codec).lower()   # H.264 from social platforms
+                        noise_level < 600 or           # Low noise = over-compressed
+                        "h264" in str(codec).lower() or # H.264 from social platforms
+                        _is_social_source               # Known social platform re-encode
                     )
 
                     if is_social_compressed:
@@ -663,6 +668,23 @@ def run_detection_multiclip(video_path: str) -> tuple:
 
     signal_scores = [score for score, _, _ in valid]
     all_signal_contexts = [ctx for _, ctx, _ in valid]  # all clip contexts for reasoning
+
+    # Inject video source into all contexts so NPR compression guard can use it
+    # Source is read from the sidecar file written by the downloader
+    import os as _os
+    _sidecar = video_path.replace(".mp4", ".meta.json").replace(".MOV", ".meta.json")
+    _video_source = ""
+    if _os.path.exists(_sidecar):
+        try:
+            import json as _jsc
+            with open(_sidecar) as _sf:
+                _smeta = _jsc.load(_sf)
+            _video_source = _smeta.get("source", "")
+        except Exception:
+            pass
+    if _video_source:
+        for _ctx in all_signal_contexts:
+            _ctx["source"] = _video_source
 
     # Weighted average — weight by noise level (more noise = more real data)
     noise_weights = []
@@ -901,7 +923,6 @@ def run_detection_multiclip(video_path: str) -> tuple:
         "threshold_undet":    THRESHOLD_UNDETERMINED,
     }
     return authenticity, label, detail
-
 
 
 
