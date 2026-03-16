@@ -554,18 +554,60 @@ def run_detection_multiclip(video_path: str) -> tuple:
             score, context = detect_ai(clip_path)
 
             # NPR frequency domain analysis — runs alongside signal detector
+            # COMPRESSION GUARD: TikTok/Instagram/YouTube re-encode videos
+            # with H.264 DCT compression that creates grid and spectral artifacts
+            # identical to AI upsampling. NPR grid/slope signals are unreliable
+            # on socially-compressed video. Only temporal residual consistency
+            # and kurtosis are compression-resilient.
             try:
                 analyze_npr, get_npr_contribution = _get_npr_analyzer()
                 if analyze_npr:
                     npr_score, npr_signals = analyze_npr(clip_path)
-                    npr_contribution = get_npr_contribution(npr_score)
+
+                    # Detect social media compression via noise level
+                    # Low noise (<500) = heavily compressed, NPR less reliable
+                    noise_level = context.get("avg_noise", context.get("noise_laplacian", 1000))
+                    codec = context.get("codec", "")
+                    is_social_compressed = (
+                        noise_level < 600 or          # Low noise = over-compressed
+                        "h264" in str(codec).lower()   # H.264 from social platforms
+                    )
+
+                    if is_social_compressed:
+                        # Discount grid and slope signals — compression artifacts
+                        # Only use kurtosis and temporal residual consistency
+                        sig = npr_signals or {}
+                        trc_score = 0
+                        trc = sig.get("temporal_residual_consistency", 0) or 0
+                        if trc > 0.45: trc_score = 16
+                        elif trc > 0.30: trc_score = 10
+                        elif trc > 0.20: trc_score = 5
+                        elif trc < 0.03: trc_score = -4
+
+                        kurt_score = 0
+                        kurt = sig.get("residual_kurtosis", 3) or 3
+                        if kurt > 80: kurt_score = 20
+                        elif kurt > 50: kurt_score = 14
+                        elif kurt > 30: kurt_score = 8
+
+                        # Compressed NPR score — only reliable signals
+                        npr_score_adj = max(0, min(100, trc_score + kurt_score))
+                        npr_contribution = get_npr_contribution(npr_score_adj)
+                        log.info("NPR @%.0f%% (compressed): raw=%d adj=%d trc=%.3f kurt=%.1f contribution=%+d",
+                                 offset_pct * 100, npr_score, npr_score_adj, trc, kurt, npr_contribution)
+                        npr_score = npr_score_adj
+                    else:
+                        npr_contribution = get_npr_contribution(npr_score)
+                        if npr_contribution != 0:
+                            log.info("NPR @%.0f%%: score=%d contribution=%+d",
+                                     offset_pct * 100, npr_score, npr_contribution)
+
                     context["npr_score"] = npr_score
                     context["npr_signals"] = npr_signals
                     context["npr_contribution"] = npr_contribution
+
+                    # Blend NPR into signal score conservatively
                     if npr_contribution != 0:
-                        log.info("NPR @%.0f%%: score=%d contribution=%+d",
-                                 offset_pct * 100, npr_score, npr_contribution)
-                        # Blend NPR into signal score conservatively
                         score = int(round(min(100, max(0, score + npr_contribution))))
             except Exception as e:
                 log.debug("NPR analysis skipped for clip @%.0f%%: %s", offset_pct * 100, e)

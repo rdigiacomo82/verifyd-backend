@@ -186,14 +186,32 @@ def _analyze_spectral_slope(frames: List[np.ndarray]) -> Tuple[float, int]:
             if mask.sum() > 0:
                 radial_mean[i] = power[mask].mean()
 
-        # Fit log-log slope (skip DC component)
-        valid = radial_mean[2:r_max] > 0
-        if valid.sum() < 5:
+        # Fit log-log slope using raw power (not log1p)
+        # Expected: real images follow ~1/f^2 so slope ~ -2.0
+        # Use raw power spectrum for correct scaling
+        fft2 = np.fft.fft2(frame)
+        fft2_shift = np.fft.fftshift(fft2)
+        power_raw = np.abs(fft2_shift) ** 2
+
+        h2, w2 = power_raw.shape
+        cy2, cx2 = h2 // 2, w2 // 2
+        y2, x2 = np.ogrid[:h2, :w2]
+        r2 = np.sqrt((x2 - cx2)**2 + (y2 - cy2)**2).astype(int)
+        r_max2 = min(cx2, cy2)
+
+        radial2 = np.zeros(r_max2)
+        for i in range(r_max2):
+            mask2 = (r2 == i)
+            if mask2.sum() > 0:
+                radial2[i] = power_raw[mask2].mean()
+
+        valid2 = radial2[2:r_max2] > 0
+        if valid2.sum() < 5:
             continue
-        x = np.log(np.arange(2, r_max)[valid])
-        y = np.log(radial_mean[2:r_max][valid])
-        if len(x) > 1:
-            slope = np.polyfit(x, y, 1)[0]
+        x_log = np.log(np.arange(2, r_max2)[valid2] + 1e-8)
+        y_log = np.log(radial2[2:r_max2][valid2] + 1e-8)
+        if len(x_log) > 1:
+            slope = np.polyfit(x_log, y_log, 1)[0]
             slopes.append(slope)
 
     if not slopes:
@@ -201,20 +219,19 @@ def _analyze_spectral_slope(frames: List[np.ndarray]) -> Tuple[float, int]:
 
     avg_slope = float(np.mean(slopes))
 
-    # Score based on deviation from expected real camera slope
-    # Real: -2.0 to -2.5
-    # AI upsampled: -1.0 to -1.8 (too flat = too much HF energy)
-    # AI over-smoothed: < -2.8
+    # Score based on deviation from expected real camera slope (~-2.0)
+    # AI upsampled: slope > -1.5 (too flat = too much HF energy)
+    # AI over-smoothed: slope < -3.5
     score = 0
-    if avg_slope > -1.5:
-        score = 15   # Very flat — strong upsampling artifact
-    elif avg_slope > -1.8:
+    if avg_slope > -1.0:
+        score = 15
+    elif avg_slope > -1.5:
         score = 10
-    elif avg_slope > -2.0:
+    elif avg_slope > -1.8:
         score = 5
-    elif avg_slope < -3.0:
-        score = 8    # Over-smoothed — diffusion artifact
-    elif avg_slope < -2.8:
+    elif avg_slope < -4.0:
+        score = 8    # Over-smoothed
+    elif avg_slope < -3.5:
         score = 4
 
     return avg_slope, score
