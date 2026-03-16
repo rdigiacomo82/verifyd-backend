@@ -22,6 +22,21 @@ from gpt_vision  import gpt_vision_score_with_context, extract_key_frames
 
 log = logging.getLogger("verifyd.detection")
 
+# New detection engines — imported lazily to avoid startup failures
+def _get_c2pa_checker():
+    try:
+        from c2pa_checker import check_c2pa
+        return check_c2pa
+    except Exception:
+        return None
+
+def _get_npr_analyzer():
+    try:
+        from npr_detector import analyze_npr, get_npr_contribution
+        return analyze_npr, get_npr_contribution
+    except Exception:
+        return None, None
+
 THRESHOLD_REAL         = 55
 THRESHOLD_UNDETERMINED = 40
 
@@ -115,6 +130,24 @@ def _check_metadata_override(video_path: str) -> tuple:
 
     except Exception as e:
         log.warning("METADATA: ffprobe error: %s", e)
+
+    # 3. C2PA provenance check — cryptographic content credentials
+    try:
+        check_c2pa = _get_c2pa_checker()
+        if check_c2pa:
+            c2pa_delta, c2pa_label, c2pa_detail = check_c2pa(video_path)
+            if c2pa_delta >= 45:
+                # Strong AI credential — treat as override
+                reason = f"C2PA manifest identifies AI generator: {c2pa_detail.get('generator', c2pa_label)}"
+                log.info("METADATA_OVERRIDE: C2PA AI generator → +%d → AI", c2pa_delta)
+                return True, min(97, 50 + c2pa_delta), "AI", reason
+            elif c2pa_delta <= -20:
+                # Strong real camera credential — treat as override
+                reason = f"C2PA manifest from verified real camera: {c2pa_detail.get('generator', c2pa_label)}"
+                log.info("METADATA_OVERRIDE: C2PA real camera → %d → REAL", c2pa_delta)
+                return True, max(3, 15 + c2pa_delta), "REAL", reason
+    except Exception as e:
+        log.warning("METADATA: C2PA check error: %s", e)
 
     return False, 0, "", ""
 
@@ -519,6 +552,24 @@ def run_detection_multiclip(video_path: str) -> tuple:
         clip_path, offset_pct = clip_path_offset
         try:
             score, context = detect_ai(clip_path)
+
+            # NPR frequency domain analysis — runs alongside signal detector
+            try:
+                analyze_npr, get_npr_contribution = _get_npr_analyzer()
+                if analyze_npr:
+                    npr_score, npr_signals = analyze_npr(clip_path)
+                    npr_contribution = get_npr_contribution(npr_score)
+                    context["npr_score"] = npr_score
+                    context["npr_signals"] = npr_signals
+                    context["npr_contribution"] = npr_contribution
+                    if npr_contribution != 0:
+                        log.info("NPR @%.0f%%: score=%d contribution=%+d",
+                                 offset_pct * 100, npr_score, npr_contribution)
+                        # Blend NPR into signal score conservatively
+                        score = int(round(min(100, max(0, score + npr_contribution))))
+            except Exception as e:
+                log.debug("NPR analysis skipped for clip @%.0f%%: %s", offset_pct * 100, e)
+
             log.info("Clip @%.0f%%: signal_score=%d content=%s",
                      offset_pct * 100, score, context.get("content_type", "?"))
             return score, context, offset_pct

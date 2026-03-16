@@ -36,12 +36,18 @@ rq>=1.16.0
 # PostgreSQL
 psycopg2-binary>=2.9.0
 
-# Signal processing (rPPG bandpass filter, FFT, peak detection)
+# rPPG biological signal engine (Engine 5)
 scipy>=1.11.0
-
-# Face detection / landmark tracking (rPPG engine — falls back to Haar if unavailable)
 mediapipe>=0.10.0
 
-# Audio analysis (audio_detector.py)
+# Audio analysis engine (Engine 4)
 librosa>=0.10.0
 soundfile>=0.12.0
+
+# C2PA content provenance verification (Engine 5)
+# Reads cryptographic content credentials from media files
+# Identifies AI generators (OpenAI, Adobe Firefly, Runway etc)
+# and real cameras (Sony, Leica, Google Pixel, Samsung S25)
+c2pa-python>=0.28.0
+
+# NPR frequency analysis uses existing numpy/scipy — no new deps needed
