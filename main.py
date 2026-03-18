@@ -342,57 +342,42 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
         }, status_code=402)
 
     # ── Plan-based file size limit ───────────────────────────
-    # Check Content-Length header first (fast path — no disk write needed)
-    # Free: 50MB | Creator: 150MB | Pro: 500MB | Enterprise: 2GB
-    PLAN_SIZE_LIMITS = {
-        "free":       50  * 1024 * 1024,   # 50MB
-        "creator":   150  * 1024 * 1024,   # 150MB
-        "pro":       500  * 1024 * 1024,   # 500MB
-        "enterprise": 2048 * 1024 * 1024,  # 2GB
-    }
-    user_plan      = status["plan"]
-    max_bytes      = PLAN_SIZE_LIMITS.get(user_plan, PLAN_SIZE_LIMITS["free"])
-    max_mb         = max_bytes // (1024 * 1024)
+    # Enterprise widget always gets 2GB limit
+    max_bytes = 2048 * 1024 * 1024  # 2GB for enterprise
+    max_mb    = 2048
 
     # Check Content-Length header if present (avoids reading entire file)
-    content_length = file.size  # FastAPI sets this from Content-Length header
+    content_length = file.size
     if content_length and content_length > max_bytes:
-        plan_label = {"free": "Free", "creator": "Creator",
-                      "pro": "Pro", "enterprise": "Enterprise"}.get(user_plan, user_plan.title())
         return JSONResponse({
-            "error":    "file_too_large",
-            "message":  f"File exceeds the {max_mb}MB limit for your {plan_label} plan.",
-            "max_mb":   max_mb,
-            "plan":     user_plan,
+            "error":   "file_too_large",
+            "message": f"File exceeds the {max_mb}MB enterprise limit.",
+            "max_mb":  max_mb,
         }, status_code=413)
 
     # ── Save file to disk then enqueue ────────────────────────
     job_id   = str(uuid.uuid4())
     raw_path = f"{UPLOAD_DIR}/{job_id}_{file.filename}"
 
-    # Stream to disk while enforcing size limit
+    # Stream to disk
     bytes_written = 0
     with open(raw_path, "wb") as f:
-        while chunk := await file.read(1024 * 1024):  # 1MB chunks
+        while chunk := await file.read(1024 * 1024):
             bytes_written += len(chunk)
             if bytes_written > max_bytes:
-                # Exceeded limit mid-stream — delete partial file and reject
                 try:
                     os.remove(raw_path)
                 except Exception:
                     pass
-                plan_label = {"free": "Free", "creator": "Creator",
-                              "pro": "Pro", "enterprise": "Enterprise"}.get(user_plan, user_plan.title())
                 return JSONResponse({
                     "error":   "file_too_large",
-                    "message": f"File exceeds the {max_mb}MB limit for your {plan_label} plan.",
+                    "message": f"File exceeds the {max_mb}MB enterprise limit.",
                     "max_mb":  max_mb,
-                    "plan":    user_plan,
                 }, status_code=413)
             f.write(chunk)
 
-    log.info("upload: saved %dMB file for %s (plan=%s limit=%dMB)",
-             bytes_written // (1024*1024), email, user_plan, max_mb)
+    log.info("widget-upload: saved %dMB file for key %s...",
+             bytes_written // (1024*1024), key[:20])
 
     try:
         enqueue_upload(job_id, raw_path, file.filename, email)
@@ -2274,57 +2259,42 @@ async def widget_upload(
         return JSONResponse({"error": "Invalid or inactive API key."}, status_code=401)
 
     # ── Plan-based file size limit ───────────────────────────
-    # Check Content-Length header first (fast path — no disk write needed)
-    # Free: 50MB | Creator: 150MB | Pro: 500MB | Enterprise: 2GB
-    PLAN_SIZE_LIMITS = {
-        "free":       50  * 1024 * 1024,   # 50MB
-        "creator":   150  * 1024 * 1024,   # 150MB
-        "pro":       500  * 1024 * 1024,   # 500MB
-        "enterprise": 2048 * 1024 * 1024,  # 2GB
-    }
-    user_plan      = status["plan"]
-    max_bytes      = PLAN_SIZE_LIMITS.get(user_plan, PLAN_SIZE_LIMITS["free"])
-    max_mb         = max_bytes // (1024 * 1024)
+    # Enterprise widget always gets 2GB limit
+    max_bytes = 2048 * 1024 * 1024  # 2GB for enterprise
+    max_mb    = 2048
 
     # Check Content-Length header if present (avoids reading entire file)
-    content_length = file.size  # FastAPI sets this from Content-Length header
+    content_length = file.size
     if content_length and content_length > max_bytes:
-        plan_label = {"free": "Free", "creator": "Creator",
-                      "pro": "Pro", "enterprise": "Enterprise"}.get(user_plan, user_plan.title())
         return JSONResponse({
-            "error":    "file_too_large",
-            "message":  f"File exceeds the {max_mb}MB limit for your {plan_label} plan.",
-            "max_mb":   max_mb,
-            "plan":     user_plan,
+            "error":   "file_too_large",
+            "message": f"File exceeds the {max_mb}MB enterprise limit.",
+            "max_mb":  max_mb,
         }, status_code=413)
 
     # ── Save file to disk then enqueue ────────────────────────
     job_id   = str(uuid.uuid4())
     raw_path = f"{UPLOAD_DIR}/{job_id}_{file.filename}"
 
-    # Stream to disk while enforcing size limit
+    # Stream to disk
     bytes_written = 0
     with open(raw_path, "wb") as f:
-        while chunk := await file.read(1024 * 1024):  # 1MB chunks
+        while chunk := await file.read(1024 * 1024):
             bytes_written += len(chunk)
             if bytes_written > max_bytes:
-                # Exceeded limit mid-stream — delete partial file and reject
                 try:
                     os.remove(raw_path)
                 except Exception:
                     pass
-                plan_label = {"free": "Free", "creator": "Creator",
-                              "pro": "Pro", "enterprise": "Enterprise"}.get(user_plan, user_plan.title())
                 return JSONResponse({
                     "error":   "file_too_large",
-                    "message": f"File exceeds the {max_mb}MB limit for your {plan_label} plan.",
+                    "message": f"File exceeds the {max_mb}MB enterprise limit.",
                     "max_mb":  max_mb,
-                    "plan":    user_plan,
                 }, status_code=413)
             f.write(chunk)
 
-    log.info("upload: saved %dMB file for %s (plan=%s limit=%dMB)",
-             bytes_written // (1024*1024), email, user_plan, max_mb)
+    log.info("widget-upload: saved %dMB file for key %s...",
+             bytes_written // (1024*1024), key[:20])
 
     # Use a synthetic enterprise email for tracking
     tracking_email = f"widget_{key[-12:]}@verifyd-enterprise.com"
@@ -2378,6 +2348,7 @@ async def widget_upload(
             return JSONResponse({"error": safe_error}, status_code=500)
 
     return JSONResponse({"error": "Analysis timed out. Please try again."}, status_code=504)
+
 
 
 
