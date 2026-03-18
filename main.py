@@ -1253,38 +1253,34 @@ def admin_data(key: str = ""):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 
     try:
-        import sqlite3
-        db_path = "/data/verifyd.db" if os.path.isdir("/data") else "verifyd.db"
-        conn = sqlite3.connect(db_path)
-        conn.row_factory = sqlite3.Row
-        cur = conn.cursor()
-
-        # Get all users
-        cur.execute("""
-            SELECT email, plan, total_uses, period_uses, period_start, created_at, last_seen
-            FROM users
-            ORDER BY created_at DESC
-        """)
-        users = [dict(row) for row in cur.fetchall()]
+        from database import get_db
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT email, plan, total_uses, period_uses, period_start, created_at, last_seen
+                FROM users
+                ORDER BY created_at DESC
+            """)
+            users = [dict(row) for row in cur.fetchall()]
 
         # Summary stats
-        total_users   = len(users)
-        free_users    = sum(1 for u in users if u["plan"] == "free")
-        creator_users = sum(1 for u in users if u["plan"] == "creator")
-        pro_users     = sum(1 for u in users if u["plan"] == "pro")
+        total_users     = len(users)
+        free_users      = sum(1 for u in users if u["plan"] == "free")
+        creator_users   = sum(1 for u in users if u["plan"] == "creator")
+        pro_users       = sum(1 for u in users if u["plan"] == "pro")
+        enterprise_users = sum(1 for u in users if u["plan"] == "enterprise")
         total_analyses  = sum(u["total_uses"] for u in users)
         monthly_revenue = (creator_users * 19) + (pro_users * 39)
 
-        conn.close()
-
         return {
             "summary": {
-                "total_users": total_users,
-                "free_users": free_users,
-                "creator_users": creator_users,
-                "pro_users": pro_users,
-                "total_analyses": total_analyses,
-                "monthly_revenue": monthly_revenue,
+                "total_users":      total_users,
+                "free_users":       free_users,
+                "creator_users":    creator_users,
+                "pro_users":        pro_users,
+                "enterprise_users": enterprise_users,
+                "total_analyses":   total_analyses,
+                "monthly_revenue":  monthly_revenue,
             },
             "users": users
         }
@@ -1339,18 +1335,14 @@ def admin_delete_user(email: str = "", key: str = ""):
     if not email:
         return JSONResponse({"error": "email required"}, status_code=400)
     try:
-        import sqlite3
-        db_path = "/data/verifyd.db" if os.path.isdir("/data") else "verifyd.db"
-        conn = sqlite3.connect(db_path)
-        cur = conn.cursor()
+        from database import get_db
         email_lower = email.strip().lower()
-        # Delete from users table
-        cur.execute("DELETE FROM users WHERE email_lower = ?", (email_lower,))
-        # Delete any OTP records
-        cur.execute("DELETE FROM email_otp WHERE email_lower = ?", (email_lower,))
-        deleted = cur.rowcount
-        conn.commit()
-        conn.close()
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("DELETE FROM users WHERE email_lower = %s", (email_lower,))
+            deleted = cur.rowcount
+            cur.execute("DELETE FROM email_otp WHERE email_lower = %s", (email_lower,))
+            conn.commit()
         log.info("Admin deleted user: %s", email_lower)
         return JSONResponse({
             "status": "deleted",
