@@ -241,6 +241,20 @@ def _verify_email_deliverable(email: str) -> tuple:
     if email_lower in _email_cache:
         return _email_cache[email_lower]
 
+    # Whitelist major trusted email providers — never block these
+    # Gmail plus addresses (user+tag@gmail.com) are also covered by gmail.com domain
+    TRUSTED_DOMAINS = {
+        "gmail.com", "yahoo.com", "yahoo.co.uk", "yahoo.ca",
+        "outlook.com", "hotmail.com", "hotmail.co.uk",
+        "icloud.com", "me.com", "mac.com",
+        "protonmail.com", "proton.me",
+        "aol.com", "msn.com", "live.com",
+    }
+    domain = email_lower.split("@")[-1] if "@" in email_lower else ""
+    if domain in TRUSTED_DOMAINS:
+        log.info("Email deliverability: %s → trusted domain, skipping API check", email_lower)
+        return True, "trusted_domain"
+
     # No API key — skip verification
     if not _ABSTRACT_KEY:
         log.warning("ABSTRACT_EMAIL_KEY not set — skipping deliverability check")
