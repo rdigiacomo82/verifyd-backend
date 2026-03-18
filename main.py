@@ -1328,6 +1328,40 @@ def debug_db():
         return {"error": str(e)}
 
 
+@app.get("/admin-delete-user/")
+def admin_delete_user(email: str = "", key: str = ""):
+    """
+    Permanently delete a user from the database.
+    Used for testing — removes all traces of the user so they can re-register fresh.
+    """
+    if not _is_admin(key):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    if not email:
+        return JSONResponse({"error": "email required"}, status_code=400)
+    try:
+        import sqlite3
+        db_path = "/data/verifyd.db" if os.path.isdir("/data") else "verifyd.db"
+        conn = sqlite3.connect(db_path)
+        cur = conn.cursor()
+        email_lower = email.strip().lower()
+        # Delete from users table
+        cur.execute("DELETE FROM users WHERE email_lower = ?", (email_lower,))
+        # Delete any OTP records
+        cur.execute("DELETE FROM email_otp WHERE email_lower = ?", (email_lower,))
+        deleted = cur.rowcount
+        conn.commit()
+        conn.close()
+        log.info("Admin deleted user: %s", email_lower)
+        return JSONResponse({
+            "status": "deleted",
+            "email": email_lower,
+            "rows_affected": deleted
+        })
+    except Exception as e:
+        log.error("Admin delete user error: %s", e)
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 @app.get("/admin-reset-user/")
 def admin_reset_user(email: str = "", key: str = ""):
     """Reset a user's period_uses to 0 for testing."""
