@@ -348,24 +348,33 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
         }, status_code=402)
 
     # ── Plan-based file size limit ───────────────────────────
-    # Enterprise widget always gets 2GB limit
-    max_bytes = 2048 * 1024 * 1024  # 2GB for enterprise
-    max_mb    = 2048
+    PLAN_SIZE_LIMITS = {
+        "free":        50 * 1024 * 1024,
+        "creator":    150 * 1024 * 1024,
+        "pro":        500 * 1024 * 1024,
+        "enterprise": 2048 * 1024 * 1024,
+    }
+    user_plan  = status["plan"]
+    max_bytes  = PLAN_SIZE_LIMITS.get(user_plan, PLAN_SIZE_LIMITS["free"])
+    max_mb     = max_bytes // (1024 * 1024)
+    plan_label = {"free": "Free", "creator": "Creator",
+                  "pro": "Pro", "enterprise": "Enterprise"}.get(user_plan, user_plan.title())
 
-    # Check Content-Length header if present (avoids reading entire file)
+    # Check Content-Length header if present (fast path)
     content_length = file.size
     if content_length and content_length > max_bytes:
         return JSONResponse({
             "error":   "file_too_large",
-            "message": f"File exceeds the {max_mb}MB enterprise limit.",
+            "message": f"File exceeds the {max_mb}MB limit for your {plan_label} plan.",
             "max_mb":  max_mb,
+            "plan":    user_plan,
         }, status_code=413)
 
     # ── Save file to disk then enqueue ────────────────────────
     job_id   = str(uuid.uuid4())
     raw_path = f"{UPLOAD_DIR}/{job_id}_{file.filename}"
 
-    # Stream to disk
+    # Stream to disk while enforcing size limit
     bytes_written = 0
     with open(raw_path, "wb") as f:
         while chunk := await file.read(1024 * 1024):
@@ -377,8 +386,9 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
                     pass
                 return JSONResponse({
                     "error":   "file_too_large",
-                    "message": f"File exceeds the {max_mb}MB enterprise limit.",
+                    "message": f"File exceeds the {max_mb}MB limit for your {plan_label} plan.",
                     "max_mb":  max_mb,
+                    "plan":    user_plan,
                 }, status_code=413)
             f.write(chunk)
 
