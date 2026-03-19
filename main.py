@@ -382,8 +382,8 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
                 }, status_code=413)
             f.write(chunk)
 
-    log.info("widget-upload: saved %dMB file for key %s...",
-             bytes_written // (1024*1024), key[:20])
+    log.info("upload: saved %dMB file for %s (plan=%s limit=%dMB)",
+             bytes_written // (1024*1024), email, user_plan, max_mb)
 
     try:
         enqueue_upload(job_id, raw_path, file.filename, email)
