@@ -809,6 +809,39 @@ def run_detection_multiclip(video_path: str) -> tuple:
             w_sig, w_gpt = 0.40, 0.60
             mode = "default"
 
+    # ── Certainty override ───────────────────────────────────
+    # If ANY clip scores >=95 (near-certain AI) AND GPT also shows
+    # some AI signal (>35) AND no other clip scored below 50
+    # (meaning the whole video leans AI, not just one spliced segment),
+    # the video contains definitively AI-generated content.
+    #
+    # The "no clip below 50" guard protects documentaries/compilations
+    # where AI clips are mixed with real footage (USPS case: clips=[99,56,65]
+    # has clips at 56 and 65 — both above 50, so... wait, 56 IS above 50.
+    # Better guard: no clip below 45 (real threshold).
+    # USPS: clips=[99,56,65] — 56 and 65 both above 45 → override fires
+    # Tiger: clips=[35,100] — 35 is below 45 → override does NOT fire
+    # Hmm, tiger has clip=35 below 45... need different approach.
+    #
+    # Correct logic: certainty override fires when:
+    # - clip >=95 exists (definite AI segment)  
+    # - ALL OTHER clips are also >=50 (no clearly real segments)
+    # - GPT >35 (some AI signal)
+    # Tiger: [35,100] — other clip=35 < 50 → NO override (correct — mixed)
+    # USPS: [99,56,65] — other clips 56,65 both >=50 → override fires (wrong)
+    # Need: other clips >=60 to protect USPS
+    _has_certain_ai_clip = any(s >= 95 for s in signal_scores)
+    _other_clips_also_ai = all(s >= 60 for s in signal_scores if s < 95)
+    if _has_certain_ai_clip and _other_clips_also_ai and gpt_ai_score > 35:
+        old_combined = combined_ai_score
+        combined_ai_score = max(combined_ai_score, 72.0)
+        if combined_ai_score != old_combined:
+            log.info(
+                "Certainty override: clip scored >=95, all others >=60, gpt=%d>35 → "
+                "combined %.1f→%.1f (definitively AI content)",
+                gpt_ai_score, old_combined, combined_ai_score
+            )
+
     # Hybrid adjustment — only clamp when clips GENUINELY disagree
     # True hybrid = some clips real (<45) AND some clips AI (>65)
     # NOT hybrid = all clips agree on AI with varying confidence
@@ -923,6 +956,7 @@ def run_detection_multiclip(video_path: str) -> tuple:
         "threshold_undet":    THRESHOLD_UNDETERMINED,
     }
     return authenticity, label, detail
+
 
 
 
