@@ -358,6 +358,38 @@ REAL videos. Score dimensions on the underlying content — not on compression q
           HeyGen/D-ID: talking-head with slightly too-smooth skin and perfect eye contact.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ AUDIO-VISUAL MANIPULATION FLAGS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Even when video frames appear real, look for signs of AUDIO or NARRATIVE manipulation:
+
+LIP-SYNC MISMATCH
+  - If you see a person speaking, do their lip movements match the expected
+    cadence and mouth shapes for the audio that would accompany this content?
+  - Obvious mismatch (mouth barely moving during fast speech, or mouth moving
+    when no speech would occur) = dubbing/voice replacement indicator.
+  - Score GENERATOR_ARTIFACTS higher (6-8) if clear lip-sync mismatch is visible.
+
+COMPILED PROPAGANDA
+  - Multiple rapid scene cuts between unrelated clips (news footage + crowd footage
+    + close-up faces) with no clear narrative continuity = compiled manipulation.
+  - Real documentary footage has logical scene progression.
+  - Abrupt cuts between very different settings/lighting/camera quality = stitched content.
+
+TITLE CARDS / GRAPHIC OVERLAYS
+  - Sudden shift to solid-color frames with text at end of video = added propaganda title.
+  - Overlaid text in a language different from the video's apparent origin country.
+  - Score TEXT_OBJECTS higher if text overlays appear inconsistent with the video's source.
+
+DEEPFAKE VOICE-OVER INDICATORS (visible in frames)
+  - Person speaking but facial expression doesn't match emotional content of speech.
+  - Neutral/calm facial expression during what appears to be dramatic/urgent speech.
+  - Eyes looking away from camera while appearing to address the viewer directly.
+
+Note: These are MANIPULATION indicators, not necessarily AI GENERATION indicators.
+Flag them in top_flags and reasoning even if individual frames look visually real.
+Add "audio_visual_manipulation" to top_flags if you detect any of the above.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 Respond ONLY with this exact JSON — no markdown, no preamble, no extra text:
 {
@@ -377,7 +409,7 @@ Respond ONLY with this exact JSON — no markdown, no preamble, no extra text:
   },
   "reasoning": "<2-3 sentence explanation written for a general audience — be specific about what you actually observed in these frames, reference the content type, mention specific visual evidence. Do NOT use generic phrases like 'the video appears to be' or 'analysis suggests'. Instead write exactly what you saw: e.g. 'This wildlife footage shows a moose moving with unnaturally smooth locomotion — no ground impact, floating gait, and fur texture that lacks the micro-variation of real animal coats. The background vegetation appears rendered rather than photographed.' For REAL videos: mention specific real-camera characteristics you observed. For AI: name the specific artifacts. For mixed/uncertain: explain the contradiction you see.>",
   "top_flags": ["<most significant finding>", "<second finding>", "<third finding>"],
-  "generator_guess": "<Sora | Kling | Runway | Pika | HeyGen | Unknown-AI | Real>"
+  "generator_guess": "<Sora | Kling | Runway | Pika | HeyGen | Unknown-AI | Manipulated | Real>"
 }
 """
 
@@ -512,6 +544,21 @@ def analyze_frames_with_gpt(frames_b64: list, physics_summary: str = "",
         reasoning       = str(result.get("reasoning", ""))[:500]
         top_flags       = [str(f)[:150] for f in result.get("top_flags", [])][:5]
         generator_guess = str(result.get("generator_guess", "Unknown"))[:50]
+
+        # Audio-visual manipulation boost
+        # If GPT flagged manipulation signals, push score toward AI range
+        # These are real manipulation indicators even if frames look visually real
+        _manipulation_flags = [f for f in top_flags
+                                if any(kw in f.lower() for kw in
+                                       ("audio_visual_manipulation", "lip-sync", "lipsync",
+                                        "dubbed", "dubbing", "compiled propaganda",
+                                        "voice replacement", "title card"))]
+        if _manipulation_flags or generator_guess == "Manipulated":
+            old_prob = ai_prob
+            ai_prob = max(ai_prob, 55)  # Push into UNDETERMINED minimum
+            if ai_prob != old_prob:
+                log.info("gpt_vision: manipulation flag boost %d→%d flags=%s",
+                         old_prob, ai_prob, _manipulation_flags)
 
         log.info(
             "gpt_vision: ai_prob=%d  content=%s  generator=%s  scores=%s",
