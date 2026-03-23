@@ -1208,10 +1208,10 @@ def detect_ai(video_path: str) -> int:
         and skin_ratio < 0.50           # guard: >0.50 = likely animal fur false positive
                                         # (bunny/dog fur hits HSV skin range at 0.50-0.70)
                                         # Real human talking-head skin ratios: 0.05-0.45
-        and edge_mvar < 0.06            # guard: outdoor/action scenes have high edge movement
-                                        # Real talking heads: camera fixed on face → edge_mvar < 0.04
-                                        # Outdoor animal/action scenes: edge_mvar 0.04-0.15
-                                        # Tiger video: edge_mvar=0.041 → now excluded correctly
+        and edge_mean_var < 0.06       # guard: outdoor/action scenes have high edge movement
+                                        # Real talking heads: camera fixed on face → edge_mean_var < 0.04
+                                        # Outdoor animal/action scenes: edge_mean_var 0.04-0.15
+                                        # Tiger video: edge_mean_var=0.041 → now excluded correctly
     )
 
     # ── Single-subject landscape person detection (v10) ─────────
