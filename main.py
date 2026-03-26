@@ -545,8 +545,7 @@ def download(cid: str):
     try:
         from storage import get_download_url, certified_exists, r2_available
         if r2_available() and certified_exists(cid):
-            url = get_download_url(f"certified/{cid}.mp4")
-            # If public URL, redirect directly (fast, no bandwidth cost on API)
+            url = get_download_url(cid)
             return RedirectResponse(url=url, status_code=302)
     except Exception as e:
         log.warning("R2 download lookup failed for %s: %s", cid, e)
@@ -632,7 +631,7 @@ def pro_download(cid: str, email: str = ""):
     try:
         from storage import get_download_url, certified_exists, r2_available
         if r2_available() and certified_exists(cid):
-            url = get_download_url(f"certified/{cid}.mp4")
+            url = get_download_url(cid)
             return RedirectResponse(url=url, status_code=302)
     except Exception as e:
         log.warning("R2 pro-download lookup failed for %s: %s", cid, e)

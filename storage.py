@@ -93,28 +93,46 @@ def delete_video(key: str) -> None:
         log.warning("storage: delete failed for %s: %s", key, e)
 
 # ── Upload certified video ────────────────────────────────────
+# Plan-based retention in days
+CERT_RETENTION_DAYS = {
+    "free":       1,    # 24 hours
+    "creator":    3,    # 72 hours
+    "pro":        7,    # 7 days
+    "enterprise": 30,   # 30 days
+}
+
 def upload_certified(job_id: str, cert_path: str, plan: str = "free") -> str:
     """
     Upload a certified (stamped) video to R2.
+    Tags with plan so Cloudflare lifecycle rules can expire by tier.
     Returns the R2 object key.
     """
-    key = f"certified/{job_id}.mp4"
+    key = f"certified/{plan}/{job_id}.mp4"
     client = _get_client()
     client.upload_file(
         cert_path,
         BUCKET,
         key,
-        ExtraArgs={"ContentType": "video/mp4"},
+        ExtraArgs={
+            "ContentType": "video/mp4",
+            "Metadata": {
+                "plan":   plan,
+                "job_id": job_id,
+            },
+        },
     )
-    log.info("storage: uploaded certified video → r2://%s/%s", BUCKET, key)
+    log.info("storage: uploaded certified video → r2://%s/%s (plan=%s)", BUCKET, key, plan)
     return key
 
 # ── Generate presigned download URL ──────────────────────────
-def get_download_url(key: str, expires: int = CERT_URL_TTL) -> str:
+def get_download_url(job_id: str, expires: int = CERT_URL_TTL) -> str:
     """
     Generate a presigned URL for downloading a certified video.
+    Finds the correct key across plan subfolders.
     If R2_PUBLIC_URL is set, returns a direct public URL instead.
     """
+    key = get_certified_key(job_id)
+
     if PUBLIC_URL:
         return f"{PUBLIC_URL.rstrip('/')}/{key}"
 
@@ -128,13 +146,28 @@ def get_download_url(key: str, expires: int = CERT_URL_TTL) -> str:
 
 # ── Check if certified video exists ──────────────────────────
 def certified_exists(job_id: str) -> bool:
-    """Check whether a certified video exists in R2."""
-    try:
-        client = _get_client()
-        client.head_object(Bucket=BUCKET, Key=f"certified/{job_id}.mp4")
-        return True
-    except Exception:
-        return False
+    """Check whether a certified video exists in R2 (any plan subfolder)."""
+    client = _get_client()
+    for plan in ["free", "creator", "pro", "enterprise"]:
+        try:
+            client.head_object(Bucket=BUCKET, Key=f"certified/{plan}/{job_id}.mp4")
+            return True
+        except Exception:
+            continue
+    return False
+
+
+def get_certified_key(job_id: str) -> str:
+    """Find the R2 key for a certified video across plan subfolders."""
+    client = _get_client()
+    for plan in ["free", "creator", "pro", "enterprise"]:
+        key = f"certified/{plan}/{job_id}.mp4"
+        try:
+            client.head_object(Bucket=BUCKET, Key=key)
+            return key
+        except Exception:
+            continue
+    return f"certified/free/{job_id}.mp4"  # fallback
 
 # ── Convenience: is R2 available? ────────────────────────────
 def r2_available() -> bool:
