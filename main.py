@@ -534,23 +534,33 @@ def share_video(cid: str):
 
 @app.get("/download/{cid}")
 def download(cid: str):
-    """Serve certified video stored in Redis by the worker.
-    Uses StreamingResponse with Content-Disposition: inline so mobile
-    browsers play the video directly rather than triggering a download."""
-    import redis as _redis
-    from fastapi.responses import StreamingResponse
+    """Serve certified video — checks R2 first, falls back to Redis."""
+    from fastapi.responses import RedirectResponse, StreamingResponse
     import io
-    redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379")
+
+    increment_downloads(cid)
+    fname = f"VeriFYD_Certified_{cid[:8]}.mp4"
+
+    # ── Try R2 first ──────────────────────────────────────────
     try:
-        r = _redis.from_url(redis_url, decode_responses=False)
+        from storage import get_download_url, certified_exists, r2_available
+        if r2_available() and certified_exists(cid):
+            url = get_download_url(f"certified/{cid}.mp4")
+            # If public URL, redirect directly (fast, no bandwidth cost on API)
+            return RedirectResponse(url=url, status_code=302)
+    except Exception as e:
+        log.warning("R2 download lookup failed for %s: %s", cid, e)
+
+    # ── Redis fallback (original behaviour) ───────────────────
+    import redis as _redis
+    try:
+        r = _redis.from_url(os.environ.get("REDIS_URL", "redis://localhost:6379"), decode_responses=False)
         cert_bytes = r.get(f"cert:{cid}")
     except Exception as e:
         log.error("Redis error in /download/%s: %s", cid, e)
         cert_bytes = None
     if not cert_bytes:
-        return JSONResponse({"error": "Certificate not found or expired. Videos are available for 1 hour after verification."}, status_code=404)
-    increment_downloads(cid)
-    fname = f"VeriFYD_Certified_{cid[:8]}.mp4"
+        return JSONResponse({"error": "Certificate not found or expired. Please re-verify your video."}, status_code=404)
     return StreamingResponse(
         io.BytesIO(cert_bytes),
         media_type="video/mp4",
@@ -569,13 +579,21 @@ def certificate_lookup(cid: str):
     cert = get_certificate(cid)
     if not cert:
         return JSONResponse({"error": "Certificate not found"}, status_code=404)
-    # Check Redis for video availability (worker stores certified video there)
-    import redis as _redis
+    # Check R2 first, then Redis for video availability
+    video_available = False
     try:
-        r = _redis.from_url(os.environ.get("REDIS_URL", "redis://localhost:6379"), decode_responses=False)
-        video_available = bool(r.exists(f"cert:{cid}"))
+        from storage import certified_exists, r2_available
+        if r2_available():
+            video_available = certified_exists(cid)
     except Exception:
-        video_available = False
+        pass
+    if not video_available:
+        import redis as _redis
+        try:
+            r = _redis.from_url(os.environ.get("REDIS_URL", "redis://localhost:6379"), decode_responses=False)
+            video_available = bool(r.exists(f"cert:{cid}"))
+        except Exception:
+            pass
     return {
         "certificate_id":  cert["cert_id"],
         "label":           cert["label"],
@@ -605,9 +623,21 @@ def pro_download(cid: str, email: str = ""):
             "upgrade_url": "https://vfvid.com/pricing"
         }, status_code=403)
 
-    # Serve file from Redis
+    # Serve file — R2 first, Redis fallback
+    from fastapi.responses import RedirectResponse, StreamingResponse
+    import io
+    increment_downloads(cid)
+    fname = f"VeriFYD_Certified_{cid[:8]}.mp4"
+
+    try:
+        from storage import get_download_url, certified_exists, r2_available
+        if r2_available() and certified_exists(cid):
+            url = get_download_url(f"certified/{cid}.mp4")
+            return RedirectResponse(url=url, status_code=302)
+    except Exception as e:
+        log.warning("R2 pro-download lookup failed for %s: %s", cid, e)
+
     import redis as _redis
-    import tempfile
     try:
         r = _redis.from_url(os.environ.get("REDIS_URL", "redis://localhost:6379"), decode_responses=False)
         cert_bytes = r.get(f"cert:{cid}")
@@ -616,10 +646,6 @@ def pro_download(cid: str, email: str = ""):
         cert_bytes = None
     if not cert_bytes:
         return JSONResponse({"error": "Video no longer available — please re-verify"}, status_code=404)
-    increment_downloads(cid)
-    from fastapi.responses import StreamingResponse
-    import io
-    fname = f"VeriFYD_Certified_{cid[:8]}.mp4"
     return StreamingResponse(
         io.BytesIO(cert_bytes),
         media_type="video/mp4",

@@ -28,6 +28,15 @@ def _get_redis():
     return redis.from_url(url, decode_responses=False)
 
 
+def _sha256_file(path: str) -> str:
+    """Compute SHA256 of a file without loading it all into RAM."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def _store_result(redis_conn, job_id: str, result: dict) -> None:
     redis_conn.setex(f"result:{job_id}", RESULT_TTL, json.dumps(result))
     log.info("Stored result: job=%s label=%s auth=%s",
@@ -63,26 +72,40 @@ def process_upload_job(
         "AI":           ("AI DETECTED",         "red",    False),
     }
 
-    # ── Retrieve file bytes from Redis ────────────────────────
-    file_bytes = r.get(file_key)
-    if not file_bytes:
-        log.error("File not found in Redis: key=%s job=%s", file_key, job_id)
-        result = {"job_status": "error", "error": "File expired from queue. Please re-upload."}
-        _store_result(r, job_id, result)
-        return result
-
-    # Write bytes to local temp file
+    # ── Retrieve file from storage (R2 or Redis fallback) ───────
     suffix   = os.path.splitext(filename)[1] or ".mp4"
     tmp_path = os.path.join(tempfile.gettempdir(), f"{job_id}{suffix}")
-    with open(tmp_path, "wb") as f:
-        f.write(file_bytes)
 
-    # Delete file bytes from Redis immediately to free memory
-    r.delete(file_key)
-    log.info("Retrieved file from Redis: job=%s size=%d bytes", job_id, len(file_bytes))
-
-    # SHA256 for certificate
-    sha256 = hashlib.sha256(file_bytes).hexdigest()
+    if file_key.startswith("r2:"):
+        # ── R2 path ───────────────────────────────────────────
+        r2_key = file_key[3:]   # strip "r2:" prefix
+        try:
+            from storage import download_video, delete_video
+            download_video(r2_key, tmp_path)
+            delete_video(r2_key)   # clean up R2 immediately
+            file_size = os.path.getsize(tmp_path)
+            log.info("Retrieved file from R2: job=%s key=%s size=%d bytes",
+                     job_id, r2_key, file_size)
+        except Exception as e:
+            log.error("R2 download failed: key=%s job=%s error=%s", r2_key, job_id, e)
+            result = {"job_status": "error", "error": "File could not be retrieved. Please re-upload."}
+            _store_result(r, job_id, result)
+            return result
+        # SHA256 from disk (avoids loading whole file into RAM)
+        sha256 = _sha256_file(tmp_path)
+    else:
+        # ── Redis fallback (original behaviour) ───────────────
+        file_bytes = r.get(file_key)
+        if not file_bytes:
+            log.error("File not found in Redis: key=%s job=%s", file_key, job_id)
+            result = {"job_status": "error", "error": "File expired from queue. Please re-upload."}
+            _store_result(r, job_id, result)
+            return result
+        with open(tmp_path, "wb") as f:
+            f.write(file_bytes)
+        r.delete(file_key)
+        log.info("Retrieved file from Redis: job=%s size=%d bytes", job_id, len(file_bytes))
+        sha256 = hashlib.sha256(file_bytes).hexdigest()
 
     try:
         log.info("Worker: starting detection for job=%s email=%s", job_id, email)
@@ -131,25 +154,39 @@ def process_upload_job(
                 # Store certified video bytes in Redis so backend can serve download
                 # (worker and backend are separate containers with no shared disk)
                 if os.path.exists(certified_path):
-                    with open(certified_path, "rb") as vf:
-                        cert_bytes = vf.read()
-                    # Plan-aware TTL:
-                    # free=24h, creator=72h, pro=7d, enterprise=30d
                     from database import get_user_status as _gus
                     try:
                         _plan = _gus(email).get("plan", "free")
                     except Exception:
                         _plan = "free"
-                    _cert_ttl = {
-                        "free":       86400,      # 24 hours
-                        "creator":    259200,     # 72 hours
-                        "pro":        604800,     # 7 days
-                        "enterprise": 2592000,    # 30 days
-                    }.get(_plan, 86400)
-                    r.setex(f"cert:{job_id}", _cert_ttl, cert_bytes)
-                    os.remove(certified_path)
-                    log.info("Worker: certified video stored in Redis: job=%s size=%d bytes plan=%s ttl=%dh",
-                             job_id, len(cert_bytes), _plan, _cert_ttl//3600)
+
+                    # ── Try R2 first ──────────────────────────
+                    _stored_in_r2 = False
+                    try:
+                        from storage import upload_certified, r2_available
+                        if r2_available():
+                            upload_certified(job_id, certified_path, _plan)
+                            os.remove(certified_path)
+                            _stored_in_r2 = True
+                            log.info("Worker: certified video stored in R2: job=%s plan=%s",
+                                     job_id, _plan)
+                    except Exception as _r2e:
+                        log.warning("R2 cert upload failed, falling back to Redis: %s", _r2e)
+
+                    # ── Redis fallback ────────────────────────
+                    if not _stored_in_r2:
+                        _cert_ttl = {
+                            "free":       86400,
+                            "creator":    259200,
+                            "pro":        604800,
+                            "enterprise": 2592000,
+                        }.get(_plan, 86400)
+                        with open(certified_path, "rb") as vf:
+                            cert_bytes = vf.read()
+                        r.setex(f"cert:{job_id}", _cert_ttl, cert_bytes)
+                        os.remove(certified_path)
+                        log.info("Worker: certified video stored in Redis (fallback): job=%s size=%d bytes plan=%s ttl=%dh",
+                                 job_id, len(cert_bytes), _plan, _cert_ttl//3600)
                 result["certificate_id"] = job_id
                 result["download_url"]   = download_url
                 # Send email

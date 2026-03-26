@@ -58,3 +58,4 @@ transformers>=4.40.0
 c2pa-python>=0.28.0
 
 # NPR frequency analysis uses existing numpy/scipy — no new deps needed
+boto3>=1.34.0
