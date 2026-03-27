@@ -1836,9 +1836,9 @@ def widget_js(key: str = ""):
 @app.get("/widget/embed/")
 def widget_embed(key: str = ""):
     """
-    The actual iframe content. Self-contained HTML+JS upload UI.
+    The actual iframe content. Self-contained HTML+JS upload + URL analysis UI.
     Validates the API key, applies customer branding, runs detection
-    through the normal upload pipeline with a special widget email.
+    through the normal upload/link pipeline with a special widget email.
     """
     record = _validate_api_key(key)
     if not record:
@@ -1855,7 +1855,7 @@ def widget_embed(key: str = ""):
 
     logo_html = (
         f'<img src="{logo_url}" alt="{company_name}" '
-        f'style="height:32px;max-width:160px;object-fit:contain;margin-right:10px">'
+        f'style="height:38px;max-width:180px;object-fit:contain;margin-right:12px">'
         if logo_url else ""
     )
 
@@ -1881,16 +1881,36 @@ def widget_embed(key: str = ""):
     padding-bottom: 16px;
     border-bottom: 1px solid #1f2937;
   }}
-  .header-text h2 {{
-    font-size: 16px;
-    font-weight: 700;
-    color: #f9fafb;
+  .header-text h2 {{ font-size: 16px; font-weight: 700; color: #f9fafb; }}
+  .header-text p  {{ font-size: 12px; color: #6b7280; margin-top: 2px; }}
+
+  /* ── Tabs ── */
+  .tabs {{
+    display: flex;
+    gap: 0;
+    margin-bottom: 18px;
+    border-bottom: 2px solid #1f2937;
   }}
-  .header-text p {{
-    font-size: 12px;
+  .tab {{
+    flex: 1;
+    padding: 10px 0;
+    text-align: center;
+    font-size: 13px;
+    font-weight: 600;
     color: #6b7280;
-    margin-top: 2px;
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -2px;
+    transition: color 0.2s, border-color 0.2s;
   }}
+  .tab.active {{
+    color: {brand_color};
+    border-bottom-color: {brand_color};
+  }}
+  .tab-panel {{ display: none; }}
+  .tab-panel.active {{ display: block; }}
+
+  /* ── Upload zone ── */
   .drop-zone {{
     border: 2px dashed #374151;
     border-radius: 10px;
@@ -1906,17 +1926,41 @@ def widget_embed(key: str = ""):
     background: rgba(245,158,11,0.04);
   }}
   .drop-zone input {{
-    position: absolute;
-    inset: 0;
-    opacity: 0;
-    cursor: pointer;
-    width: 100%;
-    height: 100%;
+    position: absolute; inset: 0; opacity: 0;
+    cursor: pointer; width: 100%; height: 100%;
   }}
-  .drop-icon {{ font-size: 36px; margin-bottom: 10px; }}
+  .drop-icon  {{ font-size: 36px; margin-bottom: 10px; }}
   .drop-label {{ font-size: 14px; color: #9ca3af; }}
   .drop-label span {{ color: {brand_color}; font-weight: 600; }}
-  .drop-sub {{ font-size: 11px; color: #4b5563; margin-top: 6px; }}
+  .drop-sub   {{ font-size: 11px; color: #4b5563; margin-top: 6px; }}
+
+  /* ── URL input ── */
+  .url-input-wrap {{ margin-bottom: 14px; }}
+  .url-input {{
+    width: 100%;
+    padding: 12px 14px;
+    background: #111827;
+    border: 1.5px solid #374151;
+    border-radius: 8px;
+    color: #e5e7eb;
+    font-size: 14px;
+    outline: none;
+    transition: border-color 0.2s;
+  }}
+  .url-input:focus {{ border-color: {brand_color}; }}
+  .url-input::placeholder {{ color: #4b5563; }}
+  .url-disclaimer {{
+    font-size: 11px;
+    color: #6b7280;
+    margin-top: 8px;
+    padding: 8px 12px;
+    background: #111827;
+    border-radius: 6px;
+    border-left: 3px solid #374151;
+    line-height: 1.5;
+  }}
+
+  /* ── File preview ── */
   .file-preview {{
     display: none;
     align-items: center;
@@ -1930,46 +1974,35 @@ def widget_embed(key: str = ""):
   .file-preview .fname {{ color: #e5e7eb; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
   .file-preview .fsize {{ color: #6b7280; font-size: 11px; }}
   .file-preview .remove {{ color: #ef4444; cursor: pointer; font-size: 18px; line-height: 1; }}
+
+  /* ── Buttons ── */
   .btn {{
-    width: 100%;
-    padding: 13px;
-    border-radius: 8px;
-    border: none;
-    font-size: 15px;
-    font-weight: 700;
-    cursor: pointer;
-    background: {brand_color};
-    color: #0a0a0a;
-    transition: opacity 0.2s, transform 0.1s;
-    letter-spacing: 0.3px;
+    width: 100%; padding: 13px; border-radius: 8px; border: none;
+    font-size: 15px; font-weight: 700; cursor: pointer;
+    background: {brand_color}; color: #0a0a0a;
+    transition: opacity 0.2s, transform 0.1s; letter-spacing: 0.3px;
   }}
   .btn:hover:not(:disabled) {{ opacity: 0.88; transform: translateY(-1px); }}
   .btn:disabled {{ opacity: 0.45; cursor: not-allowed; transform: none; }}
-  .progress-wrap {{
-    display: none;
-    margin: 16px 0;
+  .reset-btn {{
+    margin-top: 14px; padding: 8px 20px;
+    background: transparent; border: 1px solid #374151;
+    border-radius: 6px; color: #9ca3af; font-size: 13px;
+    cursor: pointer; transition: border-color 0.2s; width: 100%;
   }}
-  .progress-bar {{
-    height: 4px;
-    background: #1f2937;
-    border-radius: 2px;
-    overflow: hidden;
-  }}
+  .reset-btn:hover {{ border-color: {brand_color}; color: {brand_color}; }}
+
+  /* ── Progress ── */
+  .progress-wrap {{ display: none; margin: 16px 0; }}
+  .progress-bar {{ height: 4px; background: #1f2937; border-radius: 2px; overflow: hidden; }}
   .progress-fill {{
-    height: 100%;
-    background: {brand_color};
-    width: 0%;
-    transition: width 0.3s;
-    border-radius: 2px;
+    height: 100%; background: {brand_color}; width: 0%;
+    transition: width 0.3s; border-radius: 2px;
   }}
   .progress-label {{ font-size: 12px; color: #6b7280; margin-top: 6px; text-align: center; }}
-  .result-box {{
-    display: none;
-    border-radius: 10px;
-    padding: 20px;
-    text-align: center;
-    margin-top: 16px;
-  }}
+
+  /* ── Result ── */
+  .result-box {{ display: none; border-radius: 10px; padding: 20px; text-align: center; margin-top: 16px; }}
   .result-box.green {{ background: rgba(16,185,129,0.10); border: 1px solid rgba(16,185,129,0.3); }}
   .result-box.red   {{ background: rgba(239,68,68,0.10);  border: 1px solid rgba(239,68,68,0.3); }}
   .result-box.blue  {{ background: rgba(59,130,246,0.10); border: 1px solid rgba(59,130,246,0.3); }}
@@ -1979,45 +2012,24 @@ def widget_embed(key: str = ""):
   .result-label.blue  {{ color: #3b82f6; }}
   .result-score {{ font-size: 13px; color: #9ca3af; margin-bottom: 10px; }}
   .result-reasoning {{ font-size: 12px; color: #6b7280; line-height: 1.6; text-align: left; margin-top: 8px; }}
-  .reset-btn {{
-    margin-top: 14px;
-    padding: 8px 20px;
-    background: transparent;
-    border: 1px solid #374151;
-    border-radius: 6px;
-    color: #9ca3af;
-    font-size: 13px;
-    cursor: pointer;
-    transition: border-color 0.2s;
-  }}
-  .reset-btn:hover {{ border-color: {brand_color}; color: {brand_color}; }}
-  .powered-by {{
-    margin-top: 18px;
-    text-align: center;
-    font-size: 11px;
-    color: #374151;
-  }}
-  .powered-by a {{ color: #4b5563; text-decoration: none; }}
-  .powered-by a:hover {{ color: {brand_color}; }}
-  .error-msg {{ color: #ef4444; font-size: 13px; margin-top: 10px; text-align: center; }}
   .download-btn {{
-    display: block; width: 100%; margin-top: 12px;
-    padding: 13px; border-radius: 8px; border: none;
-    font-size: 14px; font-weight: 700; cursor: pointer;
-    background: #22c55e; color: #000;
-    text-decoration: none; text-align: center;
-    transition: opacity 0.2s;
+    display: block; width: 100%; margin-top: 12px; padding: 13px;
+    border-radius: 8px; border: none; font-size: 14px; font-weight: 700;
+    cursor: pointer; background: #22c55e; color: #000;
+    text-decoration: none; text-align: center; transition: opacity 0.2s;
   }}
   .download-btn:hover {{ opacity: 0.85; }}
   .copy-link-btn {{
-    display: block; width: 100%; margin-top: 8px;
-    padding: 11px; border-radius: 8px;
-    font-size: 13px; font-weight: 600; cursor: pointer;
-    background: transparent; color: #9ca3af;
-    border: 1px solid #374151; text-align: center;
-    transition: border-color 0.2s, color 0.2s;
+    display: block; width: 100%; margin-top: 8px; padding: 11px;
+    border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer;
+    background: transparent; color: #9ca3af; border: 1px solid #374151;
+    text-align: center; transition: border-color 0.2s, color 0.2s;
   }}
   .copy-link-btn:hover {{ border-color: #22c55e; color: #22c55e; }}
+  .powered-by {{ margin-top: 18px; text-align: center; font-size: 11px; color: #374151; }}
+  .powered-by a {{ color: #4b5563; text-decoration: none; }}
+  .powered-by a:hover {{ color: {brand_color}; }}
+  .error-msg {{ color: #ef4444; font-size: 13px; margin-top: 10px; text-align: center; }}
 </style>
 </head>
 <body>
@@ -2030,24 +2042,45 @@ def widget_embed(key: str = ""):
   </div>
 </div>
 
-<div class="drop-zone" id="dropZone">
-  <input type="file" id="fileInput" accept="video/*,.mp4,.mov,.avi,.webm,.mkv">
-  <div class="drop-icon">🎬</div>
-  <div class="drop-label">Drop video here or <span>browse</span></div>
-  <div class="drop-sub">MP4, MOV, AVI, WEBM · Max 500MB</div>
+<!-- Tabs -->
+<div class="tabs">
+  <div class="tab active" id="tabUpload" onclick="switchTab('upload')">⬆ Upload Video</div>
+  <div class="tab" id="tabUrl" onclick="switchTab('url')">🔗 Analyze Link</div>
 </div>
 
-<div class="file-preview" id="filePreview">
-  <span style="font-size:20px">🎬</span>
-  <span class="fname" id="fileName"></span>
-  <span class="fsize" id="fileSize"></span>
-  <span class="remove" id="removeFile">×</span>
+<!-- Upload Panel -->
+<div class="tab-panel active" id="panelUpload">
+  <div class="drop-zone" id="dropZone">
+    <input type="file" id="fileInput" accept="video/*,.mp4,.mov,.avi,.webm,.mkv">
+    <div class="drop-icon">🎬</div>
+    <div class="drop-label">Drop video here or <span>browse</span></div>
+    <div class="drop-sub">MP4, MOV, AVI, WEBM · Max 2GB</div>
+  </div>
+  <div class="file-preview" id="filePreview">
+    <span style="font-size:20px">🎬</span>
+    <span class="fname" id="fileName"></span>
+    <span class="fsize" id="fileSize"></span>
+    <span class="remove" id="removeFile">×</span>
+  </div>
+  <button class="btn" id="analyzeBtnUpload" disabled onclick="startUpload()">Verify Video</button>
 </div>
 
-<button class="btn" id="analyzeBtn" disabled onclick="startAnalysis()">
-  Verify Video
-</button>
+<!-- URL Panel -->
+<div class="tab-panel" id="panelUrl">
+  <div class="url-input-wrap">
+    <input class="url-input" type="url" id="urlInput"
+           placeholder="https://www.tiktok.com/... or YouTube, Instagram, Twitter"
+           oninput="onUrlInput()">
+    <div class="url-disclaimer">
+      ⚠ <strong>Note:</strong> Analyzing a link verifies the downloaded copy of this video.
+      A REAL result certifies the video content itself — not that the original source or
+      account is authentic. Always verify the source independently.
+    </div>
+  </div>
+  <button class="btn" id="analyzeBtnUrl" disabled onclick="startUrlAnalysis()">Analyze Link</button>
+</div>
 
+<!-- Shared progress + result -->
 <div class="progress-wrap" id="progressWrap">
   <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
   <div class="progress-label" id="progressLabel">Uploading…</div>
@@ -2057,15 +2090,13 @@ def widget_embed(key: str = ""):
   <div class="result-label" id="resultLabel"></div>
   <div class="result-score" id="resultScore"></div>
   <div class="result-reasoning" id="resultReasoning"></div>
-  <a class="download-btn" id="downloadBtn" href="#" target="_blank"
-     style="display:none;">
+  <a class="download-btn" id="downloadBtn" href="#" target="_blank" style="display:none;">
     ⬇ Download Certified Video
   </a>
-  <button class="copy-link-btn" id="copyLinkBtn" onclick="copyCertLink()"
-     style="display:none;">
+  <button class="copy-link-btn" id="copyLinkBtn" onclick="copyCertLink()" style="display:none;">
     🔗 Copy Certified Link
   </button>
-  <button class="reset-btn" onclick="resetWidget()" style="margin-top:10px;">Verify another video</button>
+  <button class="reset-btn" onclick="resetWidget()">Verify another video</button>
 </div>
 
 <div class="error-msg" id="errorMsg"></div>
@@ -2075,21 +2106,37 @@ def widget_embed(key: str = ""):
 </div>
 
 <script>
-var BACKEND = '{backend_url}';
-var API_KEY  = '{key}';
-// Widget uses a synthetic enterprise email keyed to the API key
-// so uses are tracked per Enterprise account, not per end-user
+var BACKEND      = '{backend_url}';
+var API_KEY      = '{key}';
 var WIDGET_EMAIL = 'widget_' + API_KEY.slice(-12) + '@verifyd-enterprise.com';
-
 var selectedFile = null;
+var currentTab   = 'upload';
 
-// ── Drag & drop ──────────────────────────────────────────────
+// ── Tab switching ─────────────────────────────────────────────
+function switchTab(tab) {{
+  currentTab = tab;
+  document.getElementById('tabUpload').classList.toggle('active', tab === 'upload');
+  document.getElementById('tabUrl').classList.toggle('active', tab === 'url');
+  document.getElementById('panelUpload').classList.toggle('active', tab === 'upload');
+  document.getElementById('panelUrl').classList.toggle('active', tab === 'url');
+  document.getElementById('resultBox').style.display    = 'none';
+  document.getElementById('progressWrap').style.display = 'none';
+  document.getElementById('errorMsg').textContent        = '';
+  notifyResize();
+}}
+
+// ── URL input ─────────────────────────────────────────────────
+function onUrlInput() {{
+  var v = document.getElementById('urlInput').value.trim();
+  document.getElementById('analyzeBtnUrl').disabled = (v.length < 10);
+}}
+
+// ── Drag & drop ───────────────────────────────────────────────
 var dz = document.getElementById('dropZone');
 dz.addEventListener('dragover',  function(e) {{ e.preventDefault(); dz.classList.add('drag-over'); }});
 dz.addEventListener('dragleave', function()  {{ dz.classList.remove('drag-over'); }});
 dz.addEventListener('drop', function(e) {{
-  e.preventDefault();
-  dz.classList.remove('drag-over');
+  e.preventDefault(); dz.classList.remove('drag-over');
   var files = e.dataTransfer.files;
   if (files.length) setFile(files[0]);
 }});
@@ -2097,36 +2144,39 @@ document.getElementById('fileInput').addEventListener('change', function(e) {{
   if (e.target.files.length) setFile(e.target.files[0]);
 }});
 document.getElementById('removeFile').addEventListener('click', function(e) {{
-  e.stopPropagation();
-  resetWidget();
+  e.stopPropagation(); resetWidget();
 }});
 
 function setFile(f) {{
   selectedFile = f;
-  document.getElementById('fileName').textContent = f.name;
-  document.getElementById('fileSize').textContent = (f.size / 1048576).toFixed(1) + ' MB';
-  document.getElementById('filePreview').style.display = 'flex';
-  document.getElementById('dropZone').style.display    = 'none';
-  document.getElementById('analyzeBtn').disabled        = false;
-  document.getElementById('errorMsg').textContent       = '';
+  document.getElementById('fileName').textContent          = f.name;
+  document.getElementById('fileSize').textContent          = (f.size / 1048576).toFixed(1) + ' MB';
+  document.getElementById('filePreview').style.display     = 'flex';
+  document.getElementById('dropZone').style.display        = 'none';
+  document.getElementById('analyzeBtnUpload').disabled     = false;
+  document.getElementById('errorMsg').textContent          = '';
 }}
 
 function resetWidget() {{
   selectedFile = null;
-  document.getElementById('fileInput').value           = '';
-  document.getElementById('filePreview').style.display = 'none';
-  document.getElementById('dropZone').style.display    = '';
-  document.getElementById('analyzeBtn').disabled        = true;
-  document.getElementById('resultBox').style.display    = 'none';
-  document.getElementById('progressWrap').style.display = 'none';
-  document.getElementById('errorMsg').textContent        = '';
-  document.getElementById('downloadBtn').style.display    = 'none';
-  document.getElementById('downloadBtn').href              = '#';
-  document.getElementById('copyLinkBtn').style.display    = 'none';
-  document.getElementById('copyLinkBtn').textContent      = '🔗 Copy Certified Link';
+  document.getElementById('fileInput').value                = '';
+  document.getElementById('urlInput').value                 = '';
+  document.getElementById('filePreview').style.display      = 'none';
+  document.getElementById('dropZone').style.display         = '';
+  document.getElementById('analyzeBtnUpload').disabled      = true;
+  document.getElementById('analyzeBtnUrl').disabled         = true;
+  document.getElementById('resultBox').style.display        = 'none';
+  document.getElementById('progressWrap').style.display     = 'none';
+  document.getElementById('errorMsg').textContent           = '';
+  document.getElementById('downloadBtn').style.display      = 'none';
+  document.getElementById('downloadBtn').href               = '#';
+  document.getElementById('copyLinkBtn').style.display      = 'none';
+  document.getElementById('copyLinkBtn').textContent        = '🔗 Copy Certified Link';
+  document.getElementById('analyzeBtnUpload').textContent   = 'Verify Video';
+  document.getElementById('analyzeBtnUpload').disabled      = false;
+  document.getElementById('analyzeBtnUrl').textContent      = 'Analyze Link';
+  document.getElementById('analyzeBtnUrl').disabled         = true;
   window._certLink = '';
-  document.getElementById('analyzeBtn').textContent      = 'Verify Video';
-  document.getElementById('analyzeBtn').disabled         = false;
   notifyResize();
 }}
 
@@ -2139,13 +2189,14 @@ function notifyResize() {{
   try {{ window.parent.postMessage({{ type: 'verifyd-resize', height: document.body.scrollHeight + 40 }}, '*'); }} catch(e) {{}}
 }}
 
-function startAnalysis() {{
+// ── Upload analysis ───────────────────────────────────────────
+function startUpload() {{
   if (!selectedFile) return;
-  document.getElementById('analyzeBtn').disabled        = true;
-  document.getElementById('analyzeBtn').textContent     = 'Analyzing…';
-  document.getElementById('progressWrap').style.display = 'block';
-  document.getElementById('resultBox').style.display    = 'none';
-  document.getElementById('errorMsg').textContent        = '';
+  document.getElementById('analyzeBtnUpload').disabled    = true;
+  document.getElementById('analyzeBtnUpload').textContent = 'Analyzing…';
+  document.getElementById('progressWrap').style.display   = 'block';
+  document.getElementById('resultBox').style.display      = 'none';
+  document.getElementById('errorMsg').textContent         = '';
   setProgress(10, 'Uploading video…');
   notifyResize();
 
@@ -2167,62 +2218,122 @@ function startAnalysis() {{
     setProgress(95, 'Finalizing result…');
     try {{
       var data = JSON.parse(xhr.responseText);
-      if (xhr.status >= 400 || data.error) {{
-        showError(data.error || 'Verification failed. Please try again.');
-        return;
-      }}
+      if (xhr.status >= 400 || data.error) {{ showError(data.error || 'Verification failed.'); return; }}
       showResult(data);
-    }} catch(e) {{
-      showError('Unexpected response. Please try again.');
-    }}
+    }} catch(e) {{ showError('Unexpected response. Please try again.'); }}
   }};
 
-  xhr.onerror = function() {{
-    showError('Network error. Please check your connection and try again.');
-  }};
+  xhr.onerror = function() {{ showError('Network error. Please check your connection.'); }};
 
-  // Simulate analysis progress while waiting
   var pct = 70;
-  var progressTimer = setInterval(function() {{
+  var t = setInterval(function() {{
     if (pct < 92) {{ pct += 2; setProgress(pct, 'Running AI analysis…'); }}
-    else clearInterval(progressTimer);
+    else clearInterval(t);
   }}, 1200);
 
   xhr.send(fd);
 }}
 
+// ── URL analysis ──────────────────────────────────────────────
+function startUrlAnalysis() {{
+  var url = document.getElementById('urlInput').value.trim();
+  if (!url) return;
+  document.getElementById('analyzeBtnUrl').disabled    = true;
+  document.getElementById('analyzeBtnUrl').textContent = 'Analyzing…';
+  document.getElementById('progressWrap').style.display = 'block';
+  document.getElementById('resultBox').style.display    = 'none';
+  document.getElementById('errorMsg').textContent       = '';
+  setProgress(10, 'Downloading video…');
+  notifyResize();
+
+  var xhr = new XMLHttpRequest();
+  xhr.open('POST', BACKEND + '/widget-analyze-link/?key=' + API_KEY);
+  xhr.setRequestHeader('Content-Type', 'application/json');
+
+  xhr.onload = function() {{
+    setProgress(95, 'Finalizing result…');
+    try {{
+      var data = JSON.parse(xhr.responseText);
+      if (xhr.status >= 400 || data.error) {{ showError(data.error || 'Analysis failed.'); return; }}
+      // Poll for result if job queued
+      if (data.job_id) {{
+        setProgress(30, 'Video downloaded — running analysis…');
+        pollResult(data.job_id);
+      }} else {{
+        showResult(data);
+      }}
+    }} catch(e) {{ showError('Unexpected response. Please try again.'); }}
+  }};
+
+  xhr.onerror = function() {{ showError('Network error. Please check your connection.'); }};
+
+  var pct = 20;
+  var t = setInterval(function() {{
+    if (pct < 88) {{ pct += 3; setProgress(pct, 'Running AI analysis…'); }}
+    else clearInterval(t);
+  }}, 1500);
+
+  xhr.send(JSON.stringify({{ url: url, email: WIDGET_EMAIL }}));
+}}
+
+function pollResult(jobId) {{
+  var attempts = 0;
+  var interval = setInterval(function() {{
+    attempts++;
+    if (attempts > 60) {{
+      clearInterval(interval);
+      showError('Analysis timed out. Please try again.');
+      return;
+    }}
+    var xhr = new XMLHttpRequest();
+    xhr.open('GET', BACKEND + '/job-status/' + jobId);
+    xhr.onload = function() {{
+      try {{
+        var data = JSON.parse(xhr.responseText);
+        if (data.job_status === 'complete') {{
+          clearInterval(interval);
+          showResult(data);
+        }} else if (data.job_status === 'error') {{
+          clearInterval(interval);
+          showError(data.error || 'Analysis failed.');
+        }}
+      }} catch(e) {{}}
+    }};
+    xhr.send();
+  }}, 3000);
+}}
+
+// ── Show result ───────────────────────────────────────────────
 function showResult(data) {{
   document.getElementById('progressWrap').style.display = 'none';
-  var box = document.getElementById('resultBox');
+  var box   = document.getElementById('resultBox');
   var color = (data.color || 'blue').toLowerCase();
   box.className = 'result-box ' + color;
-  document.getElementById('resultLabel').className = 'result-label ' + color;
-  document.getElementById('resultLabel').textContent = data.status || 'RESULT';
-  document.getElementById('resultScore').textContent =
-    'Authenticity Score: ' + (data.authenticity_score || 0) + ' / 100';
+  document.getElementById('resultLabel').className    = 'result-label ' + color;
+  document.getElementById('resultLabel').textContent  = data.status || 'RESULT';
+  document.getElementById('resultScore').textContent  = 'Authenticity Score: ' + (data.authenticity_score || 0) + ' / 100';
   var reasoning = data.gpt_reasoning || '';
-  document.getElementById('resultReasoning').textContent = reasoning;
-  document.getElementById('resultReasoning').style.display = reasoning ? '' : 'none';
+  document.getElementById('resultReasoning').textContent    = reasoning;
+  document.getElementById('resultReasoning').style.display  = reasoning ? '' : 'none';
 
-  // Show download + copy link buttons if certified video is available
   var dlBtn   = document.getElementById('downloadBtn');
   var copyBtn = document.getElementById('copyLinkBtn');
   if (data.download_url) {{
     dlBtn.href = data.download_url;
-    dlBtn.style.display = 'block';
-    // Build the public certificate URL
-    // Copy link = direct video stream so it plays inline on social media
-    window._certLink = data.download_url || '';
+    dlBtn.style.display  = 'block';
+    window._certLink     = data.download_url;
     copyBtn.style.display = 'block';
-    copyBtn.textContent = '🔗 Copy Certified Link';
+    copyBtn.textContent  = '🔗 Copy Certified Link';
   }} else {{
-    dlBtn.style.display  = 'none';
+    dlBtn.style.display   = 'none';
     copyBtn.style.display = 'none';
   }}
 
   box.style.display = 'block';
-  document.getElementById('analyzeBtn').textContent = 'Verify Video';
-  document.getElementById('analyzeBtn').disabled    = false;
+  document.getElementById('analyzeBtnUpload').textContent = 'Verify Video';
+  document.getElementById('analyzeBtnUpload').disabled    = false;
+  document.getElementById('analyzeBtnUrl').textContent    = 'Analyze Link';
+  document.getElementById('analyzeBtnUrl').disabled       = false;
   notifyResize();
 }}
 
@@ -2233,23 +2344,16 @@ function copyCertLink() {{
     navigator.clipboard.writeText(link).then(function() {{
       var btn = document.getElementById('copyLinkBtn');
       btn.textContent = '✓ Link Copied!';
-      btn.style.color = '#22c55e';
-      btn.style.borderColor = '#22c55e';
+      btn.style.color = '#22c55e'; btn.style.borderColor = '#22c55e';
       setTimeout(function() {{
         btn.textContent = '🔗 Copy Certified Link';
-        btn.style.color = '';
-        btn.style.borderColor = '';
+        btn.style.color = ''; btn.style.borderColor = '';
       }}, 2500);
     }});
   }} else {{
-    // Fallback for older browsers
     var ta = document.createElement('textarea');
-    ta.value = link;
-    ta.style.position = 'fixed';
-    ta.style.opacity = '0';
-    document.body.appendChild(ta);
-    ta.select();
-    document.execCommand('copy');
+    ta.value = link; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select(); document.execCommand('copy');
     document.body.removeChild(ta);
     var btn = document.getElementById('copyLinkBtn');
     btn.textContent = '✓ Link Copied!';
@@ -2258,10 +2362,12 @@ function copyCertLink() {{
 }}
 
 function showError(msg) {{
-  document.getElementById('progressWrap').style.display = 'none';
+  document.getElementById('progressWrap').style.display  = 'none';
   document.getElementById('errorMsg').textContent        = msg;
-  document.getElementById('analyzeBtn').textContent      = 'Verify Video';
-  document.getElementById('analyzeBtn').disabled          = false;
+  document.getElementById('analyzeBtnUpload').textContent = 'Verify Video';
+  document.getElementById('analyzeBtnUpload').disabled    = false;
+  document.getElementById('analyzeBtnUrl').textContent    = 'Analyze Link';
+  document.getElementById('analyzeBtnUrl').disabled       = false;
   notifyResize();
 }}
 
@@ -2389,6 +2495,41 @@ async def widget_upload(
             return JSONResponse({"error": safe_error}, status_code=500)
 
     return JSONResponse({"error": "Analysis timed out. Please try again."}, status_code=504)
+
+@app.post("/widget-analyze-link/")
+async def widget_analyze_link(request: Request, key: str = ""):
+    """
+    URL analysis endpoint for the embedded widget.
+    Authenticated by API key. Enqueues a link job and returns job_id
+    so the widget can poll /job-status/{job_id} for the result.
+    """
+    if not key:
+        key = request.query_params.get("key", "")
+    record = _validate_api_key(key)
+    if not record:
+        return JSONResponse({"error": "Invalid or inactive API key."}, status_code=401)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON body."}, status_code=400)
+
+    video_url = (body.get("url") or "").strip()
+    if not video_url:
+        return JSONResponse({"error": "URL is required."}, status_code=400)
+
+    tracking_email = f"widget_{key[-12:]}@verifyd-enterprise.com"
+    job_id = str(uuid.uuid4())
+
+    try:
+        enqueue_link(job_id, video_url, tracking_email)
+        increment_api_key_uses(key)
+        log.info("widget-analyze-link: queued job %s for key %s url=%s",
+                 job_id, key[:20], video_url[:60])
+        return JSONResponse({"job_id": job_id})
+    except Exception as e:
+        log.exception("widget-analyze-link enqueue failed: %s", e)
+        return JSONResponse({"error": "Failed to queue analysis. Please try again."}, status_code=500)
 
 
 
