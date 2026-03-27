@@ -1982,11 +1982,11 @@ def widget_embed(key: str = ""):
         logo_html = (
             f'<span style="font-weight:700;font-size:13px;color:#ffffff;margin-right:10px">{company_name}</span>'
             f'<span style="color:rgba(255,255,255,0.4);font-size:16px;margin-right:10px">|</span>'
-            f'<span style="font-weight:800;font-size:14px;color:{brand_color};letter-spacing:1px">VERI<span style="color:#ffffff">FYD</span></span>'
+            f'<span style="font-weight:800;font-size:14px;color:#ffffff;letter-spacing:1px">VERI<span style="color:#fbbf24">FYD</span></span>'
         )
     else:
         logo_html = (
-            f'<span style="font-weight:800;font-size:16px;color:{brand_color};letter-spacing:1px">VERI<span style="color:#ffffff">FYD</span></span>'
+            f'<span style="font-weight:800;font-size:16px;color:#ffffff;letter-spacing:1px">VERI<span style="color:#fbbf24">FYD</span></span>'
         )
 
     html = f"""<!DOCTYPE html>
@@ -2038,13 +2038,15 @@ def widget_embed(key: str = ""):
   .tab.active {{
     color: {brand_color};
     border-bottom-color: {brand_color};
+    background: rgba(255,255,255,0.08);
+    border-radius: 6px 6px 0 0;
   }}
   .tab-panel {{ display: none; }}
   .tab-panel.active {{ display: block; }}
 
   /* ── Upload zone ── */
   .drop-zone {{
-    border: 2px dashed #d1d5db;
+    border: 2px dashed #93c5fd;
     border-radius: 10px;
     padding: 36px 20px;
     text-align: center;
@@ -2052,7 +2054,8 @@ def widget_embed(key: str = ""):
     transition: border-color 0.2s, background 0.2s;
     margin-bottom: 16px;
     position: relative;
-    background: white;
+    background: #f0f7ff;
+    box-shadow: inset 0 0 0 1px rgba(59,130,246,0.1);
   }}
   .drop-zone:hover, .drop-zone.drag-over {{
     border-color: {brand_color};
@@ -2073,12 +2076,13 @@ def widget_embed(key: str = ""):
     width: 100%;
     padding: 12px 14px;
     background: white;
-    border: 1.5px solid #d1d5db;
+    border: 2px solid #93c5fd;
     border-radius: 8px;
     color: #1f2937;
     font-size: 14px;
     outline: none;
     transition: border-color 0.2s;
+    box-shadow: 0 1px 4px rgba(59,130,246,0.08);
   }}
   .url-input:focus {{ border-color: {brand_color}; }}
   .url-input::placeholder {{ color: #4b5563; }}
@@ -2098,12 +2102,12 @@ def widget_embed(key: str = ""):
     display: none;
     align-items: center;
     gap: 10px;
-    background: #f3f4f6;
+    background: #f0f7ff;
     border-radius: 8px;
     padding: 10px 14px;
     margin-bottom: 16px;
     font-size: 13px;
-    border: 1px solid #e5e7eb;
+    border: 2px solid #93c5fd;
   }}
   .file-preview .fname {{ color: #1f2937; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
   .file-preview .fsize {{ color: #6b7280; font-size: 11px; }}
@@ -2147,9 +2151,9 @@ def widget_embed(key: str = ""):
 
   /* ── Result ── */
   .result-box {{ display: none; border-radius: 10px; padding: 20px; text-align: center; margin-top: 16px; }}
-  .result-box.green {{ background: rgba(16,185,129,0.10); border: 1px solid rgba(16,185,129,0.3); }}
-  .result-box.red   {{ background: rgba(239,68,68,0.10);  border: 1px solid rgba(239,68,68,0.3); }}
-  .result-box.blue  {{ background: rgba(59,130,246,0.10); border: 1px solid rgba(59,130,246,0.3); }}
+  .result-box.green {{ background: rgba(16,185,129,0.10); border: 2px solid rgba(16,185,129,0.5); }}
+  .result-box.red   {{ background: rgba(239,68,68,0.10);  border: 2px solid rgba(239,68,68,0.5); }}
+  .result-box.blue  {{ background: rgba(59,130,246,0.10); border: 2px solid rgba(59,130,246,0.5); }}
   .result-label {{ font-size: 20px; font-weight: 800; margin-bottom: 6px; }}
   .result-label.green {{ color: #10b981; }}
   .result-label.red   {{ color: #ef4444; }}
