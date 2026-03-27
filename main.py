@@ -1269,6 +1269,52 @@ async def paypal_webhook(request: Request):
         return JSONResponse({"error": "processing error"}, status_code=500)
 
 
+@app.get("/admin-set-brand/")
+def admin_set_brand(
+    key:          str = "",
+    api_key:      str = "",
+    company_name: str = "",
+    logo_url:     str = "",
+    brand_color:  str = "",
+):
+    """Set branding on an enterprise API key. Creates columns if missing."""
+    if not _is_admin(key):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    if not api_key:
+        return JSONResponse({"error": "api_key param required"}, status_code=400)
+    try:
+        import psycopg2
+        db_url = os.environ.get("DATABASE_URL", "")
+        conn = psycopg2.connect(db_url)
+        conn.autocommit = False
+        cur = conn.cursor()
+        # Add columns if they don't exist
+        for col, dflt in [("company_name","''"),("logo_url","''"),("brand_color","'#f59e0b'")]:
+            cur.execute(f"ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS {col} TEXT DEFAULT {dflt}")
+        conn.commit()
+        # Update the record
+        cur.execute("""
+            UPDATE api_keys
+            SET company_name = %s, logo_url = %s, brand_color = %s
+            WHERE api_key = %s
+        """, (company_name, logo_url, brand_color, api_key))
+        updated = cur.rowcount
+        conn.commit()
+        # Fetch back
+        cur.execute("SELECT api_key, company_name, logo_url, brand_color FROM api_keys WHERE api_key = %s", (api_key,))
+        row = cur.fetchone()
+        cur.close(); conn.close()
+        if updated == 0:
+            return JSONResponse({"error": f"No row found for api_key={api_key}"})
+        return JSONResponse({
+            "status": "updated",
+            "api_key": row[0], "company_name": row[1],
+            "logo_url": row[2], "brand_color": row[3],
+        })
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 @app.get("/admin-data/")
 def admin_data(key: str = ""):
     """
