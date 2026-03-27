@@ -34,7 +34,7 @@ R2_ENDPOINT = f"https://{ACCOUNT_ID}.r2.cloudflarestorage.com" if ACCOUNT_ID els
 
 # TTLs for presigned URLs (seconds)
 UPLOAD_URL_TTL = 3600        # 1 hour — raw upload files
-CERT_URL_TTL   = 86400 * 30  # 30 days — certified videos
+CERT_URL_TTL   = 86400 * 6   # 6 days - R2 presigned URL max is 7 days (604800s)
 
 def _is_configured() -> bool:
     return bool(ACCOUNT_ID and ACCESS_KEY and SECRET_KEY and BUCKET)
