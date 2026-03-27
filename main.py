@@ -1350,6 +1350,52 @@ def debug_db():
         return {"error": str(e)}
 
 
+@app.get("/admin-update-apikey/")
+def admin_update_apikey(
+    key:          str = "",
+    api_key:      str = "",
+    company_name: str = "",
+    logo_url:     str = "",
+    brand_color:  str = "",
+):
+    """
+    Update branding fields on an enterprise API key.
+    Usage: /admin-update-apikey/?key=ADMIN_KEY&api_key=vfyd_live_...&company_name=...&logo_url=...&brand_color=...
+    """
+    if not _is_admin(key):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    if not api_key:
+        return JSONResponse({"error": "api_key required"}, status_code=400)
+    try:
+        from database import get_db
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                UPDATE api_keys
+                SET company_name = COALESCE(NULLIF(%s, ''), company_name),
+                    logo_url     = COALESCE(NULLIF(%s, ''), logo_url),
+                    brand_color  = COALESCE(NULLIF(%s, ''), brand_color)
+                WHERE key = %s
+            """, (company_name, logo_url, brand_color, api_key))
+            updated = cur.rowcount
+            conn.commit()
+            # Return updated record
+            cur.execute("SELECT key, company_name, logo_url, brand_color FROM api_keys WHERE key = %s", (api_key,))
+            row = cur.fetchone()
+        if updated == 0:
+            return JSONResponse({"error": "API key not found"}, status_code=404)
+        return JSONResponse({
+            "status":       "updated",
+            "key":          row[0] if row else api_key,
+            "company_name": row[1] if row else company_name,
+            "logo_url":     row[2] if row else logo_url,
+            "brand_color":  row[3] if row else brand_color,
+        })
+    except Exception as e:
+        log.error("Admin update apikey error: %s", e)
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 @app.get("/admin-delete-user/")
 def admin_delete_user(email: str = "", key: str = ""):
     """
@@ -1853,11 +1899,20 @@ def widget_embed(key: str = ""):
     brand_color  = record.get("brand_color") or "#f59e0b"
     backend_url  = BASE_URL
 
-    logo_html = (
-        f'<img src="{logo_url}" alt="{company_name}" '
-        f'style="height:38px;max-width:180px;object-fit:contain;margin-right:12px">'
-        if logo_url else ""
-    )
+    # Customer logo (left) + VeriFYD logo (right) when customer logo is set
+    if logo_url:
+        logo_html = (
+            f'<img src="{logo_url}" alt="{company_name}" '
+            f'style="height:38px;max-width:140px;object-fit:contain;margin-right:10px">'
+            f'<span style="color:#374151;font-size:18px;margin-right:10px;font-weight:300">|</span>'
+            f'<img src="https://vfvid.com/verifyd-logo.png" alt="VeriFYD" '
+            f'style="height:28px;max-width:100px;object-fit:contain;margin-right:12px">'
+        )
+    else:
+        logo_html = (
+            f'<img src="https://vfvid.com/verifyd-logo.png" alt="VeriFYD" '
+            f'style="height:32px;max-width:120px;object-fit:contain;margin-right:12px">'
+        )
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
