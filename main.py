@@ -1977,19 +1977,16 @@ def widget_embed(key: str = ""):
     brand_color  = record.get("brand_color") or "#f59e0b"
     backend_url  = BASE_URL
 
-    # Customer logo (left) + VeriFYD logo (right) when customer logo is set
-    if logo_url:
+    # Customer name badge + VeriFYD badge
+    if company_name and company_name != "VeriFYD":
         logo_html = (
-            f'<img src="{logo_url}" alt="{company_name}" '
-            f'style="height:38px;max-width:140px;object-fit:contain;margin-right:10px">'
-            f'<span style="color:#374151;font-size:18px;margin-right:10px;font-weight:300">|</span>'
-            f'<img src="https://vfvid.com/verifyd-logo.png" alt="VeriFYD" '
-            f'style="height:28px;max-width:100px;object-fit:contain;margin-right:12px">'
+            f'<span style="font-weight:700;font-size:13px;color:#ffffff;margin-right:10px">{company_name}</span>'
+            f'<span style="color:rgba(255,255,255,0.4);font-size:16px;margin-right:10px">|</span>'
+            f'<span style="font-weight:800;font-size:14px;color:{brand_color};letter-spacing:1px">VERI<span style="color:#ffffff">FYD</span></span>'
         )
     else:
         logo_html = (
-            f'<img src="https://vfvid.com/verifyd-logo.png" alt="VeriFYD" '
-            f'style="height:32px;max-width:120px;object-fit:contain;margin-right:12px">'
+            f'<span style="font-weight:800;font-size:16px;color:{brand_color};letter-spacing:1px">VERI<span style="color:#ffffff">FYD</span></span>'
         )
 
     html = f"""<!DOCTYPE html>
@@ -2001,8 +1998,8 @@ def widget_embed(key: str = ""):
 <style>
   * {{ box-sizing: border-box; margin: 0; padding: 0; }}
   body {{
-    background: #0a0a0a;
-    color: #e5e7eb;
+    background: #f8faff;
+    color: #1f2937;
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
     padding: 24px;
     min-height: 480px;
@@ -2011,18 +2008,20 @@ def widget_embed(key: str = ""):
     display: flex;
     align-items: center;
     margin-bottom: 20px;
-    padding-bottom: 16px;
-    border-bottom: 1px solid #1f2937;
+    padding: 14px 16px;
+    background: {brand_color};
+    border-radius: 10px;
+    margin: -24px -24px 20px -24px;
   }}
-  .header-text h2 {{ font-size: 16px; font-weight: 700; color: #f9fafb; }}
-  .header-text p  {{ font-size: 12px; color: #6b7280; margin-top: 2px; }}
+  .header-text h2 {{ font-size: 15px; font-weight: 700; color: #ffffff; }}
+  .header-text p  {{ font-size: 11px; color: rgba(255,255,255,0.75); margin-top: 2px; }}
 
   /* ── Tabs ── */
   .tabs {{
     display: flex;
     gap: 0;
     margin-bottom: 18px;
-    border-bottom: 2px solid #1f2937;
+    border-bottom: 2px solid #e5e7eb;
   }}
   .tab {{
     flex: 1;
@@ -2030,7 +2029,7 @@ def widget_embed(key: str = ""):
     text-align: center;
     font-size: 13px;
     font-weight: 600;
-    color: #6b7280;
+    color: #9ca3af;
     cursor: pointer;
     border-bottom: 2px solid transparent;
     margin-bottom: -2px;
@@ -2045,7 +2044,7 @@ def widget_embed(key: str = ""):
 
   /* ── Upload zone ── */
   .drop-zone {{
-    border: 2px dashed #374151;
+    border: 2px dashed #d1d5db;
     border-radius: 10px;
     padding: 36px 20px;
     text-align: center;
@@ -2053,6 +2052,7 @@ def widget_embed(key: str = ""):
     transition: border-color 0.2s, background 0.2s;
     margin-bottom: 16px;
     position: relative;
+    background: white;
   }}
   .drop-zone:hover, .drop-zone.drag-over {{
     border-color: {brand_color};
@@ -2072,10 +2072,10 @@ def widget_embed(key: str = ""):
   .url-input {{
     width: 100%;
     padding: 12px 14px;
-    background: #111827;
-    border: 1.5px solid #374151;
+    background: white;
+    border: 1.5px solid #d1d5db;
     border-radius: 8px;
-    color: #e5e7eb;
+    color: #1f2937;
     font-size: 14px;
     outline: none;
     transition: border-color 0.2s;
@@ -2087,9 +2087,9 @@ def widget_embed(key: str = ""):
     color: #6b7280;
     margin-top: 8px;
     padding: 8px 12px;
-    background: #111827;
+    background: #f3f4f6;
     border-radius: 6px;
-    border-left: 3px solid #374151;
+    border-left: 3px solid #d1d5db;
     line-height: 1.5;
   }}
 
@@ -2098,13 +2098,14 @@ def widget_embed(key: str = ""):
     display: none;
     align-items: center;
     gap: 10px;
-    background: #111827;
+    background: #f3f4f6;
     border-radius: 8px;
     padding: 10px 14px;
     margin-bottom: 16px;
     font-size: 13px;
+    border: 1px solid #e5e7eb;
   }}
-  .file-preview .fname {{ color: #e5e7eb; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+  .file-preview .fname {{ color: #1f2937; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
   .file-preview .fsize {{ color: #6b7280; font-size: 11px; }}
   .file-preview .remove {{ color: #ef4444; cursor: pointer; font-size: 18px; line-height: 1; }}
 
@@ -2169,8 +2170,8 @@ def widget_embed(key: str = ""):
     text-align: center; transition: border-color 0.2s, color 0.2s;
   }}
   .copy-link-btn:hover {{ border-color: #22c55e; color: #22c55e; }}
-  .powered-by {{ margin-top: 18px; text-align: center; font-size: 11px; color: #374151; }}
-  .powered-by a {{ color: #4b5563; text-decoration: none; }}
+  .powered-by {{ margin-top: 18px; text-align: center; font-size: 11px; color: #9ca3af; }}
+  .powered-by a {{ color: #6b7280; text-decoration: none; }}
   .powered-by a:hover {{ color: {brand_color}; }}
   .error-msg {{ color: #ef4444; font-size: 13px; margin-top: 10px; text-align: center; }}
 </style>
@@ -2409,11 +2410,11 @@ function startUrlAnalysis() {{
 function pollResult(jobId) {{
   var attempts = 0;
   var labels = [
-    'Signal forensics running…',
-    'GPT-4o vision analysis…',
-    'DINOv2 feature extraction…',
-    'NPR frequency analysis…',
-    'Combining engine results…'
+    'Examining video frames…',
+    'Analyzing motion and lighting…',
+    'Checking visual consistency…',
+    'Running authenticity checks…',
+    'Calculating final result…'
   ];
   var interval = setInterval(function() {{
     attempts++;
