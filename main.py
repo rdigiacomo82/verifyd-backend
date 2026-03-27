@@ -1993,13 +1993,23 @@ def widget_embed(key: str = ""):
   .reset-btn:hover {{ border-color: {brand_color}; color: {brand_color}; }}
 
   /* ── Progress ── */
-  .progress-wrap {{ display: none; margin: 16px 0; }}
-  .progress-bar {{ height: 4px; background: #1f2937; border-radius: 2px; overflow: hidden; }}
-  .progress-fill {{
-    height: 100%; background: {brand_color}; width: 0%;
-    transition: width 0.3s; border-radius: 2px;
+  .progress-wrap {{
+    display: none; margin: 20px 0; text-align: center;
   }}
-  .progress-label {{ font-size: 12px; color: #6b7280; margin-top: 6px; text-align: center; }}
+  .spinner {{
+    width: 40px; height: 40px; margin: 0 auto 14px;
+    border: 3px solid #1f2937;
+    border-top-color: {brand_color};
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }}
+  @keyframes spin {{ to {{ transform: rotate(360deg); }} }}
+  .progress-label {{
+    font-size: 13px; color: #9ca3af; margin-bottom: 4px; font-weight: 500;
+  }}
+  .progress-sublabel {{
+    font-size: 11px; color: #4b5563; margin-top: 4px;
+  }}
 
   /* ── Result ── */
   .result-box {{ display: none; border-radius: 10px; padding: 20px; text-align: center; margin-top: 16px; }}
@@ -2082,8 +2092,9 @@ def widget_embed(key: str = ""):
 
 <!-- Shared progress + result -->
 <div class="progress-wrap" id="progressWrap">
-  <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
-  <div class="progress-label" id="progressLabel">Uploading…</div>
+  <div class="spinner" id="spinner"></div>
+  <div class="progress-label" id="progressLabel">Analyzing video…</div>
+  <div class="progress-sublabel" id="progressSublabel">This can take up to 60 seconds</div>
 </div>
 
 <div class="result-box" id="resultBox">
@@ -2180,9 +2191,9 @@ function resetWidget() {{
   notifyResize();
 }}
 
-function setProgress(pct, label) {{
-  document.getElementById('progressFill').style.width  = pct + '%';
-  document.getElementById('progressLabel').textContent = label;
+function setProgress(pct, label, sublabel) {{
+  document.getElementById('progressLabel').textContent    = label || 'Analyzing video…';
+  document.getElementById('progressSublabel').textContent = sublabel || 'This can take up to 60 seconds';
 }}
 
 function notifyResize() {{
@@ -2208,14 +2219,14 @@ function startUpload() {{
   xhr.open('POST', BACKEND + '/widget-upload/?key=' + API_KEY);
 
   xhr.upload.onprogress = function(e) {{
-    if (e.lengthComputable) {{
-      var pct = Math.round((e.loaded / e.total) * 60);
-      setProgress(10 + pct, 'Uploading… ' + Math.round(e.loaded/e.total*100) + '%');
+    if (e.lengthComputable && e.total > 0) {{
+      var pct = Math.round(e.loaded / e.total * 100);
+      setProgress(0, 'Uploading video… ' + pct + '%', 'Please wait while your video uploads');
     }}
   }};
 
   xhr.onload = function() {{
-    setProgress(95, 'Finalizing result…');
+    setProgress(0, 'Running detection engines…', '5 AI engines analyzing your video');
     try {{
       var data = JSON.parse(xhr.responseText);
       if (xhr.status >= 400 || data.error) {{ showError(data.error || 'Verification failed.'); return; }}
@@ -2224,12 +2235,6 @@ function startUpload() {{
   }};
 
   xhr.onerror = function() {{ showError('Network error. Please check your connection.'); }};
-
-  var pct = 70;
-  var t = setInterval(function() {{
-    if (pct < 92) {{ pct += 2; setProgress(pct, 'Running AI analysis…'); }}
-    else clearInterval(t);
-  }}, 1200);
 
   xhr.send(fd);
 }}
@@ -2243,7 +2248,7 @@ function startUrlAnalysis() {{
   document.getElementById('progressWrap').style.display = 'block';
   document.getElementById('resultBox').style.display    = 'none';
   document.getElementById('errorMsg').textContent       = '';
-  setProgress(10, 'Downloading video…');
+  setProgress(0, 'Downloading video…', 'Fetching video from the link provided');
   notifyResize();
 
   var xhr = new XMLHttpRequest();
@@ -2251,13 +2256,11 @@ function startUrlAnalysis() {{
   xhr.setRequestHeader('Content-Type', 'application/json');
 
   xhr.onload = function() {{
-    setProgress(95, 'Finalizing result…');
     try {{
       var data = JSON.parse(xhr.responseText);
       if (xhr.status >= 400 || data.error) {{ showError(data.error || 'Analysis failed.'); return; }}
-      // Poll for result if job queued
       if (data.job_id) {{
-        setProgress(30, 'Video downloaded — running analysis…');
+        setProgress(0, 'Running detection engines…', '5 AI engines analyzing — this can take up to 60 seconds');
         pollResult(data.job_id);
       }} else {{
         showResult(data);
@@ -2267,26 +2270,32 @@ function startUrlAnalysis() {{
 
   xhr.onerror = function() {{ showError('Network error. Please check your connection.'); }};
 
-  var pct = 20;
-  var t = setInterval(function() {{
-    if (pct < 88) {{ pct += 3; setProgress(pct, 'Running AI analysis…'); }}
-    else clearInterval(t);
-  }}, 1500);
-
   xhr.send(JSON.stringify({{ url: url, email: WIDGET_EMAIL }}));
 }}
 
 function pollResult(jobId) {{
   var attempts = 0;
+  var labels = [
+    'Signal forensics running…',
+    'GPT-4o vision analysis…',
+    'DINOv2 feature extraction…',
+    'NPR frequency analysis…',
+    'Combining engine results…'
+  ];
   var interval = setInterval(function() {{
     attempts++;
-    if (attempts > 60) {{
+    // Cycle through informative labels
+    var lbl = labels[Math.min(Math.floor(attempts / 4), labels.length - 1)];
+    setProgress(0, lbl, 'This can take up to 60 seconds');
+
+    if (attempts > 80) {{
       clearInterval(interval);
       showError('Analysis timed out. Please try again.');
       return;
     }}
     var xhr = new XMLHttpRequest();
     xhr.open('GET', BACKEND + '/job-status/' + jobId);
+    xhr.timeout = 8000;
     xhr.onload = function() {{
       try {{
         var data = JSON.parse(xhr.responseText);
@@ -2299,6 +2308,8 @@ function pollResult(jobId) {{
         }}
       }} catch(e) {{}}
     }};
+    xhr.ontimeout = function() {{/* keep polling */}};
+    xhr.onerror  = function() {{/* keep polling — transient errors happen */}};
     xhr.send();
   }}, 3000);
 }}
