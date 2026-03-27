@@ -1352,13 +1352,25 @@ def debug_db():
 
 @app.get("/admin-list-apikeys/")
 def admin_list_apikeys(key: str = ""):
-    """List all API keys for debugging."""
+    """List all API keys and ensure branding columns exist."""
     if not _is_admin(key):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     try:
         from database import get_db
         with get_db() as conn:
             cur = conn.cursor()
+            # Ensure branding columns exist (safe to run multiple times)
+            for col, default in [
+                ("company_name", "''"),
+                ("logo_url",     "''"),
+                ("brand_color",  "'#f59e0b'"),
+            ]:
+                try:
+                    cur.execute(f"ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS {col} TEXT NOT NULL DEFAULT {default}")
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+            # Now fetch all keys
             cur.execute("SELECT api_key, company_name, logo_url, brand_color, owner_email, active FROM api_keys")
             rows = cur.fetchall()
         return JSONResponse({"keys": [
