@@ -1731,7 +1731,14 @@ def detect_ai(video_path: str) -> int:
         # is a genuine handheld phone video with natural background drift from movement.
         # AI renders are noise-clean (<200); real phone cameras are noisy (>400).
         # Calibrated: Real Baseball: noise=755 → guard protects from +4 misfire.
-        if avg_noise > 400:
+        #
+        # EXCEPTION: BG_DRIFT > 40 is extreme warping that real cameras cannot produce
+        # even with camera movement. Score as AI regardless of noise level.
+        if bg_drift > 40.0:
+            ai_score += 8
+            log.info("BG_DRIFT %.2f → extreme warp (AI) — noise guard overridden → +8",
+                     bg_drift)
+        elif avg_noise > 400:
             log.info("BG_DRIFT %.2f → unstable BUT noise=%.0f real phone camera → suppressed",
                      bg_drift, avg_noise)
         else:
