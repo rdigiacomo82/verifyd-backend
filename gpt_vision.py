@@ -546,19 +546,24 @@ def analyze_frames_with_gpt(frames_b64: list, physics_summary: str = "",
         generator_guess = str(result.get("generator_guess", "Unknown"))[:50]
 
         # Audio-visual manipulation boost
-        # If GPT flagged manipulation signals, push score toward AI range
-        # These are real manipulation indicators even if frames look visually real
+        # If GPT flagged manipulation signals AND score looks real (>40),
+        # push into UNDETERMINED minimum (55).
+        # IMPORTANT: do NOT boost if score is already low (AI territory <=40)
+        # — "Manipulated" on an AI video means it's still AI, not ambiguous.
         _manipulation_flags = [f for f in top_flags
                                 if any(kw in f.lower() for kw in
                                        ("audio_visual_manipulation", "lip-sync", "lipsync",
                                         "dubbed", "dubbing", "compiled propaganda",
                                         "voice replacement", "title card"))]
-        if _manipulation_flags or generator_guess == "Manipulated":
+        if (_manipulation_flags or generator_guess == "Manipulated") and ai_prob > 40:
             old_prob = ai_prob
             ai_prob = max(ai_prob, 55)  # Push into UNDETERMINED minimum
             if ai_prob != old_prob:
                 log.info("gpt_vision: manipulation flag boost %d→%d flags=%s",
                          old_prob, ai_prob, _manipulation_flags)
+        elif generator_guess == "Manipulated" and ai_prob <= 40:
+            log.info("gpt_vision: manipulation boost skipped — score=%d already AI territory",
+                     ai_prob)
 
         log.info(
             "gpt_vision: ai_prob=%d  content=%s  generator=%s  scores=%s",
