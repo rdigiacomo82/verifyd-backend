@@ -1375,12 +1375,12 @@ def admin_update_apikey(
                 SET company_name = COALESCE(NULLIF(%s, ''), company_name),
                     logo_url     = COALESCE(NULLIF(%s, ''), logo_url),
                     brand_color  = COALESCE(NULLIF(%s, ''), brand_color)
-                WHERE key = %s
+                WHERE api_key = %s
             """, (company_name, logo_url, brand_color, api_key))
             updated = cur.rowcount
             conn.commit()
             # Return updated record
-            cur.execute("SELECT key, company_name, logo_url, brand_color FROM api_keys WHERE key = %s", (api_key,))
+            cur.execute("SELECT api_key, company_name, logo_url, brand_color FROM api_keys WHERE api_key = %s", (api_key,))
             row = cur.fetchone()
         if updated == 0:
             return JSONResponse({"error": "API key not found"}, status_code=404)
