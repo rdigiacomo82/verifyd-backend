@@ -1350,6 +1350,26 @@ def debug_db():
         return {"error": str(e)}
 
 
+@app.get("/admin-list-apikeys/")
+def admin_list_apikeys(key: str = ""):
+    """List all API keys for debugging."""
+    if not _is_admin(key):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    try:
+        from database import get_db
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT api_key, company_name, logo_url, brand_color, owner_email, active FROM api_keys")
+            rows = cur.fetchall()
+        return JSONResponse({"keys": [
+            {"api_key": r[0], "company_name": r[1], "logo_url": r[2],
+             "brand_color": r[3], "owner_email": r[4], "active": r[5]}
+            for r in rows
+        ]})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 @app.get("/admin-update-apikey/")
 def admin_update_apikey(
     key:          str = "",
@@ -2354,13 +2374,16 @@ function pollResult(jobId) {{
     xhr.onload = function() {{
       try {{
         var data = JSON.parse(xhr.responseText);
-        if (data.job_status === 'complete') {{
+        // /job-status/ returns data.status (not data.job_status)
+        var st = data.status || data.job_status || '';
+        if (st === 'complete') {{
           clearInterval(interval);
           showResult(data);
-        }} else if (data.job_status === 'error') {{
+        }} else if (st === 'error') {{
           clearInterval(interval);
           showError(data.error || 'Analysis failed.');
         }}
+        // queued / processing / not_found → keep polling
       }} catch(e) {{}}
     }};
     xhr.ontimeout = function() {{/* keep polling */}};
