@@ -906,23 +906,45 @@ def _build_physics_summary(ctx: dict) -> str:
             .format(skin_ratio, period_val)
         )
 
-    # ── Sports / outdoor real-camera hint ──────────────────
-    # Real sports/action phone videos have characteristics that look like AI signals
-    # but are actually camera physics: telephoto blur (ball vs crowd), limited color
-    # palette (grass + dirt + sky), and motion blur artifacts.
+    # ── Sports / outdoor / water activity real-camera hint ──
+    # Real sports, backyard, pool, and athletic phone videos have characteristics
+    # that look like AI signals but are actually real physics:
+    #   - Pool splashes / dives: water flying in all directions = high motion entropy
+    #     (looks like AI omnidirectional noise but is genuine physics)
+    #   - Athletic jumps / dives: cyclical arc motion = high periodicity score
+    #     (looks like AI animation loop but is real repeated athletic motion)
+    #   - Telephoto blur: subject sharp vs blurred crowd = not AI render DOF
+    #   - Limited outdoor palette: grass/water/sky = not AI color curation
     # Help GPT understand when these are real physics, not AI renders.
     avg_noise_val = ctx.get("avg_noise", 0)
     if content_type in ("action", "cinematic") and avg_noise_val > 400:
+        # Build specific hints based on what signals fired
+        _water_hint = ""
+        _period_val = ctx.get("motion_period", ctx.get("period", 0))
+        _omni_val   = ctx.get("omni_flow_entropy", 0)
+        if avg_noise_val > 2000 and (_period_val > 0.65 or _omni_val > 3.3):
+            _water_hint = (
+                "\n  • WATER/ATHLETIC ACTIVITY: Pool splashes, dives, and athletic jumps "
+                "produce cyclical arcs and omnidirectional water motion that can appear "
+                "as AI signals. With this level of camera noise, these are real physics — "
+                "do NOT flag motion_physics or temporal_stability as AI for water splash "
+                "or jump/dive sequences. Real water is chaotic and irregular, not smooth."
+            )
         hints.append(
             "📷 REAL CAMERA INDICATORS DETECTED (noise={:.0f}): "
             "High sensor noise confirms real camera capture. "
-            "In sports/outdoor video this means:\n"
+            "In sports/outdoor/backyard video this means:\n"
             "  • Telephoto blur (ball/subject vs blurred crowd) is natural DOF, not AI render\n"
-            "  • Limited color palette (grass/dirt/sky) is the real scene, not AI curation\n"
-            "  • Motion blur on fast objects (balls, birds) is real shutter physics\n"
+            "  • Limited color palette (grass/dirt/sky/water) is the real scene, not AI curation\n"
+            "  • Motion blur on fast objects (balls, splashing water, jumping people) is real\n"
             "  • Compression artifacts from social media re-encoding are normal\n"
-            "→ Only flag background_realism or color_naturalism as AI if you see "
-            "RENDERED/PAINTED qualities, not just blur or palette limitation.".format(avg_noise_val)
+            "  • Backyard games, pool activities, and casual sports are extremely common "
+            "real phone footage — do not assume AI just because the setting is informal"
+            "{}"
+            "\n→ Only flag background_realism or color_naturalism as AI if you see "
+            "RENDERED/PAINTED qualities, not just blur or palette limitation.".format(
+                avg_noise_val, _water_hint
+            )
         )
 
     # ── Audio mismatch hint ─────────────────────────────────
