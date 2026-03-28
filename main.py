@@ -1504,6 +1504,52 @@ def admin_delete_user(email: str = "", key: str = ""):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+@app.get("/admin-clear-cache/")
+def admin_clear_cache(url: str = "", key: str = ""):
+    """
+    Clear the URL result cache for a specific video URL.
+    Use when a video was incorrectly cached and needs to be re-analyzed.
+    Example: /admin-clear-cache/?url=https://youtube.com/shorts/XYZ&key=Honda%236915
+    """
+    if not _is_admin(key):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    if not url:
+        return JSONResponse({"error": "url required"}, status_code=400)
+    try:
+        import hashlib as _hl
+        import redis as _redis_cc
+        r = _redis_cc.from_url(
+            os.environ.get("REDIS_URL", "redis://localhost:6379"),
+            decode_responses=True
+        )
+        # Clear the exact URL and common variations
+        cleared = []
+        not_found = []
+        variations = [url.strip()]
+        # Add www/non-www variation
+        if url.startswith("https://www."):
+            variations.append(url.replace("https://www.", "https://", 1))
+        elif url.startswith("https://"):
+            variations.append(url.replace("https://", "https://www.", 1))
+        for v in variations:
+            cache_key = "urlcache:v2:" + _hl.md5(v.strip().encode()).hexdigest()
+            result = r.delete(cache_key)
+            if result:
+                cleared.append(v)
+            else:
+                not_found.append(v)
+        log.info("Admin cleared URL cache: cleared=%s not_found=%s", cleared, not_found)
+        return JSONResponse({
+            "status": "ok",
+            "cleared": cleared,
+            "not_found": not_found,
+            "message": f"Cleared {len(cleared)} cache entries. Video will be re-analyzed on next submission."
+        })
+    except Exception as e:
+        log.error("Admin clear cache error: %s", e)
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 @app.get("/admin-reset-user/")
 def admin_reset_user(email: str = "", key: str = ""):
     """Reset a user's period_uses to 0 for testing."""
