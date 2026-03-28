@@ -843,12 +843,26 @@ def run_detection_multiclip(video_path: str) -> tuple:
             )
 
     # Hybrid adjustment — only clamp when clips GENUINELY disagree
-    # True hybrid = some clips real (<45) AND some clips AI (>65)
+    # True hybrid = some clips clearly real (<35) AND some clips AI (>65)
     # NOT hybrid = all clips agree on AI with varying confidence
-    _has_real_clips   = any(s < 45 for s in signal_scores)
+    # THRESHOLD CHANGE: raised from <45 to <35 — scores 35-44 are ambiguous,
+    # not "real". A clip at 35-44 can occur on AI content with noisy frames
+    # and should not trigger the mixed-content clamp.
+    _has_real_clips   = any(s < 35 for s in signal_scores)
     _has_ai_clips     = any(s > 65 for s in signal_scores)
-    _true_hybrid      = hybrid_flag and _has_real_clips and _has_ai_clips
+    # GPT override: if GPT is strongly confident AI (>=80), suppress hybrid clamp
+    # even when clips appear mixed. GPT seeing definitive AI artifacts at >=80
+    # overrides ambiguous signal variance — prevents AI videos from being
+    # downgraded to UNDETERMINED when visual evidence is unambiguous.
+    _gpt_strongly_ai  = gpt_ai_score >= 80
+    _true_hybrid      = hybrid_flag and _has_real_clips and _has_ai_clips and not _gpt_strongly_ai
     _both_engines_ai  = signal_ai_score > 70 and gpt_ai_score > 65
+
+    if _gpt_strongly_ai and hybrid_flag and _has_real_clips and _has_ai_clips:
+        log.info(
+            "Hybrid clamp suppressed: GPT=%d strongly AI (>=80) overrides mixed signal %s",
+            gpt_ai_score, signal_scores
+        )
 
     if _true_hybrid and not gpt_failed and not _both_engines_ai:
         # Genuine mixed content — pull toward UNDETERMINED
