@@ -703,7 +703,34 @@ def run_detection_multiclip(video_path: str) -> tuple:
     signal_context = valid[best_ctx_idx][1]
     content_type = signal_context.get("content_type", "cinematic")
 
-    # ── Hybrid detection ──────────────────────────────────────
+    # YouTube low-resolution uncertainty adjustment
+    # YouTube re-encodes all uploads through their H264 pipeline, which:
+    #   1. Strips all original AI generator metadata (C2PA, encoder strings)
+    #   2. Creates H264 compression artifacts that mimic real camera noise
+    #   3. Downloads at very low resolution (often 352x640) making signals unreliable
+    # When source is confirmed YouTube AND any clip is low resolution (<300k px),
+    # pull signal score 30% toward uncertain midpoint (50).
+    # This prevents confidently calling compressed YouTube AI videos as REAL.
+    # Only applies to link analysis -- direct file uploads are never youtube-sourced.
+    _is_youtube_source = "youtube" in _video_source.lower()
+    if _is_youtube_source:
+        # clip_px is returned by detector.py in signal_context
+        _any_low_res = any(
+            ctx.get("clip_px", 999999) < 300000
+            for _, ctx, _ in valid
+        )
+        if _any_low_res:
+            _old_signal = signal_ai_score
+            signal_ai_score = int(round(signal_ai_score * 0.70 + 50 * 0.30))
+            log.info(
+                "YOUTUBE_LOWRES: low-res YouTube clip detected (clip_px<300k) -- "
+                "signal %d->%d (30pct uncertainty pull, GPT weighted higher)",
+                _old_signal, signal_ai_score
+            )
+            signal_context["youtube_lowres_adjusted"] = True
+        else:
+            log.info("YOUTUBE: source=youtube but resolution adequate -- no adjustment")
+
     score_variance = max(signal_scores) - min(signal_scores) if len(signal_scores) > 1 else 0
     signal_avg_pre = sum(signal_scores) / len(signal_scores)
 

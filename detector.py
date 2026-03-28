@@ -2089,15 +2089,7 @@ def detect_ai(video_path: str) -> int:
         is_static_content or
         _is_compilation or
         avg_motion < 1.0 or
-        (avg_flow_var > 20.0) or  # camera pan produces smooth motion that looks periodic
-        # HIGH-NOISE REAL CAMERA GUARD: noise > 2000 at reasonable resolution = definitive
-        # real sensor capture. Real athletic/backyard/water activities (jumps, splashes,
-        # dives) produce cyclical motion arcs that score high autocorrelation identically
-        # to AI animation loops. A real iPhone at noise=2000+ cannot be an AI template.
-        # Threshold: 540*960=518,400px covers all clip resolutions (clips are scaled to
-        # max 720px wide by extract_clips, so 1280*720 would miss portrait clips).
-        # Prevents false positives on sports, pool, dive, and athletic content.
-        (avg_noise > 2000 and _px_count >= 518400)
+        (avg_flow_var > 20.0)   # camera pan produces smooth motion that looks periodic
     )
     _portrait_action_reclassified = (is_action_content and _is_portrait)
     _period_thresh_strong = 0.75 if _portrait_action_reclassified else 0.65
@@ -2218,13 +2210,7 @@ def detect_ai(video_path: str) -> int:
         _is_single_subject or
         is_static_content or
         _is_short_clip or
-        avg_motion < 1.5 or              # not enough motion to analyze
-        # HIGH-NOISE WATER/SPLASH GUARD: pool splashes, waterfalls, rain, and athletic
-        # dives create genuinely omnidirectional motion (water flying all directions)
-        # that scores identically to AI noise motion. At noise > 2500 with reasonable
-        # resolution (540*960=518,400px covers all portrait clip sizes), this is real
-        # camera physics not AI rendering — suppress the signal.
-        (avg_noise > 2500 and _px_count >= 518400)
+        avg_motion < 1.5                 # not enough motion to analyze
     )
     if not _omni_guard:
         # For person-like content (action, cinematic with skin), use stricter threshold
@@ -2366,5 +2352,9 @@ def detect_ai(video_path: str) -> int:
         "audio_stereo_corr":  _audio.get("stereo_corr", 0),
         "audio_has_signal":   _audio.get("ai_score_contribution", 0) > 0,
         "audio_reason":       _audio.get("reason", ""),
+        # clip resolution — used by detection.py for YouTube low-res uncertainty guard
+        "clip_width":  cap_w,
+        "clip_height": cap_h,
+        "clip_px":     cap_w * cap_h,
     }
     return int(round(ai_score)), signal_context
