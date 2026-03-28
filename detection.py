@@ -715,15 +715,19 @@ def run_detection_multiclip(video_path: str) -> tuple:
     _is_youtube_source = "youtube" in _video_source.lower()
     if _is_youtube_source:
         # clip_px is returned by detector.py in signal_context
+        # Threshold raised to 500,000px (from 300,000) to cover SMVD YouTube
+        # 480p renders which produce ~470x854 = 401,380px — above the old threshold.
+        # 500k covers all YouTube qualities up to ~540p while excluding
+        # higher quality direct uploads where signals are more reliable.
         _any_low_res = any(
-            ctx.get("clip_px", 999999) < 300000
+            ctx.get("clip_px", 999999) < 500000
             for _, ctx, _ in valid
         )
         if _any_low_res:
             _old_signal = signal_ai_score
             signal_ai_score = int(round(signal_ai_score * 0.70 + 50 * 0.30))
             log.info(
-                "YOUTUBE_LOWRES: low-res YouTube clip detected (clip_px<300k) -- "
+                "YOUTUBE_LOWRES: low-res YouTube clip detected (clip_px<500k) -- "
                 "signal %d->%d (30pct uncertainty pull, GPT weighted higher)",
                 _old_signal, signal_ai_score
             )

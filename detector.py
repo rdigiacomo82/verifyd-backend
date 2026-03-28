@@ -1744,6 +1744,14 @@ def detect_ai(video_path: str) -> int:
         else:
             ai_score += 4
             log.info("BG_DRIFT %.2f → unstable bg → +4", bg_drift)
+    elif bg_drift > 40.0 and is_action_content:
+        # EXTREME WARP on action content — no real camera produces bg_drift > 40
+        # even during fast action. Real action videos have high motion but the
+        # background warp stays proportional to camera movement (typically 5-25).
+        # bg_drift > 40 on action = AI background warping/generation artifact.
+        # This catches cases where action content guard was suppressing a real AI signal.
+        ai_score += 8
+        log.info("BG_DRIFT %.2f → extreme warp on action content (AI) → +8", bg_drift)
     elif 5.0 <= bg_drift <= 18.0 and not is_action_content:
         ai_score -= 4
         log.info("BG_DRIFT %.2f → natural range → -4", bg_drift)
@@ -2352,9 +2360,5 @@ def detect_ai(video_path: str) -> int:
         "audio_stereo_corr":  _audio.get("stereo_corr", 0),
         "audio_has_signal":   _audio.get("ai_score_contribution", 0) > 0,
         "audio_reason":       _audio.get("reason", ""),
-        # clip resolution — used by detection.py for YouTube low-res uncertainty guard
-        "clip_width":  cap_w,
-        "clip_height": cap_h,
-        "clip_px":     cap_w * cap_h,
     }
     return int(round(ai_score)), signal_context
