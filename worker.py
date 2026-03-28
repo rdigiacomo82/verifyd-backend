@@ -19,6 +19,26 @@ import tempfile
 log = logging.getLogger("verifyd.worker")
 logging.basicConfig(level=logging.INFO)
 
+# ── DINOv2 pre-warm ───────────────────────────────────────────
+# RQ forks a new child process per job. Python module-level globals
+# (_dino_loaded, _dino_model) reset in each fork, so lazy-loading
+# inside job functions reloads the model every job (~10s penalty).
+#
+# Fix: load DINOv2 HERE, at module import time, before RQ forks.
+# The loaded model lives in the parent process and is inherited
+# (copy-on-write) by all forked children — zero reload cost per job.
+#
+# This block runs once when `rq worker` starts and imports worker.py.
+# If torch/transformers are missing or the model download fails,
+# it logs a warning and continues — detection falls back gracefully.
+try:
+    from dinov2_detector import _load_model as _dino_prewarm
+    log.info("Worker startup: pre-warming DINOv2 ViT-Small...")
+    _dino_prewarm()
+    log.info("Worker startup: DINOv2 pre-warm complete — model cached in parent process")
+except Exception as _dino_err:
+    log.warning("Worker startup: DINOv2 pre-warm failed (%s) — will lazy-load per job", _dino_err)
+
 RESULT_TTL = 1800   # 30 min
 
 
