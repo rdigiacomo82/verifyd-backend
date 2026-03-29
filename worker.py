@@ -350,7 +350,43 @@ def process_link_job(
 
     except Exception as e:
         log.exception("Worker: link job %s failed", job_id)
-        result = {"job_status": "error", "error": str(e)[:300]}
+
+        # Provide specific, user-friendly error messages for known failure modes
+        err_str = str(e).lower()
+        if "sign in to confirm" in err_str or "login" in err_str or "bot" in err_str:
+            user_error = (
+                "This YouTube video requires sign-in to access and cannot be analyzed. "
+                "This happens with age-restricted videos or videos with strict privacy settings. "
+                "Try uploading the video file directly instead."
+            )
+        elif "403" in err_str or "forbidden" in err_str:
+            user_error = (
+                "Access to this video was blocked (403 Forbidden). "
+                "The video may be region-locked, private, or restricted. "
+                "Try uploading the video file directly instead."
+            )
+        elif "private" in err_str:
+            user_error = "This video is private and cannot be accessed."
+        elif "not available" in err_str or "unavailable" in err_str:
+            user_error = "This video is unavailable or has been removed."
+        elif "download produced no file" in err_str:
+            user_error = (
+                "The video could not be downloaded. "
+                "YouTube may be blocking automated access to this video. "
+                "Try uploading the video file directly instead."
+            )
+        else:
+            user_error = (
+                "This video could not be analyzed. "
+                "YouTube may be blocking access, or the link may be invalid. "
+                "Try uploading the video file directly instead."
+            )
+
+        result = {
+            "job_status": "error",
+            "error": user_error,
+            "error_detail": str(e)[:300],
+        }
         _store_result(r, job_id, result)
         return result
 
