@@ -906,33 +906,35 @@ def _build_physics_summary(ctx: dict) -> str:
             .format(skin_ratio, period_val)
         )
 
-    # ── YouTube source hint — raise AI skepticism ────────────
-    # YouTube is a major distribution platform for AI-generated videos.
-    # When the video source is YouTube AND the signal detector flagged
-    # uncertainty (youtube_lowres_adjusted), instruct GPT to be MORE
-    # skeptical and look harder for subtle AI artifacts.
+    # ── YouTube source — MANDATORY scoring rules ────────────
+    # YouTube is a primary distribution platform for AI-generated video.
+    # YouTube's H264 re-encoding pipeline creates compression noise that mimics
+    # real camera grain — this noise is NOT evidence of a real camera.
+    # When source is YouTube, the noise signal is unreliable.
     _is_youtube = "youtube" in str(ctx.get("source", "")).lower()
-    _youtube_adjusted = ctx.get("youtube_lowres_adjusted", False)
     if _is_youtube:
         hints.append(
-            "🎬 YOUTUBE SOURCE — ELEVATED AI SCRUTINY REQUIRED:\n"
-            "YouTube is one of the primary distribution platforms for AI-generated video content. "
-            "AI videos on YouTube often look highly realistic because:\n"
-            "  • High-quality AI generators (Sora, Kling, Runway) produce cinematically convincing results\n"
-            "  • YouTube's re-encoding smooths compression artifacts that would reveal AI origins\n"
-            "  • AI creators specifically optimize content to pass visual inspection\n\n"
-            "For this YouTube video, you MUST:\n"
-            "  → Look for subtle temporal inconsistencies between frames (texture shimmer, geometry drift)\n"
-            "  → Check if the background has ANY warping, morphing, or unnatural stability\n"
-            "  → Examine motion physics critically — does movement have real weight and inertia?\n"
-            "  → Scrutinize skin/hair/eye quality at full detail — AI skin is unnaturally smooth\n"
-            "  → Check if lighting stays unnaturally consistent across all frames\n"
-            "  → Look for the characteristic 'too perfect' quality that AI generators produce\n\n"
-            "DO NOT default to scoring dimensions as 2 (real) without specific visual evidence. "
-            "If a dimension looks 'fine' but you cannot point to specific real-camera characteristics, "
-            "score it 5 (uncertain) rather than 2 (real). "
-            "For YouTube content, UNDETERMINED (score 5) is more appropriate than REAL (score 2) "
-            "when you cannot confirm authenticity."
+            "🚨 YOUTUBE SOURCE — MANDATORY SCORING RULES:\n"
+            "YouTube's H264 compression creates noise that mimics real camera grain.\n"
+            "High noise in this video does NOT confirm it is real camera footage.\n\n"
+            "MANDATORY RULE — Score 2 (real) ONLY if you can state a SPECIFIC real-camera\n"
+            "observation for that dimension. Examples of valid evidence for score 2:\n"
+            "  • background_realism=2: 'I can see dirt, debris, natural shadows, real bokeh'\n"
+            "  • lighting_coherence=2: 'Shadows follow one consistent light source direction'\n"
+            "  • color_naturalism=2: 'Colors are slightly muted with natural noise variation'\n"
+            "  • motion_physics=2: 'Subject decelerates with real inertia, hair lags body'\n\n"
+            "If you CANNOT state specific real-camera evidence: score 5 (uncertain).\n"
+            "'Looks fine' or 'appears real' is NOT evidence — score 5 not 2.\n"
+            "'Cannot confirm either way' = score 5 not 2.\n\n"
+            "For this YouTube video specifically:\n"
+            "  → background_realism: Does the background have natural depth, real shadows,\n"
+            "    environmental debris? Or does it look rendered/stock? Score 5 if unsure.\n"
+            "  → lighting_coherence: Can you trace ONE consistent real light source across\n"
+            "    all frames? Or is lighting suspiciously even/perfect? Score 5 if unsure.\n"
+            "  → color_naturalism: Are colors slightly muted with noise variation like a real\n"
+            "    camera? Or oversaturated/flat? Score 5 if unsure.\n"
+            "  → temporal_stability: Do ANY fine details (texture, edges, background elements)\n"
+            "    shift between frames in ways a real camera would not produce? Score 7-9 if yes."
         )
 
     # ── Sports / outdoor real-camera hint ──────────────────
@@ -940,8 +942,10 @@ def _build_physics_summary(ctx: dict) -> str:
     # but are actually camera physics: telephoto blur (ball vs crowd), limited color
     # palette (grass + dirt + sky), and motion blur artifacts.
     # Help GPT understand when these are real physics, not AI renders.
+    # NOTE: This hint is suppressed for YouTube sources since YouTube compression
+    # noise is not real camera PRNU — the noise guard does not apply.
     avg_noise_val = ctx.get("avg_noise", 0)
-    if content_type in ("action", "cinematic") and avg_noise_val > 400:
+    if content_type in ("action", "cinematic") and avg_noise_val > 400 and not _is_youtube:
         hints.append(
             "📷 REAL CAMERA INDICATORS DETECTED (noise={:.0f}): "
             "High sensor noise confirms real camera capture. "
@@ -1035,7 +1039,6 @@ def gpt_vision_score_with_context(frames_b64: list, physics_context: dict) -> di
     result          = analyze_frames_with_gpt(frames_b64, physics_summary, content_type)
     result["available"] = True
     return result
-
 
 
 
