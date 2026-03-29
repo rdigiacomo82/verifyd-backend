@@ -211,7 +211,8 @@ def run_detection(video_path: str) -> tuple:
         # Determine blend mode
         # clash_real: signal says real BUT only override GPT if GPT is not highly confident
         # If GPT >= 75, it's seeing strong AI artifacts — don't let signal dismiss it
-        clash_real  = signal_ai_score < 50 and gpt_ai_score > 50 and gpt_ai_score < 75
+        _youtube_signal_unreliable = signal_context.get("youtube_lowres_adjusted", False) or "youtube" in _video_source.lower()
+        clash_real   = signal_ai_score < 50 and gpt_ai_score > 50 and gpt_ai_score < 75 and not _youtube_signal_unreliable
         clash_ai    = signal_ai_score > 65 and gpt_ai_score < 40   # signal says AI, GPT misses it
         gpt_dominant = gpt_ai_score >= 75 and signal_ai_score < 60  # GPT highly confident AI, signal unsure
         both_real   = signal_ai_score < 45 and gpt_ai_score < 45
