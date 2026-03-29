@@ -202,6 +202,18 @@ def run_detection(video_path: str) -> tuple:
         gpt_result.get("reasoning", "").startswith("GPT analysis error")
     )
 
+    # Read video source from sidecar so YouTube clash->real suppression works
+    # in the single-clip path just as it does in run_detection_multiclip()
+    import os as _os_rd, json as _jsc_rd
+    _sidecar_rd = video_path.replace(".mp4", ".meta.json").replace(".MOV", ".meta.json")
+    _video_source = ""
+    if _os_rd.path.exists(_sidecar_rd):
+        try:
+            with open(_sidecar_rd) as _sf_rd:
+                _video_source = _jsc_rd.load(_sf_rd).get("source", "")
+        except Exception:
+            pass
+
     if gpt_failed:
         combined      = float(signal_ai_score)
         w_sig, w_gpt  = 1.0, 0.0
