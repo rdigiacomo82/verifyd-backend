@@ -703,22 +703,17 @@ def run_detection_multiclip(video_path: str) -> tuple:
     signal_context = valid[best_ctx_idx][1]
     content_type = signal_context.get("content_type", "cinematic")
 
-    # YouTube low-resolution uncertainty adjustment
+    # ── YouTube low-resolution uncertainty adjustment ──────────
     # YouTube re-encodes all uploads through their H264 pipeline, which:
-    #   1. Strips all original AI generator metadata (C2PA, encoder strings)
+    #   1. Strips all original AI generator metadata
     #   2. Creates H264 compression artifacts that mimic real camera noise
-    #   3. Downloads at very low resolution (often 352x640) making signals unreliable
-    # When source is confirmed YouTube AND any clip is low resolution (<300k px),
-    # pull signal score 30% toward uncertain midpoint (50).
-    # This prevents confidently calling compressed YouTube AI videos as REAL.
-    # Only applies to link analysis -- direct file uploads are never youtube-sourced.
+    #   3. Downloads at low resolution making forensic signals unreliable
+    # When source=youtube AND clip_px < 500,000 (covers all YouTube quality
+    # levels up to ~540p), pull signal score 30% toward 50 and flag for
+    # clash->real suppression in blend mode selection below.
+    # clip_px is now returned by detector.py in signal_context.
     _is_youtube_source = "youtube" in _video_source.lower()
     if _is_youtube_source:
-        # clip_px is returned by detector.py in signal_context
-        # Threshold raised to 500,000px (from 300,000) to cover SMVD YouTube
-        # 480p renders which produce ~470x854 = 401,380px — above the old threshold.
-        # 500k covers all YouTube qualities up to ~540p while excluding
-        # higher quality direct uploads where signals are more reliable.
         _any_low_res = any(
             ctx.get("clip_px", 999999) < 500000
             for _, ctx, _ in valid
@@ -728,13 +723,14 @@ def run_detection_multiclip(video_path: str) -> tuple:
             signal_ai_score = int(round(signal_ai_score * 0.70 + 50 * 0.30))
             log.info(
                 "YOUTUBE_LOWRES: low-res YouTube clip detected (clip_px<500k) -- "
-                "signal %d->%d (30pct uncertainty pull, GPT weighted higher)",
+                "signal %d->%d (30pct uncertainty pull)",
                 _old_signal, signal_ai_score
             )
             signal_context["youtube_lowres_adjusted"] = True
         else:
             log.info("YOUTUBE: source=youtube but resolution adequate -- no adjustment")
 
+    # ── Hybrid detection ──────────────────────────────────────
     score_variance = max(signal_scores) - min(signal_scores) if len(signal_scores) > 1 else 0
     signal_avg_pre = sum(signal_scores) / len(signal_scores)
 
@@ -809,11 +805,26 @@ def run_detection_multiclip(video_path: str) -> tuple:
         w_sig, w_gpt = 1.0, 0.0
         mode = "signal-only (GPT failed)"
     else:
-        clash_real   = signal_ai_score < 50 and gpt_ai_score > 50 and gpt_ai_score < 75
+        # For YouTube low-res sources, signal forensics are unreliable —
+        # YouTube H264 re-encoding creates fake "real camera" noise signals.
+        # Suppress clash→real so GPT carries more weight when signal says real
+        # but GPT sees AI evidence. This prevents the 90% signal weight from
+        # overriding GPT on videos where signal data cannot be trusted.
+        _youtube_signal_unreliable = signal_context.get("youtube_lowres_adjusted", False)
+
+        clash_real   = (signal_ai_score < 50 and gpt_ai_score > 50 and gpt_ai_score < 75
+                        and not _youtube_signal_unreliable)  # suppress for YouTube low-res
         clash_ai     = signal_ai_score > 65 and gpt_ai_score < 40
         gpt_dominant = gpt_ai_score >= 75 and signal_ai_score < 60
         both_real    = signal_ai_score < 45 and gpt_ai_score < 45
         both_ai      = signal_ai_score > 65 and gpt_ai_score > 65
+
+        if _youtube_signal_unreliable and signal_ai_score < 50 and gpt_ai_score > 50:
+            log.info(
+                "YOUTUBE_LOWRES: clash->real suppressed — "
+                "signal(%d) unreliable for YouTube, GPT(%d) gets default weight",
+                signal_ai_score, gpt_ai_score
+            )
 
         if gpt_dominant:
             combined_ai_score = signal_ai_score * 0.25 + gpt_ai_score * 0.75
