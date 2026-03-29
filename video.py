@@ -81,24 +81,6 @@ def _extract_video_id(url: str) -> str:
     return ""
 
 
-def _write_youtube_sidecar(output_path: str) -> None:
-    """
-    Write a sidecar JSON file marking this video as YouTube-sourced.
-    detection.py reads this to apply YouTube-specific adjustments:
-      - Low-resolution uncertainty penalty (YouTube re-encodes at low quality)
-      - Suppression of signals that YouTube H264 compression makes unreliable
-    Mirrors the TikTok sidecar pattern: {aigc_label_type: 0, source: "youtube"}
-    """
-    import json as _json
-    try:
-        sidecar = output_path.replace(".mp4", ".meta.json")
-        with open(sidecar, "w") as sf:
-            _json.dump({"aigc_label_type": 0, "source": "youtube"}, sf)
-        log.info("SMVD YouTube: wrote source sidecar → %s", sidecar)
-    except Exception as e:
-        log.warning("SMVD YouTube: could not write sidecar: %s", e)
-
-
 def _try_smvd_youtube(url: str, output_path: str) -> bool:
     """
     Download YouTube video via SMVD API.
@@ -114,10 +96,13 @@ def _try_smvd_youtube(url: str, output_path: str) -> bool:
         "x-rapidapi-host": SMVD_HOST,
     }
 
-    # Request video details with 480p rendered format
+    # Request video details with 720p rendered format for better forensic signal.
+    # 720p = 1,280x720 = 921,600px vs 480p = 854x480 = 401,380px — more than 2x the pixels.
+    # More pixels = more forensic signal for both signal detector and GPT vision.
+    # SMVD falls back to best available if 720p is not offered by this video.
     params = {
         "videoId":          video_id,
-        "renderableFormats": "480p",
+        "renderableFormats": "720p",
         "urlAccess":        "proxied",
         "getTranscript":    "false",
     }
@@ -157,7 +142,7 @@ def _try_smvd_youtube(url: str, output_path: str) -> bool:
         if not execution_url:
             continue
 
-        log.info("SMVD YouTube: triggering render for %s", rv.get("label", "?"))
+        log.info("SMVD YouTube: triggering render for %s (requested 720p)", rv.get("label", "?"))
         try:
             # Trigger render (no auth needed)
             exec_resp = requests.get(execution_url, timeout=30)
@@ -203,7 +188,6 @@ def _try_smvd_youtube(url: str, output_path: str) -> bool:
                 size = os.path.getsize(output_path)
                 if size > 1024:
                     log.info("SMVD YouTube render: success — %d bytes", size)
-                    _write_youtube_sidecar(output_path)
                     return True
 
         except Exception as e:
@@ -218,7 +202,7 @@ def _try_smvd_youtube(url: str, output_path: str) -> bool:
     video_url = None
     audio_url = None
 
-    preferred = ["480p", "360p", "240p", "144p"]
+    preferred = ["720p", "480p", "360p", "240p", "144p"]
     for quality in preferred:
         for v in videos:
             if v.get("label", "").startswith(quality):
@@ -265,7 +249,6 @@ def _try_smvd_youtube(url: str, output_path: str) -> bool:
             size = os.path.getsize(output_path)
             if size > 1024:
                 log.info("SMVD YouTube merged: success — %d bytes", size)
-                _write_youtube_sidecar(output_path)
                 return True
         finally:
             for f in (video_tmp, audio_tmp):
@@ -277,7 +260,6 @@ def _try_smvd_youtube(url: str, output_path: str) -> bool:
         size = os.path.getsize(output_path)
         if size > 1024:
             log.info("SMVD YouTube direct: success — %d bytes", size)
-            _write_youtube_sidecar(output_path)
             return True
 
     return False
@@ -531,9 +513,6 @@ def download_video_ytdlp(url: str, output_path: str) -> None:
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
-        # Write YouTube sidecar so detection.py knows source platform
-        if "youtube.com" in url or "youtu.be" in url:
-            _write_youtube_sidecar(output_path)
     except yt_dlp.utils.DownloadError as e:
         msg = str(e)
         if "Private video" in msg or "private" in msg.lower():
@@ -770,7 +749,6 @@ def extract_clips_for_detection(video_path: str) -> list:
     # Sort by offset so results are in time order
     clips.sort(key=lambda x: x[1])
     return clips
-
 
 
 
