@@ -805,15 +805,20 @@ def run_detection_multiclip(video_path: str) -> tuple:
         w_sig, w_gpt = 1.0, 0.0
         mode = "signal-only (GPT failed)"
     else:
-        # For YouTube low-res sources, signal forensics are unreliable —
-        # YouTube H264 re-encoding creates fake "real camera" noise signals.
-        # Suppress clash→real so GPT carries more weight when signal says real
-        # but GPT sees AI evidence. This prevents the 90% signal weight from
-        # overriding GPT on videos where signal data cannot be trusted.
-        _youtube_signal_unreliable = signal_context.get("youtube_lowres_adjusted", False)
+        # YouTube H264 re-encoding creates Laplacian noise that mimics real camera
+        # grain at ALL resolutions (480p AND 720p), making signal say "real" while
+        # GPT may correctly identify AI content visually.
+        # Suppress clash->real for ALL YouTube sources — not just low-res —
+        # because the fake noise signal is a YouTube pipeline artifact, not resolution-dependent.
+        # The signal uncertainty pull (30% toward 50) still only applies to low-res (<500k px)
+        # since that addresses a different problem (insufficient pixels for reliable analysis).
+        _is_youtube = "youtube" in _video_source.lower()
+        _youtube_signal_unreliable = (
+            signal_context.get("youtube_lowres_adjusted", False) or _is_youtube
+        )
 
         clash_real   = (signal_ai_score < 50 and gpt_ai_score > 50 and gpt_ai_score < 75
-                        and not _youtube_signal_unreliable)  # suppress for YouTube low-res
+                        and not _youtube_signal_unreliable)  # suppress for ALL YouTube sources
         clash_ai     = signal_ai_score > 65 and gpt_ai_score < 40
         gpt_dominant = gpt_ai_score >= 75 and signal_ai_score < 60
         both_real    = signal_ai_score < 45 and gpt_ai_score < 45
@@ -821,8 +826,9 @@ def run_detection_multiclip(video_path: str) -> tuple:
 
         if _youtube_signal_unreliable and signal_ai_score < 50 and gpt_ai_score > 50:
             log.info(
-                "YOUTUBE_LOWRES: clash->real suppressed — "
-                "signal(%d) unreliable for YouTube, GPT(%d) gets default weight",
+                "YOUTUBE: clash->real suppressed — "
+                "signal(%d) noise unreliable for YouTube (H264 compression mimics real grain), "
+                "GPT(%d) gets default weight",
                 signal_ai_score, gpt_ai_score
             )
 
