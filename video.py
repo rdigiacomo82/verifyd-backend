@@ -188,6 +188,15 @@ def _try_smvd_youtube(url: str, output_path: str) -> bool:
                 size = os.path.getsize(output_path)
                 if size > 1024:
                     log.info("SMVD YouTube render: success — %d bytes", size)
+                    # Write source sidecar so detection.py can apply YouTube guards
+                    try:
+                        import json as _yt_json
+                        _yt_sidecar = output_path.replace(".mp4", ".meta.json")
+                        with open(_yt_sidecar, "w") as _yt_sf:
+                            _yt_json.dump({"aigc_label_type": 0, "source": "youtube"}, _yt_sf)
+                        log.info("SMVD YouTube: wrote source sidecar → %s", _yt_sidecar)
+                    except Exception as _yt_se:
+                        log.warning("SMVD YouTube: sidecar write failed: %s", _yt_se)
                     return True
 
         except Exception as e:
