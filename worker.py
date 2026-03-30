@@ -253,6 +253,23 @@ def process_link_job(
 
     tmp_path = os.path.join(tempfile.gettempdir(), f"{job_id}.mp4")
 
+    # ── Blocked domains — reject immediately with clear error ────
+    _BLOCKED_DOMAINS = [
+        "pornhub.com", "xvideos.com", "xhamster.com", "redtube.com",
+        "youporn.com", "tube8.com", "xnxx.com", "spankbang.com",
+        "onlyfans.com", "fansly.com",
+    ]
+    _url_lower = video_url.lower()
+    if any(domain in _url_lower for domain in _BLOCKED_DOMAINS):
+        _blocked_result = {
+            "job_status": "error",
+            "error": "This platform is not supported. VeriFYD analyzes YouTube, TikTok, and direct video uploads.",
+            "error_detail": f"Blocked domain: {video_url[:100]}",
+        }
+        _store_result(r, job_id, _blocked_result)
+        log.warning("Worker: blocked domain rejected for job=%s url=%s", job_id, video_url[:80])
+        return _blocked_result
+
     try:
         log.info("Worker: downloading url for job=%s", job_id)
         download_video_ytdlp(video_url, tmp_path)
@@ -367,12 +384,18 @@ def process_link_job(
             )
         elif "private" in err_str:
             user_error = "This video is private and cannot be accessed."
+        elif "copyright" in err_str or "content id" in err_str:
+            user_error = (
+                "This video cannot be analyzed because it is copyright-protected. "
+                "The content owner has restricted automated access to this video. "
+                "Try uploading the video file directly instead."
+            )
         elif "not available" in err_str or "unavailable" in err_str:
             user_error = "This video is unavailable or has been removed."
         elif "download produced no file" in err_str:
             user_error = (
-                "The video could not be downloaded. "
-                "YouTube may be blocking automated access to this video. "
+                "This video could not be downloaded. It may be copyright-protected, "
+                "age-restricted, region-locked, or set to private. "
                 "Try uploading the video file directly instead."
             )
         else:

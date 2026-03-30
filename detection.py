@@ -831,12 +831,7 @@ def run_detection_multiclip(video_path: str) -> tuple:
 
         clash_real   = (signal_ai_score < 50 and gpt_ai_score > 50 and gpt_ai_score < 75
                         and not _youtube_signal_unreliable)  # suppress for ALL YouTube sources
-        # clash_ai suppressed for YouTube when GPT is very confidently real (gpt < 30).
-        # When GPT scores < 30 it strongly identified real content — overriding it
-        # with a high signal score produces false AI detections on real YouTube video
-        # with text overlays, stable lighting, or other real-but-misread signals.
-        _clash_ai_youtube_override = _is_youtube and gpt_ai_score < 30
-        clash_ai     = signal_ai_score > 65 and gpt_ai_score < 40 and not _clash_ai_youtube_override
+        clash_ai     = signal_ai_score > 65 and gpt_ai_score < 40
         gpt_dominant = gpt_ai_score >= 75 and signal_ai_score < 60
         both_real    = signal_ai_score < 45 and gpt_ai_score < 45
         both_ai      = signal_ai_score > 65 and gpt_ai_score > 65
@@ -852,7 +847,7 @@ def run_detection_multiclip(video_path: str) -> tuple:
             _is_youtube and
             signal_ai_score > 50 and      # signal elevated (possibly false positive)
             gpt_ai_score < 45 and          # GPT confident real
-            _dino_score_ctx <= 5           # DINOv2 also confirms real
+            _dino_score_ctx <= 10          # DINOv2 also confirms real (<=10 allows for consistent-scene real video)
         )
 
         if _youtube_signal_unreliable and signal_ai_score < 50 and gpt_ai_score > 50:
