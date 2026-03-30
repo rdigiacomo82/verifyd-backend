@@ -931,8 +931,16 @@ def _build_physics_summary(ctx: dict) -> str:
             "    environmental debris? Or does it look rendered/stock? Score 5 if unsure.\n"
             "  → lighting_coherence: Can you trace ONE consistent real light source across\n"
             "    all frames? Or is lighting suspiciously even/perfect? Score 5 if unsure.\n"
+            "    EXCEPTION: Consistent artificial lighting in a real interior space\n"
+            "    (airplane cabin, office, home) is EXPECTED — score 2 if the scene\n"
+            "    looks like a real enclosed environment, even if lighting is even.\n"
             "  → color_naturalism: Are colors slightly muted with noise variation like a real\n"
             "    camera? Or oversaturated/flat? Score 5 if unsure.\n"
+            "    EXCEPTION: Muted/desaturated colors in a dark or indoor real scene\n"
+            "    are NORMAL — score 2 if the color range looks like a real environment.\n"
+            "  → background_realism: Real indoor backgrounds (airplane seats, office walls,\n"
+            "    home interiors) may look plain or uniform — this is NOT AI rendering.\n"
+            "    Score 2 if you can identify it as a real physical space.\n"
             "  → temporal_stability: Do ANY fine details (texture, edges, background elements)\n"
             "    shift between frames in ways a real camera would not produce? Score 7-9 if yes."
         )
@@ -958,31 +966,32 @@ def _build_physics_summary(ctx: dict) -> str:
             "RENDERED/PAINTED qualities, not just blur or palette limitation.".format(avg_noise_val)
         )
 
-    # ── Ultra-high noise hint (static/dark real video) ──────
-    # When sensor noise is extremely high (> 3000 Laplacian variance), this is
-    # definitively a real camera — no AI video generator produces noise at this level.
-    # AI renders: noise < 2500. Real cameras in low-light/dark: noise 3000-6000+.
-    # This fires for ALL content types including static, which the sports hint skips.
     _ultra_high_noise = avg_noise_val > 3000
     if _ultra_high_noise:
         hints.append(
-            "🎥 EXTREMELY HIGH SENSOR NOISE DETECTED (noise={:.0f}) — REAL CAMERA CONFIRMED:\n"
-            "This video has sensor noise levels that are only possible with a real camera "
-            "in low-light or dark conditions. AI video generators cannot produce this "
-            "level of sensor noise — this is definitively real camera footage.\n\n"
-            "IMPORTANT SCORING GUIDANCE for this video:\n"
-            "  → background_realism: The background may look dark, uniform, or simple "
-            "because it is GENUINELY DARK — not because it is AI-rendered. "
-            "Score 2 (real) unless you see impossible geometry or rendered textures.\n"
-            "  → lighting_coherence: Consistent dim lighting in a dark real environment "
-            "is normal. Score 2 (real) unless you see impossible light sources.\n"
-            "  → color_naturalism: Low saturation and muted colors are expected in "
-            "real dark/low-light footage. Score 2 (real) not 8 (AI).\n"
-            "  → temporal_stability: A static or slow-moving real scene will have "
-            "very consistent frames — this is normal, not an AI render artifact.\n\n"
-            "DO NOT penalize this video for having consistent, dark, or simple visuals. "
-            "The ultra-high noise is physical proof of a real camera sensor."
+            "🎥 EXTREMELY HIGH SENSOR NOISE (noise={:.0f}) — REAL CAMERA CONFIRMED:\n"
+            "No AI video generator produces sensor noise at this level. This is definitively "
+            "real camera footage.\n"
+            "→ background_realism: dark/uniform = genuinely dark scene, score 2 not 8.\n"
+            "→ lighting_coherence: consistent dim lighting = normal dark environment, score 2.\n"
+            "→ color_naturalism: muted/low-sat colors = normal low-light, score 2 not 8."
             .format(avg_noise_val)
+        )
+
+    _is_real_event_candidate = (
+        content_type in ("cinematic", "action") and
+        ctx.get("avg_noise", 0) > 500 and
+        ctx.get("ifdv", 1.0) < 0.45
+    )
+    if _is_real_event_candidate and _is_youtube:
+        hints.append(
+            "📰 POTENTIAL LIVE EVENT / NEWS FOOTAGE:\n"
+            "High camera noise + organic motion variance detected.\n"
+            "→ motion_physics=2 if people move with natural weight/inertia.\n"
+            "→ crowd_behavior=2 if crowd reactions are organic and unpredictable.\n"
+            "→ physics_violations=2 if all movement obeys gravity and normal physics.\n"
+            "→ background_realism=2 if the environment is a real location.\n"
+            "Real people in a real environment with real event chaos ARE specific evidence."
         )
 
     # ── Audio mismatch hint ─────────────────────────────────
