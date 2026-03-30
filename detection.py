@@ -226,6 +226,7 @@ def run_detection(video_path: str) -> tuple:
         clash_real   = signal_ai_score < 50 and gpt_ai_score > 50 and gpt_ai_score < 75 and not _youtube_signal_unreliable
         clash_ai    = signal_ai_score > 65 and gpt_ai_score < 40   # signal says AI, GPT misses it
         gpt_dominant = gpt_ai_score >= 75 and signal_ai_score < 60  # GPT highly confident AI, signal unsure
+        gpt_dominant_real = gpt_ai_score <= 25 and signal_ai_score > 40  # GPT very confidently real
         both_real   = signal_ai_score < 45 and gpt_ai_score < 45
         both_ai     = signal_ai_score > 65 and gpt_ai_score > 65
         confident   = signal_ai_score < 35 or signal_ai_score > 75
@@ -237,6 +238,13 @@ def run_detection(video_path: str) -> tuple:
                 0.25, 0.75
             )
             mode = "gpt-dominant (GPT highly confident AI)"
+        elif gpt_dominant_real:
+            # GPT is very confidently real — give it 75% weight over elevated signal
+            combined, w_sig, w_gpt = (
+                signal_ai_score * 0.25 + gpt_ai_score * 0.75,
+                0.25, 0.75
+            )
+            mode = "gpt-dominant-real"
         elif clash_real:
             # Signal has pixel evidence of real — GPT is moderately calling AI
             combined, w_sig, w_gpt = (
@@ -812,32 +820,7 @@ def run_detection_multiclip(video_path: str) -> tuple:
     gpt_refused = gpt_result.get("gpt_refused", False)
     gpt_failed = (not gpt_available or gpt_reasoning.startswith("GPT analysis error")) and not gpt_refused
 
-    # GPT-REFUSED NOISE PRIOR: when GPT refuses (content policy) we have no visual
-    # intelligence. If avg_noise is extremely high (> 3000), no AI renderer produces
-    # this level of sensor noise — substitute a real-camera GPT prior instead of
-    # neutral 50, and weight signal less (real noise is the evidence).
-    _avg_noise_ctx = signal_context.get("avg_noise", 0)
-    if gpt_refused and _avg_noise_ctx > 3500:
-        _noise_gpt_prior = 20  # very real — noise > 3500 is definitively real camera
-        combined_ai_score = signal_ai_score * 0.60 + _noise_gpt_prior * 0.40
-        w_sig, w_gpt = 0.60, 0.40
-        mode = f"noise-confirmed-real (GPT refused, noise={_avg_noise_ctx:.0f})"
-        log.info(
-            "GPT-REFUSED-NOISE: GPT refused but noise=%.0f > 3500 confirms real camera "
-            "— using noise prior gpt=%d, signal=%.0f%% weight",
-            _avg_noise_ctx, _noise_gpt_prior, 60
-        )
-    elif gpt_refused and _avg_noise_ctx > 3000:
-        _noise_gpt_prior = 30  # real — noise 3000-3500
-        combined_ai_score = signal_ai_score * 0.60 + _noise_gpt_prior * 0.40
-        w_sig, w_gpt = 0.60, 0.40
-        mode = f"noise-confirmed-real (GPT refused, noise={_avg_noise_ctx:.0f})"
-        log.info(
-            "GPT-REFUSED-NOISE: GPT refused but noise=%.0f > 3000 confirms real camera "
-            "— using noise prior gpt=%d, signal=%.0f%% weight",
-            _avg_noise_ctx, _noise_gpt_prior, 60
-        )
-    elif gpt_failed:
+    if gpt_failed:
         combined_ai_score = float(signal_ai_score)
         w_sig, w_gpt = 1.0, 0.0
         mode = "signal-only (GPT failed)"
@@ -858,6 +841,13 @@ def run_detection_multiclip(video_path: str) -> tuple:
                         and not _youtube_signal_unreliable)  # suppress for ALL YouTube sources
         clash_ai     = signal_ai_score > 65 and gpt_ai_score < 40
         gpt_dominant = gpt_ai_score >= 75 and signal_ai_score < 60
+        # gpt_dominant_real: symmetric counterpart to gpt_dominant.
+        # When GPT is very confidently real (<=25) and signal is elevated (>40),
+        # give GPT 75% weight — it has specific real-camera evidence (faces, physics,
+        # environment) that signal cannot measure. Threshold <=25 means GPT scored
+        # nearly every dimension as 2 (real) — a strong visual confirmation.
+        # Does NOT affect AI videos: AI plasma gpt=80 is safely above 25.
+        gpt_dominant_real = gpt_ai_score <= 25 and signal_ai_score > 40
         both_real    = signal_ai_score < 45 and gpt_ai_score < 45
         both_ai      = signal_ai_score > 65 and gpt_ai_score > 65
 
@@ -896,6 +886,15 @@ def run_detection_multiclip(video_path: str) -> tuple:
             combined_ai_score = signal_ai_score * 0.25 + gpt_ai_score * 0.75
             w_sig, w_gpt = 0.25, 0.75
             mode = "gpt-dominant"
+        elif gpt_dominant_real:
+            log.info(
+                "GPT_DOMINANT_REAL: GPT(%d) very confidently real (<=25), "
+                "signal(%d) elevated — GPT gets 75%% weight",
+                gpt_ai_score, signal_ai_score
+            )
+            combined_ai_score = signal_ai_score * 0.25 + gpt_ai_score * 0.75
+            w_sig, w_gpt = 0.25, 0.75
+            mode = "gpt-dominant-real"
         elif clash_real:
             combined_ai_score = signal_ai_score * 0.90 + gpt_ai_score * 0.10
             w_sig, w_gpt = 0.90, 0.10
