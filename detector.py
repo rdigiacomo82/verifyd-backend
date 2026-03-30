@@ -1435,9 +1435,8 @@ def detect_ai(video_path: str) -> int:
     # Real=1.55-2.54, AI=0.54-1.33. Buffer zones reduce sensitivity.
     if not _is_short_clip:
         if _flat_noise < 0.01:
-            # No qualifying flat regions (dark/night video — crushed blacks) OR
-            # near-zero value from heavy compression. Cannot assess PRNU.
-            # Treat as no-signal, NOT as AI-smooth.
+            # No qualifying flat regions (dark/night video or near-zero from compression).
+            # Cannot assess PRNU — treat as no-signal, NOT AI-smooth.
             log.info("FLAT_NOISE %.4f → no qualifying flat regions (dark/night video) → no signal", _flat_noise)
         elif _flat_noise >= 1.50:
             ai_score -= 8
@@ -1769,12 +1768,6 @@ def detect_ai(video_path: str) -> int:
     # jumps in sampled frames — these are NOT scene cuts, just panning.
     # Calibrated: AI_Slide: motion=38.8, scene cut falsely detected → flicker suppressed (wrong).
     _scene_cut_credible = _scene_cut and avg_motion < 20.0
-    # DARK/LOW-SAT VIDEO GUARD: real outdoor/night video (sat < 60) with real camera
-    # noise produces extreme flicker from motion blur, exposure variance, and text overlays.
-    # This is real camera physics, not AI temporal inconsistency.
-    # Threshold sat<60 covers: dark night (sat<40), dim outdoor (sat 40-55), and
-    # desaturated real footage (sat 55-60). AI generators rarely produce this range.
-    # Validated: AI plasma sat=84.2 (NOT guarded); real night/outdoor sat=31-55 (guarded).
     _flicker_dark_video = (avg_saturation < 60 and avg_noise > 1000)
     if _scene_cut_credible:
         log.info("FLICKER_STD %.3f → scene cut detected (low-motion) → signal suppressed", flicker_std)
