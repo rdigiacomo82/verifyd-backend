@@ -197,12 +197,7 @@ def run_detection(video_path: str) -> tuple:
     log.info("GPT-4o ai_probability: %d  available: %s", gpt_ai_score, gpt_available)
 
     # ── Combine ───────────────────────────────────────────────
-    gpt_failed = (
-        not gpt_available or
-        gpt_result.get("reasoning", "").startswith("GPT analysis error")
-    )
-
-    # Read video source from sidecar for YouTube clash->real suppression
+    # Read video source from sidecar — needed for YouTube clash->real suppression
     import os as _os_rd, json as _jsc_rd
     _sidecar_rd = video_path.replace(".mp4", ".meta.json").replace(".MOV", ".meta.json")
     _video_source = ""
@@ -212,6 +207,11 @@ def run_detection(video_path: str) -> tuple:
                 _video_source = _jsc_rd.load(_sf_rd).get("source", "")
         except Exception:
             pass
+
+    gpt_failed = (
+        not gpt_available or
+        gpt_result.get("reasoning", "").startswith("GPT analysis error")
+    )
 
     if gpt_failed:
         combined      = float(signal_ai_score)
