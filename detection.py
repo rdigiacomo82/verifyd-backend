@@ -44,7 +44,7 @@ def _get_dino_analyzer():
     except Exception:
         return None, None
 
-THRESHOLD_REAL         = 60
+THRESHOLD_REAL         = 55
 THRESHOLD_UNDETERMINED = 40
 
 
@@ -812,7 +812,32 @@ def run_detection_multiclip(video_path: str) -> tuple:
     gpt_refused = gpt_result.get("gpt_refused", False)
     gpt_failed = (not gpt_available or gpt_reasoning.startswith("GPT analysis error")) and not gpt_refused
 
-    if gpt_failed:
+    # GPT-REFUSED NOISE PRIOR: when GPT refuses (content policy) we have no visual
+    # intelligence. If avg_noise is extremely high (> 3000), no AI renderer produces
+    # this level of sensor noise — substitute a real-camera GPT prior instead of
+    # neutral 50, and weight signal less (real noise is the evidence).
+    _avg_noise_ctx = signal_context.get("avg_noise", 0)
+    if gpt_refused and _avg_noise_ctx > 3500:
+        _noise_gpt_prior = 20  # very real — noise > 3500 is definitively real camera
+        combined_ai_score = signal_ai_score * 0.60 + _noise_gpt_prior * 0.40
+        w_sig, w_gpt = 0.60, 0.40
+        mode = f"noise-confirmed-real (GPT refused, noise={_avg_noise_ctx:.0f})"
+        log.info(
+            "GPT-REFUSED-NOISE: GPT refused but noise=%.0f > 3500 confirms real camera "
+            "— using noise prior gpt=%d, signal=%.0f%% weight",
+            _avg_noise_ctx, _noise_gpt_prior, 60
+        )
+    elif gpt_refused and _avg_noise_ctx > 3000:
+        _noise_gpt_prior = 30  # real — noise 3000-3500
+        combined_ai_score = signal_ai_score * 0.60 + _noise_gpt_prior * 0.40
+        w_sig, w_gpt = 0.60, 0.40
+        mode = f"noise-confirmed-real (GPT refused, noise={_avg_noise_ctx:.0f})"
+        log.info(
+            "GPT-REFUSED-NOISE: GPT refused but noise=%.0f > 3000 confirms real camera "
+            "— using noise prior gpt=%d, signal=%.0f%% weight",
+            _avg_noise_ctx, _noise_gpt_prior, 60
+        )
+    elif gpt_failed:
         combined_ai_score = float(signal_ai_score)
         w_sig, w_gpt = 1.0, 0.0
         mode = "signal-only (GPT failed)"
@@ -847,7 +872,7 @@ def run_detection_multiclip(video_path: str) -> tuple:
             _is_youtube and
             signal_ai_score > 50 and      # signal elevated (possibly false positive)
             gpt_ai_score < 45 and          # GPT confident real
-            _dino_score_ctx <= 10          # DINOv2 also confirms real (<=10 allows for consistent-scene real video)
+            _dino_score_ctx <= 5           # DINOv2 also confirms real
         )
 
         if _youtube_signal_unreliable and signal_ai_score < 50 and gpt_ai_score > 50:

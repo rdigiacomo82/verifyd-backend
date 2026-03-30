@@ -1638,7 +1638,12 @@ def detect_ai(video_path: str) -> int:
     # GUARD: action content with high sat_std = natural outdoor lighting variation
     # GUARD: action content with low sat naturally (overcast/indoor) — not an AI signal
     _stable_is_broadcast = (sat_frame_std < 5.0 and avg_saturation > 140)
-    _stable_is_ai_render = (sat_frame_std < 5.0 and avg_saturation < 100 and not is_action_content)
+    # HIGH-NOISE GUARD: extremely high sensor noise (> 3000) with near-zero motion
+    # confirms a real camera on a static subject. No AI renderer produces noise this high.
+    # Suppress SAT_STD frozen-render signal in this case.
+    _sat_high_noise_real = (avg_noise > 3000 and avg_motion < 3.0)
+    _stable_is_ai_render = (sat_frame_std < 5.0 and avg_saturation < 100 and not is_action_content
+                            and not _sat_high_noise_real)
     _unstable_is_outdoor = (sat_frame_std > 22.0 and is_action_content)
 
     if _stable_is_broadcast:
@@ -1717,8 +1722,10 @@ def detect_ai(video_path: str) -> int:
     if _is_selfie_content and bg_drift < 6.0:
         # Selfie held steady or on table — naturally low bg drift
         log.info("BG_DRIFT %.2f → selfie static hold → no penalty", bg_drift)
-    elif bg_drift < 2.0 and not _static_broadcast:
+    elif bg_drift < 2.0 and not _static_broadcast and not (avg_noise > 3000 and avg_motion < 3.0):
         # Frozen background — AI render (not a static broadcast camera)
+        # HIGH-NOISE GUARD: frozen bg + extremely high noise + near-zero motion =
+        # real camera on tripod/static. No AI renderer produces noise > 3000.
         ai_score += 12
         log.info("BG_DRIFT %.2f → frozen AI bg → +12", bg_drift)
     elif bg_drift < 4.0 and not is_action_content and not _static_broadcast:
