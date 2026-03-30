@@ -1434,11 +1434,11 @@ def detect_ai(video_path: str) -> int:
     # that cause large swings from small encode differences.
     # Real=1.55-2.54, AI=0.54-1.33. Buffer zones reduce sensitivity.
     if not _is_short_clip:
-        if _flat_noise == 0.0:
-            # No qualifying flat regions found — dark/night video where all patches
-            # are below brightness threshold (crushed blacks). Cannot assess PRNU.
+        if _flat_noise < 0.01:
+            # No qualifying flat regions (dark/night video — crushed blacks) OR
+            # near-zero value from heavy compression. Cannot assess PRNU.
             # Treat as no-signal, NOT as AI-smooth.
-            log.info("FLAT_NOISE 0.0000 → no qualifying flat regions (dark/night video) → no signal")
+            log.info("FLAT_NOISE %.4f → no qualifying flat regions (dark/night video) → no signal", _flat_noise)
         elif _flat_noise >= 1.50:
             ai_score -= 8
             log.info("FLAT_NOISE %.4f → strong real sensor noise (PRNU present) → -8", _flat_noise)
@@ -1769,16 +1769,17 @@ def detect_ai(video_path: str) -> int:
     # jumps in sampled frames — these are NOT scene cuts, just panning.
     # Calibrated: AI_Slide: motion=38.8, scene cut falsely detected → flicker suppressed (wrong).
     _scene_cut_credible = _scene_cut and avg_motion < 20.0
-    # DARK/NIGHT VIDEO GUARD: low-saturation video (sat < 50) with high real camera
-    # noise produces extreme flicker from motion blur and exposure variance.
-    # This is real camera physics in dark environments, not AI temporal inconsistency.
-    # AI generators rarely produce dark, low-saturation footage — this guard is safe.
-    # Validated: AI plasma sat=84.2 (NOT guarded); Real dad-runs sat=31-38 (guarded).
-    _flicker_dark_video = (avg_saturation < 50)
+    # DARK/LOW-SAT VIDEO GUARD: real outdoor/night video (sat < 60) with real camera
+    # noise produces extreme flicker from motion blur, exposure variance, and text overlays.
+    # This is real camera physics, not AI temporal inconsistency.
+    # Threshold sat<60 covers: dark night (sat<40), dim outdoor (sat 40-55), and
+    # desaturated real footage (sat 55-60). AI generators rarely produce this range.
+    # Validated: AI plasma sat=84.2 (NOT guarded); real night/outdoor sat=31-55 (guarded).
+    _flicker_dark_video = (avg_saturation < 60 and avg_noise > 1000)
     if _scene_cut_credible:
         log.info("FLICKER_STD %.3f → scene cut detected (low-motion) → signal suppressed", flicker_std)
-    elif _flicker_dark_video and avg_noise > 1000:
-        log.info("FLICKER_STD %.3f → dark/night video (sat=%.0f) with real camera noise → suppressed",
+    elif _flicker_dark_video:
+        log.info("FLICKER_STD %.3f → dark/low-sat video (sat=%.0f) with real camera noise → suppressed",
                  flicker_std, avg_saturation)
     elif flicker_std > _flicker_high:
         ai_score += 14
@@ -2173,7 +2174,8 @@ def detect_ai(video_path: str) -> int:
     #   • Action content: fast camera movement causes shadow centroid to jump
     #     with camera panning — this is real physics, not AI artifact
     #   • High motion (>20): strong camera movement creates false inconsistency
-    if not is_static_content and not _is_short_clip and not is_action_content:
+    _shadow_extreme_motion = (avg_motion > 20.0 and ifdv < 0.40)
+    if not is_static_content and not _is_short_clip and not is_action_content and not _shadow_extreme_motion:
         if shadow_drift > 0.82:
             ai_score += 10
             log.info("SHADOW_DRIFT %.3f → strongly inconsistent AI shadows → +10", shadow_drift)
@@ -2218,13 +2220,15 @@ def detect_ai(video_path: str) -> int:
     #     High entropy with extreme flow_var is more likely a complex moving scene than pan.
     #     So we remove the flow_var guard — it was blocking AI jogging incorrectly.
     #   • NOTE: Must NOT overlap with signal 19 (crowd lockstep, low entropy guard).
+    _omni_extreme_motion = (avg_motion > 20.0 and ifdv < 0.40)
     _omni_guard = (
         _is_talking_head or
         _is_selfie_content or
         _is_single_subject or
         is_static_content or
         _is_short_clip or
-        avg_motion < 1.5                 # not enough motion to analyze
+        avg_motion < 1.5 or             # not enough motion to analyze
+        _omni_extreme_motion            # real camera chaos, not AI artifact
     )
     if not _omni_guard:
         # For person-like content (action, cinematic with skin), use stricter threshold
