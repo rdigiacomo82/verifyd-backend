@@ -44,7 +44,7 @@ def _get_dino_analyzer():
     except Exception:
         return None, None
 
-THRESHOLD_REAL         = 55
+THRESHOLD_REAL         = 60
 THRESHOLD_UNDETERMINED = 40
 
 
