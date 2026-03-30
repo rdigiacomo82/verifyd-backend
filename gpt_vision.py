@@ -958,6 +958,45 @@ def _build_physics_summary(ctx: dict) -> str:
             "RENDERED/PAINTED qualities, not just blur or palette limitation.".format(avg_noise_val)
         )
 
+    # ── Live event / news footage hint ──────────────────────
+    # Real-world event videos (news, protests, accidents, sports incidents)
+    # have characteristics that GPT should recognize as REAL, not uncertain.
+    # Key tells: person narrating directly to camera, readable stable text
+    # overlays (chyrons, reporter IDs), organic crowd behavior, and real
+    # physics of people running/falling/colliding.
+    # The YouTube mandatory hint above can cause GPT to over-score these
+    # as uncertain (5) when they are clearly real (2).
+    _has_high_motion = ctx.get("avg_noise", 0) > 800 and avg_motion_val > 15 if (avg_motion_val := ctx.get("motion_sync", 0) * 100) else False
+    _text_stable = ctx.get("n_scene_cuts", 0) <= 3  # stable text = real broadcast
+    _is_real_event_candidate = (
+        content_type in ("cinematic", "action") and
+        ctx.get("avg_noise", 0) > 500 and   # real camera noise present
+        ctx.get("ifdv", 1.0) < 0.45          # organic motion variance (real chaos)
+    )
+    if _is_real_event_candidate and _is_youtube:
+        hints.append(
+            "📰 POTENTIAL LIVE EVENT / NEWS FOOTAGE — REAL-WORLD INDICATORS:\n"
+            "This video may show real-world event footage (news, incident, protest, accident).\n"
+            "The signal detector found high camera noise and organic motion variance — "
+            "consistent with handheld real-camera chaos during a live event.\n\n"
+            "FOR THIS TYPE OF CONTENT, score these dimensions based on what you SEE:\n"
+            "  → motion_physics: Score 2 (real) if people move with natural weight, inertia,\n"
+            "    and reaction physics — stumbling, running, falling naturally. \n"
+            "    Score 5 only if motion looks floaty/frictionless like CGI.\n"
+            "  → crowd_behavior: Score 2 (real) if crowd reactions are organic and\n"
+            "    unpredictable — people flinching, scattering, recording on phones.\n"
+            "    Score 5 only if the crowd is suspiciously calm or synchronized.\n"
+            "  → physics_violations: Score 2 (real) if all movement obeys gravity\n"
+            "    and normal physics. Only score high if you see impossible motion.\n"
+            "  → background_realism: Score 2 (real) if the environment looks like\n"
+            "    a real location — streets, buildings, crowds, natural lighting.\n\n"
+            "IMPORTANT: The YouTube mandatory hint above applies to AI-generated content.\n"
+            "If this video shows real people in a real environment with real event chaos,\n"
+            "you should score those dimensions as 2 (real) — that IS specific evidence.\n"
+            "A reporter narrating, readable text overlays, and organic crowd behavior\n"
+            "ARE specific real-camera evidence. Do not score them 5 out of caution."
+        )
+
     # ── Audio mismatch hint ─────────────────────────────────
     audio_has_signal = ctx.get("audio_has_signal", False)
     audio_dur_mismatch = ctx.get("audio_dur_mismatch", 0)

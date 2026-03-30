@@ -2159,7 +2159,11 @@ def detect_ai(video_path: str) -> int:
     #   • Action content: fast camera movement causes shadow centroid to jump
     #     with camera panning — this is real physics, not AI artifact
     #   • High motion (>20): strong camera movement creates false inconsistency
-    if not is_static_content and not _is_short_clip and not is_action_content:
+    # EXTREME MOTION GUARD: camera shake during chaotic real events (collision,
+    # panic, crowd surge) creates genuinely random shadow centroids by physics.
+    # avg_motion > 20 with organic ifdv < 0.40 = real camera chaos, not AI artifact.
+    _shadow_extreme_motion = (avg_motion > 20.0 and ifdv < 0.40)
+    if not is_static_content and not _is_short_clip and not is_action_content and not _shadow_extreme_motion:
         if shadow_drift > 0.82:
             ai_score += 10
             log.info("SHADOW_DRIFT %.3f → strongly inconsistent AI shadows → +10", shadow_drift)
@@ -2204,13 +2208,19 @@ def detect_ai(video_path: str) -> int:
     #     High entropy with extreme flow_var is more likely a complex moving scene than pan.
     #     So we remove the flow_var guard — it was blocking AI jogging incorrectly.
     #   • NOTE: Must NOT overlap with signal 19 (crowd lockstep, low entropy guard).
+    # EXTREME MOTION GUARD: violent camera shake during real events creates
+    # genuinely omnidirectional optical flow by physics — not an AI artifact.
+    # Guard: avg_motion > 20 (extreme shake) AND ifdv < 0.40 (organic variance,
+    # not AI smooth). AI videos have ifdv > 0.40; real chaos has ifdv 0.20-0.35.
+    _omni_extreme_motion = (avg_motion > 20.0 and ifdv < 0.40)
     _omni_guard = (
         _is_talking_head or
         _is_selfie_content or
         _is_single_subject or
         is_static_content or
         _is_short_clip or
-        avg_motion < 1.5                 # not enough motion to analyze
+        avg_motion < 1.5 or             # not enough motion to analyze
+        _omni_extreme_motion            # real camera chaos, not AI artifact
     )
     if not _omni_guard:
         # For person-like content (action, cinematic with skin), use stricter threshold

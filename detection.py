@@ -44,7 +44,7 @@ def _get_dino_analyzer():
     except Exception:
         return None, None
 
-THRESHOLD_REAL         = 60
+THRESHOLD_REAL         = 55
 THRESHOLD_UNDETERMINED = 40
 
 
@@ -836,6 +836,20 @@ def run_detection_multiclip(video_path: str) -> tuple:
         both_real    = signal_ai_score < 45 and gpt_ai_score < 45
         both_ai      = signal_ai_score > 65 and gpt_ai_score > 65
 
+        # real_dominant: when signal says AI but GPT AND DINOv2 BOTH say real.
+        # This fires on YouTube live event/news footage where extreme camera
+        # shake creates AI-like signals but two visual engines confirm real.
+        # Conditions: source=youtube, signal>50 (elevated), gpt<45 (GPT says real),
+        # and DINOv2 score <=5 (DINOv2 independently confirms real).
+        # Does NOT affect AI videos: AI plasma has gpt=80 (fails gpt<45 check).
+        _dino_score_ctx = signal_context.get("dino_score", 50)
+        real_dominant = (
+            _is_youtube and
+            signal_ai_score > 50 and      # signal elevated (possibly false positive)
+            gpt_ai_score < 45 and          # GPT confident real
+            _dino_score_ctx <= 5           # DINOv2 also confirms real
+        )
+
         if _youtube_signal_unreliable and signal_ai_score < 50 and gpt_ai_score > 50:
             log.info(
                 "YOUTUBE: clash->real suppressed — "
@@ -844,7 +858,16 @@ def run_detection_multiclip(video_path: str) -> tuple:
                 signal_ai_score, gpt_ai_score
             )
 
-        if gpt_dominant:
+        if real_dominant:
+            log.info(
+                "REAL_DOMINANT: YouTube source, signal(%d) elevated but GPT(%d)<45 "
+                "and DINOv2(%d)<=5 both confirm real — GPT gets 75%% weight",
+                signal_ai_score, gpt_ai_score, _dino_score_ctx
+            )
+            combined_ai_score = signal_ai_score * 0.25 + gpt_ai_score * 0.75
+            w_sig, w_gpt = 0.25, 0.75
+            mode = "real-dominant (GPT+DINOv2 confirm real)"
+        elif gpt_dominant:
             combined_ai_score = signal_ai_score * 0.25 + gpt_ai_score * 0.75
             w_sig, w_gpt = 0.25, 0.75
             mode = "gpt-dominant"
