@@ -757,12 +757,8 @@ def extract_clips_for_detection(video_path: str) -> list:
             "-ss", str(start_sec),
             "-i", video_path,
             "-t", "6",
-            "-vf", "scale='min(iw,720)':'min(ih,1280)',scale=trunc(iw/2)*2:trunc(ih/2)*2",
-            "-map", "0:v:0",    # video stream only — clips are visual-only
-            "-c:v", "libx264",
-            "-preset", "ultrafast",
-            "-crf", "28",
-            "-movflags", "+faststart",
+            "-c", "copy",       # stream copy — file already normalized to 720p by worker.py
+            "-an",              # video only — audio detection runs on full file
             out_path,
         ]
         r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -786,6 +782,12 @@ def extract_clips_for_detection(video_path: str) -> list:
     # Sort by offset so results are in time order
     clips.sort(key=lambda x: x[1])
     return clips
+
+
+
+
+
+
 
 
 
