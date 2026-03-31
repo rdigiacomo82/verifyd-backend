@@ -743,7 +743,7 @@ def run_detection_multiclip(video_path: str) -> tuple:
             )
             signal_context["youtube_lowres_adjusted"] = True
         else:
-            log.info("YOUTUBE: source=youtube but resolution adequate -- no adjustment")
+            log.info(f"SOCIAL: source={_video_source} but resolution adequate -- no adjustment")
 
     # ── Hybrid detection ──────────────────────────────────────
     score_variance = max(signal_scores) - min(signal_scores) if len(signal_scores) > 1 else 0
@@ -851,7 +851,7 @@ def run_detection_multiclip(video_path: str) -> tuple:
         _clash_ai_youtube_override = _is_youtube and gpt_ai_score < 30
         clash_ai     = signal_ai_score > 65 and gpt_ai_score < 40 and not _clash_ai_youtube_override
         gpt_dominant = gpt_ai_score >= 75 and signal_ai_score < 60
-        gpt_dominant_real = gpt_ai_score <= 25 and signal_ai_score > 40
+        gpt_dominant_real = gpt_ai_score <= 30 and signal_ai_score > 40
         both_real    = signal_ai_score < 45 and gpt_ai_score < 45
         both_ai      = signal_ai_score > 65 and gpt_ai_score > 65
 
@@ -891,7 +891,7 @@ def run_detection_multiclip(video_path: str) -> tuple:
             w_sig, w_gpt = 0.25, 0.75
             mode = "gpt-dominant"
         elif gpt_dominant_real:
-            log.info("GPT_DOMINANT_REAL: GPT(%d)<=25 very confident real, signal(%d) — GPT gets 75%% weight",
+            log.info("GPT_DOMINANT_REAL: GPT(%d)<=30 confident real, signal(%d) elevated",
                      gpt_ai_score, signal_ai_score)
             combined_ai_score = signal_ai_score * 0.25 + gpt_ai_score * 0.75
             w_sig, w_gpt = 0.25, 0.75
@@ -959,7 +959,7 @@ def run_detection_multiclip(video_path: str) -> tuple:
     # even when clips appear mixed. GPT seeing definitive AI artifacts at >=80
     # overrides ambiguous signal variance.
     _gpt_strongly_ai   = gpt_ai_score >= 80
-    _gpt_strongly_real = gpt_ai_score <= 25
+    _gpt_strongly_real = gpt_ai_score <= 30
     _engines_confirm_real = (mode in ("real-dominant (GPT+DINOv2 confirm real)", "gpt-dominant-real"))
     _true_hybrid      = (hybrid_flag and _has_real_clips and _has_ai_clips
                          and not _gpt_strongly_ai

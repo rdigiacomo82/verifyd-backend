@@ -249,14 +249,6 @@ def _try_smvd_youtube(url: str, output_path: str) -> bool:
             size = os.path.getsize(output_path)
             if size > 1024:
                 log.info("SMVD YouTube merged: success — %d bytes", size)
-                try:
-                    import json as _yt_json
-                    _yt_sc = output_path.replace(".mp4", ".meta.json")
-                    with open(_yt_sc, "w") as _yt_sf:
-                        _yt_json.dump({"aigc_label_type": 0, "source": "youtube"}, _yt_sf)
-                    log.info("SMVD YouTube: wrote source sidecar → %s", _yt_sc)
-                except Exception as _yt_se:
-                    log.warning("SMVD YouTube: sidecar write failed: %s", _yt_se)
                 return True
         finally:
             for f in (video_tmp, audio_tmp):
@@ -268,14 +260,6 @@ def _try_smvd_youtube(url: str, output_path: str) -> bool:
         size = os.path.getsize(output_path)
         if size > 1024:
             log.info("SMVD YouTube direct: success — %d bytes", size)
-            try:
-                import json as _yt_json2
-                _yt_sc2 = output_path.replace(".mp4", ".meta.json")
-                with open(_yt_sc2, "w") as _yt_sf2:
-                    _yt_json2.dump({"aigc_label_type": 0, "source": "youtube"}, _yt_sf2)
-                log.info("SMVD YouTube: wrote source sidecar → %s", _yt_sc2)
-            except Exception as _yt_se2:
-                log.warning("SMVD YouTube: sidecar write failed: %s", _yt_se2)
             return True
 
     return False
@@ -327,7 +311,7 @@ def _try_smvd_tiktok(url: str, output_path: str) -> bool:
         import json as _json
         sidecar = output_path.replace(".mp4", ".meta.json")
         with open(sidecar, "w") as sf:
-            _json.dump({"aigc_label_type": aigc_label, "source": "tiktok"}, sf)
+            _json.dump({"aigc_label_type": aigc_label, "source": "tiktok_smvd"}, sf)
     except Exception as meta_err:
         log.warning("SMVD TikTok: could not extract AIGC metadata: %s", meta_err)
 
@@ -448,14 +432,6 @@ def _try_smvd_instagram(url: str, output_path: str) -> bool:
     size = os.path.getsize(output_path)
     if size > 1024:
         log.info("SMVD Instagram: success — %d bytes", size)
-        try:
-            import json as _ig_json
-            _ig_sc = output_path.replace(".mp4", ".meta.json")
-            with open(_ig_sc, "w") as _ig_sf:
-                _ig_json.dump({"aigc_label_type": 0, "source": "instagram"}, _ig_sf)
-            log.info("SMVD Instagram: wrote source sidecar → %s", _ig_sc)
-        except Exception as _ig_se:
-            log.warning("SMVD Instagram: sidecar write failed: %s", _ig_se)
         return True
     return False
 
@@ -537,21 +513,6 @@ def download_video_ytdlp(url: str, output_path: str) -> None:
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
-        if os.path.exists(output_path) and os.path.getsize(output_path) > 1024:
-            try:
-                import json as _ytdlp_json
-                _u = url.lower()
-                _src = ("tiktok" if "tiktok.com" in _u else
-                        "instagram" if "instagram.com" in _u else
-                        "facebook" if "facebook.com" in _u or "fb.watch" in _u else
-                        "youtube" if "youtube.com" in _u or "youtu.be" in _u else
-                        "unknown")
-                _sc = output_path.replace(".mp4", ".meta.json")
-                with open(_sc, "w") as _sf:
-                    _ytdlp_json.dump({"aigc_label_type": 0, "source": _src}, _sf)
-                log.info("yt-dlp: wrote source sidecar source=%s", _src)
-            except Exception as _sce:
-                log.warning("yt-dlp: sidecar write failed: %s", _sce)
     except yt_dlp.utils.DownloadError as e:
         msg = str(e)
         if "Private video" in msg or "private" in msg.lower():
@@ -759,11 +720,14 @@ def extract_clips_for_detection(video_path: str) -> list:
             "-i", video_path,
             "-t", "6",
             "-vf", "scale='min(iw,720)':'min(ih,1280)',scale=trunc(iw/2)*2:trunc(ih/2)*2",
+            "-map", "0:v:0",       # video stream always required
+            "-map", "0:a:0?",      # audio optional — prevents failure on audio-only segments
             "-c:v", "libx264",
             "-preset", "ultrafast",
             "-crf", "28",
             "-c:a", "aac",
             "-ar", "44100",
+            "-avoid_negative_ts", "1",   # fix timestamp issues with fast seek
             "-movflags", "+faststart",
             out_path,
         ]
