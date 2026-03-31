@@ -911,7 +911,9 @@ def _build_physics_summary(ctx: dict) -> str:
     # YouTube's H264 re-encoding pipeline creates compression noise that mimics
     # real camera grain — this noise is NOT evidence of a real camera.
     # When source is YouTube, the noise signal is unreliable.
-    _is_youtube = "youtube" in str(ctx.get("source", "")).lower()
+    _source_str = str(ctx.get("source", "")).lower()
+    _is_youtube = any(s in _source_str
+                      for s in ["youtube", "tiktok", "instagram", "facebook"])
     if _is_youtube:
         hints.append(
             "🚨 YOUTUBE SOURCE — MANDATORY SCORING RULES:\n"

@@ -222,7 +222,11 @@ def run_detection(video_path: str) -> tuple:
         # Determine blend mode
         # clash_real: signal says real BUT only override GPT if GPT is not highly confident
         # If GPT >= 75, it's seeing strong AI artifacts — don't let signal dismiss it
-        _youtube_signal_unreliable = signal_context.get("youtube_lowres_adjusted", False) or "youtube" in _video_source.lower()
+        # Social media re-encoding creates H264 noise that mimics real camera grain.
+        # Apply the same guards to YouTube, TikTok, Instagram, and Facebook.
+        _is_social_reencoded = any(s in _video_source.lower()
+                                   for s in ["youtube", "tiktok", "instagram", "facebook"])
+        _youtube_signal_unreliable = signal_context.get("youtube_lowres_adjusted", False) or _is_social_reencoded
         clash_real   = signal_ai_score < 50 and gpt_ai_score > 50 and gpt_ai_score < 75 and not _youtube_signal_unreliable
         clash_ai    = signal_ai_score > 65 and gpt_ai_score < 40   # signal says AI, GPT misses it
         gpt_dominant = gpt_ai_score >= 75 and signal_ai_score < 60  # GPT highly confident AI, signal unsure
@@ -724,7 +728,8 @@ def run_detection_multiclip(video_path: str) -> tuple:
     # levels up to ~540p), pull signal score 30% toward 50 and flag for
     # clash->real suppression in blend mode selection below.
     # clip_px is now returned by detector.py in signal_context.
-    _is_youtube_source = "youtube" in _video_source.lower()
+    _is_youtube_source = any(s in _video_source.lower()
+                             for s in ["youtube", "tiktok", "instagram", "facebook"])
     if _is_youtube_source:
         _any_low_res = any(
             ctx.get("clip_px", 999999) < 500000
@@ -839,7 +844,8 @@ def run_detection_multiclip(video_path: str) -> tuple:
         # because the fake noise signal is a YouTube pipeline artifact, not resolution-dependent.
         # The signal uncertainty pull (30% toward 50) still only applies to low-res (<500k px)
         # since that addresses a different problem (insufficient pixels for reliable analysis).
-        _is_youtube = "youtube" in _video_source.lower()
+        _is_youtube = any(s in _video_source.lower()
+                          for s in ["youtube", "tiktok", "instagram", "facebook"])
         _youtube_signal_unreliable = (
             signal_context.get("youtube_lowres_adjusted", False) or _is_youtube
         )

@@ -188,15 +188,6 @@ def _try_smvd_youtube(url: str, output_path: str) -> bool:
                 size = os.path.getsize(output_path)
                 if size > 1024:
                     log.info("SMVD YouTube render: success — %d bytes", size)
-                    # Write source sidecar so detection.py can apply YouTube guards
-                    try:
-                        import json as _yt_json
-                        _yt_sidecar = output_path.replace(".mp4", ".meta.json")
-                        with open(_yt_sidecar, "w") as _yt_sf:
-                            _yt_json.dump({"aigc_label_type": 0, "source": "youtube"}, _yt_sf)
-                        log.info("SMVD YouTube: wrote source sidecar → %s", _yt_sidecar)
-                    except Exception as _yt_se:
-                        log.warning("SMVD YouTube: sidecar write failed: %s", _yt_se)
                     return True
 
         except Exception as e:
@@ -320,7 +311,7 @@ def _try_smvd_tiktok(url: str, output_path: str) -> bool:
         import json as _json
         sidecar = output_path.replace(".mp4", ".meta.json")
         with open(sidecar, "w") as sf:
-            _json.dump({"aigc_label_type": aigc_label, "source": "tiktok_smvd"}, sf)
+            _json.dump({"aigc_label_type": aigc_label, "source": "tiktok"}, sf)
     except Exception as meta_err:
         log.warning("SMVD TikTok: could not extract AIGC metadata: %s", meta_err)
 
@@ -441,6 +432,14 @@ def _try_smvd_instagram(url: str, output_path: str) -> bool:
     size = os.path.getsize(output_path)
     if size > 1024:
         log.info("SMVD Instagram: success — %d bytes", size)
+        try:
+            import json as _json
+            _sidecar = output_path.replace(".mp4", ".meta.json")
+            with open(_sidecar, "w") as _sf:
+                _json.dump({"aigc_label_type": 0, "source": "instagram"}, _sf)
+            log.info("SMVD Instagram: wrote source sidecar → %s", _sidecar)
+        except Exception as _se:
+            log.warning("SMVD Instagram: sidecar write failed: %s", _se)
         return True
     return False
 
@@ -522,6 +521,27 @@ def download_video_ytdlp(url: str, output_path: str) -> None:
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
+        # Write source sidecar for detection guards
+        if os.path.exists(output_path) and os.path.getsize(output_path) > 1024:
+            try:
+                import json as _json_ytdlp
+                _url_lower = url.lower()
+                if "tiktok.com" in _url_lower:
+                    _src = "tiktok"
+                elif "instagram.com" in _url_lower:
+                    _src = "instagram"
+                elif "facebook.com" in _url_lower or "fb.watch" in _url_lower:
+                    _src = "facebook"
+                elif "youtube.com" in _url_lower or "youtu.be" in _url_lower:
+                    _src = "youtube"
+                else:
+                    _src = "unknown"
+                _sc = output_path.replace(".mp4", ".meta.json")
+                with open(_sc, "w") as _sf:
+                    _json_ytdlp.dump({"aigc_label_type": 0, "source": _src}, _sf)
+                log.info("yt-dlp: wrote source sidecar source=%s → %s", _src, _sc)
+            except Exception as _sce:
+                log.warning("yt-dlp: sidecar write failed: %s", _sce)
     except yt_dlp.utils.DownloadError as e:
         msg = str(e)
         if "Private video" in msg or "private" in msg.lower():
