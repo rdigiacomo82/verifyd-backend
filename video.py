@@ -758,10 +758,10 @@ def extract_clips_for_detection(video_path: str) -> list:
             "-i", video_path,
             "-t", "6",
             "-vf", "scale='min(iw,720)':'min(ih,1280)',scale=trunc(iw/2)*2:trunc(ih/2)*2",
+            "-map", "0:v:0",    # video stream only — clips are visual-only
             "-c:v", "libx264",
             "-preset", "ultrafast",
             "-crf", "28",
-            "-an",              # skip audio — clips are visual-only, audio runs on full file
             "-movflags", "+faststart",
             out_path,
         ]
