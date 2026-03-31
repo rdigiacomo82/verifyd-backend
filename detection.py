@@ -821,13 +821,13 @@ def run_detection_multiclip(video_path: str) -> tuple:
         combined_ai_score = signal_ai_score * 0.60 + _noise_gpt_prior * 0.40
         w_sig, w_gpt = 0.60, 0.40
         mode = f"noise-confirmed-real (GPT refused, noise={_avg_noise_ctx:.0f})"
-        log.info("GPT-REFUSED-NOISE: noise=%.0f > 3500 → real camera prior=%d", _avg_noise_ctx, _noise_gpt_prior)
+        log.info("GPT-REFUSED-NOISE: noise=%.0f > 3500 → real prior=%d", _avg_noise_ctx, _noise_gpt_prior)
     elif gpt_refused and _avg_noise_ctx > 3000:
         _noise_gpt_prior = 30
         combined_ai_score = signal_ai_score * 0.60 + _noise_gpt_prior * 0.40
         w_sig, w_gpt = 0.60, 0.40
         mode = f"noise-confirmed-real (GPT refused, noise={_avg_noise_ctx:.0f})"
-        log.info("GPT-REFUSED-NOISE: noise=%.0f > 3000 → real camera prior=%d", _avg_noise_ctx, _noise_gpt_prior)
+        log.info("GPT-REFUSED-NOISE: noise=%.0f > 3000 → real prior=%d", _avg_noise_ctx, _noise_gpt_prior)
     elif gpt_failed:
         combined_ai_score = float(signal_ai_score)
         w_sig, w_gpt = 1.0, 0.0
@@ -891,7 +891,7 @@ def run_detection_multiclip(video_path: str) -> tuple:
             w_sig, w_gpt = 0.25, 0.75
             mode = "gpt-dominant"
         elif gpt_dominant_real:
-            log.info("GPT_DOMINANT_REAL: GPT(%d)<=30 confident real, signal(%d) elevated",
+            log.info("GPT_DOMINANT_REAL: GPT(%d)<=30 confident real, signal(%d)",
                      gpt_ai_score, signal_ai_score)
             combined_ai_score = signal_ai_score * 0.25 + gpt_ai_score * 0.75
             w_sig, w_gpt = 0.25, 0.75
@@ -962,8 +962,7 @@ def run_detection_multiclip(video_path: str) -> tuple:
     _gpt_strongly_real = gpt_ai_score <= 30
     _engines_confirm_real = (mode in ("real-dominant (GPT+DINOv2 confirm real)", "gpt-dominant-real"))
     _true_hybrid      = (hybrid_flag and _has_real_clips and _has_ai_clips
-                         and not _gpt_strongly_ai
-                         and not _gpt_strongly_real
+                         and not _gpt_strongly_ai and not _gpt_strongly_real
                          and not _engines_confirm_real)
     _both_engines_ai  = signal_ai_score > 70 and gpt_ai_score > 65
     if _gpt_strongly_ai and hybrid_flag and _has_real_clips and _has_ai_clips:

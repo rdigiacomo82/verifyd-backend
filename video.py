@@ -249,6 +249,14 @@ def _try_smvd_youtube(url: str, output_path: str) -> bool:
             size = os.path.getsize(output_path)
             if size > 1024:
                 log.info("SMVD YouTube merged: success — %d bytes", size)
+                try:
+                    import json as _yt_json
+                    _yt_sc = output_path.replace(".mp4", ".meta.json")
+                    with open(_yt_sc, "w") as _yt_sf:
+                        _yt_json.dump({"aigc_label_type": 0, "source": "youtube"}, _yt_sf)
+                    log.info("SMVD YouTube: wrote source sidecar → %s", _yt_sc)
+                except Exception as _yt_se:
+                    log.warning("SMVD YouTube: sidecar write failed: %s", _yt_se)
                 return True
         finally:
             for f in (video_tmp, audio_tmp):
@@ -260,6 +268,14 @@ def _try_smvd_youtube(url: str, output_path: str) -> bool:
         size = os.path.getsize(output_path)
         if size > 1024:
             log.info("SMVD YouTube direct: success — %d bytes", size)
+            try:
+                import json as _yt2
+                _sc2 = output_path.replace(".mp4", ".meta.json")
+                with open(_sc2, "w") as _sf2:
+                    _yt2.dump({"aigc_label_type": 0, "source": "youtube"}, _sf2)
+                log.info("SMVD YouTube: wrote source sidecar → %s", _sc2)
+            except Exception as _se2:
+                log.warning("SMVD YouTube: sidecar write failed: %s", _se2)
             return True
 
     return False
@@ -311,7 +327,7 @@ def _try_smvd_tiktok(url: str, output_path: str) -> bool:
         import json as _json
         sidecar = output_path.replace(".mp4", ".meta.json")
         with open(sidecar, "w") as sf:
-            _json.dump({"aigc_label_type": aigc_label, "source": "tiktok_smvd"}, sf)
+            _json.dump({"aigc_label_type": aigc_label, "source": "tiktok"}, sf)
     except Exception as meta_err:
         log.warning("SMVD TikTok: could not extract AIGC metadata: %s", meta_err)
 
@@ -432,6 +448,14 @@ def _try_smvd_instagram(url: str, output_path: str) -> bool:
     size = os.path.getsize(output_path)
     if size > 1024:
         log.info("SMVD Instagram: success — %d bytes", size)
+        try:
+            import json as _ig
+            _sc_ig = output_path.replace(".mp4", ".meta.json")
+            with open(_sc_ig, "w") as _sf_ig:
+                _ig.dump({"aigc_label_type": 0, "source": "instagram"}, _sf_ig)
+            log.info("SMVD Instagram: wrote source sidecar → %s", _sc_ig)
+        except Exception as _se_ig:
+            log.warning("SMVD Instagram: sidecar write failed: %s", _se_ig)
         return True
     return False
 
@@ -513,6 +537,20 @@ def download_video_ytdlp(url: str, output_path: str) -> None:
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
+        if os.path.exists(output_path) and os.path.getsize(output_path) > 1024:
+            try:
+                import json as _ytdlp_j
+                _u = url.lower()
+                _src = ("tiktok" if "tiktok.com" in _u else
+                        "instagram" if "instagram.com" in _u else
+                        "facebook" if "facebook.com" in _u or "fb.watch" in _u else
+                        "youtube" if "youtube.com" in _u or "youtu.be" in _u else "unknown")
+                _sc_yd = output_path.replace(".mp4", ".meta.json")
+                with open(_sc_yd, "w") as _sf_yd:
+                    _ytdlp_j.dump({"aigc_label_type": 0, "source": _src}, _sf_yd)
+                log.info("yt-dlp: wrote source sidecar source=%s", _src)
+            except Exception as _sce:
+                log.warning("yt-dlp: sidecar write failed: %s", _sce)
     except yt_dlp.utils.DownloadError as e:
         msg = str(e)
         if "Private video" in msg or "private" in msg.lower():
@@ -720,14 +758,14 @@ def extract_clips_for_detection(video_path: str) -> list:
             "-i", video_path,
             "-t", "6",
             "-vf", "scale='min(iw,720)':'min(ih,1280)',scale=trunc(iw/2)*2:trunc(ih/2)*2",
-            "-map", "0:v:0",       # video stream always required
-            "-map", "0:a:0?",      # audio optional — prevents failure on audio-only segments
+            "-map", "0:v:0",
+            "-map", "0:a:0?",
             "-c:v", "libx264",
             "-preset", "ultrafast",
             "-crf", "28",
             "-c:a", "aac",
             "-ar", "44100",
-            "-avoid_negative_ts", "1",   # fix timestamp issues with fast seek
+            "-avoid_negative_ts", "1",
             "-movflags", "+faststart",
             out_path,
         ]
@@ -752,6 +790,7 @@ def extract_clips_for_detection(video_path: str) -> list:
     # Sort by offset so results are in time order
     clips.sort(key=lambda x: x[1])
     return clips
+
 
 
 

@@ -1992,9 +1992,17 @@ def detect_ai(video_path: str) -> int:
                 ai_score += 5
                 log.info("MOTION_SYNC %.3f → portrait action moderate sync → +5", motion_sync)
         else:
-            if motion_sync < _sync_thresh_strong:
+            # LONG-VIDEO GUARD: over 30s of mixed real content, averaged motion_sync
+            # naturally appears synchronized (people walk same direction, same aisle).
+            # Not the same as AI crowd lockstep. Guard when:
+            # duration > 30s AND ifdv > 0.6 (organic motion variance confirms real camera)
+            _sync_long_real = (video_duration > 30.0 and ifdv > 0.6)
+            if motion_sync < _sync_thresh_strong and not _sync_long_real:
                 ai_score += 14
                 log.info("MOTION_SYNC %.3f → extreme lockstep crowd → +14", motion_sync)
+            elif motion_sync < _sync_thresh_strong and _sync_long_real:
+                log.info("MOTION_SYNC %.3f → suppressed (long real video, ifdv=%.3f) → no penalty",
+                         motion_sync, ifdv)
             elif motion_sync < _sync_thresh_med:
                 ai_score += 8
                 log.info("MOTION_SYNC %.3f → lockstep crowd → +8", motion_sync)
