@@ -229,7 +229,7 @@ def run_detection(video_path: str) -> tuple:
         _clash_ai_social_override = _is_social_rd and gpt_ai_score < 30
         clash_ai    = signal_ai_score > 65 and gpt_ai_score < 40 and not _clash_ai_social_override
         gpt_dominant = gpt_ai_score >= 75 and signal_ai_score < 60
-        gpt_dominant_real = gpt_ai_score <= 30 and signal_ai_score > 40
+        gpt_dominant_real = gpt_ai_score <= 35 and signal_ai_score > 40
         both_real   = signal_ai_score < 45 and gpt_ai_score < 45
         both_ai     = signal_ai_score > 65 and gpt_ai_score > 65
         confident   = signal_ai_score < 35 or signal_ai_score > 75
@@ -241,7 +241,7 @@ def run_detection(video_path: str) -> tuple:
             )
             mode = "gpt-dominant (GPT highly confident AI)"
         elif gpt_dominant_real:
-            log.info("GPT_DOMINANT_REAL: GPT(%d)<=30 confident real, signal(%d) elevated",
+            log.info("GPT_DOMINANT_REAL: GPT(%d)<=35 confident real, signal(%d)",
                      gpt_ai_score, signal_ai_score)
             combined, w_sig, w_gpt = (
                 signal_ai_score * 0.25 + gpt_ai_score * 0.75,
@@ -735,7 +735,8 @@ def run_detection_multiclip(video_path: str) -> tuple:
     # levels up to ~540p), pull signal score 30% toward 50 and flag for
     # clash->real suppression in blend mode selection below.
     # clip_px is now returned by detector.py in signal_context.
-    _is_youtube_source = "youtube" in _video_source.lower()
+    _is_youtube_source = any(s in _video_source.lower()
+                             for s in ["youtube", "tiktok", "instagram", "facebook"])
     if _is_youtube_source:
         _any_low_res = any(
             ctx.get("clip_px", 999999) < 500000
@@ -823,7 +824,20 @@ def run_detection_multiclip(video_path: str) -> tuple:
     gpt_refused = gpt_result.get("gpt_refused", False)
     gpt_failed = (not gpt_available or gpt_reasoning.startswith("GPT analysis error")) and not gpt_refused
 
-    if gpt_failed:
+    _avg_noise_ctx = signal_context.get("avg_noise", 0)
+    if gpt_refused and _avg_noise_ctx > 3500:
+        _noise_gpt_prior = 20
+        combined_ai_score = signal_ai_score * 0.60 + _noise_gpt_prior * 0.40
+        w_sig, w_gpt = 0.60, 0.40
+        mode = f"noise-confirmed-real (GPT refused, noise={_avg_noise_ctx:.0f})"
+        log.info("GPT-REFUSED-NOISE: noise=%.0f > 3500 → prior=%d", _avg_noise_ctx, _noise_gpt_prior)
+    elif gpt_refused and _avg_noise_ctx > 3000:
+        _noise_gpt_prior = 30
+        combined_ai_score = signal_ai_score * 0.60 + _noise_gpt_prior * 0.40
+        w_sig, w_gpt = 0.60, 0.40
+        mode = f"noise-confirmed-real (GPT refused, noise={_avg_noise_ctx:.0f})"
+        log.info("GPT-REFUSED-NOISE: noise=%.0f > 3000 → prior=%d", _avg_noise_ctx, _noise_gpt_prior)
+    elif gpt_failed:
         combined_ai_score = float(signal_ai_score)
         w_sig, w_gpt = 1.0, 0.0
         mode = "signal-only (GPT failed)"
@@ -835,7 +849,8 @@ def run_detection_multiclip(video_path: str) -> tuple:
         # because the fake noise signal is a YouTube pipeline artifact, not resolution-dependent.
         # The signal uncertainty pull (30% toward 50) still only applies to low-res (<500k px)
         # since that addresses a different problem (insufficient pixels for reliable analysis).
-        _is_youtube = "youtube" in _video_source.lower()
+        _is_youtube = any(s in _video_source.lower()
+                          for s in ["youtube", "tiktok", "instagram", "facebook"])
         _youtube_signal_unreliable = (
             signal_context.get("youtube_lowres_adjusted", False) or _is_youtube
         )
@@ -845,7 +860,7 @@ def run_detection_multiclip(video_path: str) -> tuple:
         _clash_ai_mc_override = _is_youtube and gpt_ai_score < 30
         clash_ai     = signal_ai_score > 65 and gpt_ai_score < 40 and not _clash_ai_mc_override
         gpt_dominant = gpt_ai_score >= 75 and signal_ai_score < 60
-        gpt_dominant_real = gpt_ai_score <= 30 and signal_ai_score > 40
+        gpt_dominant_real = gpt_ai_score <= 35 and signal_ai_score > 40
         both_real    = signal_ai_score < 45 and gpt_ai_score < 45
         both_ai      = signal_ai_score > 65 and gpt_ai_score > 65
 
@@ -885,7 +900,7 @@ def run_detection_multiclip(video_path: str) -> tuple:
             w_sig, w_gpt = 0.25, 0.75
             mode = "gpt-dominant"
         elif gpt_dominant_real:
-            log.info("GPT_DOMINANT_REAL: GPT(%d)<=30, signal(%d) — GPT gets 75%%",
+            log.info("GPT_DOMINANT_REAL: GPT(%d)<=35, signal(%d) — GPT gets 75%%",
                      gpt_ai_score, signal_ai_score)
             combined_ai_score = signal_ai_score * 0.25 + gpt_ai_score * 0.75
             w_sig, w_gpt = 0.25, 0.75
@@ -952,8 +967,12 @@ def run_detection_multiclip(video_path: str) -> tuple:
     # GPT override: if GPT is strongly confident AI (>=80), suppress hybrid clamp
     # even when clips appear mixed. GPT seeing definitive AI artifacts at >=80
     # overrides ambiguous signal variance.
-    _gpt_strongly_ai  = gpt_ai_score >= 80
-    _true_hybrid      = hybrid_flag and _has_real_clips and _has_ai_clips and not _gpt_strongly_ai
+    _gpt_strongly_ai   = gpt_ai_score >= 80
+    _gpt_strongly_real = gpt_ai_score <= 35
+    _engines_confirm_real = (mode in ("real-dominant (GPT+DINOv2 confirm real)", "gpt-dominant-real"))
+    _true_hybrid      = (hybrid_flag and _has_real_clips and _has_ai_clips
+                         and not _gpt_strongly_ai and not _gpt_strongly_real
+                         and not _engines_confirm_real)
     _both_engines_ai  = signal_ai_score > 70 and gpt_ai_score > 65
     if _gpt_strongly_ai and hybrid_flag and _has_real_clips and _has_ai_clips:
         log.info(
