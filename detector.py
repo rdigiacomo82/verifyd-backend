@@ -1408,9 +1408,17 @@ def detect_ai(video_path: str) -> int:
     # ── 9c. Selfie bonus (v8) ────────────────────────────────
     # Portrait phone selfies are overwhelmingly real-world content.
     # Reduce base AI score when all selfie markers are present.
+    # CHAN_CORR GATE: real phone cameras have decorrelated color channels
+    # (sensor noise is spatially random → R/G/B independence).
+    # AI renders have perfectly correlated channels → CHAN_CORR > 0.90.
+    # Do NOT give the real-video bonus to AI-rendered close-up shots.
     if _is_selfie_content:
-        ai_score -= 12
-        log.info("SELFIE portrait+static+sharp → real phone video bonus → -12")
+        if avg_color_corr > 0.90:
+            log.info("SELFIE bonus BLOCKED — CHAN_CORR=%.4f > 0.90 (AI render, not real camera)",
+                     avg_color_corr)
+        else:
+            ai_score -= 12
+            log.info("SELFIE portrait+static+sharp → real phone video bonus → -12")
 
     # ── 9d. Talking-head bonus (v9) ──────────────────────────
     # Active portrait of a real person: strongest real-video signal.
@@ -1511,8 +1519,7 @@ def detect_ai(video_path: str) -> int:
     # 3. Very high noise (>1200) AND large resolution — definitive real camera, not AI
     _is_hevc_hd = (video_codec == "hevc" and _px_count >= 1920 * 1080)
     _is_high_noise_real = (avg_noise > 1200 and _px_count >= 1280 * 720)
-    _is_indoor_real = (not is_action_content and avg_noise > 500 and ifdv > 0.35)
-    _chan_corr_skip = _is_short_clip or _is_hevc_hd or _is_high_noise_real or _is_indoor_real
+    _chan_corr_skip = _is_short_clip or _is_hevc_hd or _is_high_noise_real
 
     _chan_corr = _color_channel_correlation(video_path)
     log.info("CHAN_CORR: inter-channel correlation=%.4f (skip=%s hevc_hd=%s hi_noise=%s short=%s)",
@@ -1639,9 +1646,7 @@ def detect_ai(video_path: str) -> int:
     # GUARD: action content with high sat_std = natural outdoor lighting variation
     # GUARD: action content with low sat naturally (overcast/indoor) — not an AI signal
     _stable_is_broadcast = (sat_frame_std < 5.0 and avg_saturation > 140)
-    _sat_high_noise_real = (avg_noise > 3000 and avg_motion < 3.0)
-    _stable_is_ai_render = (sat_frame_std < 5.0 and avg_saturation < 100
-                            and not is_action_content and not _sat_high_noise_real)
+    _stable_is_ai_render = (sat_frame_std < 5.0 and avg_saturation < 100 and not is_action_content)
     _unstable_is_outdoor = (sat_frame_std > 22.0 and is_action_content)
 
     if _stable_is_broadcast:
@@ -1681,7 +1686,7 @@ def detect_ai(video_path: str) -> int:
         log.info("SAT_STD %.2f sat=%.0f → frozen AI render → +14", sat_frame_std, avg_saturation)
     elif _unstable_is_outdoor:
         log.info("SAT_STD %.2f → outdoor action variation → no penalty", sat_frame_std)
-    elif sat_frame_std < 3.0 and not _is_short_clip and not (avg_noise > 3000 and avg_motion < 3.0):
+    elif sat_frame_std < 3.0 and not _is_short_clip:
         ai_score += 14
         log.info("SAT_STD %.2f → frozen AI lighting → +14", sat_frame_std)
     elif sat_frame_std < 6.0 and not _is_short_clip:
@@ -1720,11 +1725,11 @@ def detect_ai(video_path: str) -> int:
     if _is_selfie_content and bg_drift < 6.0:
         # Selfie held steady or on table — naturally low bg drift
         log.info("BG_DRIFT %.2f → selfie static hold → no penalty", bg_drift)
-    elif bg_drift < 2.0 and not _static_broadcast and not (avg_noise > 3000 and avg_motion < 3.0):
+    elif bg_drift < 2.0 and not _static_broadcast:
         # Frozen background — AI render (not a static broadcast camera)
         ai_score += 12
         log.info("BG_DRIFT %.2f → frozen AI bg → +12", bg_drift)
-    elif bg_drift < 4.0 and not is_action_content and not _static_broadcast and not (avg_noise > 3000 and avg_motion < 3.0):
+    elif bg_drift < 4.0 and not is_action_content and not _static_broadcast:
         ai_score += 6
         log.info("BG_DRIFT %.2f → near-frozen bg → +6", bg_drift)
     elif bg_drift > _bg_warp_threshold and not is_action_content:
@@ -1992,17 +1997,9 @@ def detect_ai(video_path: str) -> int:
                 ai_score += 5
                 log.info("MOTION_SYNC %.3f → portrait action moderate sync → +5", motion_sync)
         else:
-            # LONG-VIDEO GUARD: over 30s of mixed real content, averaged motion_sync
-            # naturally appears synchronized (people walk same direction, same aisle).
-            # Not the same as AI crowd lockstep. Guard when:
-            # duration > 30s AND ifdv > 0.6 (organic motion variance confirms real camera)
-            _sync_long_real = (video_duration > 30.0 and ifdv > 0.6)
-            if motion_sync < _sync_thresh_strong and not _sync_long_real:
+            if motion_sync < _sync_thresh_strong:
                 ai_score += 14
                 log.info("MOTION_SYNC %.3f → extreme lockstep crowd → +14", motion_sync)
-            elif motion_sync < _sync_thresh_strong and _sync_long_real:
-                log.info("MOTION_SYNC %.3f → suppressed (long real video, ifdv=%.3f) → no penalty",
-                         motion_sync, ifdv)
             elif motion_sync < _sync_thresh_med:
                 ai_score += 8
                 log.info("MOTION_SYNC %.3f → lockstep crowd → +8", motion_sync)
@@ -2275,14 +2272,12 @@ def detect_ai(video_path: str) -> int:
     #   Real_Baseball: mean=0.091, cov=1.025 → real (physical motion)
     #
     # Guards: very short clips, static (no edges to track), portrait action
-    _edge_text_overlay = (avg_motion < 10.0 and edge_cov_var > 1.5)
     _edge_coh_guard = (
         _is_short_clip or
         _is_talking_head or
         _is_single_subject or
         is_static_content or
-        _is_selfie_content or
-        _edge_text_overlay
+        _is_selfie_content
     )
     if not _edge_coh_guard and len(v9_all_gray_frames) >= 4:
         _edge_ai = (edge_mean_var < 0.05 and edge_cov_var > 1.4)
