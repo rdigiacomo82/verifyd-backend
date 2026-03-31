@@ -226,19 +226,28 @@ def run_detection(video_path: str) -> tuple:
                                    for s in ["youtube", "tiktok", "instagram", "facebook"])
         _youtube_signal_unreliable = signal_context.get("youtube_lowres_adjusted", False) or _is_social_reencoded
         clash_real   = signal_ai_score < 50 and gpt_ai_score > 50 and gpt_ai_score < 75 and not _youtube_signal_unreliable
-        clash_ai    = signal_ai_score > 65 and gpt_ai_score < 40   # signal says AI, GPT misses it
-        gpt_dominant = gpt_ai_score >= 75 and signal_ai_score < 60  # GPT highly confident AI, signal unsure
+        _clash_ai_sc_override = _is_youtube and gpt_ai_score < 30
+        clash_ai    = signal_ai_score > 65 and gpt_ai_score < 40 and not _clash_ai_sc_override
+        gpt_dominant = gpt_ai_score >= 75 and signal_ai_score < 60
+        gpt_dominant_real = gpt_ai_score <= 30 and signal_ai_score > 40
         both_real   = signal_ai_score < 45 and gpt_ai_score < 45
         both_ai     = signal_ai_score > 65 and gpt_ai_score > 65
         confident   = signal_ai_score < 35 or signal_ai_score > 75
 
         if gpt_dominant:
-            # GPT is highly confident AI but signal is borderline — trust GPT heavily
             combined, w_sig, w_gpt = (
                 signal_ai_score * 0.25 + gpt_ai_score * 0.75,
                 0.25, 0.75
             )
             mode = "gpt-dominant (GPT highly confident AI)"
+        elif gpt_dominant_real:
+            log.info("GPT_DOMINANT_REAL: GPT(%d)<=30 confident real, signal(%d) elevated",
+                     gpt_ai_score, signal_ai_score)
+            combined, w_sig, w_gpt = (
+                signal_ai_score * 0.25 + gpt_ai_score * 0.75,
+                0.25, 0.75
+            )
+            mode = "gpt-dominant-real"
         elif clash_real:
             # Signal has pixel evidence of real — GPT is moderately calling AI
             combined, w_sig, w_gpt = (
@@ -743,7 +752,7 @@ def run_detection_multiclip(video_path: str) -> tuple:
             )
             signal_context["youtube_lowres_adjusted"] = True
         else:
-            log.info(f"SOCIAL: source={_video_source} but resolution adequate -- no adjustment")
+            log.info("YOUTUBE: source=youtube but resolution adequate -- no adjustment")
 
     # ── Hybrid detection ──────────────────────────────────────
     score_variance = max(signal_scores) - min(signal_scores) if len(signal_scores) > 1 else 0
@@ -821,13 +830,13 @@ def run_detection_multiclip(video_path: str) -> tuple:
         combined_ai_score = signal_ai_score * 0.60 + _noise_gpt_prior * 0.40
         w_sig, w_gpt = 0.60, 0.40
         mode = f"noise-confirmed-real (GPT refused, noise={_avg_noise_ctx:.0f})"
-        log.info("GPT-REFUSED-NOISE: noise=%.0f > 3500 → real prior=%d", _avg_noise_ctx, _noise_gpt_prior)
+        log.info("GPT-REFUSED-NOISE: noise=%.0f > 3500 → prior=%d", _avg_noise_ctx, _noise_gpt_prior)
     elif gpt_refused and _avg_noise_ctx > 3000:
         _noise_gpt_prior = 30
         combined_ai_score = signal_ai_score * 0.60 + _noise_gpt_prior * 0.40
         w_sig, w_gpt = 0.60, 0.40
         mode = f"noise-confirmed-real (GPT refused, noise={_avg_noise_ctx:.0f})"
-        log.info("GPT-REFUSED-NOISE: noise=%.0f > 3000 → real prior=%d", _avg_noise_ctx, _noise_gpt_prior)
+        log.info("GPT-REFUSED-NOISE: noise=%.0f > 3000 → prior=%d", _avg_noise_ctx, _noise_gpt_prior)
     elif gpt_failed:
         combined_ai_score = float(signal_ai_score)
         w_sig, w_gpt = 1.0, 0.0
