@@ -124,9 +124,24 @@ def process_upload_job(
     try:
         log.info("Worker: starting detection for job=%s email=%s", job_id, email)
 
-        # ── Normalize uploaded file to 720p with reliable keyframes ──
-        # Mirrors what the link path does (SMVD renders at 720p).
-        # Forces keyframes every 2s so clip seeking works reliably.
+        # ── Clean up stale tmp files to prevent disk-full errors ──
+        try:
+            import glob as _glob, time as _time
+            _now = _time.time()
+            _stale = 0
+            for _f in _glob.glob("/tmp/*.mp4") + _glob.glob("/tmp/*.meta.json"):
+                try:
+                    if _now - os.path.getmtime(_f) > 600:  # older than 10 min
+                        os.remove(_f)
+                        _stale += 1
+                except Exception:
+                    pass
+            if _stale:
+                log.info("Worker: cleaned up %d stale tmp files", _stale)
+        except Exception as _ce:
+            log.warning("Worker: tmp cleanup error: %s", _ce)
+
+        # ── Normalize uploaded file to 720p ───────────────────
         _norm_path = tmp_path.replace(suffix, "_720p.mp4")
         try:
             import subprocess as _sp
@@ -134,11 +149,9 @@ def process_upload_job(
                 "ffmpeg", "-y", "-i", tmp_path,
                 "-vf", "scale='min(iw,720)':'min(ih,1280)',scale=trunc(iw/2)*2:trunc(ih/2)*2",
                 "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
-                "-g", "60",
-                "-keyint_min", "60",
+                "-g", "60", "-keyint_min", "60",
                 "-c:a", "aac", "-ar", "44100", "-b:a", "128k",
-                "-movflags", "+faststart",
-                _norm_path,
+                "-movflags", "+faststart", _norm_path,
             ], capture_output=True, timeout=120)
             if _nr.returncode == 0 and os.path.getsize(_norm_path) > 1024:
                 log.info("Worker: normalized upload to 720p → %s (%dMB)",
@@ -424,4 +437,3 @@ def process_link_job(
     finally:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
-
