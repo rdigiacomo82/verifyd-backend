@@ -124,8 +124,36 @@ def process_upload_job(
     try:
         log.info("Worker: starting detection for job=%s email=%s", job_id, email)
 
+        # ── Normalize uploaded file to 720p ───────────────────
+        # Transcoding to 720p before detection ensures consistent results
+        # regardless of the source tool used to create the upload.
+        # This mirrors what the link analysis path does (SMVD renders at 720p)
+        # and removes third-party watermarks/artifacts that confuse GPT scoring.
+        _norm_path = tmp_path.replace(suffix, "_720p.mp4")
+        try:
+            import subprocess as _sp
+            _nr = _sp.run([
+                "ffmpeg", "-y", "-i", tmp_path,
+                "-vf", "scale='min(iw,720)':'min(ih,1280)',scale=trunc(iw/2)*2:trunc(ih/2)*2",
+                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
+                "-c:a", "aac", "-ar", "44100", "-b:a", "128k",
+                "-movflags", "+faststart",
+                _norm_path,
+            ], capture_output=True, timeout=120)
+            if _nr.returncode == 0 and os.path.getsize(_norm_path) > 1024:
+                log.info("Worker: normalized upload to 720p → %s (%dMB)",
+                         _norm_path, os.path.getsize(_norm_path) // 1024 // 1024)
+                _detect_path = _norm_path
+            else:
+                log.warning("Worker: normalization failed (rc=%d) — using original",
+                            _nr.returncode)
+                _detect_path = tmp_path
+        except Exception as _ne:
+            log.warning("Worker: normalization error (%s) — using original", _ne)
+            _detect_path = tmp_path
+
         # ── Run detection ─────────────────────────────────────
-        authenticity, label, detail = run_detection_multiclip(tmp_path)
+        authenticity, label, detail = run_detection_multiclip(_detect_path)
         ui_text, color, certify = LABEL_UI.get(label, ("VIDEO UNDETERMINED", "blue", False))
 
         log.info("Worker: detection complete job=%s label=%s auth=%d",
@@ -226,6 +254,9 @@ def process_upload_job(
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
             log.info("Worker: cleaned up temp file %s", tmp_path)
+        if os.path.exists(_norm_path):
+            os.remove(_norm_path)
+            log.info("Worker: cleaned up normalized file %s", _norm_path)
 
 
 def process_link_job(
@@ -252,23 +283,6 @@ def process_link_job(
     }
 
     tmp_path = os.path.join(tempfile.gettempdir(), f"{job_id}.mp4")
-
-    # ── Blocked domains — reject immediately with clear error ────
-    _BLOCKED_DOMAINS = [
-        "pornhub.com", "xvideos.com", "xhamster.com", "redtube.com",
-        "youporn.com", "tube8.com", "xnxx.com", "spankbang.com",
-        "onlyfans.com", "fansly.com",
-    ]
-    _url_lower = video_url.lower()
-    if any(domain in _url_lower for domain in _BLOCKED_DOMAINS):
-        _blocked_result = {
-            "job_status": "error",
-            "error": "This platform is not supported. VeriFYD analyzes YouTube, TikTok, and direct video uploads.",
-            "error_detail": f"Blocked domain: {video_url[:100]}",
-        }
-        _store_result(r, job_id, _blocked_result)
-        log.warning("Worker: blocked domain rejected for job=%s url=%s", job_id, video_url[:80])
-        return _blocked_result
 
     try:
         log.info("Worker: downloading url for job=%s", job_id)
@@ -384,18 +398,12 @@ def process_link_job(
             )
         elif "private" in err_str:
             user_error = "This video is private and cannot be accessed."
-        elif "copyright" in err_str or "content id" in err_str:
-            user_error = (
-                "This video cannot be analyzed because it is copyright-protected. "
-                "The content owner has restricted automated access to this video. "
-                "Try uploading the video file directly instead."
-            )
         elif "not available" in err_str or "unavailable" in err_str:
             user_error = "This video is unavailable or has been removed."
         elif "download produced no file" in err_str:
             user_error = (
-                "This video could not be downloaded. It may be copyright-protected, "
-                "age-restricted, region-locked, or set to private. "
+                "The video could not be downloaded. "
+                "YouTube may be blocking automated access to this video. "
                 "Try uploading the video file directly instead."
             )
         else:
