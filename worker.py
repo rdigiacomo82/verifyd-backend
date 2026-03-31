@@ -124,14 +124,18 @@ def process_upload_job(
     try:
         log.info("Worker: starting detection for job=%s email=%s", job_id, email)
 
-        # ── Clean up stale tmp files to prevent disk-full errors ──
+        # ── Clean up stale files from both /tmp and /data/tmp ─
         try:
             import glob as _glob, time as _time
             _now = _time.time()
             _stale = 0
-            for _f in _glob.glob("/tmp/*.mp4") + _glob.glob("/tmp/*.meta.json"):
+            _data_root = os.environ.get("DATA_ROOT", "/data")
+            _all_tmp = (_glob.glob("/tmp/*.mp4") + _glob.glob("/tmp/*.meta.json") +
+                        _glob.glob(os.path.join(_data_root, "tmp", "*.mp4")) +
+                        _glob.glob(os.path.join(_data_root, "tmp", "*_720p.mp4")))
+            for _f in _all_tmp:
                 try:
-                    if _now - os.path.getmtime(_f) > 600:  # older than 10 min
+                    if _now - os.path.getmtime(_f) > 600:
                         os.remove(_f)
                         _stale += 1
                 except Exception:
@@ -141,8 +145,12 @@ def process_upload_job(
         except Exception as _ce:
             log.warning("Worker: tmp cleanup error: %s", _ce)
 
-        # ── Normalize uploaded file to 720p ───────────────────
-        _norm_path = tmp_path.replace(suffix, "_720p.mp4")
+        # ── Normalize uploaded file to 720p on persistent disk ─
+        # Write to /data/tmp (persistent disk) NOT /tmp (tiny ephemeral disk)
+        _data_root = os.environ.get("DATA_ROOT", "/data")
+        _norm_dir = os.path.join(_data_root, "tmp")
+        os.makedirs(_norm_dir, exist_ok=True)
+        _norm_path = os.path.join(_norm_dir, job_id + "_720p.mp4")
         try:
             import subprocess as _sp
             _nr = _sp.run([
