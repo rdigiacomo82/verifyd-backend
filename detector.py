@@ -1511,12 +1511,6 @@ def detect_ai(video_path: str) -> int:
     # 3. Very high noise (>1200) AND large resolution — definitive real camera, not AI
     _is_hevc_hd = (video_codec == "hevc" and _px_count >= 1920 * 1080)
     _is_high_noise_real = (avg_noise > 1200 and _px_count >= 1280 * 720)
-    # INDOOR LIGHTING GUARD: consistent artificial lighting (airplane cabin,
-    # office, studio) creates high channel correlation in real cameras because
-    # the light source evenly illuminates all channels. Guard when:
-    # cinematic content (not action) + real noise (>500) + organic ifdv (>0.35)
-    # AI plasma: content=action → NOT suppressed ✅
-    # Pilot clip2: content=cinematic, noise=764, ifdv=0.388 → suppressed ✅
     _is_indoor_real = (not is_action_content and avg_noise > 500 and ifdv > 0.35)
     _chan_corr_skip = _is_short_clip or _is_hevc_hd or _is_high_noise_real or _is_indoor_real
 
@@ -1645,7 +1639,9 @@ def detect_ai(video_path: str) -> int:
     # GUARD: action content with high sat_std = natural outdoor lighting variation
     # GUARD: action content with low sat naturally (overcast/indoor) — not an AI signal
     _stable_is_broadcast = (sat_frame_std < 5.0 and avg_saturation > 140)
-    _stable_is_ai_render = (sat_frame_std < 5.0 and avg_saturation < 100 and not is_action_content)
+    _sat_high_noise_real = (avg_noise > 3000 and avg_motion < 3.0)
+    _stable_is_ai_render = (sat_frame_std < 5.0 and avg_saturation < 100
+                            and not is_action_content and not _sat_high_noise_real)
     _unstable_is_outdoor = (sat_frame_std > 22.0 and is_action_content)
 
     if _stable_is_broadcast:
@@ -1724,7 +1720,7 @@ def detect_ai(video_path: str) -> int:
     if _is_selfie_content and bg_drift < 6.0:
         # Selfie held steady or on table — naturally low bg drift
         log.info("BG_DRIFT %.2f → selfie static hold → no penalty", bg_drift)
-    elif bg_drift < 2.0 and not _static_broadcast:
+    elif bg_drift < 2.0 and not _static_broadcast and not (avg_noise > 3000 and avg_motion < 3.0):
         # Frozen background — AI render (not a static broadcast camera)
         ai_score += 12
         log.info("BG_DRIFT %.2f → frozen AI bg → +12", bg_drift)
@@ -2271,13 +2267,6 @@ def detect_ai(video_path: str) -> int:
     #   Real_Baseball: mean=0.091, cov=1.025 → real (physical motion)
     #
     # Guards: very short clips, static (no edges to track), portrait action
-    # TEXT OVERLAY GUARD: captions/subtitles on real YouTube videos create
-    # hard-edge text boundaries that appear/disappear between frames — this
-    # looks like AI edge crawl but is just text overlay physics.
-    # Guard: low motion (< 10) AND very high edge cov (> 1.5) in YouTube source
-    # signals text overlay more than AI edge crawl.
-    # AI plasma: motion=17.4 > 10 → NOT suppressed ✅
-    # Cops/biker: motion=9.4, edge_cov=1.6 → suppressed ✅
     _edge_text_overlay = (avg_motion < 10.0 and edge_cov_var > 1.5)
     _edge_coh_guard = (
         _is_short_clip or
@@ -2285,7 +2274,7 @@ def detect_ai(video_path: str) -> int:
         _is_single_subject or
         is_static_content or
         _is_selfie_content or
-        _edge_text_overlay          # text overlays mimic edge crawl
+        _edge_text_overlay
     )
     if not _edge_coh_guard and len(v9_all_gray_frames) >= 4:
         _edge_ai = (edge_mean_var < 0.05 and edge_cov_var > 1.4)

@@ -222,8 +222,6 @@ def run_detection(video_path: str) -> tuple:
         # Determine blend mode
         # clash_real: signal says real BUT only override GPT if GPT is not highly confident
         # If GPT >= 75, it's seeing strong AI artifacts — don't let signal dismiss it
-        # Social media re-encoding creates H264 noise that mimics real camera grain.
-        # Apply the same guards to YouTube, TikTok, Instagram, and Facebook.
         _is_social_reencoded = any(s in _video_source.lower()
                                    for s in ["youtube", "tiktok", "instagram", "facebook"])
         _youtube_signal_unreliable = signal_context.get("youtube_lowres_adjusted", False) or _is_social_reencoded
@@ -823,15 +821,13 @@ def run_detection_multiclip(video_path: str) -> tuple:
         combined_ai_score = signal_ai_score * 0.60 + _noise_gpt_prior * 0.40
         w_sig, w_gpt = 0.60, 0.40
         mode = f"noise-confirmed-real (GPT refused, noise={_avg_noise_ctx:.0f})"
-        log.info("GPT-REFUSED-NOISE: noise=%.0f > 3500 confirms real camera — gpt_prior=%d",
-                 _avg_noise_ctx, _noise_gpt_prior)
+        log.info("GPT-REFUSED-NOISE: noise=%.0f > 3500 → real camera prior=%d", _avg_noise_ctx, _noise_gpt_prior)
     elif gpt_refused and _avg_noise_ctx > 3000:
         _noise_gpt_prior = 30
         combined_ai_score = signal_ai_score * 0.60 + _noise_gpt_prior * 0.40
         w_sig, w_gpt = 0.60, 0.40
         mode = f"noise-confirmed-real (GPT refused, noise={_avg_noise_ctx:.0f})"
-        log.info("GPT-REFUSED-NOISE: noise=%.0f > 3000 confirms real camera — gpt_prior=%d",
-                 _avg_noise_ctx, _noise_gpt_prior)
+        log.info("GPT-REFUSED-NOISE: noise=%.0f > 3000 → real camera prior=%d", _avg_noise_ctx, _noise_gpt_prior)
     elif gpt_failed:
         combined_ai_score = float(signal_ai_score)
         w_sig, w_gpt = 1.0, 0.0
@@ -855,6 +851,7 @@ def run_detection_multiclip(video_path: str) -> tuple:
         _clash_ai_youtube_override = _is_youtube and gpt_ai_score < 30
         clash_ai     = signal_ai_score > 65 and gpt_ai_score < 40 and not _clash_ai_youtube_override
         gpt_dominant = gpt_ai_score >= 75 and signal_ai_score < 60
+        gpt_dominant_real = gpt_ai_score <= 25 and signal_ai_score > 40
         both_real    = signal_ai_score < 45 and gpt_ai_score < 45
         both_ai      = signal_ai_score > 65 and gpt_ai_score > 65
 
@@ -893,6 +890,12 @@ def run_detection_multiclip(video_path: str) -> tuple:
             combined_ai_score = signal_ai_score * 0.25 + gpt_ai_score * 0.75
             w_sig, w_gpt = 0.25, 0.75
             mode = "gpt-dominant"
+        elif gpt_dominant_real:
+            log.info("GPT_DOMINANT_REAL: GPT(%d)<=25 very confident real, signal(%d) — GPT gets 75%% weight",
+                     gpt_ai_score, signal_ai_score)
+            combined_ai_score = signal_ai_score * 0.25 + gpt_ai_score * 0.75
+            w_sig, w_gpt = 0.25, 0.75
+            mode = "gpt-dominant-real"
         elif clash_real:
             combined_ai_score = signal_ai_score * 0.90 + gpt_ai_score * 0.10
             w_sig, w_gpt = 0.90, 0.10
@@ -955,12 +958,9 @@ def run_detection_multiclip(video_path: str) -> tuple:
     # GPT override: if GPT is strongly confident AI (>=80), suppress hybrid clamp
     # even when clips appear mixed. GPT seeing definitive AI artifacts at >=80
     # overrides ambiguous signal variance.
-    # SYMMETRIC: if GPT is very confidently real (<=25) OR real_dominant/gpt_dominant_real
-    # fired (meaning two engines confirm real), also suppress hybrid clamp.
     _gpt_strongly_ai   = gpt_ai_score >= 80
     _gpt_strongly_real = gpt_ai_score <= 25
-    _engines_confirm_real = (mode in ("real-dominant (GPT+DINOv2 confirm real)",
-                                       "gpt-dominant-real"))
+    _engines_confirm_real = (mode in ("real-dominant (GPT+DINOv2 confirm real)", "gpt-dominant-real"))
     _true_hybrid      = (hybrid_flag and _has_real_clips and _has_ai_clips
                          and not _gpt_strongly_ai
                          and not _gpt_strongly_real
@@ -970,12 +970,6 @@ def run_detection_multiclip(video_path: str) -> tuple:
         log.info(
             "Hybrid clamp suppressed: GPT=%d strongly AI (>=80) overrides mixed signal %s",
             gpt_ai_score, signal_scores
-        )
-    if (_gpt_strongly_real or _engines_confirm_real) and hybrid_flag:
-        log.info(
-            "Hybrid clamp suppressed: GPT=%d strongly real (<=25) or engines confirmed real "
-            "(mode=%s) — real result preserved",
-            gpt_ai_score, mode
         )
 
     if _true_hybrid and not gpt_failed and not _both_engines_ai:

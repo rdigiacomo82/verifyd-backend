@@ -249,6 +249,14 @@ def _try_smvd_youtube(url: str, output_path: str) -> bool:
             size = os.path.getsize(output_path)
             if size > 1024:
                 log.info("SMVD YouTube merged: success — %d bytes", size)
+                try:
+                    import json as _yt_json
+                    _yt_sc = output_path.replace(".mp4", ".meta.json")
+                    with open(_yt_sc, "w") as _yt_sf:
+                        _yt_json.dump({"aigc_label_type": 0, "source": "youtube"}, _yt_sf)
+                    log.info("SMVD YouTube: wrote source sidecar → %s", _yt_sc)
+                except Exception as _yt_se:
+                    log.warning("SMVD YouTube: sidecar write failed: %s", _yt_se)
                 return True
         finally:
             for f in (video_tmp, audio_tmp):
@@ -260,6 +268,14 @@ def _try_smvd_youtube(url: str, output_path: str) -> bool:
         size = os.path.getsize(output_path)
         if size > 1024:
             log.info("SMVD YouTube direct: success — %d bytes", size)
+            try:
+                import json as _yt_json2
+                _yt_sc2 = output_path.replace(".mp4", ".meta.json")
+                with open(_yt_sc2, "w") as _yt_sf2:
+                    _yt_json2.dump({"aigc_label_type": 0, "source": "youtube"}, _yt_sf2)
+                log.info("SMVD YouTube: wrote source sidecar → %s", _yt_sc2)
+            except Exception as _yt_se2:
+                log.warning("SMVD YouTube: sidecar write failed: %s", _yt_se2)
             return True
 
     return False
@@ -433,13 +449,13 @@ def _try_smvd_instagram(url: str, output_path: str) -> bool:
     if size > 1024:
         log.info("SMVD Instagram: success — %d bytes", size)
         try:
-            import json as _json
-            _sidecar = output_path.replace(".mp4", ".meta.json")
-            with open(_sidecar, "w") as _sf:
-                _json.dump({"aigc_label_type": 0, "source": "instagram"}, _sf)
-            log.info("SMVD Instagram: wrote source sidecar → %s", _sidecar)
-        except Exception as _se:
-            log.warning("SMVD Instagram: sidecar write failed: %s", _se)
+            import json as _ig_json
+            _ig_sc = output_path.replace(".mp4", ".meta.json")
+            with open(_ig_sc, "w") as _ig_sf:
+                _ig_json.dump({"aigc_label_type": 0, "source": "instagram"}, _ig_sf)
+            log.info("SMVD Instagram: wrote source sidecar → %s", _ig_sc)
+        except Exception as _ig_se:
+            log.warning("SMVD Instagram: sidecar write failed: %s", _ig_se)
         return True
     return False
 
@@ -521,25 +537,19 @@ def download_video_ytdlp(url: str, output_path: str) -> None:
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
-        # Write source sidecar for detection guards
         if os.path.exists(output_path) and os.path.getsize(output_path) > 1024:
             try:
-                import json as _json_ytdlp
-                _url_lower = url.lower()
-                if "tiktok.com" in _url_lower:
-                    _src = "tiktok"
-                elif "instagram.com" in _url_lower:
-                    _src = "instagram"
-                elif "facebook.com" in _url_lower or "fb.watch" in _url_lower:
-                    _src = "facebook"
-                elif "youtube.com" in _url_lower or "youtu.be" in _url_lower:
-                    _src = "youtube"
-                else:
-                    _src = "unknown"
+                import json as _ytdlp_json
+                _u = url.lower()
+                _src = ("tiktok" if "tiktok.com" in _u else
+                        "instagram" if "instagram.com" in _u else
+                        "facebook" if "facebook.com" in _u or "fb.watch" in _u else
+                        "youtube" if "youtube.com" in _u or "youtu.be" in _u else
+                        "unknown")
                 _sc = output_path.replace(".mp4", ".meta.json")
                 with open(_sc, "w") as _sf:
-                    _json_ytdlp.dump({"aigc_label_type": 0, "source": _src}, _sf)
-                log.info("yt-dlp: wrote source sidecar source=%s → %s", _src, _sc)
+                    _ytdlp_json.dump({"aigc_label_type": 0, "source": _src}, _sf)
+                log.info("yt-dlp: wrote source sidecar source=%s", _src)
             except Exception as _sce:
                 log.warning("yt-dlp: sidecar write failed: %s", _sce)
     except yt_dlp.utils.DownloadError as e:
