@@ -1361,6 +1361,39 @@ def admin_data(key: str = ""):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+@app.get("/admin-user-certs/")
+def admin_user_certs(key: str = "", email: str = ""):
+    """
+    Returns all certificates scanned by a specific user.
+    Usage: /admin-user-certs/?key=ADMIN_KEY&email=user@example.com
+    """
+    if not _is_admin(key):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    if not email:
+        return JSONResponse({"error": "email parameter required"}, status_code=400)
+
+    try:
+        from database import get_db
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT cert_id, original_file, label, authenticity, ai_score, upload_time
+                FROM certificates
+                WHERE email = %s
+                ORDER BY upload_time DESC
+            """, (email,))
+            rows = [dict(row) for row in cur.fetchall()]
+
+        return {
+            "email": email,
+            "total": len(rows),
+            "certificates": rows
+        }
+    except Exception as e:
+        log.error("Admin user certs error: %s", e)
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 @app.get("/debug-db/")
 def debug_db():
     """Show all tables in the database."""
@@ -2728,13 +2761,3 @@ async def widget_analyze_link(request: Request, key: str = ""):
     except Exception as e:
         log.exception("widget-analyze-link enqueue failed: %s", e)
         return JSONResponse({"error": "Failed to queue analysis. Please try again."}, status_code=500)
-
-
-
-
-
-
-
-
-
-
