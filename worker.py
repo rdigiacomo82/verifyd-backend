@@ -129,10 +129,10 @@ def process_upload_job(
             import glob as _glob, time as _time
             _now = _time.time()
             _stale = 0
-            _data_root = os.environ.get("DATA_ROOT", "/data")
+            _data_root_c = os.environ.get("DATA_ROOT", "/data")
             _all_tmp = (_glob.glob("/tmp/*.mp4") + _glob.glob("/tmp/*.meta.json") +
-                        _glob.glob(os.path.join(_data_root, "tmp", "*.mp4")) +
-                        _glob.glob(os.path.join(_data_root, "tmp", "*_720p.mp4")))
+                        _glob.glob(os.path.join(_data_root_c, "tmp", "*.mp4")) +
+                        _glob.glob(os.path.join(_data_root_c, "tmp", "*_720p.mp4")))
             for _f in _all_tmp:
                 try:
                     if _now - os.path.getmtime(_f) > 600:
@@ -147,6 +147,8 @@ def process_upload_job(
 
         # ── Normalize uploaded file to 720p on persistent disk ─
         # Write to /data/tmp (persistent disk) NOT /tmp (tiny ephemeral disk)
+        # CRF 18 (near-lossless) preserves AI/real artifact fingerprints
+        # through re-encode — critical for accurate signal detection
         _data_root = os.environ.get("DATA_ROOT", "/data")
         _norm_dir = os.path.join(_data_root, "tmp")
         os.makedirs(_norm_dir, exist_ok=True)
@@ -156,7 +158,7 @@ def process_upload_job(
             _nr = _sp.run([
                 "ffmpeg", "-y", "-i", tmp_path,
                 "-vf", "scale='min(iw,720)':'min(ih,1280)',scale=trunc(iw/2)*2:trunc(ih/2)*2",
-                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
+                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "18",
                 "-g", "60", "-keyint_min", "60",
                 "-c:a", "aac", "-ar", "44100", "-b:a", "128k",
                 "-movflags", "+faststart", _norm_path,
@@ -445,3 +447,4 @@ def process_link_job(
     finally:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
+
