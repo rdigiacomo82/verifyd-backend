@@ -124,11 +124,9 @@ def process_upload_job(
     try:
         log.info("Worker: starting detection for job=%s email=%s", job_id, email)
 
-        # ── Normalize uploaded file to 720p ───────────────────
-        # Transcoding to 720p before detection ensures consistent results
-        # regardless of the source tool used to create the upload.
-        # This mirrors what the link analysis path does (SMVD renders at 720p)
-        # and removes third-party watermarks/artifacts that confuse GPT scoring.
+        # ── Normalize uploaded file to 720p with reliable keyframes ──
+        # Mirrors what the link path does (SMVD renders at 720p).
+        # Forces keyframes every 2s so clip seeking works reliably.
         _norm_path = tmp_path.replace(suffix, "_720p.mp4")
         try:
             import subprocess as _sp
@@ -136,6 +134,8 @@ def process_upload_job(
                 "ffmpeg", "-y", "-i", tmp_path,
                 "-vf", "scale='min(iw,720)':'min(ih,1280)',scale=trunc(iw/2)*2:trunc(ih/2)*2",
                 "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
+                "-g", "60",
+                "-keyint_min", "60",
                 "-c:a", "aac", "-ar", "44100", "-b:a", "128k",
                 "-movflags", "+faststart",
                 _norm_path,
@@ -254,7 +254,7 @@ def process_upload_job(
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
             log.info("Worker: cleaned up temp file %s", tmp_path)
-        if os.path.exists(_norm_path):
+        if "_norm_path" in dir() and os.path.exists(_norm_path):
             os.remove(_norm_path)
             log.info("Worker: cleaned up normalized file %s", _norm_path)
 
