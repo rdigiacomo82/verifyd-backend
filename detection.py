@@ -224,11 +224,9 @@ def run_detection(video_path: str) -> tuple:
         # If GPT >= 75, it's seeing strong AI artifacts — don't let signal dismiss it
         _youtube_signal_unreliable = signal_context.get("youtube_lowres_adjusted", False) or "youtube" in _video_source.lower()
         clash_real   = signal_ai_score < 50 and gpt_ai_score > 50 and gpt_ai_score < 75 and not _youtube_signal_unreliable
-        clash_ai          = signal_ai_score > 65 and gpt_ai_score < 40   # signal says AI, GPT misses it
-        gpt_dominant      = gpt_ai_score >= 75 and signal_ai_score < 60  # GPT highly confident AI, signal unsure
-        gpt_dominant_real = gpt_ai_score <= 35 and signal_ai_score > 40 and signal_ai_score < 65  # GPT confident real, signal moderate
-        signal_dominant_ai = signal_ai_score >= 65 and gpt_ai_score <= 35  # signal overrides GPT in high-conflict zone
-        both_real         = signal_ai_score < 45 and gpt_ai_score < 45
+        clash_ai    = signal_ai_score > 65 and gpt_ai_score < 40   # signal says AI, GPT misses it
+        gpt_dominant = gpt_ai_score >= 75 and signal_ai_score < 60  # GPT highly confident AI, signal unsure
+        both_real   = signal_ai_score < 45 and gpt_ai_score < 45
         both_ai     = signal_ai_score > 65 and gpt_ai_score > 65
         confident   = signal_ai_score < 35 or signal_ai_score > 75
 
@@ -246,24 +244,6 @@ def run_detection(video_path: str) -> tuple:
                 0.90, 0.10
             )
             mode = "clash→real (signal wins)"
-        elif signal_dominant_ai:
-            # Signal highly confident AI, GPT confidently real — physics wins
-            log.info("SIGNAL_DOMINANT_AI: signal(%d)>=65 overrides GPT(%d)<=35",
-                     signal_ai_score, gpt_ai_score)
-            combined, w_sig, w_gpt = (
-                signal_ai_score * 0.90 + gpt_ai_score * 0.10,
-                0.90, 0.10
-            )
-            mode = "signal-dominant-AI"
-        elif gpt_dominant_real:
-            # GPT confident real, signal moderate — trust GPT
-            log.info("GPT_DOMINANT_REAL: GPT(%d)<=35, signal(%d)<65 — GPT gets 75%%",
-                     gpt_ai_score, signal_ai_score)
-            combined, w_sig, w_gpt = (
-                signal_ai_score * 0.25 + gpt_ai_score * 0.75,
-                0.25, 0.75
-            )
-            mode = "gpt-dominant-real"
         elif clash_ai:
             # Signal caught AI artifacts — GPT is under-calling
             combined, w_sig, w_gpt = (
@@ -980,7 +960,17 @@ def run_detection_multiclip(video_path: str) -> tuple:
         # → should land UNDETERMINED not AI
         _high_variance   = score_variance > 35
         _not_all_strong  = any(s < 70 for s in signal_scores)
-        _both_engines_ambiguous = signal_ai_score < 80 and gpt_ai_score < 65
+        # CHAN_CORR gate: if ALL clips have very high inter-channel correlation
+        # (>0.90), the variance is caused by codec/model artifacts on one clip,
+        # NOT genuine content disagreement. Physics is clear — suppress clamp.
+        _clip_chan_corrs = [ctx.get("chan_corr", 0) for ctx in all_signal_contexts]
+        _all_clips_high_chan_corr = all(c > 0.90 for c in _clip_chan_corrs if c > 0)
+        if _all_clips_high_chan_corr and _high_variance:
+            log.info("Hybrid clamp suppressed: all clips CHAN_CORR>0.90 %s — "
+                     "variance caused by codec artifacts, not real content",
+                     _clip_chan_corrs)
+        _both_engines_ambiguous = (signal_ai_score < 80 and gpt_ai_score < 65
+                                   and not _all_clips_high_chan_corr)
 
         if _high_variance and _not_all_strong and _both_engines_ambiguous:
             # Pull toward UNDETERMINED for mixed-content videos
