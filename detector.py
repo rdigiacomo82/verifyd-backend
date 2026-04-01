@@ -1406,19 +1406,8 @@ def detect_ai(video_path: str) -> int:
         ai_score += 4
 
     # ── 9c. Selfie bonus (v8) ────────────────────────────────
-    # Portrait phone selfies are overwhelmingly real-world content.
-    # Reduce base AI score when all selfie markers are present.
-    # CHAN_CORR GATE: real phone cameras have decorrelated color channels
-    # (sensor noise is spatially random → R/G/B independence).
-    # AI renders have perfectly correlated channels → CHAN_CORR > 0.90.
-    # Do NOT give the real-video bonus to AI-rendered close-up shots.
-    if _is_selfie_content:
-        if avg_color_corr > 0.90:
-            log.info("SELFIE bonus BLOCKED — CHAN_CORR=%.4f > 0.90 (AI render, not real camera)",
-                     avg_color_corr)
-        else:
-            ai_score -= 12
-            log.info("SELFIE portrait+static+sharp → real phone video bonus → -12")
+    # Moved below CHAN_CORR computation so we can gate on _chan_corr
+    # (avg_color_corr is a different metric — see selfie bonus below)
 
     # ── 9d. Talking-head bonus (v9) ──────────────────────────
     # Active portrait of a real person: strongest real-video signal.
@@ -1541,6 +1530,20 @@ def detect_ai(video_path: str) -> int:
     else:
         log.info("CHAN_CORR %.4f → skipped (guards: hevc_hd=%s hi_noise=%s short=%s)",
                  _chan_corr, _is_hevc_hd, _is_high_noise_real, _is_short_clip)
+
+    # ── 9c. Selfie bonus (v8) — uses _chan_corr, must be after CHAN_CORR block ──
+    # Portrait phone selfies are overwhelmingly real-world content.
+    # CHAN_CORR GATE: real phone cameras have decorrelated color channels
+    # (sensor noise is spatially random → R/G/B independence).
+    # AI renders have perfectly correlated channels → _chan_corr > 0.90.
+    # Do NOT give the real-video bonus to AI-rendered close-up shots.
+    if _is_selfie_content:
+        if _chan_corr > 0.90:
+            log.info("SELFIE bonus BLOCKED — CHAN_CORR=%.4f > 0.90 (AI render, not real camera)",
+                     _chan_corr)
+        else:
+            ai_score -= 12
+            log.info("SELFIE portrait+static+sharp → real phone video bonus → -12")
 
     if _is_talking_head:
         ai_score -= 12
