@@ -338,9 +338,26 @@ REAL videos. Score dimensions on the underlying content — not on compression q
 
 9. CROWD_BEHAVIOR  (score 5 if no crowd / multiple people in scene)
    0-2 = Real: individuals move independently, unpredictable, genuine emotional
-         reactions (flinching, running, recording), organic chaos.
-   8-10= AI:   synchronized movement, uniform crowd behavior, bystanders too calm
-         for the event severity, people act as if central event isn't happening.
+         reactions (flinching, running, recording), organic chaos. Bystanders
+         in the vicinity of a loud sudden event ALWAYS react — they stop,
+         turn toward the sound, back away, or cover their head.
+   8-10= AI: any of the following:
+
+   NON-REACTING BYSTANDERS: A person anywhere in the scene who continues
+     their normal activity (walking, shopping, pushing a cart) completely
+     unaffected by a loud, dramatic, nearby event (crash, explosion, collapse,
+     screaming) is exhibiting AI behavior. AI generators frequently fail to
+     update secondary characters when the main event happens. If even ONE
+     background person appears oblivious to a major nearby event: score 8.
+
+   REACTION TIMING: Real people have a 200-400ms neurological startle delay.
+     They react slightly AFTER an event — flinching, turning, gasping. AI
+     generates simultaneous or perfectly-timed reactions. If bystanders react
+     at cinematically perfect timing (exactly when the event happens, not
+     after): score 8-9.
+
+   SYNCHRONIZED MOVEMENT: Crowd moves as a unit, uniform behavior.
+     Score 8-10.
 
 10. TEXT_OBJECTS  (score 5 if no text visible in scene)
     0-2 = Real: visible text (signs, labels, screens) is readable and stable across frames.
@@ -349,9 +366,32 @@ REAL videos. Score dimensions on the underlying content — not on compression q
 
 11. PHYSICS_VIOLATIONS  ← MOST IMPORTANT DIMENSION
     0-2 = Real: objects obey gravity, water flows down, human trajectories follow
-          parabolic arcs, no body part bends at impossible angles.
-    8-10= AI:   people floating upward against gravity on slides/slopes, water flowing
-          the wrong direction, limbs bending impossibly, body rising without physical cause.
+          parabolic arcs, no body part bends at impossible angles. Structures
+          fail independently — one falling shelf does NOT topple an entire row
+          because real store shelves are freestanding independent units.
+    8-10= AI: any of the following:
+
+    GRAVITY VIOLATIONS: people floating upward, water flowing wrong direction,
+      limbs bending impossibly, body rising without physical cause. Score 10.
+
+    STRUCTURAL CASCADE VIOLATIONS: This is critical for AI-generated
+      incident videos. In the real world:
+      - Retail store shelving (supermarket, warehouse, stockroom) consists of
+        INDEPENDENT freestanding units. One unit falling does NOT cause the
+        entire aisle to collapse simultaneously. If you see an entire row of
+        shelving units collapse together as one connected structure: SCORE 9-10.
+      - Real shelf collapses: one section falls, adjacent sections stay standing.
+      - Real ladder falls: the ladder tips, the person falls, products near the
+        impact point scatter. Products 5+ meters away are unaffected.
+      - If a single event (one ladder tip, one person falling) causes an entire
+        aisle of shelving to collapse simultaneously: this is physically
+        impossible for real store shelves. Score physics_violations 9-10.
+
+    IMPACT RESPONSE VIOLATIONS: A person struck by a heavy collapsing shelf
+      would show visible pain, writhing, protective movement, attempt to get up.
+      A person who lies completely still and limp after a major impact (ragdoll
+      response) is exhibiting AI-generated behavior. Score 8-10.
+
     Score 10 for any clear, unambiguous physics violation. This is dispositive.
 
 12. GENERATOR_ARTIFACTS  ← SECOND MOST IMPORTANT DIMENSION
@@ -378,27 +418,30 @@ REAL videos. Score dimensions on the underlying content — not on compression q
 
     8-10= Staged/AI -- look for these patterns:
 
+    REACTION TIMING MISMATCH: Real humans have a neurological startle
+      delay of 200-400ms -- they react AFTER an event, not simultaneously
+      with it. If a bystander (especially a child) turns and runs at the
+      exact same instant the event occurs with no delay, this is AI
+      choreography. Children have a freeze-then-flee startle pattern --
+      instant coordinated fleeing without the freeze phase = AI. Score 8-10.
+
+    INJURY RESPONSE FAILURE: A person struck by a heavy object (collapsing
+      shelf, falling ladder, debris impact) would show: visible pain, writhing,
+      protective arm movements, attempting to get up, vocal distress.
+      A person who lies completely still and limp after major physical impact
+      (ragdoll response) is AI-generated behavior. Real injury victims move,
+      react, and try to protect themselves. Score 8-10 for ragdoll stillness.
+
     PREDATOR APPROACH BLINDNESS: A person who does NOT pull away or move
       their pet to safety even while CLEARLY WATCHING a dangerous animal
-      approach is exhibiting AI behavior. Real people do not observe a
-      predator approaching their dog and simply watch. If you see a person
-      LOOKING AT a predator but not reacting urgently: score 8-10.
-      Being on the phone does NOT explain this -- you still pull your dog
-      away from a predator. Score 8-10 if person watches danger passively.
+      approach is exhibiting AI behavior. Being on the phone does NOT
+      explain this. Score 8-10.
 
-    PERFECT TIMING: Event occurs at the exact moment that maximizes drama.
-      Real incidents have awkward timing and are partially missed. AI
-      generates narratively perfect timing. Score 8-10.
+    SECURITY CAMERA INCIDENT PATTERN: Fake security camera overlays
+      (timestamp + "FRONT DOCK", "PARKING LOT", etc.) are commonly faked.
+      If you see a cam overlay AND implausible behavior: score 8-10.
 
-    SECURITY CAMERA INCIDENT PATTERN: AI incident videos frequently use
-      fake security camera overlays (timestamp + location label like
-      "FRONT DOCK", "PARKING LOT", "ENTRANCE") to appear authentic.
-      A security camera watermark is NOT proof of authenticity -- it is
-      commonly faked. If you see a cam overlay AND implausible behavior:
-      score this dimension 8-10.
-
-    CALM OBSERVER: Person appears to be watching the event rather than
-      living through it -- positioned like a spectator, not a participant.
+    CALM OBSERVER: Person watches the event rather than living through it.
       Score 8-10.
 
 14. SCENE_STAGING  ← CATCHES NARRATIVELY COMPLETE AI INCIDENT VIDEOS
@@ -969,9 +1012,7 @@ def _build_physics_summary(ctx: dict) -> str:
     # When source is YouTube, the noise signal is unreliable.
     _is_youtube = "youtube" in str(ctx.get("source", "")).lower()
 
-    # ── Fake security camera incident hint ──────────────
-    # AI incident videos fake Ring/Nest security cam overlays to appear authentic.
-    # Real security cams have electrical 50/60Hz flicker — AI renders are smooth.
+    # Security cam incident hint
     _flicker_val = ctx.get("flicker_std", 999)
     _chan_val = ctx.get("chan_corr", 0)
     _is_security_cam_suspect = (
@@ -983,20 +1024,13 @@ def _build_physics_summary(ctx: dict) -> str:
         hints.append(
             "🚨 POSSIBLE FAKE SECURITY CAMERA FOOTAGE "  
             "(flicker={:.3f}, chan_corr={:.3f}):\n".format(_flicker_val, _chan_val) +
-            "AI-generated incident videos frequently fake Ring/Nest/Arlo security cam\n"
-            "overlays (location label + timestamp) to appear authentic. A security\n"
-            "camera watermark is NOT proof of authenticity -- it is commonly faked.\n"
-            "This video has unnaturally smooth flicker (real cams have 50/60Hz\n"
-            "electrical flicker) and high AI render correlation.\n\n"
+            "AI incident videos fake Ring/Nest/Arlo cam overlays to appear authentic.\n"
+            "A cam watermark is NOT proof of authenticity -- it is commonly faked.\n"
             "BEHAVIORAL CHECKLIST -- score behavioral_plausibility 8-10 if ANY:\n"
             "  -> Person watches predator approach their pet WITHOUT pulling pet away\n"
-            "  -> Person on phone near obvious danger with no evasive movement\n"
-            "  -> Person looks DOWN at danger source with curiosity, not fear\n"
+            "  -> Person looks at danger with curiosity not fear\n"
             "  -> Reaction happens at cinematically perfect moment\n"
-            "  -> Person positioned at dangerous edge despite visible threat nearby\n\n"
-            "Score scene_staging 8-10 if: complete narrative arc is captured\n"
-            "(setup + buildup + climax + recovery all in frame). Real cam incidents\n"
-            "capture only fragments. AI generates the complete story."
+            "Score scene_staging 8-10 if: complete narrative arc captured."
         )
 
     if _is_youtube:
