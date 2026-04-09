@@ -104,9 +104,15 @@ def _check_metadata_override(video_path: str) -> tuple:
             except Exception:
                 pass
 
-        # Lavf encoder + null vendor = AI pipeline fingerprint (weak, not override)
+        # Lavf encoder + null vendor = AI pipeline fingerprint
+        # Lavf is used by AI generation pipelines and ffmpeg re-encodes.
+        # Real device recordings (Ring, Android, iPhone) never produce Lavf.
+        # Alone it is weak (re-encode is common). Combined with high CHAN_CORR
+        # across all clips it becomes a meaningful composite AI signal.
+        # Return as a soft label so downstream blend can act on it.
         if "lavf" in encoder and vendor in ("[0][0][0][0]", "", "0000"):
-            log.info("METADATA: Lavf encoder + null vendor_id detected (AI pipeline fingerprint — weak signal, not override)")
+            log.info("METADATA: Lavf encoder + null vendor_id detected (AI pipeline fingerprint — soft signal, see LAVF_CHAN_CORR boost)")
+            return False, 0, "LAVF_AI_PIPELINE", "Lavf encoder + null vendor_id (AI pipeline fingerprint)"
 
         # Android/iOS device metadata = definitive real camera recording
         # These tags are written by the device OS and cannot be faked by AI generators
@@ -537,6 +543,9 @@ def run_detection_multiclip(video_path: str) -> tuple:
 
     # ── Metadata override — fast path ────────────────────────
     override, ov_ai_score, ov_label, ov_reason = _check_metadata_override(video_path)
+    _lavf_ai_pipeline = (ov_label == "LAVF_AI_PIPELINE")  # soft signal — used in blend
+    if _lavf_ai_pipeline:
+        log.info("METADATA: LAVF_AI_PIPELINE soft flag set — will boost if all clips CHAN_CORR>0.90")
     if override and ov_label == "AI":
         authenticity = 100 - ov_ai_score
         log.info("Metadata override → ai_score=%d auth=%d label=AI", ov_ai_score, authenticity)
@@ -960,17 +969,7 @@ def run_detection_multiclip(video_path: str) -> tuple:
         # → should land UNDETERMINED not AI
         _high_variance   = score_variance > 35
         _not_all_strong  = any(s < 70 for s in signal_scores)
-        # CHAN_CORR gate: if ALL clips have very high inter-channel correlation
-        # (>0.90), the variance is caused by codec/model artifacts on one clip,
-        # NOT genuine content disagreement. Physics is clear — suppress clamp.
-        _clip_chan_corrs = [ctx.get("chan_corr", 0) for ctx in all_signal_contexts]
-        _all_clips_high_chan_corr = all(c > 0.90 for c in _clip_chan_corrs if c > 0)
-        if _all_clips_high_chan_corr and _high_variance:
-            log.info("Hybrid clamp suppressed: all clips CHAN_CORR>0.90 %s — "
-                     "variance caused by codec artifacts, not real content",
-                     _clip_chan_corrs)
-        _both_engines_ambiguous = (signal_ai_score < 80 and gpt_ai_score < 65
-                                   and not _all_clips_high_chan_corr)
+        _both_engines_ambiguous = signal_ai_score < 80 and gpt_ai_score < 65
 
         if _high_variance and _not_all_strong and _both_engines_ambiguous:
             # Pull toward UNDETERMINED for mixed-content videos
@@ -984,6 +983,31 @@ def run_detection_multiclip(video_path: str) -> tuple:
             )
         else:
             log.info("Hybrid flag set but all clips agree (%s) — no clamping applied", signal_scores)
+
+    combined_ai_score = max(0.0, min(100.0, combined_ai_score))
+
+    # ── LAVF + CHAN_CORR composite boost ────────────────────────
+    # Lavf encoder alone is weak (innocent re-encodes are common).
+    # But Lavf + ALL clips showing high inter-channel correlation (>0.90)
+    # is a strong composite signal: AI generators produce both together.
+    # Real devices (Ring, Android, iPhone) never produce this combination.
+    # Boost combined score by +15 to move borderline REAL toward UNDETERMINED.
+    if _lavf_ai_pipeline:
+        _clip_chan_corrs = [ctx.get("chan_corr", 0) for ctx in all_signal_contexts]
+        _all_high_chan_corr = all(c > 0.90 for c in _clip_chan_corrs if c > 0)
+        if _all_high_chan_corr and _clip_chan_corrs:
+            old_combined = combined_ai_score
+            combined_ai_score = min(100.0, combined_ai_score + 15.0)
+            log.info(
+                "LAVF+CHAN_CORR boost: Lavf encoder + all clips CHAN_CORR>0.90 %s "
+                "→ combined %.1f→%.1f (AI pipeline fingerprint confirmed)",
+                _clip_chan_corrs, old_combined, combined_ai_score
+            )
+        else:
+            log.info(
+                "LAVF flag set but CHAN_CORR not all >0.90 %s — no boost (likely innocent re-encode)",
+                _clip_chan_corrs
+            )
 
     combined_ai_score = max(0.0, min(100.0, combined_ai_score))
     authenticity = 100 - int(round(combined_ai_score))
