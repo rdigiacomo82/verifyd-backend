@@ -1076,7 +1076,19 @@ def _build_physics_summary(ctx: dict) -> str:
             "  • Motion blur on fast objects (balls, birds) is real shutter physics\n"
             "  • Compression artifacts from social media re-encoding are normal\n"
             "→ Only flag background_realism or color_naturalism as AI if you see "
-            "RENDERED/PAINTED qualities, not just blur or palette limitation.".format(avg_noise_val)
+            "RENDERED/PAINTED qualities, not just blur or palette limitation.\n"
+            "⚠ IMPORTANT: Real camera noise does NOT override impossible physics. "
+            "Even genuine camera footage can be AI-generated. You MUST still check:\n"
+            "  • STRUCTURAL CASCADE: Did an entire row of store shelves collapse "
+            "simultaneously from one event? Real shelves are INDEPENDENT — "
+            "one falling does not topple all others. Score physics_violations 9-10.\n"
+            "  • BYSTANDER REACTIONS: Did anyone in the background continue "
+            "normally despite a loud nearby crash? Score crowd_behavior 8.\n"
+            "  • INJURY RESPONSE: Did an injured person lie completely still "
+            "after major impact (ragdoll)? Score behavioral_plausibility 8-10.\n"
+            "  • REACTION TIMING: Did a child react with zero delay, no freeze "
+            "phase? Score behavioral_plausibility 8-10."
+            .format(avg_noise_val)
         )
 
     # ── Audio mismatch hint ─────────────────────────────────
