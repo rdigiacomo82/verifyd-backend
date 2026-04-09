@@ -8,7 +8,7 @@
 #  Previously: one narrative prompt → one number (inconsistent,
 #  undebuggable, can't tune individual dimensions).
 #
-#  Now: GPT scores 14 independent dimensions 0-10 with a
+#  Now: GPT scores 12 independent dimensions 0-10 with a
 #  required reason per dimension. Python computes the final
 #  score using content-type-aware weights. This gives:
 #    - Reproducible scores (same video → same result)
@@ -367,34 +367,49 @@ REAL videos. Score dimensions on the underlying content — not on compression q
 
 13. BEHAVIORAL_PLAUSIBILITY  ← CRITICAL FOR STAGED/AI INCIDENT VIDEOS
     Score 5 if no people are visible or behavior is not assessable.
-    0-2 = Real: people react with appropriate urgency, timing, and emotion
-          to events happening around them. Reactions are involuntary and
-          imperfect — flinching before an event, stumbling, covering face,
-          pulling away instinctively. Body language matches the threat level.
-    8-10= Staged/AI: person remains unnaturally calm during a high-threat event,
-          appears to observe danger without instinctive retreat, positions
-          themselves sub-optimally for survival but optimally for the camera,
-          delays reaction until the precise moment the event occurs (like an
-          actor hitting a cue), or looks at the danger with curiosity rather
-          than fear. A real person near a predator would pull their pet away
-          immediately upon seeing it — not watch it approach. A real person
-          in sudden danger lurches involuntarily — they do not step back calmly.
-    This dimension catches AI-generated incident videos that are technically
-    convincing but behaviorally implausible.
+
+    THE CORE QUESTION: Does every person in the scene react the way a
+    real human being would actually react in that specific situation?
+
+    0-2 = Real: reactions are involuntary, imperfect, and ANTICIPATORY --
+          people move BEFORE danger reaches them, not exactly when it does.
+          Real people pull pets away when they SEE a predator approaching.
+          Body language shows genuine alarm BEFORE the climactic moment.
+
+    8-10= Staged/AI -- look for these patterns:
+
+    PREDATOR APPROACH BLINDNESS: A person who does NOT pull away or move
+      their pet to safety even while CLEARLY WATCHING a dangerous animal
+      approach is exhibiting AI behavior. Real people do not observe a
+      predator approaching their dog and simply watch. If you see a person
+      LOOKING AT a predator but not reacting urgently: score 8-10.
+      Being on the phone does NOT explain this -- you still pull your dog
+      away from a predator. Score 8-10 if person watches danger passively.
+
+    PERFECT TIMING: Event occurs at the exact moment that maximizes drama.
+      Real incidents have awkward timing and are partially missed. AI
+      generates narratively perfect timing. Score 8-10.
+
+    SECURITY CAMERA INCIDENT PATTERN: AI incident videos frequently use
+      fake security camera overlays (timestamp + location label like
+      "FRONT DOCK", "PARKING LOT", "ENTRANCE") to appear authentic.
+      A security camera watermark is NOT proof of authenticity -- it is
+      commonly faked. If you see a cam overlay AND implausible behavior:
+      score this dimension 8-10.
+
+    CALM OBSERVER: Person appears to be watching the event rather than
+      living through it -- positioned like a spectator, not a participant.
+      Score 8-10.
 
 14. SCENE_STAGING  ← CATCHES NARRATIVELY COMPLETE AI INCIDENT VIDEOS
-    Score 5 if content type makes this not applicable (pure nature, no people).
-    0-2 = Real: camera angle is incidental or fixed (security cam, bystander phone),
-          subjects are not optimally framed for dramatic effect, the incident
-          is partially captured or poorly framed (real cameras miss things),
-          the video feels incomplete or accidental rather than curated.
-    8-10= Staged: the key event happens in perfect frame-center at ideal camera
-          distance, subject and danger are both fully visible throughout the
-          entire incident, the sequence has a complete narrative arc (setup
-          → buildup → climax → resolution all perfectly captured), background
-          people fail to react despite witnessing a dramatic event.
-          AI generators create narratively complete videos — real incidents
-          are partial, poorly framed, and chaotic by nature.
+    Score 5 if content type makes this not applicable.
+    0-2 = Real: camera angle is incidental or fixed, incident is partially
+          captured or poorly framed -- real cameras miss things. Feels
+          incomplete and accidental rather than curated.
+    8-10= Staged: key event in perfect frame-center, complete narrative arc
+          (setup to buildup to climax to resolution all perfectly captured),
+          background people fail to react to dramatic event. AI generators
+          create complete narrative videos -- real incidents are chaotic.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
  AUDIO-VISUAL MANIPULATION FLAGS
@@ -953,6 +968,37 @@ def _build_physics_summary(ctx: dict) -> str:
     # real camera grain — this noise is NOT evidence of a real camera.
     # When source is YouTube, the noise signal is unreliable.
     _is_youtube = "youtube" in str(ctx.get("source", "")).lower()
+
+    # ── Fake security camera incident hint ──────────────
+    # AI incident videos fake Ring/Nest security cam overlays to appear authentic.
+    # Real security cams have electrical 50/60Hz flicker — AI renders are smooth.
+    _flicker_val = ctx.get("flicker_std", 999)
+    _chan_val = ctx.get("chan_corr", 0)
+    _is_security_cam_suspect = (
+        content_type in ("selfie", "cinematic") and
+        _flicker_val < 1.0 and
+        _chan_val > 0.90
+    )
+    if _is_security_cam_suspect:
+        hints.append(
+            "🚨 POSSIBLE FAKE SECURITY CAMERA FOOTAGE "  
+            "(flicker={:.3f}, chan_corr={:.3f}):\n".format(_flicker_val, _chan_val) +
+            "AI-generated incident videos frequently fake Ring/Nest/Arlo security cam\n"
+            "overlays (location label + timestamp) to appear authentic. A security\n"
+            "camera watermark is NOT proof of authenticity -- it is commonly faked.\n"
+            "This video has unnaturally smooth flicker (real cams have 50/60Hz\n"
+            "electrical flicker) and high AI render correlation.\n\n"
+            "BEHAVIORAL CHECKLIST -- score behavioral_plausibility 8-10 if ANY:\n"
+            "  -> Person watches predator approach their pet WITHOUT pulling pet away\n"
+            "  -> Person on phone near obvious danger with no evasive movement\n"
+            "  -> Person looks DOWN at danger source with curiosity, not fear\n"
+            "  -> Reaction happens at cinematically perfect moment\n"
+            "  -> Person positioned at dangerous edge despite visible threat nearby\n\n"
+            "Score scene_staging 8-10 if: complete narrative arc is captured\n"
+            "(setup + buildup + climax + recovery all in frame). Real cam incidents\n"
+            "capture only fragments. AI generates the complete story."
+        )
+
     if _is_youtube:
         hints.append(
             "🚨 YOUTUBE SOURCE — MANDATORY SCORING RULES:\n"
