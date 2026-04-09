@@ -8,7 +8,7 @@
 #  Previously: one narrative prompt → one number (inconsistent,
 #  undebuggable, can't tune individual dimensions).
 #
-#  Now: GPT scores 12 independent dimensions 0-10 with a
+#  Now: GPT scores 14 independent dimensions 0-10 with a
 #  required reason per dimension. Python computes the final
 #  score using content-type-aware weights. This gives:
 #    - Reproducible scores (same video → same result)
@@ -80,6 +80,8 @@ DIMENSIONS = [
     "text_objects",
     "physics_violations",
     "generator_artifacts",
+    "behavioral_plausibility",
+    "scene_staging",
 ]
 
 # Base weights (unnormalized — normalized at runtime)
@@ -96,6 +98,8 @@ _BASE_WEIGHTS = {
     "text_objects":       0.6,
     "physics_violations": 2.0,   # always high — impossible physics = certain AI
     "generator_artifacts":2.5,   # always highest — explicit label = certain AI
+    "behavioral_plausibility": 1.8,  # high — unnatural human reaction is strong AI signal
+    "scene_staging":      1.5,   # moderate-high — narratively perfect framing = AI
 }
 
 # Per-content-type multipliers applied on top of base weights
@@ -119,6 +123,8 @@ _CONTENT_WEIGHTS = {
         "background_realism": 1.4, # AI action has rendered backgrounds
         "skin_texture": 1.0,       # raised from 0.7: person action videos need skin check
         "hair_detail": 0.7,
+        "behavioral_plausibility": 2.5,  # highest for action — staged behavior is key tell
+        "scene_staging": 2.0,            # AI incident videos have perfect narrative framing
     },
     "cinematic": {
         "background_realism": 2.0, "lighting_coherence": 1.8,
@@ -159,6 +165,8 @@ def _scores_to_ai_probability(scores: dict, content_type: str) -> int:
         prob = max(prob, 90)
     if scores.get("physics_violations", 0) >= 8:
         prob = max(prob, 80)
+    if scores.get("behavioral_plausibility", 0) >= 8:
+        prob = max(prob, 70)  # implausible human reaction = strong AI floor
     if any(scores.get(d, 0) >= 9 for d in DIMENSIONS):
         prob = max(prob, 75)
 
@@ -245,7 +253,7 @@ def extract_key_frames(video_path: str, n_frames: int = MAX_FRAMES) -> list:
 # ─────────────────────────────────────────────────────────────
 
 _DIMENSION_GUIDE = """\
-You are a forensic AI video detection expert. Score each of the 12 dimensions below
+You are a forensic AI video detection expert. Score each of the 14 dimensions below
 from 0 to 10, where:
   0  = strongly real  (clear evidence this is genuine camera footage)
   5  = uncertain / not visible / not applicable to this content
@@ -357,6 +365,37 @@ REAL videos. Score dimensions on the underlying content — not on compression q
           Runway: cinematic color grading, smooth camera moves, slight temporal flicker.
           HeyGen/D-ID: talking-head with slightly too-smooth skin and perfect eye contact.
 
+13. BEHAVIORAL_PLAUSIBILITY  ← CRITICAL FOR STAGED/AI INCIDENT VIDEOS
+    Score 5 if no people are visible or behavior is not assessable.
+    0-2 = Real: people react with appropriate urgency, timing, and emotion
+          to events happening around them. Reactions are involuntary and
+          imperfect — flinching before an event, stumbling, covering face,
+          pulling away instinctively. Body language matches the threat level.
+    8-10= Staged/AI: person remains unnaturally calm during a high-threat event,
+          appears to observe danger without instinctive retreat, positions
+          themselves sub-optimally for survival but optimally for the camera,
+          delays reaction until the precise moment the event occurs (like an
+          actor hitting a cue), or looks at the danger with curiosity rather
+          than fear. A real person near a predator would pull their pet away
+          immediately upon seeing it — not watch it approach. A real person
+          in sudden danger lurches involuntarily — they do not step back calmly.
+    This dimension catches AI-generated incident videos that are technically
+    convincing but behaviorally implausible.
+
+14. SCENE_STAGING  ← CATCHES NARRATIVELY COMPLETE AI INCIDENT VIDEOS
+    Score 5 if content type makes this not applicable (pure nature, no people).
+    0-2 = Real: camera angle is incidental or fixed (security cam, bystander phone),
+          subjects are not optimally framed for dramatic effect, the incident
+          is partially captured or poorly framed (real cameras miss things),
+          the video feels incomplete or accidental rather than curated.
+    8-10= Staged: the key event happens in perfect frame-center at ideal camera
+          distance, subject and danger are both fully visible throughout the
+          entire incident, the sequence has a complete narrative arc (setup
+          → buildup → climax → resolution all perfectly captured), background
+          people fail to react despite witnessing a dramatic event.
+          AI generators create narratively complete videos — real incidents
+          are partial, poorly framed, and chaotic by nature.
+
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
  AUDIO-VISUAL MANIPULATION FLAGS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -405,7 +444,9 @@ Respond ONLY with this exact JSON — no markdown, no preamble, no extra text:
     "crowd_behavior": <0-10>,
     "text_objects": <0-10>,
     "physics_violations": <0-10>,
-    "generator_artifacts": <0-10>
+    "generator_artifacts": <0-10>,
+    "behavioral_plausibility": <0-10>,
+    "scene_staging": <0-10>
   },
   "reasoning": "<2-3 sentence explanation written for a general audience — be specific about what you actually observed in these frames, reference the content type, mention specific visual evidence. Do NOT use generic phrases like 'the video appears to be' or 'analysis suggests'. Instead write exactly what you saw: e.g. 'This wildlife footage shows a moose moving with unnaturally smooth locomotion — no ground impact, floating gait, and fur texture that lacks the micro-variation of real animal coats. The background vegetation appears rendered rather than photographed.' For REAL videos: mention specific real-camera characteristics you observed. For AI: name the specific artifacts. For mixed/uncertain: explain the contradiction you see.>",
   "top_flags": ["<most significant finding>", "<second finding>", "<third finding>"],
@@ -911,9 +952,7 @@ def _build_physics_summary(ctx: dict) -> str:
     # YouTube's H264 re-encoding pipeline creates compression noise that mimics
     # real camera grain — this noise is NOT evidence of a real camera.
     # When source is YouTube, the noise signal is unreliable.
-    _source_str = str(ctx.get("source", "")).lower()
-    _is_youtube = any(s in _source_str
-                      for s in ["youtube", "tiktok", "instagram", "facebook"])
+    _is_youtube = "youtube" in str(ctx.get("source", "")).lower()
     if _is_youtube:
         hints.append(
             "🚨 YOUTUBE SOURCE — MANDATORY SCORING RULES:\n"
@@ -933,8 +972,6 @@ def _build_physics_summary(ctx: dict) -> str:
             "    environmental debris? Or does it look rendered/stock? Score 5 if unsure.\n"
             "  → lighting_coherence: Can you trace ONE consistent real light source across\n"
             "    all frames? Or is lighting suspiciously even/perfect? Score 5 if unsure.\n"
-            "    EXCEPTION: Consistent artificial lighting in a real interior (airplane,\n"
-            "    office, home) is EXPECTED — score 2 if the scene looks like a real space.\n"
             "  → color_naturalism: Are colors slightly muted with noise variation like a real\n"
             "    camera? Or oversaturated/flat? Score 5 if unsure.\n"
             "  → temporal_stability: Do ANY fine details (texture, edges, background elements)\n"
@@ -960,32 +997,6 @@ def _build_physics_summary(ctx: dict) -> str:
             "  • Compression artifacts from social media re-encoding are normal\n"
             "→ Only flag background_realism or color_naturalism as AI if you see "
             "RENDERED/PAINTED qualities, not just blur or palette limitation.".format(avg_noise_val)
-        )
-
-    _ultra_high_noise = avg_noise_val > 3000
-    if _ultra_high_noise:
-        hints.append(
-            "🎥 EXTREMELY HIGH SENSOR NOISE DETECTED (noise={:.0f}) — REAL CAMERA CONFIRMED:\n"
-            "No AI video generator produces sensor noise at this level.\n"
-            "→ background_realism: dark/uniform = genuinely dark scene, score 2 not 8.\n"
-            "→ lighting_coherence: consistent dim lighting = real dark environment, score 2.\n"
-            "→ color_naturalism: muted/low-sat colors = normal low-light, score 2 not 8.\n"
-            "→ temporal_stability: consistent static frames = real static camera, score 2."
-            .format(avg_noise_val)
-        )
-
-    _is_real_event_candidate = (
-        content_type in ("cinematic", "action") and
-        ctx.get("avg_noise", 0) > 500 and
-        ctx.get("ifdv", 1.0) < 0.45
-    )
-    if _is_real_event_candidate and _is_youtube:
-        hints.append(
-            "📰 POTENTIAL LIVE EVENT/NEWS FOOTAGE (high noise + organic motion):\n"
-            "→ motion_physics=2 if people move with natural weight/inertia.\n"
-            "→ crowd_behavior=2 if crowd reactions are organic and unpredictable.\n"
-            "→ physics_violations=2 if all movement obeys gravity.\n"
-            "→ background_realism=2 if the environment is a real physical location."
         )
 
     # ── Audio mismatch hint ─────────────────────────────────
@@ -1024,7 +1035,7 @@ def _build_physics_summary(ctx: dict) -> str:
             lines.append(f"  {h}")
 
     lines.append("\n═══════════════════════════════════════")
-    lines.append("Now score all 12 dimensions based on what you observe in the frames.")
+    lines.append("Now score all 14 dimensions based on what you observe in the frames.")
     lines.append("")
 
     return "\n".join(lines)
