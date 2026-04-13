@@ -124,59 +124,8 @@ def process_upload_job(
     try:
         log.info("Worker: starting detection for job=%s email=%s", job_id, email)
 
-        # ── Clean up stale files from both /tmp and /data/tmp ─
-        try:
-            import glob as _glob, time as _time
-            _now = _time.time()
-            _stale = 0
-            _data_root_c = os.environ.get("DATA_ROOT", "/data")
-            _all_tmp = (_glob.glob("/tmp/*.mp4") + _glob.glob("/tmp/*.meta.json") +
-                        _glob.glob(os.path.join(_data_root_c, "tmp", "*.mp4")) +
-                        _glob.glob(os.path.join(_data_root_c, "tmp", "*_720p.mp4")))
-            for _f in _all_tmp:
-                try:
-                    if _now - os.path.getmtime(_f) > 600:
-                        os.remove(_f)
-                        _stale += 1
-                except Exception:
-                    pass
-            if _stale:
-                log.info("Worker: cleaned up %d stale tmp files", _stale)
-        except Exception as _ce:
-            log.warning("Worker: tmp cleanup error: %s", _ce)
-
-        # ── Normalize uploaded file to 720p on persistent disk ─
-        # Write to /data/tmp (persistent disk) NOT /tmp (tiny ephemeral disk)
-        # CRF 18 (near-lossless) preserves AI/real artifact fingerprints
-        # through re-encode — critical for accurate signal detection
-        _data_root = os.environ.get("DATA_ROOT", "/data")
-        _norm_dir = os.path.join(_data_root, "tmp")
-        os.makedirs(_norm_dir, exist_ok=True)
-        _norm_path = os.path.join(_norm_dir, job_id + "_720p.mp4")
-        try:
-            import subprocess as _sp
-            _nr = _sp.run([
-                "ffmpeg", "-y", "-i", tmp_path,
-                "-vf", "scale='min(iw,720)':'min(ih,1280)',scale=trunc(iw/2)*2:trunc(ih/2)*2",
-                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "18",
-                "-g", "60", "-keyint_min", "60",
-                "-c:a", "aac", "-ar", "44100", "-b:a", "128k",
-                "-movflags", "+faststart", _norm_path,
-            ], capture_output=True, timeout=120)
-            if _nr.returncode == 0 and os.path.getsize(_norm_path) > 1024:
-                log.info("Worker: normalized upload to 720p → %s (%dMB)",
-                         _norm_path, os.path.getsize(_norm_path) // 1024 // 1024)
-                _detect_path = _norm_path
-            else:
-                log.warning("Worker: normalization failed (rc=%d) — using original",
-                            _nr.returncode)
-                _detect_path = tmp_path
-        except Exception as _ne:
-            log.warning("Worker: normalization error (%s) — using original", _ne)
-            _detect_path = tmp_path
-
         # ── Run detection ─────────────────────────────────────
-        authenticity, label, detail = run_detection_multiclip(_detect_path)
+        authenticity, label, detail = run_detection_multiclip(tmp_path)
         ui_text, color, certify = LABEL_UI.get(label, ("VIDEO UNDETERMINED", "blue", False))
 
         log.info("Worker: detection complete job=%s label=%s auth=%d",
@@ -277,9 +226,6 @@ def process_upload_job(
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
             log.info("Worker: cleaned up temp file %s", tmp_path)
-        if "_norm_path" in dir() and os.path.exists(_norm_path):
-            os.remove(_norm_path)
-            log.info("Worker: cleaned up normalized file %s", _norm_path)
 
 
 def process_link_job(
@@ -407,11 +353,17 @@ def process_link_job(
 
         # Provide specific, user-friendly error messages for known failure modes
         err_str = str(e).lower()
-        if "sign in to confirm" in err_str or "login" in err_str or "bot" in err_str:
+        if "comfortable for some audiences" in err_str or "not comfortable" in err_str:
             user_error = (
-                "This YouTube video requires sign-in to access and cannot be analyzed. "
-                "This happens with age-restricted videos or videos with strict privacy settings. "
-                "Try uploading the video file directly instead."
+                "This TikTok video has restricted access and cannot be downloaded for analysis. "
+                "To analyze it: open TikTok, save the video to your device, "
+                "then upload the file directly using the Upload button."
+            )
+        elif "sign in to confirm" in err_str or "login" in err_str or "bot" in err_str:
+            user_error = (
+                "This video requires sign-in to access and cannot be analyzed via link. "
+                "This happens with age-restricted or restricted videos. "
+                "Try downloading the video to your device and uploading the file directly."
             )
         elif "403" in err_str or "forbidden" in err_str:
             user_error = (
