@@ -80,8 +80,6 @@ DIMENSIONS = [
     "text_objects",
     "physics_violations",
     "generator_artifacts",
-    "behavioral_plausibility",
-    "scene_staging",
 ]
 
 # Base weights (unnormalized — normalized at runtime)
@@ -98,8 +96,6 @@ _BASE_WEIGHTS = {
     "text_objects":       0.6,
     "physics_violations": 2.0,   # always high — impossible physics = certain AI
     "generator_artifacts":2.5,   # always highest — explicit label = certain AI
-    "behavioral_plausibility": 1.8,  # high — unnatural human reaction is strong AI signal
-    "scene_staging":      1.5,   # moderate-high — narratively perfect framing = AI
 }
 
 # Per-content-type multipliers applied on top of base weights
@@ -123,8 +119,6 @@ _CONTENT_WEIGHTS = {
         "background_realism": 1.4, # AI action has rendered backgrounds
         "skin_texture": 1.0,       # raised from 0.7: person action videos need skin check
         "hair_detail": 0.7,
-        "behavioral_plausibility": 2.5,  # highest for action — staged behavior is key tell
-        "scene_staging": 2.0,            # AI incident videos have perfect narrative framing
     },
     "cinematic": {
         "background_realism": 2.0, "lighting_coherence": 1.8,
@@ -165,8 +159,6 @@ def _scores_to_ai_probability(scores: dict, content_type: str) -> int:
         prob = max(prob, 90)
     if scores.get("physics_violations", 0) >= 8:
         prob = max(prob, 80)
-    if scores.get("behavioral_plausibility", 0) >= 8:
-        prob = max(prob, 70)  # implausible human reaction = strong AI floor
     if any(scores.get(d, 0) >= 9 for d in DIMENSIONS):
         prob = max(prob, 75)
 
@@ -253,7 +245,7 @@ def extract_key_frames(video_path: str, n_frames: int = MAX_FRAMES) -> list:
 # ─────────────────────────────────────────────────────────────
 
 _DIMENSION_GUIDE = """\
-You are a forensic AI video detection expert. Score each of the 14 dimensions below
+You are a forensic AI video detection expert. Score each of the 12 dimensions below
 from 0 to 10, where:
   0  = strongly real  (clear evidence this is genuine camera footage)
   5  = uncertain / not visible / not applicable to this content
@@ -338,26 +330,9 @@ REAL videos. Score dimensions on the underlying content — not on compression q
 
 9. CROWD_BEHAVIOR  (score 5 if no crowd / multiple people in scene)
    0-2 = Real: individuals move independently, unpredictable, genuine emotional
-         reactions (flinching, running, recording), organic chaos. Bystanders
-         in the vicinity of a loud sudden event ALWAYS react — they stop,
-         turn toward the sound, back away, or cover their head.
-   8-10= AI: any of the following:
-
-   NON-REACTING BYSTANDERS: A person anywhere in the scene who continues
-     their normal activity (walking, shopping, pushing a cart) completely
-     unaffected by a loud, dramatic, nearby event (crash, explosion, collapse,
-     screaming) is exhibiting AI behavior. AI generators frequently fail to
-     update secondary characters when the main event happens. If even ONE
-     background person appears oblivious to a major nearby event: score 8.
-
-   REACTION TIMING: Real people have a 200-400ms neurological startle delay.
-     They react slightly AFTER an event — flinching, turning, gasping. AI
-     generates simultaneous or perfectly-timed reactions. If bystanders react
-     at cinematically perfect timing (exactly when the event happens, not
-     after): score 8-9.
-
-   SYNCHRONIZED MOVEMENT: Crowd moves as a unit, uniform behavior.
-     Score 8-10.
+         reactions (flinching, running, recording), organic chaos.
+   8-10= AI:   synchronized movement, uniform crowd behavior, bystanders too calm
+         for the event severity, people act as if central event isn't happening.
 
 10. TEXT_OBJECTS  (score 5 if no text visible in scene)
     0-2 = Real: visible text (signs, labels, screens) is readable and stable across frames.
@@ -366,32 +341,9 @@ REAL videos. Score dimensions on the underlying content — not on compression q
 
 11. PHYSICS_VIOLATIONS  ← MOST IMPORTANT DIMENSION
     0-2 = Real: objects obey gravity, water flows down, human trajectories follow
-          parabolic arcs, no body part bends at impossible angles. Structures
-          fail independently — one falling shelf does NOT topple an entire row
-          because real store shelves are freestanding independent units.
-    8-10= AI: any of the following:
-
-    GRAVITY VIOLATIONS: people floating upward, water flowing wrong direction,
-      limbs bending impossibly, body rising without physical cause. Score 10.
-
-    STRUCTURAL CASCADE VIOLATIONS: This is critical for AI-generated
-      incident videos. In the real world:
-      - Retail store shelving (supermarket, warehouse, stockroom) consists of
-        INDEPENDENT freestanding units. One unit falling does NOT cause the
-        entire aisle to collapse simultaneously. If you see an entire row of
-        shelving units collapse together as one connected structure: SCORE 9-10.
-      - Real shelf collapses: one section falls, adjacent sections stay standing.
-      - Real ladder falls: the ladder tips, the person falls, products near the
-        impact point scatter. Products 5+ meters away are unaffected.
-      - If a single event (one ladder tip, one person falling) causes an entire
-        aisle of shelving to collapse simultaneously: this is physically
-        impossible for real store shelves. Score physics_violations 9-10.
-
-    IMPACT RESPONSE VIOLATIONS: A person struck by a heavy collapsing shelf
-      would show visible pain, writhing, protective movement, attempt to get up.
-      A person who lies completely still and limp after a major impact (ragdoll
-      response) is exhibiting AI-generated behavior. Score 8-10.
-
+          parabolic arcs, no body part bends at impossible angles.
+    8-10= AI:   people floating upward against gravity on slides/slopes, water flowing
+          the wrong direction, limbs bending impossibly, body rising without physical cause.
     Score 10 for any clear, unambiguous physics violation. This is dispositive.
 
 12. GENERATOR_ARTIFACTS  ← SECOND MOST IMPORTANT DIMENSION
@@ -404,55 +356,6 @@ REAL videos. Score dimensions on the underlying content — not on compression q
           Pika: color bloom on edges, slightly over-sharpened subjects.
           Runway: cinematic color grading, smooth camera moves, slight temporal flicker.
           HeyGen/D-ID: talking-head with slightly too-smooth skin and perfect eye contact.
-
-13. BEHAVIORAL_PLAUSIBILITY  ← CRITICAL FOR STAGED/AI INCIDENT VIDEOS
-    Score 5 if no people are visible or behavior is not assessable.
-
-    THE CORE QUESTION: Does every person in the scene react the way a
-    real human being would actually react in that specific situation?
-
-    0-2 = Real: reactions are involuntary, imperfect, and ANTICIPATORY --
-          people move BEFORE danger reaches them, not exactly when it does.
-          Real people pull pets away when they SEE a predator approaching.
-          Body language shows genuine alarm BEFORE the climactic moment.
-
-    8-10= Staged/AI -- look for these patterns:
-
-    REACTION TIMING MISMATCH: Real humans have a neurological startle
-      delay of 200-400ms -- they react AFTER an event, not simultaneously
-      with it. If a bystander (especially a child) turns and runs at the
-      exact same instant the event occurs with no delay, this is AI
-      choreography. Children have a freeze-then-flee startle pattern --
-      instant coordinated fleeing without the freeze phase = AI. Score 8-10.
-
-    INJURY RESPONSE FAILURE: A person struck by a heavy object (collapsing
-      shelf, falling ladder, debris impact) would show: visible pain, writhing,
-      protective arm movements, attempting to get up, vocal distress.
-      A person who lies completely still and limp after major physical impact
-      (ragdoll response) is AI-generated behavior. Real injury victims move,
-      react, and try to protect themselves. Score 8-10 for ragdoll stillness.
-
-    PREDATOR APPROACH BLINDNESS: A person who does NOT pull away or move
-      their pet to safety even while CLEARLY WATCHING a dangerous animal
-      approach is exhibiting AI behavior. Being on the phone does NOT
-      explain this. Score 8-10.
-
-    SECURITY CAMERA INCIDENT PATTERN: Fake security camera overlays
-      (timestamp + "FRONT DOCK", "PARKING LOT", etc.) are commonly faked.
-      If you see a cam overlay AND implausible behavior: score 8-10.
-
-    CALM OBSERVER: Person watches the event rather than living through it.
-      Score 8-10.
-
-14. SCENE_STAGING  ← CATCHES NARRATIVELY COMPLETE AI INCIDENT VIDEOS
-    Score 5 if content type makes this not applicable.
-    0-2 = Real: camera angle is incidental or fixed, incident is partially
-          captured or poorly framed -- real cameras miss things. Feels
-          incomplete and accidental rather than curated.
-    8-10= Staged: key event in perfect frame-center, complete narrative arc
-          (setup to buildup to climax to resolution all perfectly captured),
-          background people fail to react to dramatic event. AI generators
-          create complete narrative videos -- real incidents are chaotic.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
  AUDIO-VISUAL MANIPULATION FLAGS
@@ -502,9 +405,7 @@ Respond ONLY with this exact JSON — no markdown, no preamble, no extra text:
     "crowd_behavior": <0-10>,
     "text_objects": <0-10>,
     "physics_violations": <0-10>,
-    "generator_artifacts": <0-10>,
-    "behavioral_plausibility": <0-10>,
-    "scene_staging": <0-10>
+    "generator_artifacts": <0-10>
   },
   "reasoning": "<2-3 sentence explanation written for a general audience — be specific about what you actually observed in these frames, reference the content type, mention specific visual evidence. Do NOT use generic phrases like 'the video appears to be' or 'analysis suggests'. Instead write exactly what you saw: e.g. 'This wildlife footage shows a moose moving with unnaturally smooth locomotion — no ground impact, floating gait, and fur texture that lacks the micro-variation of real animal coats. The background vegetation appears rendered rather than photographed.' For REAL videos: mention specific real-camera characteristics you observed. For AI: name the specific artifacts. For mixed/uncertain: explain the contradiction you see.>",
   "top_flags": ["<most significant finding>", "<second finding>", "<third finding>"],
@@ -1010,29 +911,36 @@ def _build_physics_summary(ctx: dict) -> str:
     # YouTube's H264 re-encoding pipeline creates compression noise that mimics
     # real camera grain — this noise is NOT evidence of a real camera.
     # When source is YouTube, the noise signal is unreliable.
-    _is_youtube = "youtube" in str(ctx.get("source", "")).lower()
-
-    # Security cam incident hint
-    _flicker_val = ctx.get("flicker_std", 999)
-    _chan_val = ctx.get("chan_corr", 0)
-    _is_security_cam_suspect = (
-        content_type in ("selfie", "cinematic") and
-        _flicker_val < 1.0 and
-        _chan_val > 0.90
+    # ── Astronomical / space footage hint ──────────────────
+    # Space footage breaks all terrestrial signal assumptions:
+    # black space = perfect RGB lock, stable spacecraft = no flicker,
+    # iPhone NR = no grain, bright planet vs black = high saturation.
+    _avg_sat_val = ctx.get("avg_saturation", 0) or 0
+    _avg_noise_val2 = ctx.get("avg_noise", 999) or 999
+    _motion_val2 = ctx.get("motion", 99) or 99
+    _is_astronomical = (
+        content_type in ("static", "cinematic") and
+        _avg_noise_val2 < 200 and
+        _motion_val2 < 3 and
+        (_avg_sat_val > 120 or _avg_sat_val < 20)
     )
-    if _is_security_cam_suspect:
+    if _is_astronomical:
         hints.append(
-            "🚨 POSSIBLE FAKE SECURITY CAMERA FOOTAGE "  
-            "(flicker={:.3f}, chan_corr={:.3f}):\n".format(_flicker_val, _chan_val) +
-            "AI incident videos fake Ring/Nest/Arlo cam overlays to appear authentic.\n"
-            "A cam watermark is NOT proof of authenticity -- it is commonly faked.\n"
-            "BEHAVIORAL CHECKLIST -- score behavioral_plausibility 8-10 if ANY:\n"
-            "  -> Person watches predator approach their pet WITHOUT pulling pet away\n"
-            "  -> Person looks at danger with curiosity not fear\n"
-            "  -> Reaction happens at cinematically perfect moment\n"
-            "Score scene_staging 8-10 if: complete narrative arc captured."
+            "POSSIBLE SPACE / ASTRONOMICAL FOOTAGE:\n"
+            "Low noise + minimal motion + extreme saturation is consistent with\n"
+            "real space footage from a smartphone aboard a spacecraft.\n"
+            "Space footage breaks normal AI detection rules:\n"
+            "  Black space = near-identical RGB channels (looks like AI render)\n"
+            "  Stable spacecraft = unnaturally smooth (looks like AI)\n"
+            "  iPhone noise reduction = no grain (looks like AI)\n"
+            "  Bright planet vs black space = high saturation (looks like AI)\n"
+            "If you see: star field, Moon surface, Earth from orbit, spacecraft\n"
+            "hardware, or any planetary body against black space:\n"
+            "  -> Score ALL dimensions 1-2 (real). This is real camera footage.\n"
+            "  -> Do NOT penalize smooth motion, dark frames, or high contrast."
         )
 
+    _is_youtube = "youtube" in str(ctx.get("source", "")).lower()
     if _is_youtube:
         hints.append(
             "🚨 YOUTUBE SOURCE — MANDATORY SCORING RULES:\n"
@@ -1076,19 +984,7 @@ def _build_physics_summary(ctx: dict) -> str:
             "  • Motion blur on fast objects (balls, birds) is real shutter physics\n"
             "  • Compression artifacts from social media re-encoding are normal\n"
             "→ Only flag background_realism or color_naturalism as AI if you see "
-            "RENDERED/PAINTED qualities, not just blur or palette limitation.\n"
-            "⚠ IMPORTANT: Real camera noise does NOT override impossible physics. "
-            "Even genuine camera footage can be AI-generated. You MUST still check:\n"
-            "  • STRUCTURAL CASCADE: Did an entire row of store shelves collapse "
-            "simultaneously from one event? Real shelves are INDEPENDENT — "
-            "one falling does not topple all others. Score physics_violations 9-10.\n"
-            "  • BYSTANDER REACTIONS: Did anyone in the background continue "
-            "normally despite a loud nearby crash? Score crowd_behavior 8.\n"
-            "  • INJURY RESPONSE: Did an injured person lie completely still "
-            "after major impact (ragdoll)? Score behavioral_plausibility 8-10.\n"
-            "  • REACTION TIMING: Did a child react with zero delay, no freeze "
-            "phase? Score behavioral_plausibility 8-10."
-            .format(avg_noise_val)
+            "RENDERED/PAINTED qualities, not just blur or palette limitation.".format(avg_noise_val)
         )
 
     # ── Audio mismatch hint ─────────────────────────────────
@@ -1127,7 +1023,7 @@ def _build_physics_summary(ctx: dict) -> str:
             lines.append(f"  {h}")
 
     lines.append("\n═══════════════════════════════════════")
-    lines.append("Now score all 14 dimensions based on what you observe in the frames.")
+    lines.append("Now score all 12 dimensions based on what you observe in the frames.")
     lines.append("")
 
     return "\n".join(lines)
@@ -1172,6 +1068,11 @@ def gpt_vision_score_with_context(frames_b64: list, physics_context: dict) -> di
     result          = analyze_frames_with_gpt(frames_b64, physics_summary, content_type)
     result["available"] = True
     return result
+
+
+
+
+
 
 
 
