@@ -104,9 +104,13 @@ def _check_metadata_override(video_path: str) -> tuple:
             except Exception:
                 pass
 
-        # Lavf encoder + null vendor = AI pipeline fingerprint (weak, not override)
+        # Lavf encoder + null vendor = AI pipeline fingerprint (soft signal)
+        # Returns a soft override label so multi_clip_detection can apply
+        # the LAVF+CHAN_CORR composite boost when all clips confirm it.
         if "lavf" in encoder and vendor in ("[0][0][0][0]", "", "0000"):
-            log.info("METADATA: Lavf encoder + null vendor_id detected (AI pipeline fingerprint — weak signal, not override)")
+            log.info("METADATA: Lavf encoder + null vendor_id detected (AI pipeline fingerprint — soft signal, see LAVF_CHAN_CORR boost)")
+            log.info("METADATA: LAVF_AI_PIPELINE soft flag set — will boost if all clips CHAN_CORR>0.90")
+            return True, 20, "LAVF_AI_PIPELINE", "Lavf encoder + null vendor fingerprint (AI pipeline soft signal)"
 
         # Android/iOS device metadata = definitive real camera recording
         # These tags are written by the device OS and cannot be faked by AI generators
@@ -177,6 +181,9 @@ def run_detection(video_path: str) -> tuple:
             "weight_signal":   1.0,
             "weight_gpt":      0.0,
         }
+    elif override and ov_label == "LAVF_AI_PIPELINE":
+        # Soft LAVF flag — do not override, just note it for composite boost below
+        log.info("Metadata LAVF soft flag → running full detection, composite boost may apply")
     elif override and ov_label == "REAL":
         # Device metadata confirms real camera — still run full detection
         # but pass the device confirmation as a strong prior to both engines
@@ -975,6 +982,29 @@ def run_detection_multiclip(video_path: str) -> tuple:
         else:
             log.info("Hybrid flag set but all clips agree (%s) — no clamping applied", signal_scores)
 
+    # ── LAVF + CHAN_CORR composite boost ────────────────────────
+    # Lavf encoder alone is weak (innocent re-encodes are common).
+    # But Lavf + ALL clips showing CHAN_CORR > 0.90 is a strong composite
+    # signal — real re-encodes rarely have both together.
+    _lavf_flag = override and ov_label == "LAVF_AI_PIPELINE"
+    if _lavf_flag:
+        _all_chan_corr = [ctx.get("chan_corr", 0) for _, ctx, _ in valid]
+        _all_high_corr = all(c > 0.90 for c in _all_chan_corr if c > 0)
+        if _all_high_corr and _all_chan_corr:
+            old_combined = combined_ai_score
+            combined_ai_score = min(100.0, combined_ai_score + 15)
+            log.info(
+                "LAVF+CHAN_CORR boost: combined %.1f→%.1f "
+                "(Lavf encoder + all clips CHAN_CORR>0.90 [%s])",
+                old_combined, combined_ai_score,
+                ", ".join(f"{c:.3f}" for c in _all_chan_corr)
+            )
+        else:
+            log.info(
+                "LAVF flag set but CHAN_CORR not all >0.90 [%s] — no boost (likely innocent re-encode)",
+                ", ".join(str(c) for c in _all_chan_corr)
+            )
+
     # ── Real device metadata ceiling ────────────────────────
     # When metadata confirms a real device recording (isom/mp42 container +
     # creation_time), pixel signals may still score very high for exotic
@@ -1064,7 +1094,6 @@ def run_detection_multiclip(video_path: str) -> tuple:
         "threshold_undet":    THRESHOLD_UNDETERMINED,
     }
     return authenticity, label, detail
-
 
 
 

@@ -80,6 +80,8 @@ DIMENSIONS = [
     "text_objects",
     "physics_violations",
     "generator_artifacts",
+    "behavioral_plausibility",
+    "scene_staging",
 ]
 
 # Base weights (unnormalized — normalized at runtime)
@@ -96,6 +98,8 @@ _BASE_WEIGHTS = {
     "text_objects":       0.6,
     "physics_violations": 2.0,   # always high — impossible physics = certain AI
     "generator_artifacts":2.5,   # always highest — explicit label = certain AI
+    "behavioral_plausibility": 1.8,  # high — unnatural human reaction is strong AI signal
+    "scene_staging":      1.5,   # moderate-high — narratively perfect framing = AI
 }
 
 # Per-content-type multipliers applied on top of base weights
@@ -119,6 +123,8 @@ _CONTENT_WEIGHTS = {
         "background_realism": 1.4, # AI action has rendered backgrounds
         "skin_texture": 1.0,       # raised from 0.7: person action videos need skin check
         "hair_detail": 0.7,
+        "behavioral_plausibility": 2.5,
+        "scene_staging": 2.0,
     },
     "cinematic": {
         "background_realism": 2.0, "lighting_coherence": 1.8,
@@ -161,7 +167,8 @@ def _scores_to_ai_probability(scores: dict, content_type: str) -> int:
         prob = max(prob, 80)
     if any(scores.get(d, 0) >= 9 for d in DIMENSIONS):
         prob = max(prob, 75)
-
+    if scores.get("behavioral_plausibility", 0) >= 8:
+        prob = max(prob, 70)
     return prob
 
 
@@ -345,6 +352,10 @@ REAL videos. Score dimensions on the underlying content — not on compression q
     8-10= AI:   people floating upward against gravity on slides/slopes, water flowing
           the wrong direction, limbs bending impossibly, body rising without physical cause.
     Score 10 for any clear, unambiguous physics violation. This is dispositive.
+    STRUCTURAL CASCADE: Retail store shelving units are INDEPENDENT freestanding
+    structures. An entire aisle of shelves collapsing simultaneously from a single
+    event is physically impossible — one shelf tipping does not topple all others.
+    If you see an entire row of shelves collapsing at once → score 9-10 immediately.
 
 12. GENERATOR_ARTIFACTS  ← SECOND MOST IMPORTANT DIMENSION
     0-2 = No AI labels, watermarks, or known generator signatures visible.
@@ -356,6 +367,40 @@ REAL videos. Score dimensions on the underlying content — not on compression q
           Pika: color bloom on edges, slightly over-sharpened subjects.
           Runway: cinematic color grading, smooth camera moves, slight temporal flicker.
           HeyGen/D-ID: talking-head with slightly too-smooth skin and perfect eye contact.
+
+13. BEHAVIORAL_PLAUSIBILITY
+    0-2 = Real: human reactions show correct neurological timing — 200-400ms startle
+          delay before fleeing, children show freeze-then-flee pattern, witnesses
+          react to nearby events within normal response windows.
+    8-10= AI:   reactions are instantaneous (zero delay), people ignore major nearby
+          events entirely, injury victims are completely motionless (ragdoll stillness),
+          predator approach goes unnoticed by nearby people.
+    Key checks:
+      REACTION TIMING: Does anyone react with ZERO delay to a sudden event? Real
+        humans have a 200-400ms neurological startle delay — instant reaction = AI.
+      INJURY RESPONSE: Does an injured person lie completely still after major impact?
+        Real injured people moan, shift, clutch wounds — ragdoll stillness = AI.
+      PREDATOR APPROACH BLINDNESS: Does a person watch a predator approach without
+        any defensive response? Animals and humans sense threats — no reaction = AI.
+      NON-REACTING BYSTANDERS: If even ONE background person is completely oblivious
+        to a major nearby event (explosion, collapse, animal attack) → score 8.
+
+14. SCENE_STAGING
+    0-2 = Real: incident is partial, poorly framed, chaotic — real events are
+          rarely captured at the perfect angle with perfect timing.
+    8-10= AI:   complete narrative arc (setup → buildup → climax → resolution)
+          all visible in a single continuous shot, camera perfectly positioned,
+          incident begins and ends cleanly within the clip.
+    Key checks:
+      PERFECT FRAMING: Is the camera perfectly positioned to capture the key moment?
+        Real incidents are rarely perfectly framed — they start before the camera,
+        the camera is often off-angle, or the key moment is partially missed.
+      NARRATIVE COMPLETENESS: Does the clip contain a full story with clear beginning,
+        middle, and end? Real caught-on-camera incidents are almost always partial.
+      SECURITY CAMERA PATTERN: Fake security cam overlays (timestamps, FRONT DOCK
+        labels, etc.) are commonly added to AI videos to fake authenticity.
+        If the video has a security cam overlay but the content seems too dramatic
+        or perfectly framed → score scene_staging 8-9.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
  AUDIO-VISUAL MANIPULATION FLAGS
@@ -405,7 +450,9 @@ Respond ONLY with this exact JSON — no markdown, no preamble, no extra text:
     "crowd_behavior": <0-10>,
     "text_objects": <0-10>,
     "physics_violations": <0-10>,
-    "generator_artifacts": <0-10>
+    "generator_artifacts": <0-10>,
+    "behavioral_plausibility": <0-10>,
+    "scene_staging": <0-10>
   },
   "reasoning": "<2-3 sentence explanation written for a general audience — be specific about what you actually observed in these frames, reference the content type, mention specific visual evidence. Do NOT use generic phrases like 'the video appears to be' or 'analysis suggests'. Instead write exactly what you saw: e.g. 'This wildlife footage shows a moose moving with unnaturally smooth locomotion — no ground impact, floating gait, and fur texture that lacks the micro-variation of real animal coats. The background vegetation appears rendered rather than photographed.' For REAL videos: mention specific real-camera characteristics you observed. For AI: name the specific artifacts. For mixed/uncertain: explain the contradiction you see.>",
   "top_flags": ["<most significant finding>", "<second finding>", "<third finding>"],
@@ -940,6 +987,30 @@ def _build_physics_summary(ctx: dict) -> str:
             "  -> Do NOT penalize smooth motion, dark frames, or high contrast."
         )
 
+    # ── Security camera incident hint ──────────────────────
+    # Fake security cam overlays are commonly added to AI videos.
+    # When flicker_std < 1.0 AND chan_corr > 0.90 on selfie/cinematic content,
+    # this combination is suspicious — real security cams have more variation.
+    _flicker_val = ctx.get("flicker_std", 99) or 99
+    _chan_val = ctx.get("chan_corr", 0) or 0
+    _is_security_cam_suspect = (
+        content_type in ("cinematic", "static") and
+        _flicker_val < 1.0 and _chan_val > 0.90
+    )
+    if _is_security_cam_suspect:
+        hints.append(
+            "⚠ POSSIBLE FAKE SECURITY CAMERA OVERLAY:\n"
+            "Very stable footage (low flicker) combined with high RGB channel "
+            "lock is suspicious for security cam content. Real security cameras "
+            "have more variation. Fake security cam overlays are commonly added "
+            "to AI videos to fake authenticity.\n"
+            "CHECK:\n"
+            "  • Does the timestamp/overlay look authentic or slightly off?\n"
+            "  • Is the content TOO dramatic for a real security cam catch?\n"
+            "  • Is the incident perfectly framed for the camera angle?\n"
+            "→ If security cam + staged incident: score scene_staging 8-9."
+        )
+
     _is_youtube = "youtube" in str(ctx.get("source", "")).lower()
     if _is_youtube:
         hints.append(
@@ -984,7 +1055,19 @@ def _build_physics_summary(ctx: dict) -> str:
             "  • Motion blur on fast objects (balls, birds) is real shutter physics\n"
             "  • Compression artifacts from social media re-encoding are normal\n"
             "→ Only flag background_realism or color_naturalism as AI if you see "
-            "RENDERED/PAINTED qualities, not just blur or palette limitation.".format(avg_noise_val)
+            "RENDERED/PAINTED qualities, not just blur or palette limitation.\n"
+            "⚠ IMPORTANT: Real camera noise does NOT override impossible physics. "
+            "Even genuine camera footage can be AI-generated. You MUST still check:\n"
+            "  • STRUCTURAL CASCADE: Did an entire row of store shelves collapse "
+            "simultaneously from one event? Real shelves are INDEPENDENT — "
+            "one falling does not topple all others. Score physics_violations 9-10.\n"
+            "  • BYSTANDER REACTIONS: Did anyone in the background continue "
+            "normally despite a loud nearby crash? Score crowd_behavior 8.\n"
+            "  • INJURY RESPONSE: Did an injured person lie completely still "
+            "after major impact (ragdoll)? Score behavioral_plausibility 8-10.\n"
+            "  • REACTION TIMING: Did a child react with zero delay, no freeze "
+            "phase? Score behavioral_plausibility 8-10."
+            .format(avg_noise_val)
         )
 
     # ── Audio mismatch hint ─────────────────────────────────
@@ -1023,7 +1106,7 @@ def _build_physics_summary(ctx: dict) -> str:
             lines.append(f"  {h}")
 
     lines.append("\n═══════════════════════════════════════")
-    lines.append("Now score all 12 dimensions based on what you observe in the frames.")
+    lines.append("Now score all 14 dimensions based on what you observe in the frames.")
     lines.append("")
 
     return "\n".join(lines)
@@ -1068,6 +1151,16 @@ def gpt_vision_score_with_context(frames_b64: list, physics_context: dict) -> di
     result          = analyze_frames_with_gpt(frames_b64, physics_summary, content_type)
     result["available"] = True
     return result
+
+
+
+
+
+
+
+
+
+
 
 
 
