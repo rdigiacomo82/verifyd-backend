@@ -228,6 +228,302 @@ def process_upload_job(
             log.info("Worker: cleaned up temp file %s", tmp_path)
 
 
+def process_photo_upload_job(
+    file_key: str,
+    filename: str,
+    email: str,
+) -> dict:
+    """
+    Background job: retrieve photo from R2/Redis, analyze it,
+    stamp if REAL, store result. Called by RQ.
+    """
+    import os as _os
+    import tempfile
+    import hashlib
+    from rq import get_current_job
+    from photo_detection import run_photo_detection
+    from database import insert_certificate, increment_user_uses, get_user_status as _gus
+    from config import BASE_URL
+    from emailer import send_certification_email
+
+    rq_job = get_current_job()
+    job_id = rq_job.id if rq_job else file_key.replace("file:", "")
+
+    r = _get_redis()
+
+    LABEL_UI = {
+        "REAL":         ("REAL PHOTO VERIFIED",  "green", True),
+        "UNDETERMINED": ("PHOTO UNDETERMINED",    "blue",  False),
+        "AI":           ("AI DETECTED",           "red",   False),
+    }
+
+    ext = _os.path.splitext(filename)[1].lower() or ".jpg"
+    if ext not in (".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif"):
+        ext = ".jpg"
+    tmp_path = _os.path.join(tempfile.gettempdir(), f"{job_id}{ext}")
+
+    try:
+        # ── Retrieve file ─────────────────────────────────────
+        if file_key.startswith("r2:"):
+            r2_key = file_key[3:]
+            from storage import download_video, delete_video
+            download_video(r2_key, tmp_path)
+            delete_video(r2_key)
+            log.info("Retrieved photo from R2: job=%s key=%s size=%d bytes",
+                     job_id, r2_key, _os.path.getsize(tmp_path))
+            sha256 = _sha256_file(tmp_path)
+        else:
+            file_bytes = r.get(file_key)
+            if not file_bytes:
+                result = {"job_status": "error",
+                          "error": "Photo expired from queue. Please re-upload."}
+                _store_result(r, job_id, result)
+                return result
+            with open(tmp_path, "wb") as fh:
+                fh.write(file_bytes)
+            r.delete(file_key)
+            sha256 = hashlib.sha256(file_bytes).hexdigest()
+
+        log.info("Worker: starting photo detection job=%s email=%s", job_id, email)
+
+        # ── Run detection ─────────────────────────────────────
+        authenticity, label, detail = run_photo_detection(tmp_path)
+        ui_text, color, certify = LABEL_UI.get(label, ("PHOTO UNDETERMINED", "blue", False))
+
+        log.info("Worker: photo detection complete job=%s label=%s auth=%d",
+                 job_id, label, authenticity)
+
+        # ── Record use + persist certificate ──────────────────
+        increment_user_uses(email)
+        insert_certificate(
+            cert_id       = job_id,
+            email         = email,
+            original_file = filename,
+            label         = label,
+            authenticity  = authenticity,
+            ai_score      = detail["ai_score"],
+            sha256        = sha256,
+        )
+
+        # ── Build result ──────────────────────────────────────
+        result = {
+            "status":             ui_text,
+            "authenticity_score": authenticity,
+            "color":              color,
+            "label":              label,
+            "gpt_reasoning":      detail.get("gpt_reasoning", ""),
+            "gpt_flags":          detail.get("gpt_flags", []),
+            "signal_score":       detail.get("signal_ai_score", 0),
+            "gpt_score":          detail.get("gpt_ai_score", 0),
+            "ela_score":          detail.get("ela_score", 0),
+            "generator_guess":    detail.get("generator_guess", "Unknown"),
+            "media_type":         "photo",
+            "job_status":         "complete",
+        }
+
+        # ── Stamp certified photos (REAL only) ────────────────
+        if certify:
+            certified_path = _os.path.join(
+                tempfile.gettempdir(), f"cert_{job_id}{ext}"
+            )
+            download_url = f"{BASE_URL}/download-photo/{job_id}"
+            try:
+                from video import stamp_photo
+                stamp_photo(tmp_path, certified_path, job_id)
+
+                if _os.path.exists(certified_path):
+                    try:
+                        _plan = _gus(email).get("plan", "free")
+                    except Exception:
+                        _plan = "free"
+
+                    # Try R2 first
+                    _stored = False
+                    try:
+                        from storage import r2_available, upload_certified_photo
+                        if r2_available():
+                            upload_certified_photo(job_id, certified_path, _plan, ext)
+                            _os.remove(certified_path)
+                            _stored = True
+                            log.info("Worker: certified photo stored in R2: job=%s plan=%s",
+                                     job_id, _plan)
+                    except Exception as _r2e:
+                        log.warning("R2 photo cert upload failed, falling back to Redis: %s", _r2e)
+
+                    # Redis fallback
+                    if not _stored and _os.path.exists(certified_path):
+                        _cert_ttl = {
+                            "free": 86400, "creator": 259200,
+                            "pro": 604800, "enterprise": 2592000,
+                        }.get(_plan, 86400)
+                        with open(certified_path, "rb") as pf:
+                            cert_bytes = pf.read()
+                        r.setex(f"cert:{job_id}", _cert_ttl, cert_bytes)
+                        _os.remove(certified_path)
+                        log.info("Worker: certified photo in Redis: job=%s size=%d",
+                                 job_id, len(cert_bytes))
+
+                result["certificate_id"] = job_id
+                result["download_url"]   = download_url
+
+                if email and "@" in email:
+                    try:
+                        send_certification_email(email, job_id, authenticity, filename, download_url)
+                    except Exception as em:
+                        log.warning("Worker: email failed for %s: %s", job_id, em)
+
+            except Exception as stamp_err:
+                log.error("Worker: photo stamp failed for %s: %s", job_id, stamp_err)
+
+        _store_result(r, job_id, result)
+        return result
+
+    except Exception as e:
+        log.exception("Worker: photo job %s failed", job_id)
+        result = {"job_status": "error", "error": str(e)[:300]}
+        _store_result(r, job_id, result)
+        return result
+
+    finally:
+        if _os.path.exists(tmp_path):
+            _os.remove(tmp_path)
+            log.info("Worker: cleaned up photo temp file %s", tmp_path)
+
+
+def process_photo_link_job(
+    job_id: str,
+    image_url: str,
+    email: str,
+) -> dict:
+    """
+    Background job: download image from URL, analyze it, store result.
+    No certification for link jobs (user may not own the image).
+    """
+    import os
+    import tempfile
+    import urllib.request
+    import urllib.error
+
+    r = _get_redis()
+    tmp_path = os.path.join(tempfile.gettempdir(), f"{job_id}.jpg")
+
+    try:
+        log.info("Worker: downloading image for job=%s url=%s", job_id, image_url[:80])
+
+        try:
+            headers = {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"
+                ),
+                "Accept": "image/webp,image/apng,image/*,*/*;q=0.8",
+            }
+            req = urllib.request.Request(image_url, headers=headers)
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                content_type = resp.headers.get("Content-Type", "")
+                data = resp.read()
+
+            ext = ".jpg"
+            if "png" in content_type:
+                ext = ".png"
+            elif "webp" in content_type:
+                ext = ".webp"
+            elif data[:4] == b"\x89PNG":
+                ext = ".png"
+            elif data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+                ext = ".webp"
+
+            if ext != ".jpg":
+                tmp_path = tmp_path.replace(".jpg", ext)
+
+            with open(tmp_path, "wb") as fh:
+                fh.write(data)
+
+            log.info("Worker: downloaded image job=%s size=%d ext=%s",
+                     job_id, len(data), ext)
+
+        except urllib.error.HTTPError as e:
+            err = f"Could not download image: HTTP {e.code}. The image may be private or require login."
+            result = {"job_status": "error", "error": err}
+            _store_result(r, job_id, result)
+            return result
+        except Exception as e:
+            err = f"Could not download image: {str(e)[:150]}"
+            result = {"job_status": "error", "error": err}
+            _store_result(r, job_id, result)
+            return result
+
+        # ── Register user ─────────────────────────────────────
+        try:
+            from database import get_or_create_user
+            get_or_create_user(email)
+        except Exception:
+            pass
+
+        # ── Run detection ─────────────────────────────────────
+        from photo_detection import run_photo_detection
+        from database import insert_certificate, increment_user_uses
+
+        authenticity, label, detail = run_photo_detection(tmp_path)
+
+        LABEL_UI = {
+            "REAL":         ("REAL PHOTO VERIFIED",  "green", True),
+            "UNDETERMINED": ("PHOTO UNDETERMINED",    "blue",  False),
+            "AI":           ("AI DETECTED",           "red",   False),
+        }
+        ui_text, color, _ = LABEL_UI.get(label, ("PHOTO UNDETERMINED", "blue", False))
+
+        increment_user_uses(email)
+        insert_certificate(
+            cert_id       = job_id,
+            email         = email,
+            original_file = image_url,
+            label         = label,
+            authenticity  = authenticity,
+            ai_score      = detail["ai_score"],
+            sha256        = None,
+        )
+
+        result = {
+            "status":             ui_text,
+            "authenticity_score": authenticity,
+            "color":              color,
+            "label":              label,
+            "gpt_reasoning":      detail.get("gpt_reasoning", ""),
+            "gpt_flags":          detail.get("gpt_flags", []),
+            "signal_score":       detail.get("signal_ai_score", 0),
+            "gpt_score":          detail.get("gpt_ai_score", 0),
+            "ela_score":          detail.get("ela_score", 0),
+            "generator_guess":    detail.get("generator_guess", "Unknown"),
+            "media_type":         "photo",
+            "job_status":         "complete",
+        }
+
+        # Cache URL result (1 hour)
+        try:
+            import hashlib as _hl, json as _jc
+            _key = "urlcache:photo:v1:" + _hl.md5(image_url.strip().encode()).hexdigest()
+            _cache = {k: v for k, v in result.items() if k != "job_status"}
+            r.setex(_key, 3600, _jc.dumps(_cache))
+            log.info("Worker: cached photo URL result for %s", image_url[:60])
+        except Exception as _ce:
+            log.warning("Worker: photo URL cache write failed: %s", _ce)
+
+        _store_result(r, job_id, result)
+        return result
+
+    except Exception as e:
+        log.exception("Worker: photo link job %s failed", job_id)
+        result = {"job_status": "error", "error": str(e)[:300]}
+        _store_result(r, job_id, result)
+        return result
+
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+
 def process_link_job(
     job_id:       str,
     video_url:    str,

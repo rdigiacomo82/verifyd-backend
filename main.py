@@ -19,7 +19,9 @@ import os, uuid, requests, tempfile, logging, hashlib
 from contextlib import asynccontextmanager
 
 from detection import run_detection   # returns (authenticity, label, detail)
-from queue_helper import enqueue_upload, enqueue_link, get_job_result
+from queue_helper import (enqueue_upload, enqueue_link,
+                          enqueue_photo_upload, enqueue_photo_link,
+                          get_job_result)
 from config import (                  # single source of truth for all settings
     BASE_URL,
     UPLOAD_DIR, CERT_DIR, TMP_DIR,
@@ -461,6 +463,277 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
             return JSONResponse({"error": safe_error}, status_code=500)
 
     return JSONResponse({"error": "Analysis timed out. Please try again."}, status_code=504)
+
+
+
+# ─────────────────────────────────────────────
+#  Redis helper (shared by photo endpoints)
+# ─────────────────────────────────────────────
+def _get_redis():
+    import redis as _redis
+    return _redis.from_url(
+        os.environ.get("REDIS_URL", "redis://localhost:6379"),
+        decode_responses=False,
+    )
+
+
+# ─────────────────────────────────────────────
+#  Photo upload endpoint
+# ─────────────────────────────────────────────
+PHOTO_ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif"}
+PHOTO_SIZE_LIMITS = {
+    "free":        10 * 1024 * 1024,   # 10MB
+    "creator":     25 * 1024 * 1024,   # 25MB
+    "pro":         50 * 1024 * 1024,   # 50MB
+    "enterprise":  200 * 1024 * 1024,  # 200MB
+}
+
+PHOTO_LABEL_UI = {
+    "REAL":         ("REAL PHOTO VERIFIED", "green",  True),
+    "UNDETERMINED": ("PHOTO UNDETERMINED",  "blue",   False),
+    "AI":           ("AI DETECTED",         "red",    False),
+}
+
+
+@app.post("/upload-photo/")
+async def upload_photo(file: UploadFile = File(...), email: str = Form(...)):
+    """
+    Photo upload endpoint. Mirrors /upload/ but for still images.
+    Accepts: JPEG, PNG, WebP, HEIC/HEIF.
+    """
+    # ── Email validation ──────────────────────────────────────
+    if not is_valid_email(email):
+        return JSONResponse({"error": "Invalid email address."}, status_code=400)
+
+    is_deliverable, reason = _verify_email_deliverable(email)
+    if not is_deliverable:
+        return JSONResponse({"error": reason}, status_code=400)
+
+    if not is_email_verified(email):
+        return JSONResponse({
+            "error":   "email_not_verified",
+            "message": "Please verify your email address before uploading.",
+        }, status_code=403)
+
+    # ── File type check ───────────────────────────────────────
+    ext = os.path.splitext(file.filename)[1].lower()
+    if ext not in PHOTO_ALLOWED_EXTENSIONS:
+        return JSONResponse({
+            "error":   "unsupported_format",
+            "message": f"Unsupported image format '{ext}'. "
+                       f"Accepted formats: JPEG, PNG, WebP, HEIC.",
+        }, status_code=415)
+
+    # ── Disk cleanup ──────────────────────────────────────────
+    try:
+        _cleanup_old_files(max_age_hours=2.0)
+    except Exception:
+        pass
+
+    # ── Usage limit check ─────────────────────────────────────
+    status = get_user_status(email)
+    if not status["allowed"]:
+        return JSONResponse({
+            "error":     "limit_reached",
+            "plan":      status["plan"],
+            "uses_left": 0,
+            "limit":     status["limit"],
+        }, status_code=402)
+
+    # ── Plan-based size limit ─────────────────────────────────
+    user_plan = status["plan"]
+    max_bytes = PHOTO_SIZE_LIMITS.get(user_plan, PHOTO_SIZE_LIMITS["free"])
+    max_mb    = max_bytes // (1024 * 1024)
+    plan_label = {"free": "Free", "creator": "Creator",
+                  "pro": "Pro", "enterprise": "Enterprise"}.get(user_plan, user_plan.title())
+
+    content_length = file.size
+    if content_length and content_length > max_bytes:
+        return JSONResponse({
+            "error":   "file_too_large",
+            "message": f"Image exceeds the {max_mb}MB limit for your {plan_label} plan.",
+            "max_mb":  max_mb,
+            "plan":    user_plan,
+        }, status_code=413)
+
+    # ── Save to disk ──────────────────────────────────────────
+    job_id   = str(uuid.uuid4())
+    raw_path = f"{UPLOAD_DIR}/{job_id}_{file.filename}"
+
+    bytes_written = 0
+    with open(raw_path, "wb") as f_out:
+        while chunk := await file.read(1024 * 1024):
+            bytes_written += len(chunk)
+            if bytes_written > max_bytes:
+                try:
+                    os.remove(raw_path)
+                except Exception:
+                    pass
+                return JSONResponse({
+                    "error":   "file_too_large",
+                    "message": f"Image exceeds the {max_mb}MB limit for your {plan_label} plan.",
+                    "max_mb":  max_mb,
+                    "plan":    user_plan,
+                }, status_code=413)
+            f_out.write(chunk)
+
+    log.info("photo_upload: saved %dKB for %s (plan=%s)",
+             bytes_written // 1024, email, user_plan)
+
+    # ── Enqueue ───────────────────────────────────────────────
+    try:
+        enqueue_photo_upload(job_id, raw_path, file.filename, email)
+        log.info("photo_upload: queued job %s for %s file=%s", job_id, email, file.filename)
+    except Exception as e:
+        log.warning("Queue unavailable (%s) — falling back to sync", e)
+        from photo_detection import run_photo_detection
+        try:
+            authenticity, label, detail = run_photo_detection(raw_path)
+            ui_text, color, _ = PHOTO_LABEL_UI.get(label, ("PHOTO UNDETERMINED", "blue", False))
+            return JSONResponse({
+                "status":             ui_text,
+                "authenticity_score": authenticity,
+                "color":              color,
+                "label":              label,
+                "gpt_reasoning":      detail.get("gpt_reasoning", ""),
+                "gpt_flags":          detail.get("gpt_flags", []),
+                "signal_score":       detail.get("signal_ai_score", 0),
+                "gpt_score":          detail.get("gpt_ai_score", 0),
+                "media_type":         "photo",
+            })
+        except Exception as sync_e:
+            return JSONResponse({"error": str(sync_e)[:200]}, status_code=500)
+        finally:
+            if os.path.exists(raw_path):
+                os.remove(raw_path)
+
+    # ── Poll for result ───────────────────────────────────────
+    import asyncio
+    for _ in range(60):  # up to 3 minutes — photos are faster than video
+        await asyncio.sleep(3)
+        result = get_job_result(job_id)
+        if result and result.get("job_status") == "complete":
+            result.pop("job_status", None)
+            return JSONResponse(result)
+        if result and result.get("job_status") == "error":
+            raw_error = result.get("error", "")
+            is_tb = "Traceback" in raw_error or "File /opt" in raw_error or len(raw_error) > 200
+            safe_error = (
+                "Photo analysis failed. Please try again."
+                if is_tb else raw_error or "Photo analysis failed."
+            )
+            return JSONResponse({"error": safe_error}, status_code=500)
+
+    return JSONResponse({"error": "Photo analysis timed out. Please try again."}, status_code=504)
+
+
+@app.get("/analyze-photo-link/")
+async def analyze_photo_link(request: Request, image_url: str = "", email: str = ""):
+    """
+    Photo URL analysis endpoint. Mirrors /analyze-link-json/ for images.
+    """
+    import asyncio
+
+    if not image_url:
+        return JSONResponse({"error": "image_url is required"}, status_code=400)
+
+    if not email:
+        # Try session cookie fallback
+        session_token = request.cookies.get("vfy_session", "")
+        if session_token and session_token in _session_store:
+            email = _session_store[session_token]["email"]
+        else:
+            return JSONResponse({"error": "email is required"}, status_code=400)
+
+    if not is_valid_email(email):
+        return JSONResponse({"error": "Invalid email address."}, status_code=400)
+
+    # Check URL cache first
+    try:
+        import hashlib as _hl, json as _jc
+        r_cache = _get_redis()
+        _key = "urlcache:photo:v1:" + _hl.md5(image_url.strip().encode()).hexdigest()
+        cached = r_cache.get(_key)
+        if cached:
+            result = _jc.loads(cached)
+            log.info("photo_link: cache hit for %s", image_url[:60])
+            return JSONResponse(result)
+    except Exception:
+        pass
+
+    # Usage check
+    status = get_user_status(email)
+    if not status["allowed"]:
+        return JSONResponse({
+            "error":     "limit_reached",
+            "plan":      status["plan"],
+            "uses_left": 0,
+        }, status_code=402)
+
+    job_id = str(uuid.uuid4())
+
+    try:
+        enqueue_photo_link(job_id, image_url, email)
+    except Exception as e:
+        return JSONResponse({"error": f"Queue unavailable: {str(e)[:100]}"}, status_code=503)
+
+    # Return job_id immediately for polling (mirrors analyze-link-json)
+    log.info("analyze-photo-link: returning job_id=%s for frontend polling", job_id)
+    return JSONResponse({"job_id": job_id, "status": "queued"})
+
+
+@app.get("/download-photo/{cid}")
+async def download_photo(cid: str):
+    """
+    Serve certified photo — checks R2 first, falls back to Redis.
+    Mirrors /download/{cid} for videos.
+    """
+    from fastapi.responses import Response
+
+    # Try R2 first
+    try:
+        from storage import _get_client, BUCKET
+        client = _get_client()
+        for plan in ("pro", "creator", "free", "enterprise"):
+            for ext in (".jpg", ".png", ".webp"):
+                key = f"certified-photos/{plan}/{cid}{ext}"
+                try:
+                    obj = client.get_object(Bucket=BUCKET, Key=key)
+                    data = obj["Body"].read()
+                    content_type = {
+                        ".jpg": "image/jpeg",
+                        ".png": "image/png",
+                        ".webp": "image/webp",
+                    }.get(ext, "image/jpeg")
+                    return Response(
+                        content=data,
+                        media_type=content_type,
+                        headers={
+                            "Content-Disposition": f'attachment; filename="verifyd_cert_{cid[:8]}{ext}"',
+                            "Cache-Control": "private, max-age=3600",
+                        }
+                    )
+                except Exception:
+                    continue
+    except Exception as e:
+        log.warning("R2 photo download lookup failed for %s: %s", cid, e)
+
+    # Redis fallback
+    try:
+        r = _get_redis()
+        data = r.get(f"cert:{cid}")
+        if data:
+            return Response(
+                content=data,
+                media_type="image/jpeg",
+                headers={
+                    "Content-Disposition": f'attachment; filename="verifyd_cert_{cid[:8]}.jpg"',
+                }
+            )
+    except Exception:
+        pass
+
+    return JSONResponse({"error": "Certified photo not found or expired."}, status_code=404)
 
 
 @app.get("/job-status/{job_id}")
