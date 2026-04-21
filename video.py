@@ -713,6 +713,91 @@ def stamp_video(input_path: str, output_path: str, cert_id: str) -> None:
 
 
 
+def stamp_photo(input_path: str, output_path: str, cert_id: str) -> None:
+    """
+    Burn VeriFYD logo watermark onto a still image.
+    Bottom-right corner, 85% opacity, scales to 20% of image width.
+    Preserves original format (JPEG/PNG/WebP) and quality.
+    Mirrors stamp_video() but uses PIL compositing instead of ffmpeg.
+    """
+    import tempfile
+    import numpy as np
+    from PIL import Image
+
+    # Find logo — same search path as stamp_video
+    _here = os.path.dirname(os.path.abspath(__file__))
+    logo_src = None
+    for _candidate in [
+        os.path.join(_here, "assets", "VeriFYD_Logo.png"),
+        "/opt/render/project/src/assets/VeriFYD_Logo.png",
+        os.path.join(os.getcwd(), "assets", "VeriFYD_Logo.png"),
+    ]:
+        if os.path.exists(_candidate):
+            logo_src = _candidate
+            break
+
+    log.info("stamp_photo: logo_src=%s cert_id=%s", logo_src, cert_id)
+
+    ext = os.path.splitext(input_path)[1].lower()
+    img = Image.open(input_path).convert("RGBA")
+    iw, ih = img.size
+
+    if not logo_src:
+        # Fallback: text watermark using PIL
+        from PIL import ImageDraw, ImageFont
+        draw = ImageDraw.Draw(img)
+        text = f"VeriFYD  {cert_id[:8].upper()}"
+        try:
+            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 28)
+        except Exception:
+            font = ImageFont.load_default()
+        tx, ty = iw - 200, ih - 48
+        draw.text((tx + 2, ty + 2), text, font=font, fill=(0, 0, 0, 180))
+        draw.text((tx, ty), text, font=font, fill=(255, 255, 255, 220))
+        log.info("stamp_photo: used text fallback watermark")
+    else:
+        # Load and process logo — same treatment as stamp_video
+        logo = Image.open(logo_src).convert("RGBA")
+        logo_data = np.array(logo)
+        r_ch = logo_data[:, :, 0]
+        g_ch = logo_data[:, :, 1]
+        b_ch = logo_data[:, :, 2]
+        a_ch = logo_data[:, :, 3]
+        # Remove near-black pixels (same as stamp_video)
+        black_mask = (r_ch < 40) & (g_ch < 40) & (b_ch < 40) & (a_ch > 10)
+        logo_data[:, :, 3][black_mask] = 0
+        logo = Image.fromarray(logo_data)
+
+        # Scale logo to 20% of image width
+        logo_w = max(80, int(iw * 0.20))
+        logo_h = int(logo.height * (logo_w / logo.width))
+        logo = logo.resize((logo_w, logo_h), Image.LANCZOS)
+
+        # Apply 85% opacity
+        logo_arr = np.array(logo)
+        logo_arr[:, :, 3] = (logo_arr[:, :, 3] * 0.85).astype(np.uint8)
+        logo = Image.fromarray(logo_arr)
+
+        # Composite: bottom-right with 10px margin
+        paste_x = iw - logo_w - 10
+        paste_y = ih - logo_h - 10
+        img.paste(logo, (paste_x, paste_y), logo)
+        log.info("stamp_photo: logo placed at (%d,%d) size=%dx%d",
+                 paste_x, paste_y, logo_w, logo_h)
+
+    # Save output — preserve original format where possible
+    if ext in (".jpg", ".jpeg"):
+        img = img.convert("RGB")   # JPEG doesn't support alpha
+        img.save(output_path, "JPEG", quality=92)
+    elif ext in (".webp",):
+        img.save(output_path, "WEBP", quality=90)
+    else:
+        img.save(output_path, "PNG")
+
+    sz = os.path.getsize(output_path) if os.path.exists(output_path) else 0
+    log.info("stamp_photo: success output=%s size=%d", output_path, sz)
+
+
 def extract_clips_for_detection(video_path: str) -> list:
     """
     Extract 1-3 clips from different positions in the video for multi-clip detection.
@@ -782,6 +867,18 @@ def extract_clips_for_detection(video_path: str) -> list:
     # Sort by offset so results are in time order
     clips.sort(key=lambda x: x[1])
     return clips
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

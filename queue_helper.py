@@ -103,6 +103,87 @@ def enqueue_link(job_id: str, video_url: str, email: str, double_count: bool = F
     log.info("Enqueued link job: job_id=%s email=%s url=%s", job_id, email, video_url)
 
 
+def enqueue_photo_upload(job_id: str, file_path: str,
+                         filename: str, email: str) -> None:
+    """
+    Transfer photo to storage (R2 if configured, Redis fallback),
+    then enqueue a photo processing job.
+    Mirrors enqueue_upload() but calls process_photo_upload_job.
+    """
+    from rq import Queue
+
+    r = get_redis()
+
+    # ── Try R2 first ─────────────────────────────────────────
+    try:
+        from storage import upload_video, r2_available
+        if r2_available():
+            r2_key = upload_video(job_id, file_path, filename)
+            log.info("Stored photo in R2: key=%s", r2_key)
+            q = Queue(QUEUE_NAME, connection=r)
+            q.enqueue(
+                "worker.process_photo_upload_job",
+                kwargs={
+                    "file_key": f"r2:{r2_key}",
+                    "filename": filename,
+                    "email":    email,
+                },
+                job_id=job_id,
+                job_timeout=300,   # photos are faster than video — 5 min max
+                result_ttl=RESULT_TTL,
+            )
+            log.info("Enqueued photo upload job (R2): job_id=%s email=%s", job_id, email)
+            return
+    except Exception as e:
+        log.warning("R2 photo upload failed, falling back to Redis: %s", e)
+
+    # ── Redis fallback ────────────────────────────────────────
+    file_key = f"file:{job_id}"
+    with open(file_path, "rb") as f:
+        file_bytes = f.read()
+    r.setex(file_key, FILE_TTL, file_bytes)
+    log.info("Stored photo in Redis (fallback): key=%s size=%d", file_key, len(file_bytes))
+
+    q = Queue(QUEUE_NAME, connection=r)
+    q.enqueue(
+        "worker.process_photo_upload_job",
+        kwargs={
+            "file_key": file_key,
+            "filename": filename,
+            "email":    email,
+        },
+        job_id=job_id,
+        job_timeout=300,
+        result_ttl=RESULT_TTL,
+    )
+    log.info("Enqueued photo upload job (Redis): job_id=%s email=%s file=%s",
+             job_id, email, filename)
+
+
+def enqueue_photo_link(job_id: str, image_url: str, email: str) -> None:
+    """
+    Enqueue a photo link analysis job.
+    Mirrors enqueue_link() but calls process_photo_link_job.
+    """
+    from rq import Queue
+
+    r = get_redis()
+    q = Queue(QUEUE_NAME, connection=r)
+    q.enqueue(
+        "worker.process_photo_link_job",
+        kwargs={
+            "job_id":    job_id,
+            "image_url": image_url,
+            "email":     email,
+        },
+        job_id=job_id,
+        job_timeout=300,
+        result_ttl=RESULT_TTL,
+    )
+    log.info("Enqueued photo link job: job_id=%s email=%s url=%s",
+             job_id, email, image_url[:80])
+
+
 def get_job_result(job_id: str) -> dict:
     """
     Check Redis for a completed job result.

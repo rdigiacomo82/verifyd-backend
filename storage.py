@@ -169,6 +169,43 @@ def get_certified_key(job_id: str) -> str:
             continue
     return f"certified/free/{job_id}.mp4"  # fallback
 
+def upload_certified_photo(job_id: str, cert_path: str,
+                           plan: str = "free", ext: str = ".jpg") -> str:
+    """
+    Upload a certified (stamped) photo to R2.
+    Stored at certified-photos/{plan}/{job_id}{ext}.
+    Tags with plan for lifecycle rules.
+    Returns the R2 object key.
+    """
+    content_types = {
+        ".jpg":  "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png":  "image/png",
+        ".webp": "image/webp",
+    }
+    content_type = content_types.get(ext.lower(), "image/jpeg")
+    key = f"certified-photos/{plan}/{job_id}{ext}"
+
+    client = _get_client()
+    client.upload_file(
+        cert_path,
+        BUCKET,
+        key,
+        ExtraArgs={
+            "ContentType": content_type,
+            "Metadata": {
+                "plan":   plan,
+                "job_id": job_id,
+                "type":   "photo",
+            },
+        },
+    )
+    log.info("storage: uploaded certified photo → r2://%s/%s (plan=%s)",
+             BUCKET, key, plan)
+    return key
+
+
 # ── Convenience: is R2 available? ────────────────────────────
 def r2_available() -> bool:
     return _is_configured()
+
