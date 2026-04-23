@@ -199,6 +199,18 @@ def _build_photo_gpt_context(signal_score: int, signal_context: dict) -> dict:
             "Score generator_artifacts 9-10 immediately."
         )
 
+    # Splice/composite hint for GPT
+    splice = signal_context.get("splice_score", 0)
+    if splice > 30:
+        photo_notes.append(
+            f"Noise inconsistency detected across image regions (splice_score={splice:.0f}). "
+            "This suggests a COMPOSITE image — a real person or object photographed separately "
+            "and placed onto an AI-generated background. "
+            "Inspect the boundary between the foreground subject and background carefully. "
+            "Look for: inconsistent lighting direction, background too perfect/AI-smooth, "
+            "edge artifacts at person/background boundary, background depth unrealistic."
+        )
+
     if photo_notes:
         ctx["photo_signal_notes"] = "\n".join(
             [f"PHOTO SIGNAL ANALYSIS — guide your inspection:"] + 
@@ -287,6 +299,19 @@ def run_photo_detection(image_path: str) -> tuple:
         both_real     = signal_score < 45 and gpt_score < 45
         both_ai       = signal_score > 65 and gpt_score > 65
 
+        # Composite/no-EXIF guard: when signal is very low (near 0) but:
+        #   - No EXIF metadata (already flagged as AI signal in photo_detector)
+        #   - GPT scores 55+ (moderately confident AI)
+        # The 85/15 split is too aggressive — a real photo composited onto
+        # an AI background will have real-camera pixel signals (high noise,
+        # real texture) but GPT correctly identifies AI elements.
+        # In this case give GPT equal weight (50/50).
+        _no_exif = signal_context.get("meta_adjustment", 0) >= 10  # +10 = no EXIF
+        _splice  = signal_context.get("splice_score", 0) > 30       # composite detected
+        _low_signal_gpt_disagrees = (
+            signal_score < 40 and gpt_score > 55 and (_no_exif or _splice)
+        )
+
         if gpt_dominant:
             combined, w_sig, w_gpt = (
                 signal_score * 0.25 + gpt_score * 0.75, 0.25, 0.75
@@ -297,6 +322,15 @@ def run_photo_detection(image_path: str) -> tuple:
                 signal_score * 0.70 + gpt_score * 0.30, 0.70, 0.30
             )
             mode = "clash→AI (signal leads)"
+        elif _low_signal_gpt_disagrees:
+            # No-EXIF + GPT sees AI + signal near 0 → likely composite image
+            # Give GPT equal weight — signal is being fooled by real-photo region
+            combined, w_sig, w_gpt = (
+                signal_score * 0.50 + gpt_score * 0.50, 0.50, 0.50
+            )
+            mode = "composite-suspect (no-exif + GPT disagrees)"
+            log.info("COMPOSITE GUARD: signal=%d near 0 but no_exif=%s splice=%.0f gpt=%d → 50/50 blend",
+                     signal_score, _no_exif, signal_context.get("splice_score", 0), gpt_score)
         elif clash_real:
             combined, w_sig, w_gpt = (
                 signal_score * 0.85 + gpt_score * 0.15, 0.85, 0.15

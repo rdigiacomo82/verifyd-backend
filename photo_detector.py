@@ -46,9 +46,26 @@ def _compute_ela(image_path: str, quality: int = 90) -> float:
     AI-generated images and composited regions show boundary artifacts
     where compression levels differ — real photos have uniform ELA.
 
+    NOTE: ELA is unreliable on PNG files (lossless — no re-compression
+    artifacts to measure). For PNG input we convert to JPEG first.
+
     Returns ELA score 0-100 (higher = more AI-like).
     """
     try:
+        # PNG guard: re-save as JPEG first so ELA has something to measure.
+        # Pure PNG has no compression history → ELA on original PNG is meaningless.
+        _ext = os.path.splitext(image_path)[1].lower()
+        _is_png = _ext in (".png", ".webp")
+        if _is_png:
+            import tempfile as _tf
+            _jpg_tmp = _tf.mktemp(suffix=".jpg")
+            _orig = cv2.imread(image_path)
+            if _orig is None:
+                return 50.0
+            cv2.imwrite(_jpg_tmp, _orig, [cv2.IMWRITE_JPEG_QUALITY, 95])
+            image_path = _jpg_tmp
+            log.info("ELA: PNG input → converted to JPEG for ELA analysis")
+
         img = cv2.imread(image_path)
         if img is None:
             return 50.0
@@ -248,6 +265,90 @@ def _compute_texture_variance(img_gray: np.ndarray) -> float:
 
 
 # ─────────────────────────────────────────────────────────────
+#  Splice / composite boundary detector
+# ─────────────────────────────────────────────────────────────
+def _compute_splice_score(img_bgr: np.ndarray) -> float:
+    """
+    Detect real-person-on-AI-background composites by measuring
+    noise floor discontinuity across image regions.
+
+    When a real photo is composited onto an AI background:
+    - Person region: high real camera noise (natural PRNU)
+    - Background region: near-zero AI-render noise
+    - This creates a large noise variance GAP between regions
+
+    Method: divide image into a grid, compute noise floor per cell,
+    measure the coefficient of variation of noise across cells.
+    High CoV = inconsistent noise = composite/splice signal.
+
+    Also checks for vertical noise gradient: real composites often
+    have person in center/foreground (noisy) vs clean AI background.
+
+    Returns splice_score 0-100 (higher = more likely composited).
+    """
+    try:
+        h, w = img_bgr.shape[:2]
+        gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY).astype(np.float64)
+
+        # Compute noise floor in a 4x4 grid of cells
+        rows, cols = 4, 4
+        cell_noises = []
+        for r in range(rows):
+            for c in range(cols):
+                y1 = r * h // rows
+                y2 = (r + 1) * h // rows
+                x1 = c * w // cols
+                x2 = (c + 1) * w // cols
+                cell = gray[y1:y2, x1:x2]
+                # High-pass filter to isolate noise
+                blur = cv2.GaussianBlur(cell.astype(np.float32), (5, 5), 0)
+                noise = float(np.std(cell - blur))
+                cell_noises.append(noise)
+
+        if not cell_noises or np.mean(cell_noises) < 0.1:
+            return 0.0
+
+        # Coefficient of variation of noise across cells
+        noise_arr = np.array(cell_noises)
+        noise_cov = float(np.std(noise_arr) / (np.mean(noise_arr) + 1e-6))
+
+        # A real composite has some cells with real camera noise
+        # and some cells with near-zero AI noise → high CoV
+        # A purely real photo has consistent noise everywhere → low CoV
+        # A purely AI image has uniformly low noise → low CoV
+
+        # Also look at min/max noise ratio — composites have extreme spread
+        noise_ratio = float(np.max(noise_arr) / (np.min(noise_arr) + 0.01))
+
+        score = 0.0
+
+        if noise_cov > 1.2:
+            score += 35.0
+            log.info("SPLICE: noise CoV=%.3f → highly inconsistent noise → +35", noise_cov)
+        elif noise_cov > 0.8:
+            score += 20.0
+            log.info("SPLICE: noise CoV=%.3f → moderately inconsistent noise → +20", noise_cov)
+        elif noise_cov > 0.5:
+            score += 10.0
+            log.info("SPLICE: noise CoV=%.3f → slightly inconsistent noise → +10", noise_cov)
+
+        if noise_ratio > 15.0:
+            score += 25.0
+            log.info("SPLICE: noise_ratio=%.1f → extreme noise spread (composite) → +25", noise_ratio)
+        elif noise_ratio > 8.0:
+            score += 15.0
+            log.info("SPLICE: noise_ratio=%.1f → high noise spread → +15", noise_ratio)
+        elif noise_ratio > 4.0:
+            score += 5.0
+
+        return min(100.0, score)
+
+    except Exception as e:
+        log.debug("SPLICE error: %s", e)
+        return 0.0
+
+
+# ─────────────────────────────────────────────────────────────
 #  Metadata / EXIF analysis
 # ─────────────────────────────────────────────────────────────
 def _analyze_metadata(image_path: str) -> Tuple[int, dict]:
@@ -388,6 +489,10 @@ def detect_ai_photo(image_path: str) -> Tuple[int, dict]:
     # ── Signal 10: Metadata ──────────────────────────────────
     meta_adjustment, meta_dict = _analyze_metadata(image_path)
 
+    # ── Signal 11: Splice / composite boundary ───────────────
+    splice_score = _compute_splice_score(img_bgr)
+    log.info("Splice score: %.1f", splice_score)
+
     # ── Score computation ────────────────────────────────────
     ai_score = 0
 
@@ -461,6 +566,18 @@ def detect_ai_photo(image_path: str) -> Tuple[int, dict]:
     # Metadata adjustment
     ai_score += meta_adjustment
 
+    # Splice/composite score — weighted contribution
+    # A pure composite (real person on AI background) can have splice_score=60+
+    # Weight it at 40% since it's a new signal needing calibration
+    if splice_score > 50:
+        _splice_contrib = int(round(splice_score * 0.40))
+        ai_score += _splice_contrib
+        log.info("SPLICE %.1f → composite boundary detected → +%d", splice_score, _splice_contrib)
+    elif splice_score > 30:
+        _splice_contrib = int(round(splice_score * 0.25))
+        ai_score += _splice_contrib
+        log.info("SPLICE %.1f → possible composite → +%d", splice_score, _splice_contrib)
+
     # Clamp
     ai_score = max(0, min(100, ai_score))
 
@@ -497,6 +614,7 @@ def detect_ai_photo(image_path: str) -> Tuple[int, dict]:
         "image_height":  h,
         "signal_score":  ai_score,
         "source":        "photo_upload",
+        "splice_score":  splice_score,
     }
 
     return ai_score, context
