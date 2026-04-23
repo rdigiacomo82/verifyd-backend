@@ -870,27 +870,15 @@ def run_detection_multiclip(video_path: str) -> tuple:
         # and DINOv2 score <=5 (DINOv2 independently confirms real).
         # Does NOT affect AI videos: AI plasma has gpt=80 (fails gpt<45 check).
         _dino_score_ctx = signal_context.get("dino_score", 50)
-        # real_dominant: signal says AI but GPT AND DINOv2 BOTH strongly say real.
-        # Extended to catch uploaded files (no sidecar → _is_youtube=False) where:
-        #   - Signal is elevated but not extreme (50-75 range — ambiguous territory)
-        #   - GPT is very confident real (< 30, not just < 45)
-        #   - DINOv2 independently confirms real (score <= 5)
-        # This prevents high-noise real camera footage (dashcam, bodycam, news) from
-        # being misclassified when re-encoded through YouTube/Lavf pipeline.
-        _strong_gpt_real    = gpt_ai_score < 30    # GPT very confident real
-        _moderate_gpt_real  = gpt_ai_score < 45    # GPT moderately confident real
+        _strong_gpt_real   = gpt_ai_score < 30
+        _moderate_gpt_real = gpt_ai_score < 45
         real_dominant = (
             (
                 # Original YouTube sidecar path
                 (_is_youtube and signal_ai_score > 50 and _moderate_gpt_real and _dino_score_ctx <= 5)
                 or
-                # Extended: any source where GPT is VERY confident real AND DINOv2 confirms.
-                # Conditions are intentionally strict to avoid misclassifying AI videos:
-                #   - Signal ambiguous (50-75 range) — above 75 is too strong to override
-                #   - GPT very confident real (< 30) — not just moderately real
-                #   - DINOv2 also confirms real (score <= 2, stricter than YouTube path)
-                # This catches high-noise real camera footage (dashcam, bodycam, news)
-                # uploaded directly rather than via YouTube link.
+                # Extended: uploaded files where GPT very confident real AND DINOv2 confirms.
+                # Signal ambiguous (50-75), GPT < 30, DINOv2 <= 2 — all three must agree.
                 (signal_ai_score > 50 and signal_ai_score <= 75 and _strong_gpt_real and _dino_score_ctx <= 2)
             )
         )
@@ -1026,9 +1014,9 @@ def run_detection_multiclip(video_path: str) -> tuple:
     # signal — real re-encodes rarely have both together.
     _lavf_flag = override and ov_label == "LAVF_AI_PIPELINE"
     if _lavf_flag:
-        # Only include chan_corr values that were NOT skipped by hi_noise/hevc_hd guard.
-        # If CHAN_CORR was skipped for scoring (real camera noise), it must not trigger
-        # the LAVF boost — YouTube re-encodes with Lavf AND have high noise (real camera).
+        # Only use chan_corr values that were NOT skipped by hi_noise/hevc_hd guard.
+        # YouTube re-encodes have high real-camera noise which skips CHAN_CORR scoring
+        # but the raw value was still high — must not trigger the LAVF boost.
         _all_chan_corr = [
             ctx.get("chan_corr", 0) for _, ctx, _ in valid
             if not ctx.get("chan_corr_skipped", False)
