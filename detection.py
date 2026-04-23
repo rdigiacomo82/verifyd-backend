@@ -203,7 +203,11 @@ def run_detection(video_path: str) -> tuple:
         # ov_ai_score is very low (3-15) — will be incorporated via signal_context
 
     # ── Engine 1: Signal detector ─────────────────────────────
-    signal_ai_score, signal_context = detect_ai(video_path)
+    _raw_signal = detect_ai(video_path)
+    if isinstance(_raw_signal, tuple):
+        signal_ai_score, signal_context = _raw_signal
+    else:
+        signal_ai_score, signal_context = int(_raw_signal), {}
     log.info("Signal detector ai_score: %d  content_type: %s",
              signal_ai_score, signal_context.get("content_type", "unknown"))
 
@@ -588,7 +592,12 @@ def run_detection_multiclip(video_path: str) -> tuple:
     def _detect_one(clip_path_offset):
         clip_path, offset_pct = clip_path_offset
         try:
-            score, context = detect_ai(clip_path)
+            _raw = detect_ai(clip_path)
+            # Handle both old (int) and new (int, dict) return signatures
+            if isinstance(_raw, tuple):
+                score, context = _raw
+            else:
+                score, context = int(_raw), {}
 
             # NPR frequency domain analysis — runs alongside signal detector
             # COMPRESSION GUARD: TikTok/Instagram/YouTube re-encode videos
