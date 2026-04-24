@@ -417,7 +417,7 @@ def process_photo_upload_job(
 
                 if email and "@" in email:
                     try:
-                        send_certification_email(email, job_id, authenticity, filename, download_url)
+                        send_certification_email(email, job_id, authenticity, filename, download_url, is_photo=True)
                     except Exception as em:
                         log.warning("Worker: email failed for %s: %s", job_id, em)
 
@@ -744,5 +744,6 @@ def process_link_job(
     finally:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
+
 
 

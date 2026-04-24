@@ -124,14 +124,31 @@ def send_certification_email(
     authenticity: int,
     original_filename: str,
     download_url: str,
+    is_photo: bool = False,
 ) -> bool:
     """
-    Send post-certification email when a video is certified REAL.
+    Send post-certification email when a video or photo is certified REAL.
     Includes download link, certificate link, and score.
+    Pass is_photo=True for photo certifications to use correct language.
     """
     cert_url      = f"{SITE_URL}/v/{certificate_id}"
     short_id      = certificate_id[:8].upper()
     safe_filename = original_filename[:40] + ("..." if len(original_filename) > 40 else "")
+
+    # Media-type strings — swap all "video" language to "photo" when is_photo=True
+    _media        = "photo" if is_photo else "video"
+    _Media        = "Photo" if is_photo else "Video"
+    _verified_lbl = "Real Photo Verified" if is_photo else "Real Video Verified"
+    _dl_label     = "Download Certified Photo" if is_photo else "Download Certified Video"
+    _share_label  = "Share Your Certified Photo" if is_photo else "Share Your Certified Video"
+    _share_desc   = f"Share this link with anyone to prove your {_media} is real:"
+    _share_tap    = f"Tap the link above to stream or share your certified {_media} directly."
+    _what_body    = (
+        f"VeriFYD's dual-engine analysis (signal detection + GPT-4o vision AI) assessed "
+        f"your {_media} and found no significant indicators of AI generation. Your certified "
+        f"{_media} includes the VeriFYD watermark as proof of authenticity."
+    )
+    _subject      = f"&#10003; Your {_media} has been certified — VeriFYD #{short_id}"
 
     # Score color — green for high, yellow for moderate
     score_color = "#22c55e" if authenticity >= 75 else "#f59e0b"
@@ -155,11 +172,11 @@ def send_certification_email(
             <td style="padding:40px 32px 24px;text-align:center;">
               <div style="display:inline-block;background:#052e16;border:1px solid #22c55e;border-radius:100px;padding:8px 20px;margin-bottom:24px;">
                 <span style="color:#22c55e;font-size:13px;font-weight:700;letter-spacing:1px;text-transform:uppercase;">
-                  &#10003; &nbsp;Real Video Verified
+                  &#10003; &nbsp;{_verified_lbl}
                 </span>
               </div>
               <h2 style="margin:0 0 8px;font-size:24px;font-weight:800;color:#ffffff;">
-                Your video has been certified
+                Your {_media} has been certified
               </h2>
               <p style="margin:0;color:#888888;font-size:15px;line-height:1.6;">
                 VeriFYD has analyzed <strong style="color:#ccc;">{safe_filename}</strong>
@@ -203,7 +220,7 @@ def send_certification_email(
                  style="display:block;background:#22c55e;color:#000000;text-decoration:none;
                         text-align:center;padding:16px;border-radius:10px;
                         font-size:15px;font-weight:700;margin-bottom:12px;">
-                &#11015;&#65039; &nbsp;Download Certified Video
+                &#11015;&#65039; &nbsp;{_dl_label}
               </a>
               <!-- View Certificate — secondary -->
               <a href="{cert_url}"
@@ -220,10 +237,10 @@ def send_certification_email(
             <td style="padding:0 32px 32px;">
               <div style="background:#0f0f0f;border:1px solid #7c3aed;border-radius:10px;padding:20px;text-align:center;">
                 <p style="margin:0 0 10px;color:#c4b5fd;font-size:13px;font-weight:700;letter-spacing:1px;text-transform:uppercase;">
-                  🔗 Share Your Certified Video
+                  🔗 {_share_label}
                 </p>
                 <p style="margin:0 0 12px;color:#888;font-size:12px;line-height:1.6;">
-                  Share this link with anyone to prove your video is real:
+                  {_share_desc}
                 </p>
                 <a href="{download_url}"
                    style="display:block;background:#1a1a1a;border:1px solid #7c3aed;border-radius:8px;
@@ -232,7 +249,7 @@ def send_certification_email(
                   {download_url}
                 </a>
                 <p style="margin:10px 0 0;color:#555;font-size:11px;">
-                  Tap the link above to stream or share your certified video directly.
+                  {_share_tap}
                 </p>
               </div>
             </td>
@@ -243,9 +260,7 @@ def send_certification_email(
             <td style="padding:0 32px 32px;">
               <p style="margin:0 0 12px;color:#555;font-size:12px;line-height:1.7;">
                 <strong style="color:#777;">What does this mean?</strong><br>
-                VeriFYD's dual-engine analysis (signal detection + GPT-4o vision AI) assessed
-                your video and found no significant indicators of AI generation. Your certified
-                video includes the VeriFYD watermark as proof of authenticity.
+                {_what_body}
               </p>
               <p style="margin:0;color:#444;font-size:11px;line-height:1.6;">
                 Note: VeriFYD results represent analytical guidance. See our
@@ -265,7 +280,7 @@ def send_certification_email(
     return _send({
         "from":    f"{FROM_NAME} <{FROM_ADDRESS}>",
         "to":      [to_email],
-        "subject": f"&#10003; Your video has been certified — VeriFYD #{short_id}",
+        "subject": f"&#10003; Your {_media} has been certified — VeriFYD #{short_id}",
         "html":    html,
     })
 
@@ -378,4 +393,5 @@ def send_enterprise_welcome_email(
         "subject": f"\U0001f680 Your VeriFYD Enterprise account is ready \u2014 {company_name}",
         "html":    html,
     })
+
 
