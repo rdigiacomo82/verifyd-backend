@@ -108,10 +108,6 @@ def _check_metadata_override(video_path: str) -> tuple:
         # Returns a soft override label so multi_clip_detection can apply
         # the LAVF+CHAN_CORR composite boost when all clips confirm it.
         if "lavf" in encoder and vendor in ("[0][0][0][0]", "", "0000"):
-            # Before flagging as AI pipeline, check if this is a YouTube re-encode.
-            # YouTube's transcoding pipeline always sets Lavf as the encoder AND writes
-            # "ISO Media file produced by Google Inc." in the stream handler_name.
-            # This is a legitimate re-encode, not an AI generator fingerprint — suppress.
             _handler_names = " ".join(
                 s.get("tags", {}).get("handler_name", "").lower()
                 for s in data.get("streams", [])
@@ -134,10 +130,19 @@ def _check_metadata_override(video_path: str) -> tuple:
         is_android = bool(android_ver)
         is_apple   = bool(apple_make or apple_model)
         # mp42/isom with creation_time and no Lavf encoder = real device recording
+        compatible_brands = fmt_tags.get("compatible_brands", "").lower()
+
+        # Exclude FFmpeg/AI pipeline container signatures:
+        # "iso4" and "iso6" in compatible_brands = ISO Base Media v4/v6 = FFmpeg output
+        # Real cameras use: isomiso2mp41, isomiso2avc1mp41, isomavc1, qt, mp41
+        # AI generators use: isomiso4, iso4, iso6 (FFmpeg default mux output)
+        _ffmpeg_ai_brand = any(b in compatible_brands for b in ("iso4", "iso6"))
+
         is_real_container = (
             major_brand in ("mp42", "isom", "M4V ", "qt  ") and
             bool(creation_time) and
-            "lavf" not in encoder.lower()
+            "lavf" not in encoder.lower() and
+            not _ffmpeg_ai_brand   # exclude FFmpeg AI pipeline containers
         )
 
         if is_android:
@@ -593,7 +598,6 @@ def run_detection_multiclip(video_path: str) -> tuple:
         clip_path, offset_pct = clip_path_offset
         try:
             _raw = detect_ai(clip_path)
-            # Handle both old (int) and new (int, dict) return signatures
             if isinstance(_raw, tuple):
                 score, context = _raw
             else:
@@ -874,11 +878,8 @@ def run_detection_multiclip(video_path: str) -> tuple:
         _moderate_gpt_real = gpt_ai_score < 45
         real_dominant = (
             (
-                # Original YouTube sidecar path
                 (_is_youtube and signal_ai_score > 50 and _moderate_gpt_real and _dino_score_ctx <= 5)
                 or
-                # Extended: uploaded files where GPT very confident real AND DINOv2 confirms.
-                # Signal ambiguous (50-75), GPT < 30, DINOv2 <= 2 — all three must agree.
                 (signal_ai_score > 50 and signal_ai_score <= 75 and _strong_gpt_real and _dino_score_ctx <= 2)
             )
         )
@@ -1014,9 +1015,6 @@ def run_detection_multiclip(video_path: str) -> tuple:
     # signal — real re-encodes rarely have both together.
     _lavf_flag = override and ov_label == "LAVF_AI_PIPELINE"
     if _lavf_flag:
-        # Only use chan_corr values that were NOT skipped by hi_noise/hevc_hd guard.
-        # YouTube re-encodes have high real-camera noise which skips CHAN_CORR scoring
-        # but the raw value was still high — must not trigger the LAVF boost.
         _all_chan_corr = [
             ctx.get("chan_corr", 0) for _, ctx, _ in valid
             if not ctx.get("chan_corr_skipped", False)
@@ -1044,14 +1042,29 @@ def run_detection_multiclip(video_path: str) -> tuple:
     # These break terrestrial signal assumptions. Cap combined score at
     # UNDETERMINED ceiling — metadata is more reliable than pixel signals
     # for content outside the detector's training distribution.
+    #
+    # OVERRIDE: When BOTH signal AND GPT are strongly confident AI (both >75),
+    # the ceiling does NOT apply. Two independent engines agreeing strongly on AI
+    # overrides a weak metadata heuristic. The isom+creation_time check is too
+    # permissive — AI generators (Runway, Kling, Sora) also output isom containers
+    # with creation timestamps. Only apply ceiling when engines are ambiguous.
+    _dual_engine_confident_ai = (signal_ai_score > 75 and gpt_ai_score > 75)
+
     if override and ov_label == "REAL" and combined_ai_score >= 70:
-        old_combined = combined_ai_score
-        combined_ai_score = min(combined_ai_score, 58.0)
-        log.info(
-            "Real device metadata ceiling: combined %.1f→%.1f "
-            "(metadata confirmed real camera, preventing AI verdict) | %s",
-            old_combined, combined_ai_score, ov_reason
-        )
+        if _dual_engine_confident_ai:
+            log.info(
+                "Real device metadata ceiling SKIPPED: signal=%d AND gpt=%d both >75 "
+                "(dual-engine confident AI overrides weak metadata heuristic) | %s",
+                signal_ai_score, gpt_ai_score, ov_reason
+            )
+        else:
+            old_combined = combined_ai_score
+            combined_ai_score = min(combined_ai_score, 58.0)
+            log.info(
+                "Real device metadata ceiling: combined %.1f→%.1f "
+                "(metadata confirmed real camera, preventing AI verdict) | %s",
+                old_combined, combined_ai_score, ov_reason
+            )
 
     combined_ai_score = max(0.0, min(100.0, combined_ai_score))
     authenticity = 100 - int(round(combined_ai_score))
