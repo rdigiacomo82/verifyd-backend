@@ -85,20 +85,30 @@ def _extract_photo_frames(image_path: str, n_crops: int = 4) -> list:
     import tempfile
     frames = []
     try:
-        # HEIC conversion for frame extraction
+        # HEIC conversion for frame extraction — cv2 and GPT both need JPEG
         _heic_tmp_fe = None
         _fe_ext = os.path.splitext(image_path)[1].lower()
         if _fe_ext in ('.heic', '.heif'):
             try:
                 import subprocess as _sp, tempfile as _tf2
                 _tmp = _tf2.mktemp(suffix='.jpg')
+                # Try ffmpeg first (fastest)
                 _r = _sp.run(['ffmpeg', '-y', '-i', image_path, '-q:v', '2', _tmp],
                              capture_output=True, timeout=30)
-                if _r.returncode == 0 and os.path.exists(_tmp):
+                if _r.returncode == 0 and os.path.exists(_tmp) and os.path.getsize(_tmp) > 1000:
                     _heic_tmp_fe = _tmp
                     image_path = _tmp
-            except Exception:
-                pass
+                    log.info("photo_detection frames: HEIC→JPEG via ffmpeg")
+                else:
+                    # Fallback: ImageMagick
+                    _r2 = _sp.run(['convert', image_path, _tmp],
+                                  capture_output=True, timeout=30)
+                    if _r2.returncode == 0 and os.path.exists(_tmp) and os.path.getsize(_tmp) > 1000:
+                        _heic_tmp_fe = _tmp
+                        image_path = _tmp
+                        log.info("photo_detection frames: HEIC→JPEG via ImageMagick")
+            except Exception as _he:
+                log.warning("photo_detection frames: HEIC conversion failed: %s", _he)
 
         img = cv2.imread(image_path)
         if img is None:

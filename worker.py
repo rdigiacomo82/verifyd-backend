@@ -329,7 +329,34 @@ def process_photo_upload_job(
             download_url = f"{BASE_URL}/download-photo/{job_id}"
             try:
                 from video import stamp_photo
-                stamp_photo(tmp_path, certified_path, job_id)
+
+                # HEIC files cannot be stamped by Pillow directly.
+                # Convert to JPEG first, then stamp, then store as JPEG.
+                _stamp_src = tmp_path
+                _heic_converted = None
+                if ext in (".heic", ".heif"):
+                    import subprocess as _sp, tempfile as _tf
+                    _jpg_tmp = _tf.mktemp(suffix=".jpg")
+                    _r = _sp.run(
+                        ["ffmpeg", "-y", "-i", tmp_path, "-q:v", "2", _jpg_tmp],
+                        capture_output=True, timeout=30
+                    )
+                    if _r.returncode == 0 and _os.path.exists(_jpg_tmp):
+                        _stamp_src = _jpg_tmp
+                        _heic_converted = _jpg_tmp
+                        certified_path = _os.path.join(
+                            tempfile.gettempdir(), f"cert_{job_id}.jpg"
+                        )
+                        ext = ".jpg"  # update ext so R2 upload uses correct extension
+                        log.info("Worker: HEIC→JPEG for stamping: %s", _jpg_tmp)
+                    else:
+                        log.warning("Worker: HEIC→JPEG conversion failed, skipping stamp")
+                        _stamp_src = None
+
+                if _stamp_src:
+                    stamp_photo(_stamp_src, certified_path, job_id)
+                if _heic_converted and _os.path.exists(_heic_converted):
+                    _os.remove(_heic_converted)
 
                 if _os.path.exists(certified_path):
                     try:
@@ -695,5 +722,6 @@ def process_link_job(
     finally:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
+
 
 
