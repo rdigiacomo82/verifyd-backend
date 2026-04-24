@@ -331,26 +331,48 @@ def process_photo_upload_job(
                 from video import stamp_photo
 
                 # HEIC files cannot be stamped by Pillow directly.
-                # Convert to JPEG first, then stamp, then store as JPEG.
+                # Convert to JPEG first using ImageMagick (ffmpeg cannot decode HEIC on Render).
                 _stamp_src = tmp_path
                 _heic_converted = None
                 if ext in (".heic", ".heif"):
                     import subprocess as _sp, tempfile as _tf
                     _jpg_tmp = _tf.mktemp(suffix=".jpg")
-                    _r = _sp.run(
-                        ["ffmpeg", "-y", "-i", tmp_path, "-q:v", "2", _jpg_tmp],
-                        capture_output=True, timeout=30
-                    )
-                    if _r.returncode == 0 and _os.path.exists(_jpg_tmp):
+                    _converted_ok = False
+
+                    # Method 1: ImageMagick convert (works on Render, used by photo_detector)
+                    try:
+                        _r = _sp.run(
+                            ["convert", tmp_path, _jpg_tmp],
+                            capture_output=True, timeout=30
+                        )
+                        if _r.returncode == 0 and _os.path.exists(_jpg_tmp) and _os.path.getsize(_jpg_tmp) > 1000:
+                            _converted_ok = True
+                            log.info("Worker: HEIC→JPEG via ImageMagick: %s", _jpg_tmp)
+                    except Exception as _e1:
+                        log.debug("Worker: ImageMagick HEIC conversion failed: %s", _e1)
+
+                    # Method 2: ffmpeg fallback
+                    if not _converted_ok:
+                        try:
+                            _r2 = _sp.run(
+                                ["ffmpeg", "-y", "-i", tmp_path, "-q:v", "2", _jpg_tmp],
+                                capture_output=True, timeout=30
+                            )
+                            if _r2.returncode == 0 and _os.path.exists(_jpg_tmp) and _os.path.getsize(_jpg_tmp) > 1000:
+                                _converted_ok = True
+                                log.info("Worker: HEIC→JPEG via ffmpeg: %s", _jpg_tmp)
+                        except Exception as _e2:
+                            log.debug("Worker: ffmpeg HEIC conversion failed: %s", _e2)
+
+                    if _converted_ok:
                         _stamp_src = _jpg_tmp
                         _heic_converted = _jpg_tmp
                         certified_path = _os.path.join(
                             tempfile.gettempdir(), f"cert_{job_id}.jpg"
                         )
                         ext = ".jpg"  # update ext so R2 upload uses correct extension
-                        log.info("Worker: HEIC→JPEG for stamping: %s", _jpg_tmp)
                     else:
-                        log.warning("Worker: HEIC→JPEG conversion failed, skipping stamp")
+                        log.warning("Worker: HEIC→JPEG all conversion methods failed, skipping stamp")
                         _stamp_src = None
 
                 if _stamp_src:
@@ -722,6 +744,5 @@ def process_link_job(
     finally:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
-
 
 
