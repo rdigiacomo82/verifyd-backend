@@ -85,6 +85,21 @@ def _extract_photo_frames(image_path: str, n_crops: int = 4) -> list:
     import tempfile
     frames = []
     try:
+        # HEIC conversion for frame extraction
+        _heic_tmp_fe = None
+        _fe_ext = os.path.splitext(image_path)[1].lower()
+        if _fe_ext in ('.heic', '.heif'):
+            try:
+                import subprocess as _sp, tempfile as _tf2
+                _tmp = _tf2.mktemp(suffix='.jpg')
+                _r = _sp.run(['ffmpeg', '-y', '-i', image_path, '-q:v', '2', _tmp],
+                             capture_output=True, timeout=30)
+                if _r.returncode == 0 and os.path.exists(_tmp):
+                    _heic_tmp_fe = _tmp
+                    image_path = _tmp
+            except Exception:
+                pass
+
         img = cv2.imread(image_path)
         if img is None:
             return []
@@ -123,6 +138,8 @@ def _extract_photo_frames(image_path: str, n_crops: int = 4) -> list:
             frames.append(base64.b64encode(cbuf.tobytes()).decode("utf-8"))
 
         log.info("photo_detection: extracted %d frames/crops from %s", len(frames), image_path)
+        if _heic_tmp_fe and os.path.exists(_heic_tmp_fe):
+            os.remove(_heic_tmp_fe)
         return frames
 
     except Exception as e:
@@ -197,18 +214,6 @@ def _build_photo_gpt_context(signal_score: int, signal_context: dict) -> dict:
         photo_notes.append(
             "AI generator software tag found in EXIF metadata. "
             "Score generator_artifacts 9-10 immediately."
-        )
-
-    # Splice/composite hint for GPT
-    splice = signal_context.get("splice_score", 0)
-    if splice > 30:
-        photo_notes.append(
-            f"Noise inconsistency detected across image regions (splice_score={splice:.0f}). "
-            "This suggests a COMPOSITE image — a real person or object photographed separately "
-            "and placed onto an AI-generated background. "
-            "Inspect the boundary between the foreground subject and background carefully. "
-            "Look for: inconsistent lighting direction, background too perfect/AI-smooth, "
-            "edge artifacts at person/background boundary, background depth unrealistic."
         )
 
     if photo_notes:
@@ -299,19 +304,6 @@ def run_photo_detection(image_path: str) -> tuple:
         both_real     = signal_score < 45 and gpt_score < 45
         both_ai       = signal_score > 65 and gpt_score > 65
 
-        # Composite/no-EXIF guard: when signal is very low (near 0) but:
-        #   - No EXIF metadata (already flagged as AI signal in photo_detector)
-        #   - GPT scores 55+ (moderately confident AI)
-        # The 85/15 split is too aggressive — a real photo composited onto
-        # an AI background will have real-camera pixel signals (high noise,
-        # real texture) but GPT correctly identifies AI elements.
-        # In this case give GPT equal weight (50/50).
-        _no_exif = signal_context.get("meta_adjustment", 0) >= 10  # +10 = no EXIF
-        _splice  = signal_context.get("splice_score", 0) > 30       # composite detected
-        _low_signal_gpt_disagrees = (
-            signal_score < 40 and gpt_score > 55 and (_no_exif or _splice)
-        )
-
         if gpt_dominant:
             combined, w_sig, w_gpt = (
                 signal_score * 0.25 + gpt_score * 0.75, 0.25, 0.75
@@ -322,15 +314,6 @@ def run_photo_detection(image_path: str) -> tuple:
                 signal_score * 0.70 + gpt_score * 0.30, 0.70, 0.30
             )
             mode = "clash→AI (signal leads)"
-        elif _low_signal_gpt_disagrees:
-            # No-EXIF + GPT sees AI + signal near 0 → likely composite image
-            # Give GPT equal weight — signal is being fooled by real-photo region
-            combined, w_sig, w_gpt = (
-                signal_score * 0.50 + gpt_score * 0.50, 0.50, 0.50
-            )
-            mode = "composite-suspect (no-exif + GPT disagrees)"
-            log.info("COMPOSITE GUARD: signal=%d near 0 but no_exif=%s splice=%.0f gpt=%d → 50/50 blend",
-                     signal_score, _no_exif, signal_context.get("splice_score", 0), gpt_score)
         elif clash_real:
             combined, w_sig, w_gpt = (
                 signal_score * 0.85 + gpt_score * 0.15, 0.85, 0.15
