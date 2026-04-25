@@ -25,6 +25,12 @@ services:
       # Leave empty to skip proxy (TikTok will fail from Render's datacenter IP).
       - key: RESIDENTIAL_PROXY_URL
         value: ""   # <-- fill this in after signing up
+      # HuggingFace model cache — stored on persistent disk so models
+      # (DINOv2 ~350MB + ViT Deepfake ~330MB) download once and never again.
+      # Without this, models re-download on every deploy from the ephemeral
+      # container filesystem which only has ~1GB total space.
+      - key: HF_HOME
+        value: /var/data/huggingface
 
     # Persistent disk — prevents videos/, certified/, and the
     # SQLite database from being wiped on every deploy/restart.
