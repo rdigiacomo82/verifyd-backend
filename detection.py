@@ -44,6 +44,13 @@ def _get_dino_analyzer():
     except Exception:
         return None, None
 
+def _get_deepfake_analyzer():
+    try:
+        from deepfake_detector import analyze_deepfake, get_deepfake_contribution
+        return analyze_deepfake, get_deepfake_contribution
+    except Exception:
+        return None, None
+
 THRESHOLD_REAL         = 55
 THRESHOLD_UNDETERMINED = 40
 
@@ -686,6 +693,40 @@ def run_detection_multiclip(video_path: str) -> tuple:
                     log.debug("DINOv2 @%.0f%%: skipped (signal=%d not ambiguous)", offset_pct * 100, score)
             except Exception as e:
                 log.debug("DINOv2 analysis skipped for clip @%.0f%%: %s", offset_pct * 100, e)
+
+            # Deepfake (face-swap) detection — ViT model
+            # Only activates on portrait/face content with skin present
+            # Runs AFTER DINOv2 and signal detection, contributes small weight
+            try:
+                analyze_deepfake, get_deepfake_contribution = _get_deepfake_analyzer()
+                if analyze_deepfake:
+                    _ct = context.get("content_type", "cinematic")
+                    _skin = context.get("skin_ratio", 0.0)
+                    df_score, df_signals = analyze_deepfake(
+                        clip_path,
+                        content_type=_ct,
+                        skin_ratio=_skin,
+                    )
+                    context["deepfake_score"]   = df_score
+                    context["deepfake_signals"] = df_signals
+                    if df_signals.get("available") and df_score > 0:
+                        df_contribution = get_deepfake_contribution(df_score, score, _ct)
+                        context["deepfake_contribution"] = df_contribution
+                        if df_contribution != 0:
+                            log.info(
+                                "DeepfakeDetector @%.0f%%: score=%d contribution=%+d "
+                                "(signal=%d content=%s skin=%.3f)",
+                                offset_pct * 100, df_score, df_contribution,
+                                score, _ct, _skin,
+                            )
+                            score = int(round(min(100, max(0, score + df_contribution))))
+                    elif df_signals.get("skipped_reason"):
+                        log.debug(
+                            "DeepfakeDetector @%.0f%%: skipped (%s)",
+                            offset_pct * 100, df_signals["skipped_reason"],
+                        )
+            except Exception as e:
+                log.debug("DeepfakeDetector skipped for clip @%.0f%%: %s", offset_pct * 100, e)
 
             log.info("Clip @%.0f%%: signal_score=%d content=%s",
                      offset_pct * 100, score, context.get("content_type", "?"))

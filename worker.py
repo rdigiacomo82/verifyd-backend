@@ -33,6 +33,14 @@ try:
 except Exception as _dino_err:
     log.warning("Worker startup: DINOv2 pre-warm failed (%s) — will lazy-load per job", _dino_err)
 
+try:
+    from deepfake_detector import _load_model as _deepfake_prewarm
+    log.info("Worker startup: pre-warming ViT Deepfake Detector...")
+    _deepfake_prewarm()
+    log.info("Worker startup: Deepfake Detector pre-warm complete — model cached in parent process")
+except Exception as _df_err:
+    log.warning("Worker startup: Deepfake Detector pre-warm failed (%s) — will lazy-load per job", _df_err)
+
 RESULT_TTL = 1800   # 30 min
 
 
