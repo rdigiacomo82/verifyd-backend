@@ -1856,6 +1856,178 @@ def admin_clear_cache(url: str = "", key: str = ""):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+@app.get("/admin-disk-cleanup/")
+def admin_disk_cleanup(key: str = "", dry_run: bool = False):
+    """
+    Clean up disk space by removing:
+    1. Orphaned certified files on disk with no matching Redis TTL
+       (files that should have expired but weren't deleted)
+    2. Tmp clip files left over from crashed jobs
+    3. Old raw upload files in /var/data/videos/
+
+    Pass dry_run=true to see what would be deleted without deleting.
+    Example: /admin-disk-cleanup/?key=Honda%236915
+    Example: /admin-disk-cleanup/?key=Honda%236915&dry_run=true
+    """
+    if not _is_admin(key):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    import shutil as _shutil
+    from config import CERT_DIR, UPLOAD_DIR, TMP_DIR
+
+    results = {
+        "dry_run": dry_run,
+        "deleted": [],
+        "skipped": [],
+        "errors": [],
+        "freed_bytes": 0,
+    }
+
+    try:
+        import redis as _redis_dc
+        r = _redis_dc.from_url(
+            os.environ.get("REDIS_URL", "redis://localhost:6379"),
+            decode_responses=True
+        )
+    except Exception as e:
+        return JSONResponse({"error": f"Redis connection failed: {e}"}, status_code=500)
+
+    # ── 1. Orphaned certified files ───────────────────────────
+    # These are files in /var/data/certified/ (local disk fallback)
+    # that have no matching cert: key in Redis (already expired/served)
+    for _dir in [CERT_DIR, "/var/data/certified"]:
+        if not os.path.isdir(_dir):
+            continue
+        for fname in os.listdir(_dir):
+            fpath = os.path.join(_dir, fname)
+            if not os.path.isfile(fpath):
+                continue
+            # Extract job_id from filename (cert_<job_id>.mp4 or cert_<job_id>.jpg)
+            _base = fname.replace("cert_", "").replace(".mp4", "").replace(".jpg", "").replace(".png", "")
+            _redis_key = f"cert:{_base}"
+            _exists_in_redis = r.exists(_redis_key)
+            fsize = os.path.getsize(fpath)
+            if not _exists_in_redis:
+                results["freed_bytes"] += fsize
+                if not dry_run:
+                    try:
+                        os.remove(fpath)
+                        results["deleted"].append(f"cert/{fname} ({fsize//1024}KB)")
+                        log.info("Disk cleanup: deleted orphaned cert file %s", fpath)
+                    except Exception as e:
+                        results["errors"].append(f"{fname}: {e}")
+                else:
+                    results["deleted"].append(f"[DRY RUN] cert/{fname} ({fsize//1024}KB)")
+            else:
+                results["skipped"].append(f"cert/{fname} (still active in Redis)")
+
+    # ── 2. Old tmp clip files ─────────────────────────────────
+    # /var/data/tmp/ should be cleaned after each job but crashes can leave files
+    # Delete anything older than 2 hours
+    import time as _time
+    _now = _time.time()
+    _tmp_dirs = [TMP_DIR, "/data/tmp", "/var/data/tmp"]
+    for _dir in _tmp_dirs:
+        if not os.path.isdir(_dir):
+            continue
+        for fname in os.listdir(_dir):
+            fpath = os.path.join(_dir, fname)
+            if not os.path.isfile(fpath):
+                continue
+            _age_hours = (_now - os.path.getmtime(fpath)) / 3600
+            if _age_hours > 2:
+                fsize = os.path.getsize(fpath)
+                results["freed_bytes"] += fsize
+                if not dry_run:
+                    try:
+                        os.remove(fpath)
+                        results["deleted"].append(f"tmp/{fname} ({fsize//1024}KB, {_age_hours:.1f}h old)")
+                    except Exception as e:
+                        results["errors"].append(f"tmp/{fname}: {e}")
+                else:
+                    results["deleted"].append(f"[DRY RUN] tmp/{fname} ({fsize//1024}KB, {_age_hours:.1f}h old)")
+
+    # ── 3. Old raw upload files ───────────────────────────────
+    # /var/data/videos/ — these should be cleaned after processing
+    # but delete anything older than 1 hour as a safety net
+    if os.path.isdir(UPLOAD_DIR):
+        for fname in os.listdir(UPLOAD_DIR):
+            fpath = os.path.join(UPLOAD_DIR, fname)
+            if not os.path.isfile(fpath):
+                continue
+            _age_hours = (_now - os.path.getmtime(fpath)) / 3600
+            if _age_hours > 1:
+                fsize = os.path.getsize(fpath)
+                results["freed_bytes"] += fsize
+                if not dry_run:
+                    try:
+                        os.remove(fpath)
+                        results["deleted"].append(f"videos/{fname} ({fsize//1024}KB, {_age_hours:.1f}h old)")
+                    except Exception as e:
+                        results["errors"].append(f"videos/{fname}: {e}")
+                else:
+                    results["deleted"].append(f"[DRY RUN] videos/{fname} ({fsize//1024}KB, {_age_hours:.1f}h old)")
+
+    results["freed_mb"] = round(results["freed_bytes"] / (1024 * 1024), 2)
+    results["summary"] = (
+        f"{'Would free' if dry_run else 'Freed'} {results['freed_mb']}MB across "
+        f"{len(results['deleted'])} files"
+    )
+    log.info("Disk cleanup: freed=%.2fMB deleted=%d errors=%d dry_run=%s",
+             results["freed_mb"], len(results["deleted"]), len(results["errors"]), dry_run)
+    return JSONResponse(results)
+
+
+@app.get("/admin-disk-usage/")
+def admin_disk_usage(key: str = ""):
+    """
+    Show current disk usage breakdown.
+    Example: /admin-disk-usage/?key=Honda%236915
+    """
+    if not _is_admin(key):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    import shutil as _shutil
+    from config import CERT_DIR, UPLOAD_DIR, TMP_DIR
+
+    def _dir_size(path):
+        total = 0
+        count = 0
+        if os.path.isdir(path):
+            for f in os.listdir(path):
+                fp = os.path.join(path, f)
+                if os.path.isfile(fp):
+                    total += os.path.getsize(fp)
+                    count += 1
+        return {"files": count, "mb": round(total / (1024*1024), 2)}
+
+    # Overall disk
+    try:
+        _total, _used, _free = _shutil.disk_usage("/data")
+        disk_info = {
+            "total_gb": round(_total / (1024**3), 2),
+            "used_gb":  round(_used  / (1024**3), 2),
+            "free_gb":  round(_free  / (1024**3), 2),
+            "used_pct": round(_used / _total * 100, 1),
+        }
+    except Exception:
+        disk_info = {}
+
+    return JSONResponse({
+        "disk": disk_info,
+        "directories": {
+            "certified":       _dir_size(CERT_DIR),
+            "certified_var":   _dir_size("/var/data/certified"),
+            "uploads":         _dir_size(UPLOAD_DIR),
+            "tmp":             _dir_size(TMP_DIR),
+            "tmp_data":        _dir_size("/data/tmp"),
+            "hf_cache":        _dir_size("/data/huggingface"),
+            "database":        {"mb": round(os.path.getsize("/var/data/certificates.db") / (1024*1024), 2) if os.path.exists("/var/data/certificates.db") else 0},
+        },
+        "tip": "Run /admin-disk-cleanup/?key=... to free space from orphaned files"
+    })
+
+
 @app.get("/admin-reset-user/")
 def admin_reset_user(email: str = "", key: str = ""):
     """Reset a user's period_uses to 0 for testing."""
