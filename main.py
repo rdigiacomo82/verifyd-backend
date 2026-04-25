@@ -2003,7 +2003,7 @@ def admin_disk_usage(key: str = ""):
 
     # Overall disk
     try:
-        _total, _used, _free = _shutil.disk_usage("/data")
+        _total, _used, _free = _shutil.disk_usage("/var/data" if os.path.isdir("/var/data") else "/data")
         disk_info = {
             "total_gb": round(_total / (1024**3), 2),
             "used_gb":  round(_used  / (1024**3), 2),
@@ -2021,9 +2021,11 @@ def admin_disk_usage(key: str = ""):
             "uploads":         _dir_size(UPLOAD_DIR),
             "tmp":             _dir_size(TMP_DIR),
             "tmp_data":        _dir_size("/data/tmp"),
-            "hf_cache":        _dir_size("/data/huggingface"),
+            "hf_cache":        _dir_size(os.environ.get("HF_HOME", "/var/data/huggingface")),
             "database":        {"mb": round(os.path.getsize("/var/data/certificates.db") / (1024*1024), 2) if os.path.exists("/var/data/certificates.db") else 0},
         },
+        "hf_home": os.environ.get("HF_HOME", "not set"),
+        "persistent_disk": "/var/data" if os.path.isdir("/var/data") else "not mounted",
         "tip": "Run /admin-disk-cleanup/?key=... to free space from orphaned files"
     })
 
