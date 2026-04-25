@@ -735,6 +735,26 @@ def run_detection_multiclip(video_path: str) -> tuple:
             log.warning("Signal detection failed for clip @%.0f%%: %s", offset_pct * 100, e)
             return None, {}, offset_pct
 
+    # ── Start frame extraction in background BEFORE signal detection ──
+    # This is the parallelization: frame extraction (~1-2s) overlaps with
+    # signal detection (~8-12s), saving time without changing any logic.
+    # The frames are retrieved later in the GPT section via _frame_future.result()
+    _frames_per_clip_pre = max(2, 8 // len(clips))
+    def _extract_all_frames():
+        """Extract frames from all clips for GPT. Runs in background thread."""
+        _frames = []
+        for _cp, _ in clips:
+            try:
+                _f = extract_key_frames(_cp, n_frames=_frames_per_clip_pre)
+                _frames.extend(_f)
+            except Exception as _e:
+                log.debug("Background frame extraction failed for clip: %s", _e)
+        return _frames
+
+    _frame_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    _frame_future = _frame_executor.submit(_extract_all_frames)
+
+    # ── Run signal detection on all clips in parallel ─────────
     clip_results = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
         futures = [ex.submit(_detect_one, c) for c in clips]
@@ -836,21 +856,38 @@ def run_detection_multiclip(video_path: str) -> tuple:
         signal_context["clip_signal_scores"] = signal_scores
 
     # ── GPT vision — single call with frames from all clips ───
+    #
+    # PARALLELIZATION: Frame extraction runs in a background thread that was
+    # started BEFORE signal detection completed (see _frame_future below).
+    # This overlaps the ~1-2s frame extraction with the tail end of signal
+    # detection, saving time without changing any logic.
+    #
+    # The GPT API call itself still waits for signal_context to be fully
+    # populated (hybrid_flag, signal_scores, etc.) before being sent.
+    # Zero change to detection accuracy or blend logic.
     all_frames = []
-    frames_per_clip = max(2, 8 // n_clips)
-    for clip_path, _ in clips:
-        try:
-            frames = extract_key_frames(clip_path, n_frames=frames_per_clip)
-            all_frames.extend(frames)
-        except Exception as e:
-            log.warning("Frame extraction failed for clip: %s", e)
+    try:
+        # Retrieve pre-extracted frames from the background thread
+        # _frame_future was submitted before signal detection started
+        all_frames = _frame_future.result(timeout=30)
+    except Exception as e:
+        log.warning("Parallel frame extraction failed (%s) — retrying inline", e)
+        # Fallback: extract frames inline if parallel extraction failed
+        frames_per_clip = max(2, 8 // n_clips)
+        for clip_path, _ in clips:
+            try:
+                frames = extract_key_frames(clip_path, n_frames=frames_per_clip)
+                all_frames.extend(frames)
+            except Exception as fe:
+                log.warning("Frame extraction failed for clip: %s", fe)
 
     if not all_frames:
         log.warning("No frames extracted — using signal only")
         gpt_result = {"ai_probability": 50, "reasoning": "Frame extraction failed",
                       "flags": [], "available": False}
     else:
-        # Add hybrid context to GPT prompt
+        # Add hybrid context to GPT prompt — still uses full signal_context
+        # populated after signal detection completed
         if hybrid_flag:
             signal_context["_extra_context"] = (
                 f"NOTE: This video was sampled at {n_clips} points in time. "
@@ -858,6 +895,12 @@ def run_detection_multiclip(video_path: str) -> tuple:
                 f"suggesting mixed content — some segments real, some AI-generated."
             )
         gpt_result = gpt_vision_score_with_context(all_frames, signal_context)
+
+    # Clean up the frame extraction executor
+    try:
+        _frame_executor.shutdown(wait=False)
+    except Exception:
+        pass
 
     gpt_ai_score  = gpt_result.get("ai_probability", 50)
     gpt_available = gpt_result.get("available", False)
