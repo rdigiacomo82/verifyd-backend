@@ -69,6 +69,37 @@ async def lifespan(app: FastAPI):
     # Startup
     init_db()
     log.info("VeriFYD startup complete")
+
+    # ── Keepalive scheduler ─────────────────────────────────
+    # Enqueues a lightweight no-op job every 8 minutes to prevent
+    # Render from suspending the worker process between real jobs.
+    # Cold starts add ~15-20s (model pre-warm) — this eliminates them.
+    import threading as _threading
+    import time as _time
+
+    def _keepalive_scheduler():
+        """Background thread that enqueues keepalive pings every 8 minutes."""
+        _time.sleep(60)  # Wait 1 minute after startup before first ping
+        while True:
+            try:
+                import redis as _redis
+                import rq as _rq
+                _r = _redis.from_url(
+                    os.environ.get("REDIS_URL", "redis://localhost:6379"),
+                    decode_responses=False
+                )
+                _q = _rq.Queue("verifyd", connection=_r)
+                from worker import keepalive_ping
+                _q.enqueue(keepalive_ping, job_timeout=10, result_ttl=60)
+                log.info("Keepalive: enqueued ping to keep worker warm")
+            except Exception as _ke:
+                log.debug("Keepalive: enqueue failed (%s) — worker may be restarting", _ke)
+            _time.sleep(480)  # 8 minutes
+
+    _t = _threading.Thread(target=_keepalive_scheduler, daemon=True, name="keepalive")
+    _t.start()
+    log.info("Keepalive scheduler started — pinging worker every 8 minutes")
+
     yield
     # Shutdown (add cleanup here if needed)
 

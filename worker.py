@@ -753,5 +753,25 @@ def process_link_job(
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
 
+# ─────────────────────────────────────────────────────────────
+#  Keepalive job — prevents worker cold starts
+# ─────────────────────────────────────────────────────────────
+def keepalive_ping():
+    """
+    Lightweight no-op job enqueued every 8 minutes by main.py scheduler.
+
+    PURPOSE: Render's worker service suspends after inactivity, causing
+    cold starts that add ~15-20s to the next real job (model pre-warm).
+    This job keeps the worker process alive between real user submissions
+    so models stay cached in memory at all times.
+
+    The job does nothing except log a heartbeat. Total execution time: <1ms.
+    Redis TTL for result: 60 seconds (no need to keep longer).
+    """
+    import time as _time
+    _ts = _time.strftime("%Y-%m-%d %H:%M:%S UTC", _time.gmtime())
+    log.info("Keepalive ping: worker alive at %s — models cached in memory", _ts)
+    return {"status": "alive", "ts": _ts}
+
 
 
