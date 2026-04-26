@@ -909,7 +909,64 @@ def _build_physics_summary(ctx: dict) -> str:
             "THAT IS AN AI SIGNAL. Score physics_violations 7-9, "
             "background_realism 7-9, motion_physics 7-9. "
             "Aim for ai_probability 70-90 unless you see clear real-camera artifacts "
-            "(compression noise, shaky camera, imperfect focus on subject)."
+            "(compression noise, shaky camera, imperfect focus on subject).\n\n"
+            "⛔ SCORING BLOCK — DO NOT score any dimension 0-2 (real) unless you can "
+            "state a SPECIFIC visual observation as evidence. Examples of valid evidence:\n"
+            "  motion_physics=2: 'hooves visibly compress into mud on each stride'\n"
+            "  background_realism=2: 'visible camera shake and imperfect focus on subject'\n"
+            "  temporal_stability=2: 'fur texture consistent with real compression grain'\n"
+            "'Looks natural' or 'appears real' is NOT evidence — score 5 not 2.\n"
+            "Compression noise from VP9/H264 re-encoding is NOT real camera grain — "
+            "do not treat it as evidence of authentic footage."
+        )
+
+    # ── Exotic bird / large animal portrait hint ────────────
+    # Shoebill, cassowary, hornbill, pelican, secretary bird videos
+    # filmed in close-up portrait style with a human nearby are
+    # extremely common AI content. The portrait=True flag combined
+    # with cinematic/action content type and moderate skin_ratio
+    # (the human in frame) is the telltale pattern.
+    _portrait_flag = ctx.get("portrait", False)
+    _is_exotic_bird_pattern = (
+        content_type in ("cinematic", "action") and
+        _portrait_flag and
+        skin_ratio is not None and 0.08 < skin_ratio < 0.30
+    )
+    if _is_exotic_bird_pattern:
+        hints.append(
+            "🚨 EXOTIC BIRD / LARGE ANIMAL PORTRAIT — EXTREMELY HIGH AI PROBABILITY:\n"
+            "Videos showing large exotic birds (shoebill, cassowary, hornbill, pelican, "
+            "secretary bird, condor) or large animals filmed in close-up portrait style "
+            "with a human nearby are among the most viral AI-generated content in 2026. "
+            "Kling and Sora produce these convincingly. Your DEFAULT assumption is AI.\n\n"
+            "THIS VIDEO MATCHES THE PATTERN: cinematic/action content + portrait framing "
+            "+ moderate skin ratio (human visible in frame with animal).\n\n"
+            "CRITICAL — DO NOT score 0-2 (real) on ANY dimension without SPECIFIC evidence:\n"
+            "  ❌ INVALID: 'the bird looks natural' → score 5 (uncertain), not 2\n"
+            "  ❌ INVALID: 'motion appears realistic' → score 5 (uncertain), not 2\n"
+            "  ❌ INVALID: 'lighting seems consistent' → score 5 (uncertain), not 2\n"
+            "  ✓ VALID for score 2: 'beak has visible keratin texture variation and "
+            "asymmetric edge wear consistent with real bone/keratin'\n"
+            "  ✓ VALID for score 2: 'feathers show individual barb separation and "
+            "directional clumping from air movement, not uniform rendering'\n"
+            "  ✓ VALID for score 2: 'visible handheld camera shake with natural "
+            "focus breathing on the bird'\n\n"
+            "SPECIFIC CHECKS FOR BIRD CONTENT:\n"
+            "  👁️ EYES: Real bird eyes have visible scleral rings, iris texture, "
+            "natural moisture highlights, and asymmetric catchlights. AI bird eyes "
+            "are perfectly round, symmetrically lit, and glassy.\n"
+            "  🪶 FEATHERS: Real feathers have micro-barb detail, dirt/wear at "
+            "tips, and shift direction with movement. AI feathers are uniformly "
+            "rendered with identical texture across the entire surface.\n"
+            "  🦵 FEET/LEGS: Real bird feet grip surfaces, show tendon movement "
+            "under skin, and leave physical impressions. AI bird feet often float "
+            "slightly or have unnaturally smooth skin.\n"
+            "  🎬 CAMERA BEHAVIOR: Real wildlife footage has imperfect focus, "
+            "natural exposure adjustment as the bird moves, and micro-shake. "
+            "AI content has cinematic-quality stable framing — too perfect.\n\n"
+            "→ If you cannot cite SPECIFIC feather/eye/foot evidence for a real score: "
+            "score motion_physics 7, background_realism 7, temporal_stability 7, "
+            "and aim for ai_probability 65-85."
         )
 
     # ── High-skin-ratio creature / AI animal render hint ───
@@ -1151,6 +1208,7 @@ def gpt_vision_score_with_context(frames_b64: list, physics_context: dict) -> di
     result          = analyze_frames_with_gpt(frames_b64, physics_summary, content_type)
     result["available"] = True
     return result
+
 
 
 
