@@ -90,7 +90,7 @@ async def lifespan(app: FastAPI):
                 )
                 _q = _rq.Queue("verifyd", connection=_r)
                 from worker import keepalive_ping
-                _q.enqueue(keepalive_ping, job_timeout=10, result_ttl=60)
+                _q.enqueue(keepalive_ping, job_timeout=60, result_ttl=60)
                 log.info("Keepalive: enqueued ping to keep worker warm")
             except Exception as _ke:
                 log.debug("Keepalive: enqueue failed (%s) — worker may be restarting", _ke)
