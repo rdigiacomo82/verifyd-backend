@@ -940,8 +940,13 @@ def run_detection_multiclip(video_path: str) -> tuple:
         # The signal uncertainty pull (30% toward 50) still only applies to low-res (<500k px)
         # since that addresses a different problem (insufficient pixels for reliable analysis).
         _is_youtube = "youtube" in _video_source.lower()
+        _is_instagram = "instagram" in _video_source.lower()
+        # Instagram re-encodes all videos to VP9 at 540p, creating compression
+        # noise that mimics real camera grain — same problem as YouTube H264.
+        # Suppress real_dominant and clash->real for Instagram sources.
         _youtube_signal_unreliable = (
-            signal_context.get("youtube_lowres_adjusted", False) or _is_youtube
+            signal_context.get("youtube_lowres_adjusted", False) or
+            _is_youtube or _is_instagram
         )
 
         clash_real   = (signal_ai_score < 50 and gpt_ai_score > 50 and gpt_ai_score < 75
@@ -962,16 +967,26 @@ def run_detection_multiclip(video_path: str) -> tuple:
         _moderate_gpt_real = gpt_ai_score < 45
         real_dominant = (
             (
-                (_is_youtube and signal_ai_score > 50 and _moderate_gpt_real and _dino_score_ctx <= 5)
+                # YouTube/Instagram: compression fakes real grain, so real_dominant
+                # applies when GPT and DINOv2 both confirm real.
+                # NOT for cinematic/action content — too many AI animal/wildlife videos
+                # fool GPT into scoring real. Signal detector is more reliable there.
+                ((_is_youtube or _is_instagram) and signal_ai_score > 50
+                 and _moderate_gpt_real and _dino_score_ctx <= 5
+                 and content_type not in ("cinematic", "action"))
                 or
-                (signal_ai_score > 50 and signal_ai_score <= 75 and _strong_gpt_real and _dino_score_ctx <= 2)
+                # Uploaded files: signal ambiguous, GPT very confident real, DINOv2 confirms.
+                # NOT for cinematic/action — AI wildlife videos fool GPT.
+                (signal_ai_score > 50 and signal_ai_score <= 75 and _strong_gpt_real
+                 and _dino_score_ctx <= 2
+                 and content_type not in ("cinematic", "action"))
             )
         )
 
         if _youtube_signal_unreliable and signal_ai_score < 50 and gpt_ai_score > 50:
             log.info(
-                "YOUTUBE: clash->real suppressed — "
-                "signal(%d) noise unreliable for YouTube (H264 compression mimics real grain), "
+                "YOUTUBE/INSTAGRAM: clash->real suppressed — "
+                "signal(%d) noise unreliable (H264/VP9 compression mimics real grain), "
                 "GPT(%d) gets default weight",
                 signal_ai_score, gpt_ai_score
             )
@@ -1223,3 +1238,4 @@ def run_detection_multiclip(video_path: str) -> tuple:
         "threshold_undet":    THRESHOLD_UNDETERMINED,
     }
     return authenticity, label, detail
+
