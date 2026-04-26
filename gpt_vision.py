@@ -510,7 +510,7 @@ def analyze_frames_with_gpt(frames_b64: list, physics_summary: str = "",
         payload = {
             "model":       GPT_MODEL,
             "messages":    [{"role": "user", "content": content}],
-            "max_tokens":  800,         # increased from 400 — rubric needs room
+            "max_tokens":  500,         # reduced from 800 — typical response is 260-310 tokens, 500 gives 60% buffer
             "temperature": 0.1,
         }
 
