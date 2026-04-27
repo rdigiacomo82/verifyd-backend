@@ -472,28 +472,14 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
             log.exception("Sync fallback also failed for %s", raw_path)
             return JSONResponse({"error": str(e2)}, status_code=500)
 
-    # ── Transparent polling — wait for worker result ──────────
-    # Frontend sees same response format as before — no job_id exposed.
-    import asyncio
-    for _ in range(120):   # poll up to 6 minutes
-        await asyncio.sleep(3)
-        result = get_job_result(job_id)
-        if result and result.get("job_status") == "complete":
-            result.pop("job_status", None)
-            return JSONResponse(result)
-        if result and result.get("job_status") == "error":
-            # Never expose raw tracebacks to widget end-users
-            raw_error = result.get("error", "")
-            is_traceback = ("Traceback" in raw_error or "File /opt" in raw_error or len(raw_error) > 200)
-            safe_error = (
-                "Analysis failed. Please try again or contact support."
-                if is_traceback
-                else raw_error or "Analysis failed. Please try again."
-            )
-            log.error("Job error: %s", raw_error[:300])
-            return JSONResponse({"error": safe_error}, status_code=500)
-
-    return JSONResponse({"error": "Analysis timed out. Please try again."}, status_code=504)
+    # ── Return immediately — frontend polls /job-status/{job_id} ──────────
+    # This allows the worker optimization to take effect: the worker can store
+    # an early detection result with video_ready=False, and the UI can display
+    # the authenticity score while stamping / R2 upload / email finish after.
+    # IMPORTANT: this does not change detection or stamping; it only stops the
+    # upload request from blocking until the whole RQ job completes.
+    log.info("upload: returning job_id=%s for frontend polling", job_id)
+    return JSONResponse({"job_id": job_id, "status": "queued"})
 
 
 
