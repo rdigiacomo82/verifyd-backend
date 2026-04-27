@@ -242,11 +242,11 @@ def send_certification_email(
                 <p style="margin:0 0 12px;color:#888;font-size:12px;line-height:1.6;">
                   {_share_desc}
                 </p>
-                <a href="{download_url}"
+                <a href="{cert_url}"
                    style="display:block;background:#1a1a1a;border:1px solid #7c3aed;border-radius:8px;
                           font-size:13px;color:#c4b5fd;font-family:'Courier New',monospace;
                           word-break:break-all;text-decoration:none;padding:12px;">
-                  {download_url}
+                  {cert_url}
                 </a>
                 <p style="margin:10px 0 0;color:#555;font-size:11px;">
                   {_share_tap}
