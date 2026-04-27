@@ -807,6 +807,13 @@ def run_detection_multiclip(video_path: str) -> tuple:
     signal_context = valid[best_ctx_idx][1]
     content_type = signal_context.get("content_type", "cinematic")
 
+    # Inject portrait flag into signal_context for gpt_vision exotic bird hint.
+    # Portrait = clip is vertically oriented (height > width * 1.5 — phone video).
+    _clip_w = signal_context.get("clip_width", 0)
+    _clip_h = signal_context.get("clip_height", 0)
+    if _clip_w and _clip_h:
+        signal_context["portrait"] = _clip_h > _clip_w * 1.5
+
     # ── YouTube low-resolution uncertainty adjustment ──────────
     # YouTube re-encodes all uploads through their H264 pipeline, which:
     #   1. Strips all original AI generator metadata
@@ -1238,4 +1245,3 @@ def run_detection_multiclip(video_path: str) -> tuple:
         "threshold_undet":    THRESHOLD_UNDETERMINED,
     }
     return authenticity, label, detail
-
