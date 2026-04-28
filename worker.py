@@ -18,27 +18,21 @@ import tempfile
 log = logging.getLogger("verifyd.worker")
 logging.basicConfig(level=logging.INFO)
 
-# ── DINOv2 pre-warm ───────────────────────────────────────────
-# RQ forks a new child process per job. Module-level globals reset
-# in each fork so lazy-loading reloads the model every job (~10s).
-# Loading HERE at import time means the parent process caches the
-# model and all forked children inherit it copy-on-write — zero
-# reload cost per job.
-try:
-    from dinov2_detector import _load_model as _dino_prewarm
-    log.info("Worker startup: pre-warming DINOv2 ViT-Small...")
-    _dino_prewarm()
-    log.info("Worker startup: DINOv2 pre-warm complete — model cached in parent process")
-except Exception as _dino_err:
-    log.warning("Worker startup: DINOv2 pre-warm failed (%s) — will lazy-load per job", _dino_err)
-
-try:
-    from deepfake_detector import _load_model as _deepfake_prewarm
-    log.info("Worker startup: pre-warming ViT Deepfake Detector...")
-    _deepfake_prewarm()
-    log.info("Worker startup: Deepfake Detector pre-warm complete — model cached in parent process")
-except Exception as _df_err:
-    log.warning("Worker startup: Deepfake Detector pre-warm failed (%s) — will lazy-load per job", _df_err)
+# ── Model loading policy ──────────────────────────────────────
+# IMPORTANT:
+# Do NOT pre-warm HuggingFace / transformer models at module import time.
+#
+# Why:
+# - RQ/Render can import this module for lightweight jobs such as keepalive_ping().
+# - The previous module-level prewarm caused DINOv2 and the ViT deepfake model
+#   to reload on keepalive jobs and again around real jobs, adding avoidable delay.
+# - Detection modules still lazy-load and cache their models when an actual
+#   upload/link/photo analysis needs them.
+#
+# Result:
+# - keepalive remains truly lightweight.
+# - real jobs no longer pay an extra module-import prewarm before detection.
+# - detection, scoring, stamping, R2 upload, and email behavior remain unchanged.
 
 RESULT_TTL = 1800   # 30 min
 
@@ -699,6 +693,7 @@ def keepalive_ping():
     _ts = _time.strftime("%Y-%m-%d %H:%M:%S UTC", _time.gmtime())
     log.info("Keepalive ping: worker alive at %s — models cached in memory", _ts)
     return {"status": "alive", "ts": _ts}
+
 
 
 
