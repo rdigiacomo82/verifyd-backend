@@ -1197,29 +1197,46 @@ def run_detection_multiclip(video_path: str) -> tuple:
 
     _real_device_confirmed = bool(override and ov_label == "REAL")
     _shortform_source = (_is_instagram or _is_youtube or "tiktok" in _video_source.lower() or not _video_source)
+    # Two calibrated activation paths:
+    #   A) Forensic-dominant: signal remains high (>=65) even if GPT under-calls AI.
+    #   B) GPT-confirmed social AI: signal is only borderline after DINO/deepfake
+    #      tie-breakers, but GPT is clearly AI (>=60) and the same forensic stack
+    #      is present. This catches Reels/TikTok AI-action clips where social
+    #      compression lowers the final signal while GPT returns Unknown-AI.
+    _forensic_dominant_social_ai = (
+        signal_ai_score >= 65 and
+        gpt_ai_score <= 50
+    )
+    _gpt_confirmed_social_ai = (
+        signal_ai_score >= 45 and
+        gpt_ai_score >= 60
+    )
+
     _social_action_ai_composite = (
         not _real_device_confirmed and
         _shortform_source and
         content_type in ("action", "cinematic", "single_subject") and
-        signal_ai_score >= 65 and
-        gpt_ai_score <= 45 and
         len(_social_ai_indicators) >= 3 and
-        _max_noise < 1000  # protect real phone videos with strong sensor grain
+        _max_noise < 1000 and  # protect real phone videos with strong sensor grain
+        (_forensic_dominant_social_ai or _gpt_confirmed_social_ai)
     )
 
     if _social_action_ai_composite:
         old_combined = combined_ai_score
-        # 62+ crosses the AI threshold (<40 authenticity). Use 65 when GPT is
-        # neutral/low but the forensic signal stack is clearly AI-like.
+        # 62+ crosses the AI threshold (<40 authenticity). Use 65 when the
+        # social short-form forensic stack and GPT/signal agreement indicate AI.
         combined_ai_score = max(combined_ai_score, 65.0)
-        mode = "social-action-AI composite"
-        log.info(
-            "Social action AI composite: signal=%d gpt=%d indicators=%s noise=%.1f "
-            "source=%s -> combined %.1f->%.1f",
-            signal_ai_score, gpt_ai_score, ",".join(_social_ai_indicators),
-            _max_noise, _video_source or "upload", old_combined, combined_ai_score
+        mode = (
+            "social-action-AI composite (GPT-confirmed)"
+            if _gpt_confirmed_social_ai else
+            "social-action-AI composite (forensic-dominant)"
         )
-
+        log.info(
+            "Social action AI composite TRIGGERED: signal=%d gpt=%d indicators=%s "
+            "noise=%.1f source=%s path=%s -> combined %.1f->%.1f",
+            signal_ai_score, gpt_ai_score, ",".join(_social_ai_indicators),
+            _max_noise, _video_source or "upload", mode, old_combined, combined_ai_score
+        )
     # ── Real device metadata ceiling ────────────────────────
     # When metadata confirms a real device recording (isom/mp42 container +
     # creation_time), pixel signals may still score very high for exotic
