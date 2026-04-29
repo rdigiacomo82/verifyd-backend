@@ -1141,6 +1141,85 @@ def run_detection_multiclip(video_path: str) -> tuple:
                 ", ".join(str(c) for c in _all_chan_corr)
             )
 
+    # ── Social/short-form AI action composite override ─────────
+    # Calibration case: Instagram/Reels style AI action videos can produce
+    # a strong signal score (DCT grid + smooth PRNU + limited hue palette +
+    # omnidirectional flow artifacts) while GPT under-scores the scene as
+    # "Real" because the frames look plausible. When the forensic signal
+    # stack fires together, we should not let a low GPT score drag the final
+    # result back to UNDETERMINED.
+    #
+    # Guards to protect genuine phone footage:
+    # - Do NOT apply when real device metadata is present (Android/iPhone).
+    # - Require action/cinematic/person content, elevated signal, low/neutral GPT.
+    # - Require at least 3 independent AI indicators from the clip context.
+    _social_ai_indicators = []
+    _ctx_dct_vals = []
+    _ctx_hue_vals = []
+    _ctx_omni_vals = []
+    _ctx_flat_vals = []
+    _ctx_sync_vals = []
+    _ctx_noise_vals = []
+
+    for _ctx in all_signal_contexts:
+        if not _ctx:
+            continue
+        if _ctx.get("dct_score") is not None:
+            _ctx_dct_vals.append(float(_ctx.get("dct_score", 0) or 0))
+        if _ctx.get("hue_entropy") is not None:
+            _ctx_hue_vals.append(float(_ctx.get("hue_entropy", 0) or 0))
+        if _ctx.get("omni_flow_entropy") is not None:
+            _ctx_omni_vals.append(float(_ctx.get("omni_flow_entropy", 0) or 0))
+        if _ctx.get("flat_noise") is not None:
+            _ctx_flat_vals.append(float(_ctx.get("flat_noise", 999) or 999))
+        if _ctx.get("motion_sync") is not None:
+            _ctx_sync_vals.append(float(_ctx.get("motion_sync", 999) or 999))
+        if _ctx.get("avg_noise") is not None:
+            _ctx_noise_vals.append(float(_ctx.get("avg_noise", 0) or 0))
+
+    _max_dct   = max(_ctx_dct_vals) if _ctx_dct_vals else 0.0
+    _min_hue   = min(_ctx_hue_vals) if _ctx_hue_vals else 99.0
+    _max_omni  = max(_ctx_omni_vals) if _ctx_omni_vals else 0.0
+    _min_flat  = min(_ctx_flat_vals) if _ctx_flat_vals else 999.0
+    _min_sync  = min(_ctx_sync_vals) if _ctx_sync_vals else 999.0
+    _max_noise = max(_ctx_noise_vals) if _ctx_noise_vals else 0.0
+
+    if _max_dct >= 12.0:
+        _social_ai_indicators.append(f"dct={_max_dct:.1f}")
+    if _min_hue <= 1.8:
+        _social_ai_indicators.append(f"hue={_min_hue:.2f}")
+    if _max_omni >= 3.7:
+        _social_ai_indicators.append(f"omni={_max_omni:.2f}")
+    if _min_flat <= 1.0:
+        _social_ai_indicators.append(f"flat_noise={_min_flat:.2f}")
+    if _min_sync <= 0.06:
+        _social_ai_indicators.append(f"motion_sync={_min_sync:.3f}")
+
+    _real_device_confirmed = bool(override and ov_label == "REAL")
+    _shortform_source = (_is_instagram or _is_youtube or "tiktok" in _video_source.lower() or not _video_source)
+    _social_action_ai_composite = (
+        not _real_device_confirmed and
+        _shortform_source and
+        content_type in ("action", "cinematic", "single_subject") and
+        signal_ai_score >= 65 and
+        gpt_ai_score <= 45 and
+        len(_social_ai_indicators) >= 3 and
+        _max_noise < 1000  # protect real phone videos with strong sensor grain
+    )
+
+    if _social_action_ai_composite:
+        old_combined = combined_ai_score
+        # 62+ crosses the AI threshold (<40 authenticity). Use 65 when GPT is
+        # neutral/low but the forensic signal stack is clearly AI-like.
+        combined_ai_score = max(combined_ai_score, 65.0)
+        mode = "social-action-AI composite"
+        log.info(
+            "Social action AI composite: signal=%d gpt=%d indicators=%s noise=%.1f "
+            "source=%s -> combined %.1f->%.1f",
+            signal_ai_score, gpt_ai_score, ",".join(_social_ai_indicators),
+            _max_noise, _video_source or "upload", old_combined, combined_ai_score
+        )
+
     # ── Real device metadata ceiling ────────────────────────
     # When metadata confirms a real device recording (isom/mp42 container +
     # creation_time), pixel signals may still score very high for exotic
