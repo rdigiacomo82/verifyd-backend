@@ -348,4 +348,3 @@ def get_deepfake_contribution(
         return -3 if signal_ambiguous else -1
 
     return 0
-
