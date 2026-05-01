@@ -1204,6 +1204,55 @@ def run_detection_multiclip(video_path: str) -> tuple:
                 _max_noise, gpt_ai_score, old_combined, combined_ai_score
             )
 
+    # ── Animal / creature AI render override ─────────────────────
+    # Some AI animal/creature/action renders are visually convincing enough that
+    # GPT labels them Real and DINOv2/Deepfake acts as a real-video tie-breaker.
+    # However, the forensic stack can still show a very specific composite pattern:
+    #   • high skin-range ratio from fur/creature tones,
+    #   • highly periodic/generated motion,
+    #   • very high inter-channel correlation,
+    #   • omnidirectional synthetic optical-flow noise,
+    #   • at least one pre-heavy clip score already in suspicious territory.
+    # This rule prevents that composite from being downgraded back to REAL.
+    # It is intentionally narrow and does not apply to ordinary human/phone videos.
+    _pre_heavy_scores_for_animal = [
+        int(ctx.get("pre_heavy_score", score) or score)
+        for score, ctx, _ in valid
+    ]
+    _max_pre_heavy_animal = max(_pre_heavy_scores_for_animal) if _pre_heavy_scores_for_animal else signal_ai_score
+    _max_skin_ratio = max(float(ctx.get("skin_ratio", 0.0) or 0.0) for ctx in all_signal_contexts) if all_signal_contexts else 0.0
+    _max_motion_period = max(float(ctx.get("motion_period", 0.0) or 0.0) for ctx in all_signal_contexts) if all_signal_contexts else 0.0
+    _max_chan_corr = max(float(ctx.get("chan_corr", 0.0) or 0.0) for ctx in all_signal_contexts) if all_signal_contexts else 0.0
+    _max_omni_animal = max(float(ctx.get("omni_flow_ent", ctx.get("omni_flow_entropy", 0.0)) or 0.0) for ctx in all_signal_contexts) if all_signal_contexts else 0.0
+    _min_flat_noise = min(float(ctx.get("flat_noise", 9.0) or 9.0) for ctx in all_signal_contexts) if all_signal_contexts else 9.0
+    _animal_or_creature_render_ai = (
+        _max_pre_heavy_animal >= 52 and
+        _max_skin_ratio >= 0.55 and
+        _max_motion_period >= 0.70 and
+        _max_chan_corr >= 0.90 and
+        _max_omni_animal >= 3.70
+    )
+    # Alternate path for lower-omni clips where flat regions are also unusually clean.
+    _animal_or_creature_render_ai_alt = (
+        _max_pre_heavy_animal >= 55 and
+        _max_skin_ratio >= 0.55 and
+        _max_motion_period >= 0.75 and
+        _max_chan_corr >= 0.92 and
+        _min_flat_noise <= 1.30
+    )
+    if _animal_or_creature_render_ai or _animal_or_creature_render_ai_alt:
+        old_combined = combined_ai_score
+        combined_ai_score = max(combined_ai_score, 68.0)
+        mode = "animal/creature AI forensic override"
+        log.info(
+            "ANIMAL_CREATURE_AI override: forensic composite detected "
+            "(pre_heavy_max=%d skin=%.3f period=%.3f chan_corr=%.3f "
+            "omni=%.3f flat_noise=%.3f gpt=%d) → combined %.1f→%.1f",
+            _max_pre_heavy_animal, _max_skin_ratio, _max_motion_period,
+            _max_chan_corr, _max_omni_animal, _min_flat_noise,
+            gpt_ai_score, old_combined, combined_ai_score
+        )
+
     # ── LAVF + CHAN_CORR composite boost ────────────────────────
     # Lavf encoder alone is weak (innocent re-encodes are common).
     # But Lavf + ALL clips showing CHAN_CORR > 0.90 is a strong composite
