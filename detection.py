@@ -1,6 +1,8 @@
 # ============================================================
 #  VeriFYD — detection.py  v3
 #
+#  Speed update: heavy DINOv2/Deepfake tie-breakers run once per video
+#
 #  DUAL ENGINE:
 #    1. detector.py   — signal-based (pixel-level evidence)
 #    2. gpt_vision.py — GPT-4o semantic (visual reasoning)
@@ -674,59 +676,14 @@ def run_detection_multiclip(video_path: str) -> tuple:
             except Exception as e:
                 log.debug("NPR analysis skipped for clip @%.0f%%: %s", offset_pct * 100, e)
 
-            # DINOv2 feature-based analysis — tie-breaker for ambiguous clips
-            # Only runs when signal score is in ambiguous range (35-72)
-            # to avoid adding noise to already-confident detections
-            try:
-                analyze_dinov2, get_dino_contribution = _get_dino_analyzer()
-                if analyze_dinov2 and 35 <= score <= 72:
-                    dino_score, dino_signals = analyze_dinov2(clip_path)
-                    dino_contribution = get_dino_contribution(dino_score, score)
-                    context["dino_score"] = dino_score
-                    context["dino_signals"] = dino_signals
-                    context["dino_contribution"] = dino_contribution
-                    if dino_contribution != 0:
-                        log.info("DINOv2 @%.0f%%: score=%d contribution=%+d (signal=%d ambiguous)",
-                                 offset_pct * 100, dino_score, dino_contribution, score)
-                        score = int(round(min(100, max(0, score + dino_contribution))))
-                elif analyze_dinov2:
-                    log.debug("DINOv2 @%.0f%%: skipped (signal=%d not ambiguous)", offset_pct * 100, score)
-            except Exception as e:
-                log.debug("DINOv2 analysis skipped for clip @%.0f%%: %s", offset_pct * 100, e)
-
-            # Deepfake (face-swap) detection — ViT model
-            # Only activates on portrait/face content with skin present
-            # Runs AFTER DINOv2 and signal detection, contributes small weight
-            try:
-                analyze_deepfake, get_deepfake_contribution = _get_deepfake_analyzer()
-                if analyze_deepfake:
-                    _ct = context.get("content_type", "cinematic")
-                    _skin = context.get("skin_ratio", 0.0)
-                    df_score, df_signals = analyze_deepfake(
-                        clip_path,
-                        content_type=_ct,
-                        skin_ratio=_skin,
-                    )
-                    context["deepfake_score"]   = df_score
-                    context["deepfake_signals"] = df_signals
-                    if df_signals.get("available") and df_score > 0:
-                        df_contribution = get_deepfake_contribution(df_score, score, _ct)
-                        context["deepfake_contribution"] = df_contribution
-                        if df_contribution != 0:
-                            log.info(
-                                "DeepfakeDetector @%.0f%%: score=%d contribution=%+d "
-                                "(signal=%d content=%s skin=%.3f)",
-                                offset_pct * 100, df_score, df_contribution,
-                                score, _ct, _skin,
-                            )
-                            score = int(round(min(100, max(0, score + df_contribution))))
-                    elif df_signals.get("skipped_reason"):
-                        log.debug(
-                            "DeepfakeDetector @%.0f%%: skipped (%s)",
-                            offset_pct * 100, df_signals["skipped_reason"],
-                        )
-            except Exception as e:
-                log.debug("DeepfakeDetector skipped for clip @%.0f%%: %s", offset_pct * 100, e)
+            # Heavy learned models (DINOv2 + ViT DeepfakeDetector) are intentionally
+            # NOT run inside every parallel clip worker anymore. On 3-clip videos this
+            # caused repeated model loads/inference and added ~15-25s with little
+            # accuracy benefit. We now run these tie-breakers once, after primary
+            # signal/NPR scoring, on the most suspicious/ambiguous clip only.
+            context["_clip_path"] = clip_path
+            context["_offset_pct"] = offset_pct
+            context["pre_heavy_score"] = score
 
             log.info("Clip @%.0f%%: signal_score=%d content=%s",
                      offset_pct * 100, score, context.get("content_type", "?"))
@@ -769,6 +726,93 @@ def run_detection_multiclip(video_path: str) -> tuple:
     if not valid:
         log.warning("All clip detections failed — falling back to single clip")
         return run_detection(video_path)
+
+    # ── Heavy-model gating for speed ─────────────────────────
+    # Run DINOv2 and ViT DeepfakeDetector only once per video, on the clip
+    # where they can help most. Primary detector + NPR still run on every clip.
+    # This preserves the multi-clip forensic scan while avoiding 2-3 repeated
+    # 330-350MB model inferences/loads per job.
+    def _apply_heavy_models_once(_valid):
+        if not _valid:
+            return _valid
+
+        _candidates = []
+        for _idx, (_score, _ctx, _pct) in enumerate(_valid):
+            _skin = float(_ctx.get("skin_ratio", 0.0) or 0.0)
+            _ambig = 35 <= _score <= 72
+            _priority = (2 if _ambig else 0) + (1 if _skin >= 0.08 else 0)
+            _candidates.append((_priority, _score, _idx))
+        _candidates.sort(reverse=True)
+        _chosen_idx = _candidates[0][2]
+        _score, _ctx, _pct = _valid[_chosen_idx]
+        _clip_path = _ctx.get("_clip_path")
+        if not _clip_path:
+            return _valid
+
+        _original_score = _score
+        log.info(
+            "HEAVY_MODEL_GATE: running DINOv2/Deepfake once on clip @%.0f%% "
+            "(score=%d, clips=%d)",
+            _pct * 100, _score, len(_valid)
+        )
+
+        try:
+            analyze_dinov2, get_dino_contribution = _get_dino_analyzer()
+            if analyze_dinov2 and 35 <= _score <= 72:
+                dino_score, dino_signals = analyze_dinov2(_clip_path)
+                dino_contribution = get_dino_contribution(dino_score, _score)
+                _ctx["dino_score"] = dino_score
+                _ctx["dino_signals"] = dino_signals
+                _ctx["dino_contribution"] = dino_contribution
+                if dino_contribution != 0:
+                    log.info("DINOv2 @%.0f%%: score=%d contribution=%+d (signal=%d ambiguous)",
+                             _pct * 100, dino_score, dino_contribution, _score)
+                    _score = int(round(min(100, max(0, _score + dino_contribution))))
+            elif analyze_dinov2:
+                log.debug("DINOv2 @%.0f%%: skipped (signal=%d not ambiguous)", _pct * 100, _score)
+        except Exception as e:
+            log.debug("DINOv2 analysis skipped for clip @%.0f%%: %s", _pct * 100, e)
+
+        try:
+            analyze_deepfake, get_deepfake_contribution = _get_deepfake_analyzer()
+            if analyze_deepfake:
+                _ct = _ctx.get("content_type", "cinematic")
+                _skin = _ctx.get("skin_ratio", 0.0)
+                df_score, df_signals = analyze_deepfake(
+                    _clip_path,
+                    content_type=_ct,
+                    skin_ratio=_skin,
+                )
+                _ctx["deepfake_score"]   = df_score
+                _ctx["deepfake_signals"] = df_signals
+                if df_signals.get("available") and df_score > 0:
+                    df_contribution = get_deepfake_contribution(df_score, _score, _ct)
+                    _ctx["deepfake_contribution"] = df_contribution
+                    if df_contribution != 0:
+                        log.info(
+                            "DeepfakeDetector @%.0f%%: score=%d contribution=%+d "
+                            "(signal=%d content=%s skin=%.3f)",
+                            _pct * 100, df_score, df_contribution,
+                            _score, _ct, _skin,
+                        )
+                        _score = int(round(min(100, max(0, _score + df_contribution))))
+                elif df_signals.get("skipped_reason"):
+                    log.debug(
+                        "DeepfakeDetector @%.0f%%: skipped (%s)",
+                        _pct * 100, df_signals["skipped_reason"],
+                    )
+        except Exception as e:
+            log.debug("DeepfakeDetector skipped for clip @%.0f%%: %s", _pct * 100, e)
+
+        if _score != _original_score:
+            log.info(
+                "HEAVY_MODEL_GATE: selected clip @%.0f%% adjusted %d→%d",
+                _pct * 100, _original_score, _score
+            )
+            _valid[_chosen_idx] = (_score, _ctx, _pct)
+        return _valid
+
+    valid = _apply_heavy_models_once(valid)
 
     signal_scores = [score for score, _, _ in valid]
     all_signal_contexts = [ctx for _, ctx, _ in valid]  # all clip contexts for reasoning
@@ -1141,102 +1185,6 @@ def run_detection_multiclip(video_path: str) -> tuple:
                 ", ".join(str(c) for c in _all_chan_corr)
             )
 
-    # ── Social/short-form AI action composite override ─────────
-    # Calibration case: Instagram/Reels style AI action videos can produce
-    # a strong signal score (DCT grid + smooth PRNU + limited hue palette +
-    # omnidirectional flow artifacts) while GPT under-scores the scene as
-    # "Real" because the frames look plausible. When the forensic signal
-    # stack fires together, we should not let a low GPT score drag the final
-    # result back to UNDETERMINED.
-    #
-    # Guards to protect genuine phone footage:
-    # - Do NOT apply when real device metadata is present (Android/iPhone).
-    # - Require action/cinematic/person content, elevated signal, low/neutral GPT.
-    # - Require at least 3 independent AI indicators from the clip context.
-    _social_ai_indicators = []
-    _ctx_dct_vals = []
-    _ctx_hue_vals = []
-    _ctx_omni_vals = []
-    _ctx_flat_vals = []
-    _ctx_sync_vals = []
-    _ctx_noise_vals = []
-
-    for _ctx in all_signal_contexts:
-        if not _ctx:
-            continue
-        if _ctx.get("dct_score") is not None:
-            _ctx_dct_vals.append(float(_ctx.get("dct_score", 0) or 0))
-        if _ctx.get("hue_entropy") is not None:
-            _ctx_hue_vals.append(float(_ctx.get("hue_entropy", 0) or 0))
-        if _ctx.get("omni_flow_entropy") is not None:
-            _ctx_omni_vals.append(float(_ctx.get("omni_flow_entropy", 0) or 0))
-        if _ctx.get("flat_noise") is not None:
-            _ctx_flat_vals.append(float(_ctx.get("flat_noise", 999) or 999))
-        if _ctx.get("motion_sync") is not None:
-            _ctx_sync_vals.append(float(_ctx.get("motion_sync", 999) or 999))
-        if _ctx.get("avg_noise") is not None:
-            _ctx_noise_vals.append(float(_ctx.get("avg_noise", 0) or 0))
-
-    _max_dct   = max(_ctx_dct_vals) if _ctx_dct_vals else 0.0
-    _min_hue   = min(_ctx_hue_vals) if _ctx_hue_vals else 99.0
-    _max_omni  = max(_ctx_omni_vals) if _ctx_omni_vals else 0.0
-    _min_flat  = min(_ctx_flat_vals) if _ctx_flat_vals else 999.0
-    _min_sync  = min(_ctx_sync_vals) if _ctx_sync_vals else 999.0
-    _max_noise = max(_ctx_noise_vals) if _ctx_noise_vals else 0.0
-
-    if _max_dct >= 12.0:
-        _social_ai_indicators.append(f"dct={_max_dct:.1f}")
-    if _min_hue <= 1.8:
-        _social_ai_indicators.append(f"hue={_min_hue:.2f}")
-    if _max_omni >= 3.7:
-        _social_ai_indicators.append(f"omni={_max_omni:.2f}")
-    if _min_flat <= 1.0:
-        _social_ai_indicators.append(f"flat_noise={_min_flat:.2f}")
-    if _min_sync <= 0.06:
-        _social_ai_indicators.append(f"motion_sync={_min_sync:.3f}")
-
-    _real_device_confirmed = bool(override and ov_label == "REAL")
-    _shortform_source = (_is_instagram or _is_youtube or "tiktok" in _video_source.lower() or not _video_source)
-    # Two calibrated activation paths:
-    #   A) Forensic-dominant: signal remains high (>=65) even if GPT under-calls AI.
-    #   B) GPT-confirmed social AI: signal is only borderline after DINO/deepfake
-    #      tie-breakers, but GPT is clearly AI (>=60) and the same forensic stack
-    #      is present. This catches Reels/TikTok AI-action clips where social
-    #      compression lowers the final signal while GPT returns Unknown-AI.
-    _forensic_dominant_social_ai = (
-        signal_ai_score >= 65 and
-        gpt_ai_score <= 50
-    )
-    _gpt_confirmed_social_ai = (
-        signal_ai_score >= 45 and
-        gpt_ai_score >= 60
-    )
-
-    _social_action_ai_composite = (
-        not _real_device_confirmed and
-        _shortform_source and
-        content_type in ("action", "cinematic", "single_subject") and
-        len(_social_ai_indicators) >= 3 and
-        _max_noise < 1000 and  # protect real phone videos with strong sensor grain
-        (_forensic_dominant_social_ai or _gpt_confirmed_social_ai)
-    )
-
-    if _social_action_ai_composite:
-        old_combined = combined_ai_score
-        # 62+ crosses the AI threshold (<40 authenticity). Use 65 when the
-        # social short-form forensic stack and GPT/signal agreement indicate AI.
-        combined_ai_score = max(combined_ai_score, 65.0)
-        mode = (
-            "social-action-AI composite (GPT-confirmed)"
-            if _gpt_confirmed_social_ai else
-            "social-action-AI composite (forensic-dominant)"
-        )
-        log.info(
-            "Social action AI composite TRIGGERED: signal=%d gpt=%d indicators=%s "
-            "noise=%.1f source=%s path=%s -> combined %.1f->%.1f",
-            signal_ai_score, gpt_ai_score, ",".join(_social_ai_indicators),
-            _max_noise, _video_source or "upload", mode, old_combined, combined_ai_score
-        )
     # ── Real device metadata ceiling ────────────────────────
     # When metadata confirms a real device recording (isom/mp42 container +
     # creation_time), pixel signals may still score very high for exotic
