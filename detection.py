@@ -1159,6 +1159,51 @@ def run_detection_multiclip(video_path: str) -> tuple:
         else:
             log.info("Hybrid flag set but all clips agree (%s) — no clamping applied", signal_scores)
 
+    # ── Device-recorded / screen-recorded AI override ─────────────
+    # Real Android/iPhone metadata is strong evidence that a device recorded the
+    # file, but it does NOT prove the scene itself is real. Users can screen-record
+    # or film an AI video with a real phone, creating genuine device metadata,
+    # HEVC/H.264 camera noise, and real sensor artifacts. In that case GPT/DINOv2
+    # can be fooled by the phone capture layer while temporal forensic signals still
+    # reveal the synthetic source underneath.
+    #
+    # This is deliberately narrow:
+    #   • only when metadata says real device,
+    #   • only when at least one clip was already suspicious before heavy-model
+    #     tie-breakers,
+    #   • only when multiple temporal AI-motion signals agree.
+    _device_meta_real = (
+        override and ov_label == "REAL" and (
+            "Android" in str(ov_reason) or
+            "Apple" in str(ov_reason) or
+            "device" in str(ov_reason).lower()
+        )
+    )
+    if _device_meta_real:
+        _pre_heavy_scores = [int(ctx.get("pre_heavy_score", score) or score) for score, ctx, _ in valid]
+        _max_pre_heavy = max(_pre_heavy_scores) if _pre_heavy_scores else signal_ai_score
+        _min_motion_sync = min(float(ctx.get("motion_sync", 1.0) or 1.0) for ctx in all_signal_contexts) if all_signal_contexts else 1.0
+        _min_ifdv = min(float(ctx.get("ifdv", 1.0) or 1.0) for ctx in all_signal_contexts) if all_signal_contexts else 1.0
+        _max_omni = max(float(ctx.get("omni_flow_ent", ctx.get("omni_flow_entropy", 0.0)) or 0.0) for ctx in all_signal_contexts) if all_signal_contexts else 0.0
+        _max_noise = max(float(ctx.get("avg_noise", ctx.get("noise", 0.0)) or 0.0) for ctx in all_signal_contexts) if all_signal_contexts else 0.0
+        _device_rerecord_ai = (
+            _max_pre_heavy >= 58 and
+            _min_motion_sync <= 0.070 and
+            _min_ifdv <= 0.120 and
+            _max_omni >= 3.50
+        )
+        if _device_rerecord_ai:
+            old_combined = combined_ai_score
+            combined_ai_score = max(combined_ai_score, 66.0)
+            mode = "device-recorded AI forensic override"
+            log.info(
+                "DEVICE_RECORDED_AI override: real-device metadata present but temporal AI "
+                "signals agree (pre_heavy_max=%d motion_sync=%.3f ifdv=%.3f omni=%.3f "
+                "noise=%.0f gpt=%d) → combined %.1f→%.1f",
+                _max_pre_heavy, _min_motion_sync, _min_ifdv, _max_omni,
+                _max_noise, gpt_ai_score, old_combined, combined_ai_score
+            )
+
     # ── LAVF + CHAN_CORR composite boost ────────────────────────
     # Lavf encoder alone is weak (innocent re-encodes are common).
     # But Lavf + ALL clips showing CHAN_CORR > 0.90 is a strong composite
