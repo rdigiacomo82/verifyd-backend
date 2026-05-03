@@ -1336,6 +1336,59 @@ def run_detection_multiclip(video_path: str) -> tuple:
             old_combined, combined_ai_score
         )
 
+
+
+    # ── Ram / high-motion cinematic animal-action AI override ───────────────
+    # Some AI animal/action reels (example: AI Ram) do not match the earlier
+    # high-skin/high-period animal rule, and their single uploaded clip can be
+    # pulled down hard by GPT saying Real. The reliable pattern is not semantic;
+    # it is a temporal/render composite:
+    #   • very high background drift / warp,
+    #   • very high inter-channel render correlation,
+    #   • omnidirectional optical-flow noise,
+    #   • high TCV / edge instability,
+    #   • DCT/grid or smooth-flat-region evidence.
+    # This keeps link and upload behavior aligned for re-encoded social AI.
+    _max_tcv_cine = max(float(ctx.get("tcv", 0.0) or 0.0) for ctx in _ctxs_for_cinematic) if _ctxs_for_cinematic else 0.0
+    _min_motion_sync_cine = min(float(ctx.get("motion_sync", 1.0) or 1.0) for ctx in _ctxs_for_cinematic) if _ctxs_for_cinematic else 1.0
+    _ram_action_render_ai = (
+        _cinematic_or_action and
+        _max_bg_drift >= 45.0 and
+        _max_omni_cine >= 3.78 and
+        _max_chan_cine >= 0.92 and
+        _max_tcv_cine >= 1200.0 and
+        (
+            _min_flat_cine <= 1.00 or
+            _max_dct_cine >= 15.0 or
+            _min_motion_sync_cine <= 0.080 or
+            _max_flicker_cine >= 4.0
+        )
+    )
+    # Slightly softer path for cases where channel correlation is just under the
+    # high threshold but the clip has extreme DCT/grid and edge/TCV instability.
+    _ram_action_render_ai_alt = (
+        _cinematic_or_action and
+        _max_bg_drift >= 50.0 and
+        _max_omni_cine >= 3.80 and
+        _max_tcv_cine >= 1500.0 and
+        _max_dct_cine >= 15.0 and
+        _min_flat_cine <= 1.05 and
+        _max_edge_cov_cine >= 0.50
+    )
+    if _ram_action_render_ai or _ram_action_render_ai_alt:
+        old_combined = combined_ai_score
+        combined_ai_score = max(combined_ai_score, 68.0)
+        mode = "ram/high-motion cinematic AI forensic override"
+        log.info(
+            "RAM_CINEMATIC_ACTION_AI override: high-motion render composite detected "
+            "(bg_drift=%.2f omni=%.3f chan_corr=%.3f tcv=%.2f flat_noise=%.3f "
+            "dct=%.2f motion_sync=%.3f flicker=%.2f edge_cov=%.3f gpt=%d) → combined %.1f→%.1f",
+            _max_bg_drift, _max_omni_cine, _max_chan_cine, _max_tcv_cine,
+            _min_flat_cine, _max_dct_cine, _min_motion_sync_cine,
+            _max_flicker_cine, _max_edge_cov_cine, gpt_ai_score,
+            old_combined, combined_ai_score
+        )
+
     # ── LAVF + CHAN_CORR composite boost ────────────────────────
     # Lavf encoder alone is weak (innocent re-encodes are common).
     # But Lavf + ALL clips showing CHAN_CORR > 0.90 is a strong composite
