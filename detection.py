@@ -1253,6 +1253,89 @@ def run_detection_multiclip(video_path: str) -> tuple:
             gpt_ai_score, old_combined, combined_ai_score
         )
 
+    # ── Cinematic/social AI render override ─────────────────────
+    # This catches the Iran/Ram-style cinematic AI videos where GPT and the
+    # heavy models may read individual frames as real, while the temporal
+    # forensic stack shows a consistent synthetic render pipeline.
+    #
+    # The failure pattern seen in production:
+    #   • upload/link may sample different qualities or clip counts,
+    #   • GPT may return Real/low AI on the uploaded version,
+    #   • DINOv2/Deepfake can subtract points,
+    #   • but multiple motion/texture artifacts still agree:
+    #       - background warping/drift,
+    #       - omnidirectional AI optical-flow noise,
+    #       - very high channel correlation or AI-smooth flat regions,
+    #       - flicker/shadow/edge-crawl/grid artifacts.
+    #
+    # This rule is source-invariant: it applies to uploads and links so the
+    # same underlying video cannot pass certification simply because it was
+    # submitted as a file instead of a URL.
+    _ctxs_for_cinematic = all_signal_contexts or []
+    _content_types_seen = {str(ctx.get("content_type", content_type)) for ctx in _ctxs_for_cinematic} or {content_type}
+    _cinematic_or_action = any(ct in ("cinematic", "action") for ct in _content_types_seen)
+
+    _max_pre_heavy_cine = max(
+        [int(ctx.get("pre_heavy_score", score) or score) for score, ctx, _ in valid] or [signal_ai_score]
+    )
+    _max_primary_cine = max([int(score) for score, _, _ in valid] or [signal_ai_score])
+    _max_bg_drift = max(float(ctx.get("bg_drift", 0.0) or 0.0) for ctx in _ctxs_for_cinematic) if _ctxs_for_cinematic else 0.0
+    _max_omni_cine = max(float(ctx.get("omni_flow_ent", ctx.get("omni_flow_entropy", 0.0)) or 0.0) for ctx in _ctxs_for_cinematic) if _ctxs_for_cinematic else 0.0
+    _max_chan_cine = max(float(ctx.get("chan_corr", 0.0) or 0.0) for ctx in _ctxs_for_cinematic) if _ctxs_for_cinematic else 0.0
+    _min_flat_cine = min(float(ctx.get("flat_noise", 9.0) or 9.0) for ctx in _ctxs_for_cinematic) if _ctxs_for_cinematic else 9.0
+    _max_flicker_cine = max(float(ctx.get("flicker_std", 0.0) or 0.0) for ctx in _ctxs_for_cinematic) if _ctxs_for_cinematic else 0.0
+    _max_shadow_cine = max(float(ctx.get("shadow_drift", 0.0) or 0.0) for ctx in _ctxs_for_cinematic) if _ctxs_for_cinematic else 0.0
+    _max_edge_cov_cine = max(float(ctx.get("edge_cov", ctx.get("edge_cov_var", 0.0)) or 0.0) for ctx in _ctxs_for_cinematic) if _ctxs_for_cinematic else 0.0
+    _max_dct_cine = max(float(ctx.get("dct", ctx.get("dct_score", 0.0)) or 0.0) for ctx in _ctxs_for_cinematic) if _ctxs_for_cinematic else 0.0
+
+    _cinematic_artifact_votes = 0
+    _cinematic_artifact_votes += 1 if _max_bg_drift >= 35.0 else 0
+    _cinematic_artifact_votes += 1 if _max_omni_cine >= 3.80 else 0
+    _cinematic_artifact_votes += 1 if _max_chan_cine >= 0.90 else 0
+    _cinematic_artifact_votes += 1 if _min_flat_cine <= 0.95 else 0
+    _cinematic_artifact_votes += 1 if _max_flicker_cine >= 8.0 else 0
+    _cinematic_artifact_votes += 1 if _max_shadow_cine >= 0.72 else 0
+    _cinematic_artifact_votes += 1 if _max_edge_cov_cine >= 1.00 else 0
+    _cinematic_artifact_votes += 1 if _max_dct_cine >= 22.0 else 0
+
+    _cinematic_social_ai = (
+        _cinematic_or_action and
+        _max_bg_drift >= 35.0 and
+        _max_omni_cine >= 3.80 and
+        _cinematic_artifact_votes >= 3 and
+        (
+            _max_pre_heavy_cine >= 40 or
+            _max_primary_cine >= 50 or
+            (_max_chan_cine >= 0.93 and _min_flat_cine <= 1.00)
+        )
+    )
+
+    # Stronger path: if signal was already 50+ before DINO/GPT downgrades,
+    # a high-correlation/omni-flow/social-cinematic pattern should not pass.
+    _cinematic_social_ai_strong = (
+        _cinematic_or_action and
+        _max_pre_heavy_cine >= 50 and
+        _max_omni_cine >= 3.78 and
+        (_max_chan_cine >= 0.90 or _min_flat_cine <= 0.80) and
+        (_max_bg_drift >= 30.0 or _max_flicker_cine >= 6.0 or _max_shadow_cine >= 0.70)
+    )
+
+    if _cinematic_social_ai or _cinematic_social_ai_strong:
+        old_combined = combined_ai_score
+        combined_ai_score = max(combined_ai_score, 66.0)
+        mode = "cinematic/social AI forensic override"
+        log.info(
+            "CINEMATIC_SOCIAL_AI override: temporal/render composite detected "
+            "(pre_heavy_max=%d primary_max=%d bg_drift=%.2f omni=%.3f "
+            "chan_corr=%.3f flat_noise=%.3f flicker=%.2f shadow=%.3f "
+            "edge_cov=%.3f dct=%.2f votes=%d gpt=%d) → combined %.1f→%.1f",
+            _max_pre_heavy_cine, _max_primary_cine, _max_bg_drift,
+            _max_omni_cine, _max_chan_cine, _min_flat_cine,
+            _max_flicker_cine, _max_shadow_cine, _max_edge_cov_cine,
+            _max_dct_cine, _cinematic_artifact_votes, gpt_ai_score,
+            old_combined, combined_ai_score
+        )
+
     # ── LAVF + CHAN_CORR composite boost ────────────────────────
     # Lavf encoder alone is weak (innocent re-encodes are common).
     # But Lavf + ALL clips showing CHAN_CORR > 0.90 is a strong composite
@@ -1383,3 +1466,4 @@ def run_detection_multiclip(video_path: str) -> tuple:
         "threshold_undet":    THRESHOLD_UNDETERMINED,
     }
     return authenticity, label, detail
+
