@@ -1184,7 +1184,7 @@ def run_detection_multiclip(video_path: str) -> tuple:
         _max_pre_heavy = max(_pre_heavy_scores) if _pre_heavy_scores else signal_ai_score
         _min_motion_sync = min(float(ctx.get("motion_sync", 1.0) or 1.0) for ctx in all_signal_contexts) if all_signal_contexts else 1.0
         _min_ifdv = min(float(ctx.get("ifdv", 1.0) or 1.0) for ctx in all_signal_contexts) if all_signal_contexts else 1.0
-        _max_omni = max(float(ctx.get("omni_flow_ent", ctx.get("omni_flow_entropy", 0.0)) or 0.0) for ctx in all_signal_contexts) if all_signal_contexts else 0.0
+        _max_omni = max(float(ctx.get("omni_flow_ent", ctx.get("omni_ent", ctx.get("omni_flow_entropy", 0.0))) or 0.0) for ctx in all_signal_contexts) if all_signal_contexts else 0.0
         _max_noise = max(float(ctx.get("avg_noise", ctx.get("noise", 0.0)) or 0.0) for ctx in all_signal_contexts) if all_signal_contexts else 0.0
         _device_rerecord_ai = (
             _max_pre_heavy >= 58 and
@@ -1223,7 +1223,7 @@ def run_detection_multiclip(video_path: str) -> tuple:
     _max_skin_ratio = max(float(ctx.get("skin_ratio", 0.0) or 0.0) for ctx in all_signal_contexts) if all_signal_contexts else 0.0
     _max_motion_period = max(float(ctx.get("motion_period", 0.0) or 0.0) for ctx in all_signal_contexts) if all_signal_contexts else 0.0
     _max_chan_corr = max(float(ctx.get("chan_corr", 0.0) or 0.0) for ctx in all_signal_contexts) if all_signal_contexts else 0.0
-    _max_omni_animal = max(float(ctx.get("omni_flow_ent", ctx.get("omni_flow_entropy", 0.0)) or 0.0) for ctx in all_signal_contexts) if all_signal_contexts else 0.0
+    _max_omni_animal = max(float(ctx.get("omni_flow_ent", ctx.get("omni_ent", ctx.get("omni_flow_entropy", 0.0))) or 0.0) for ctx in all_signal_contexts) if all_signal_contexts else 0.0
     _min_flat_noise = min(float(ctx.get("flat_noise", 9.0) or 9.0) for ctx in all_signal_contexts) if all_signal_contexts else 9.0
     _animal_or_creature_render_ai = (
         _max_pre_heavy_animal >= 52 and
@@ -1280,7 +1280,7 @@ def run_detection_multiclip(video_path: str) -> tuple:
     )
     _max_primary_cine = max([int(score) for score, _, _ in valid] or [signal_ai_score])
     _max_bg_drift = max(float(ctx.get("bg_drift", 0.0) or 0.0) for ctx in _ctxs_for_cinematic) if _ctxs_for_cinematic else 0.0
-    _max_omni_cine = max(float(ctx.get("omni_flow_ent", ctx.get("omni_flow_entropy", 0.0)) or 0.0) for ctx in _ctxs_for_cinematic) if _ctxs_for_cinematic else 0.0
+    _max_omni_cine = max(float(ctx.get("omni_flow_ent", ctx.get("omni_ent", ctx.get("omni_flow_entropy", 0.0))) or 0.0) for ctx in _ctxs_for_cinematic) if _ctxs_for_cinematic else 0.0
     _max_chan_cine = max(float(ctx.get("chan_corr", 0.0) or 0.0) for ctx in _ctxs_for_cinematic) if _ctxs_for_cinematic else 0.0
     _min_flat_cine = min(float(ctx.get("flat_noise", 9.0) or 9.0) for ctx in _ctxs_for_cinematic) if _ctxs_for_cinematic else 9.0
     _max_flicker_cine = max(float(ctx.get("flicker_std", 0.0) or 0.0) for ctx in _ctxs_for_cinematic) if _ctxs_for_cinematic else 0.0
@@ -1487,7 +1487,7 @@ def run_detection_multiclip(video_path: str) -> tuple:
 
     _max_bg_bull = max([_ctx_float(ctx, "bg_drift") for ctx in _ctxs_bull] or [0.0])
     _max_chan_bull = max([_ctx_float(ctx, "chan_corr") for ctx in _ctxs_bull] or [0.0])
-    _max_omni_bull = max([_ctx_float(ctx, "omni_flow_ent", "omni_flow_entropy") for ctx in _ctxs_bull] or [0.0])
+    _max_omni_bull = max([_ctx_float(ctx, "omni_flow_ent", "omni_ent", "omni_flow_entropy") for ctx in _ctxs_bull] or [0.0])
     _min_sync_bull = min([_ctx_float(ctx, "motion_sync", default=1.0) for ctx in _ctxs_bull] or [1.0])
     _max_tcv_bull = max([_ctx_float(ctx, "tcv", "temporal_consistency_var", "temporal_coherence_var") for ctx in _ctxs_bull] or [0.0])
     _max_period_bull = max([_ctx_float(ctx, "motion_period", "period") for ctx in _ctxs_bull] or [0.0])
@@ -1534,6 +1534,85 @@ def run_detection_multiclip(video_path: str) -> tuple:
             _min_sync_bull, _max_tcv_bull, _max_period_bull, _max_skin_bull,
             _max_flicker_bull, _max_dct_bull, _max_pre_heavy_bull,
             _bull_signal_votes, gpt_ai_score, old_combined, combined_ai_score
+        )
+
+
+    # ── Final robust cinematic/action AI agreement override ────────────────
+    # This is the last-pass safety net for the exact class of misses seen in
+    # short vertical bull/ram/animal/action reels. It intentionally uses
+    # PATTERN AGREEMENT rather than brittle single-value thresholds. Modern AI
+    # video often carries convincing H264/Instagram noise, PRNU-like flat-region
+    # texture, and natural-looking color palettes, so those real-camera-looking
+    # deductions must not certify a clip when the temporal/render signals agree.
+    #
+    # Production miss example values:
+    #   motion=24.9, bg_drift=45.5, chan_corr=0.9156, omni_ent=3.741,
+    #   motion_sync=0.066, tcv=1744, period=0.676, skin=0.557.
+    # The previous rule missed because one threshold was too tight. This rule
+    # catches the composite pattern and logs every value for auditability.
+    _robust_ctxs = all_signal_contexts or []
+    _robust_content_types = {str(ctx.get("content_type", content_type)) for ctx in _robust_ctxs} or {content_type}
+    _robust_action_content = any(ct in ("action", "cinematic") for ct in _robust_content_types)
+
+    def _robust_float(ctx, *names, default=0.0):
+        for name in names:
+            try:
+                val = ctx.get(name, None)
+                if val is not None:
+                    return float(val or 0.0)
+            except Exception:
+                continue
+        return float(default)
+
+    _robust_motion = max([_robust_float(ctx, "motion", "avg_motion") for ctx in _robust_ctxs] or [0.0])
+    _robust_bg = max([_robust_float(ctx, "bg_drift", "background_drift") for ctx in _robust_ctxs] or [0.0])
+    _robust_chan = max([_robust_float(ctx, "chan_corr", "channel_corr") for ctx in _robust_ctxs] or [0.0])
+    _robust_omni = max([_robust_float(ctx, "omni_flow_ent", "omni_ent", "omni_flow_entropy") for ctx in _robust_ctxs] or [0.0])
+    _robust_sync = min([_robust_float(ctx, "motion_sync", default=1.0) for ctx in _robust_ctxs] or [1.0])
+    _robust_tcv = max([_robust_float(ctx, "tcv", "temporal_consistency_var", "temporal_coherence_var") for ctx in _robust_ctxs] or [0.0])
+    _robust_period = max([_robust_float(ctx, "motion_period", "period") for ctx in _robust_ctxs] or [0.0])
+    _robust_skin = max([_robust_float(ctx, "skin_ratio", "skin") for ctx in _robust_ctxs] or [0.0])
+    _robust_flicker = max([_robust_float(ctx, "flicker_std") for ctx in _robust_ctxs] or [0.0])
+    _robust_dct = max([_robust_float(ctx, "dct", "dct_score") for ctx in _robust_ctxs] or [0.0])
+    _robust_pre_heavy = max(
+        [int(ctx.get("pre_heavy_score", score) or score) for score, ctx, _ in valid] or [signal_ai_score]
+    )
+
+    _robust_votes = 0
+    _robust_votes += 1 if _robust_motion >= 18.0 else 0
+    _robust_votes += 1 if _robust_bg >= 38.0 else 0
+    _robust_votes += 1 if _robust_chan >= 0.90 else 0
+    _robust_votes += 1 if _robust_omni >= 3.60 else 0
+    _robust_votes += 1 if _robust_sync <= 0.085 else 0
+    _robust_votes += 1 if _robust_tcv >= 1000.0 else 0
+    _robust_votes += 1 if _robust_period >= 0.58 else 0
+    _robust_votes += 1 if _robust_flicker >= 4.0 else 0
+    _robust_votes += 1 if _robust_dct >= 9.0 else 0
+
+    _robust_cinematic_action_ai = (
+        _robust_action_content and
+        _robust_motion >= 18.0 and
+        _robust_bg >= 38.0 and
+        _robust_chan >= 0.90 and
+        _robust_omni >= 3.60 and
+        (_robust_sync <= 0.085 or _robust_period >= 0.60) and
+        (_robust_tcv >= 1000.0 or _robust_flicker >= 4.0) and
+        (_robust_skin >= 0.30 or _robust_pre_heavy >= 20) and
+        _robust_votes >= 6
+    )
+
+    if _robust_cinematic_action_ai:
+        old_combined = combined_ai_score
+        combined_ai_score = max(combined_ai_score, 72.0)
+        mode = "robust cinematic/action AI forensic override"
+        log.info(
+            "ROBUST_CINEMATIC_ACTION_AI override: pattern agreement detected "
+            "(motion=%.1f bg_drift=%.2f chan_corr=%.3f omni=%.3f sync=%.3f "
+            "tcv=%.2f period=%.3f skin=%.3f flicker=%.2f dct=%.2f pre_heavy=%d "
+            "votes=%d gpt=%d) → combined %.1f→%.1f",
+            _robust_motion, _robust_bg, _robust_chan, _robust_omni, _robust_sync,
+            _robust_tcv, _robust_period, _robust_skin, _robust_flicker, _robust_dct,
+            _robust_pre_heavy, _robust_votes, gpt_ai_score, old_combined, combined_ai_score
         )
 
     # ── LAVF + CHAN_CORR composite boost ────────────────────────
@@ -1665,5 +1744,5 @@ def run_detection_multiclip(video_path: str) -> tuple:
         "threshold_real":     THRESHOLD_REAL,
         "threshold_undet":    THRESHOLD_UNDETERMINED,
     }
-    return authenticity, label, detail
+    return authenticity, label, detaill
 
