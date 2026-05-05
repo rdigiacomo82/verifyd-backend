@@ -1389,6 +1389,75 @@ def run_detection_multiclip(video_path: str) -> tuple:
             old_combined, combined_ai_score
         )
 
+
+    # ── Borderline large-animal / collision-action AI override ───────────────
+    # Some hyperreal animal-impact reels (example: bull/ram collision clips) are
+    # re-encoded or screen-recorded in a way that adds convincing camera grain,
+    # PRNU-like flat noise, and natural palette signals. That can collapse the
+    # primary score even though the temporal/render stack is still abnormal.
+    #
+    # This is intentionally narrower than the general cinematic override. It
+    # requires a large-animal/action pattern plus ALL of the following forensic
+    # clues that usually survive re-encoding:
+    #   • background warp/drift,
+    #   • high inter-channel render correlation,
+    #   • omnidirectional optical-flow noise,
+    #   • high temporal consistency/variance (TCV),
+    #   • lockstep subject/camera motion,
+    #   • strong periodic animal/action movement.
+    #
+    # It prevents GPT/Deepfake from certifying an AI animal collision simply
+    # because the clip has convincing noise/palette after social compression.
+    _max_motion_large_animal = max(float(ctx.get("motion", 0.0) or 0.0) for ctx in _ctxs_for_cinematic) if _ctxs_for_cinematic else 0.0
+    _max_skin_large_animal = max(float(ctx.get("skin_ratio", ctx.get("skin", 0.0)) or 0.0) for ctx in _ctxs_for_cinematic) if _ctxs_for_cinematic else 0.0
+    _max_period_large_animal = max(float(ctx.get("motion_period", ctx.get("period", 0.0)) or 0.0) for ctx in _ctxs_for_cinematic) if _ctxs_for_cinematic else 0.0
+    _max_rvov_large_animal = max(float(ctx.get("rvov", 0.0) or 0.0) for ctx in _ctxs_for_cinematic) if _ctxs_for_cinematic else 0.0
+
+    _large_animal_action_ai = (
+        _cinematic_or_action and
+        _max_motion_large_animal >= 20.0 and
+        _max_bg_drift >= 40.0 and
+        _max_chan_cine >= 0.91 and
+        _max_omni_cine >= 3.70 and
+        _max_tcv_cine >= 1500.0 and
+        _min_motion_sync_cine <= 0.080 and
+        _max_period_large_animal >= 0.60 and
+        (
+            _max_skin_large_animal >= 0.50 or
+            _max_rvov_large_animal >= 15000.0 or
+            _max_flicker_cine >= 5.0
+        )
+    )
+
+    # Alternate social-compression path: uploaded version may show slightly lower
+    # channel correlation/omni-flow but still has severe background drift, high
+    # TCV, lockstep motion, and animal/action periodicity.
+    _large_animal_action_ai_alt = (
+        _cinematic_or_action and
+        _max_motion_large_animal >= 22.0 and
+        _max_bg_drift >= 45.0 and
+        _max_omni_cine >= 3.68 and
+        _max_tcv_cine >= 1700.0 and
+        _min_motion_sync_cine <= 0.070 and
+        _max_period_large_animal >= 0.65 and
+        _max_skin_large_animal >= 0.50
+    )
+
+    if _large_animal_action_ai or _large_animal_action_ai_alt:
+        old_combined = combined_ai_score
+        combined_ai_score = max(combined_ai_score, 68.0)
+        mode = "large-animal action AI forensic override"
+        log.info(
+            "LARGE_ANIMAL_ACTION_AI override: borderline animal/action render composite detected "
+            "(motion=%.1f bg_drift=%.2f chan_corr=%.3f omni=%.3f tcv=%.2f "
+            "motion_sync=%.3f period=%.3f skin=%.3f rvov=%.2f flicker=%.2f gpt=%d) "
+            "→ combined %.1f→%.1f",
+            _max_motion_large_animal, _max_bg_drift, _max_chan_cine, _max_omni_cine,
+            _max_tcv_cine, _min_motion_sync_cine, _max_period_large_animal,
+            _max_skin_large_animal, _max_rvov_large_animal, _max_flicker_cine,
+            gpt_ai_score, old_combined, combined_ai_score
+        )
+
     # ── LAVF + CHAN_CORR composite boost ────────────────────────
     # Lavf encoder alone is weak (innocent re-encodes are common).
     # But Lavf + ALL clips showing CHAN_CORR > 0.90 is a strong composite
