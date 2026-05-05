@@ -1458,6 +1458,84 @@ def run_detection_multiclip(video_path: str) -> tuple:
             gpt_ai_score, old_combined, combined_ai_score
         )
 
+
+    # ── Bull / high-motion animal collision AI hard override ───────────────
+    # Production miss: bull/ram collision reels can carry strong camera-like
+    # noise and natural palette after Instagram/H264 re-encoding. Those real-
+    # looking signals should NOT certify the clip when the temporal/render
+    # signature is internally consistent with AI:
+    #   • high background drift / scene warp,
+    #   • very high RGB channel correlation,
+    #   • omnidirectional optical-flow noise,
+    #   • lockstep subject motion,
+    #   • high TCV/temporal instability or strong periodic animation.
+    # This rule is deliberately focused on short vertical action/animal reels and
+    # uses only already-computed signals, so it does not add runtime.
+    _ctxs_bull = all_signal_contexts or []
+    _content_types_bull = {str(ctx.get("content_type", content_type)) for ctx in _ctxs_bull} or {content_type}
+    _bull_action_content = any(ct in ("action", "cinematic") for ct in _content_types_bull)
+
+    def _ctx_float(ctx, *names, default=0.0):
+        for name in names:
+            try:
+                val = ctx.get(name, None)
+                if val is not None:
+                    return float(val or 0.0)
+            except Exception:
+                pass
+        return float(default)
+
+    _max_bg_bull = max([_ctx_float(ctx, "bg_drift") for ctx in _ctxs_bull] or [0.0])
+    _max_chan_bull = max([_ctx_float(ctx, "chan_corr") for ctx in _ctxs_bull] or [0.0])
+    _max_omni_bull = max([_ctx_float(ctx, "omni_flow_ent", "omni_flow_entropy") for ctx in _ctxs_bull] or [0.0])
+    _min_sync_bull = min([_ctx_float(ctx, "motion_sync", default=1.0) for ctx in _ctxs_bull] or [1.0])
+    _max_tcv_bull = max([_ctx_float(ctx, "tcv", "temporal_consistency_var", "temporal_coherence_var") for ctx in _ctxs_bull] or [0.0])
+    _max_period_bull = max([_ctx_float(ctx, "motion_period", "period") for ctx in _ctxs_bull] or [0.0])
+    _max_motion_bull = max([_ctx_float(ctx, "motion") for ctx in _ctxs_bull] or [0.0])
+    _max_skin_bull = max([_ctx_float(ctx, "skin_ratio", "skin") for ctx in _ctxs_bull] or [0.0])
+    _max_flicker_bull = max([_ctx_float(ctx, "flicker_std") for ctx in _ctxs_bull] or [0.0])
+    _max_dct_bull = max([_ctx_float(ctx, "dct", "dct_score") for ctx in _ctxs_bull] or [0.0])
+    _max_pre_heavy_bull = max(
+        [int(ctx.get("pre_heavy_score", score) or score) for score, ctx, _ in valid] or [signal_ai_score]
+    )
+
+    _bull_signal_votes = 0
+    _bull_signal_votes += 1 if _max_bg_bull >= 40.0 else 0
+    _bull_signal_votes += 1 if _max_chan_bull >= 0.90 else 0
+    _bull_signal_votes += 1 if _max_omni_bull >= 3.65 else 0
+    _bull_signal_votes += 1 if _min_sync_bull <= 0.085 else 0
+    _bull_signal_votes += 1 if _max_tcv_bull >= 1000.0 else 0
+    _bull_signal_votes += 1 if _max_period_bull >= 0.60 else 0
+    _bull_signal_votes += 1 if _max_flicker_bull >= 4.0 else 0
+    _bull_signal_votes += 1 if _max_dct_bull >= 9.0 else 0
+
+    _bull_collision_ai = (
+        _bull_action_content and
+        _max_motion_bull >= 18.0 and
+        _max_bg_bull >= 40.0 and
+        _max_chan_bull >= 0.90 and
+        _max_omni_bull >= 3.65 and
+        _min_sync_bull <= 0.085 and
+        (_max_tcv_bull >= 1000.0 or _max_period_bull >= 0.60) and
+        (_max_skin_bull >= 0.35 or _max_pre_heavy_bull >= 22) and
+        _bull_signal_votes >= 5
+    )
+
+    if _bull_collision_ai:
+        old_combined = combined_ai_score
+        combined_ai_score = max(combined_ai_score, 72.0)
+        mode = "bull/high-motion animal collision AI forensic override"
+        log.info(
+            "BULL_COLLISION_AI override: high-motion animal/action render composite detected "
+            "(motion=%.1f bg_drift=%.2f chan_corr=%.3f omni=%.3f sync=%.3f "
+            "tcv=%.2f period=%.3f skin=%.3f flicker=%.2f dct=%.2f pre_heavy=%d "
+            "votes=%d gpt=%d) → combined %.1f→%.1f",
+            _max_motion_bull, _max_bg_bull, _max_chan_bull, _max_omni_bull,
+            _min_sync_bull, _max_tcv_bull, _max_period_bull, _max_skin_bull,
+            _max_flicker_bull, _max_dct_bull, _max_pre_heavy_bull,
+            _bull_signal_votes, gpt_ai_score, old_combined, combined_ai_score
+        )
+
     # ── LAVF + CHAN_CORR composite boost ────────────────────────
     # Lavf encoder alone is weak (innocent re-encodes are common).
     # But Lavf + ALL clips showing CHAN_CORR > 0.90 is a strong composite
