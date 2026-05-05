@@ -434,6 +434,53 @@ Note: These are MANIPULATION indicators, not necessarily AI GENERATION indicator
 Flag them in top_flags and reasoning even if individual frames look visually real.
 Add "audio_visual_manipulation" to top_flags if you detect any of the above.
 
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ SHORT-FORM ANIMAL / ACTION / COLLISION CLIPS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Important: Be stricter with short-form animal/action/collision clips from Instagram,
+TikTok, X, or uploaded social-media videos. Do not classify the video as Real
+simply because individual frames look photographic, have natural color, or show
+plausible camera grain. Social-media re-encoding and screen recording can add
+real-looking noise over AI-generated content.
+
+For animal/action/collision scenes, raise the AI probability when multiple frames
+show any of the following:
+  • animal, person, object, or vehicle movement that appears too perfectly timed
+    with the camera or environment;
+  • impact/collision/action that looks dramatic but lacks realistic body physics,
+    recoil, secondary motion, dust/debris, injury response, crowd reaction, or
+    environmental reaction;
+  • background or ground plane subtly warping during movement;
+  • fur, skin, horns, hooves, legs, shadows, or object boundaries changing shape
+    frame-to-frame;
+  • cinematic social-media framing where the scene looks like a viral hyperreal
+    render rather than normal captured footage.
+
+For these animal/action/collision clips, if the scene is visually plausible but
+suspicious, do NOT output generator_guess="Real" with all-real low scores. Use
+Unknown-AI when motion physics, scene behavior, or temporal stability are
+questionable. Use high AI scores when the action depends on unlikely or
+inconsistent physics.
+
+Score guidance for these clips:
+  • motion_physics should be 7-10 if the impact or animal movement looks
+    exaggerated, too smooth, or physically implausible.
+  • temporal_stability should be 6-10 if body parts, background, shadows, or
+    object boundaries vary across frames.
+  • background_realism should be 5-10 if the ground/background appears to warp,
+    smear, or react unnaturally.
+  • physics_violations should be 7-10 if the collision/reaction lacks realistic
+    force transfer, recoil, deformation, dust, debris, or natural follow-through.
+  • behavioral_plausibility should be 7-10 if bystanders, animals, or people fail
+    to react naturally to the action.
+
+Large animal examples include bull, ram, goat, deer, elk, moose, horse, bear,
+cow, bison, elephant, exotic bird, and predator-encounter clips. In these scenes,
+real evidence requires specific visible physical interaction: hooves striking the
+ground, weight transfer, dust/debris, disturbed grass, contact shadows, body recoil,
+and natural follow-through. If these are missing or inconsistent, score toward AI.
+
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 Respond ONLY with this exact JSON — no markdown, no preamble, no extra text:
@@ -591,6 +638,40 @@ def analyze_frames_with_gpt(frames_b64: list, physics_summary: str = "",
         reasoning       = str(result.get("reasoning", ""))[:500]
         top_flags       = [str(f)[:150] for f in result.get("top_flags", [])][:5]
         generator_guess = str(result.get("generator_guess", "Unknown"))[:50]
+
+        # Large animal / short-form action guard
+        # GPT sometimes calls viral AI animal/action clips "Real" when frames look
+        # photographic. If several behavior/physics dimensions are suspicious but the
+        # weighted score is still too low, lift GPT into at least uncertain territory
+        # so detection.py forensic overrides can work consistently.
+        _large_action_dims = (
+            scores.get("motion_physics", 0),
+            scores.get("temporal_stability", 0),
+            scores.get("background_realism", 0),
+            scores.get("physics_violations", 0),
+            scores.get("behavioral_plausibility", 0),
+            scores.get("scene_staging", 0),
+        )
+        _large_action_hits = sum(1 for v in _large_action_dims if v >= 6)
+        _is_social_action = content_type in ("action", "cinematic")
+        if _is_social_action and _large_action_hits >= 2 and ai_prob < 50:
+            old_prob = ai_prob
+            ai_prob = max(ai_prob, 50)
+            if generator_guess == "Real":
+                generator_guess = "Unknown-AI"
+            log.info(
+                "gpt_vision: large animal/action guard %d→%d hits=%d generator=%s",
+                old_prob, ai_prob, _large_action_hits, generator_guess
+            )
+        if _is_social_action and _large_action_hits >= 3 and ai_prob < 70:
+            old_prob = ai_prob
+            ai_prob = max(ai_prob, 70)
+            if generator_guess == "Real":
+                generator_guess = "Unknown-AI"
+            log.info(
+                "gpt_vision: strong animal/action guard %d→%d hits=%d generator=%s",
+                old_prob, ai_prob, _large_action_hits, generator_guess
+            )
 
         # Audio-visual manipulation boost
         # If GPT flagged manipulation signals AND score looks real (>40),
@@ -1208,6 +1289,7 @@ def gpt_vision_score_with_context(frames_b64: list, physics_context: dict) -> di
     result          = analyze_frames_with_gpt(frames_b64, physics_summary, content_type)
     result["available"] = True
     return result
+
 
 
 
