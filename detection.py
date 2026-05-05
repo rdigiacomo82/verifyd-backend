@@ -1744,5 +1744,5 @@ def run_detection_multiclip(video_path: str) -> tuple:
         "threshold_real":     THRESHOLD_REAL,
         "threshold_undet":    THRESHOLD_UNDETERMINED,
     }
-    return authenticity, label, detaill
+    return authenticity, label, detail
 
