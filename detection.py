@@ -19,6 +19,7 @@
 # ============================================================
 
 import logging
+import os
 from detector    import detect_ai
 from gpt_vision  import gpt_vision_score_with_context, extract_key_frames
 
@@ -1075,6 +1076,104 @@ def run_detection_multiclip(video_path: str) -> tuple:
             combined_ai_score = signal_ai_score * 0.40 + gpt_ai_score * 0.60
             w_sig, w_gpt = 0.40, 0.60
             mode = "default"
+
+
+    # ── GPT + forensic agreement overrides for short social AI reels ─────
+    # Production miss: X/Twitter vertical social clip had GPT=70 and one
+    # suspicious forensic clip, but the final combiner treated this as
+    # "clash→real" because the weighted signal average was dragged down by
+    # a lower-scoring clip. For social-media AI, a single strong segment plus
+    # GPT's semantic AI call is enough to prevent certification as REAL.
+    #
+    # This does NOT add model calls. It only reuses already-computed clip
+    # scores and signal_context values.
+    _max_clip_score = max(signal_scores or [signal_ai_score])
+    _min_clip_score = min(signal_scores or [signal_ai_score])
+
+    if not gpt_failed:
+        if gpt_ai_score >= 65 and _max_clip_score >= 45:
+            old_combined = combined_ai_score
+            combined_ai_score = max(combined_ai_score, 68.0)
+            mode = "GPT_FORENSIC_AGREEMENT_AI_OVERRIDE"
+            log.info(
+                "GPT_FORENSIC_AGREEMENT_AI_OVERRIDE: GPT=%d and max_clip=%d "
+                "agree on AI risk → combined %.1f→%.1f",
+                gpt_ai_score, _max_clip_score, old_combined, combined_ai_score
+            )
+
+        # Softer hybrid path for the exact pattern in the X/Twitter miss:
+        # one clip lands suspicious after heavy-model subtraction, another
+        # clip looks real/compressed, and GPT still calls the video AI.
+        if gpt_ai_score >= 68 and _max_clip_score >= 37 and hybrid_flag:
+            old_combined = combined_ai_score
+            combined_ai_score = max(combined_ai_score, 65.0)
+            mode = "HYBRID_AI_CLIP_OVERRIDE"
+            log.info(
+                "HYBRID_AI_CLIP_OVERRIDE: GPT=%d, max_clip=%d, min_clip=%d, "
+                "hybrid=%s → combined %.1f→%.1f",
+                gpt_ai_score, _max_clip_score, _min_clip_score,
+                hybrid_flag, old_combined, combined_ai_score
+            )
+
+    # ── Social AI render composite override ───────────────────────────────
+    # Catches re-encoded X/Twitter/Instagram/TikTok AI clips where real-looking
+    # grain and natural palette deductions suppress the score, but the render
+    # pipeline still leaks: very high RGB channel correlation, frozen/synthetic
+    # saturation behavior, omnidirectional optical-flow noise, and edge crawl.
+    _ctxs_social_render = all_signal_contexts or []
+
+    def _social_float(ctx, *names, default=0.0):
+        for name in names:
+            try:
+                val = ctx.get(name, None)
+                if val is not None:
+                    return float(val or 0.0)
+            except Exception:
+                continue
+        return float(default)
+
+    _max_social_chan = max([_social_float(ctx, "chan_corr", "channel_corr") for ctx in _ctxs_social_render] or [0.0])
+    _max_social_sat_std = max([_social_float(ctx, "sat_std", "saturation_std") for ctx in _ctxs_social_render] or [0.0])
+    _max_social_omni = max([_social_float(ctx, "omni_flow_ent", "omni_ent", "omni_flow_entropy") for ctx in _ctxs_social_render] or [0.0])
+    _max_social_edge_cov = max([_social_float(ctx, "edge_cov", "edge_cov_var") for ctx in _ctxs_social_render] or [0.0])
+    _max_social_edge_mvar = max([_social_float(ctx, "edge_mvar", "edge_motion_var") for ctx in _ctxs_social_render] or [0.0])
+    _max_social_pre_heavy = max(
+        [int(ctx.get("pre_heavy_score", score) or score) for score, ctx, _ in valid] or [signal_ai_score]
+    )
+
+    _social_render_ai = (
+        _max_social_chan >= 0.94 and
+        _max_social_sat_std >= 2.0 and
+        _max_social_omni >= 3.50 and
+        _max_social_edge_cov >= 1.60
+    )
+
+    # Alternate path for cases where channel correlation is slightly below .94
+    # but GPT already sees AI and the clip was suspicious before heavy-model
+    # tie-breakers subtracted points.
+    _social_render_ai_alt = (
+        not gpt_failed and
+        gpt_ai_score >= 65 and
+        _max_social_pre_heavy >= 45 and
+        _max_social_chan >= 0.90 and
+        _max_social_sat_std >= 2.0 and
+        _max_social_omni >= 3.45 and
+        (_max_social_edge_cov >= 1.50 or _max_social_edge_mvar >= 0.030)
+    )
+
+    if _social_render_ai or _social_render_ai_alt:
+        old_combined = combined_ai_score
+        combined_ai_score = max(combined_ai_score, 66.0)
+        mode = "SOCIAL_AI_RENDER_OVERRIDE"
+        log.info(
+            "SOCIAL_AI_RENDER_OVERRIDE: render composite detected "
+            "(chan_corr=%.3f sat_std=%.2f omni=%.3f edge_cov=%.3f "
+            "edge_mvar=%.4f pre_heavy=%d gpt=%d) → combined %.1f→%.1f",
+            _max_social_chan, _max_social_sat_std, _max_social_omni,
+            _max_social_edge_cov, _max_social_edge_mvar,
+            _max_social_pre_heavy, gpt_ai_score, old_combined, combined_ai_score
+        )
+
 
     # ── Certainty override ───────────────────────────────────
     # If ANY clip scores >=95 (near-certain AI) AND GPT also shows
