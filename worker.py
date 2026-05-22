@@ -684,15 +684,17 @@ def process_document_upload_job(
 ) -> dict:
     """
     Background job: retrieve document from R2/Redis, analyze it,
-    store result. Mirrors process_photo_upload_job but does not stamp
-    the source document in MVP v1. The certificate record stores SHA256.
+    store result, and create a certified/stamped PDF for REAL documents.
+    Mirrors the certified-video flow: the result is stored first, then the
+    stamped document is generated/uploaded and the result is updated.
     """
     import os as _os
     import tempfile as _tempfile
     import hashlib as _hashlib
     from rq import get_current_job
     from document_detection import run_document_detection
-    from database import insert_certificate, increment_user_uses
+    from database import insert_certificate, increment_user_uses, get_user_status as _gus
+    from config import BASE_URL
 
     rq_job = get_current_job()
     job_id = rq_job.id if rq_job else file_key.replace("file:", "")
@@ -763,9 +765,78 @@ def process_document_upload_job(
             "sha256":             detail.get("sha256", sha256),
             "media_type":         "document",
             "job_status":         "complete",
+            "document_ready":     False,
         }
 
+        if certify:
+            result["certificate_id"] = job_id
+            result["download_url"] = f"{BASE_URL}/download-document/{job_id}"
+            result["certification_status"] = "processing"
+
+        # Store analysis result immediately so frontend can display the score.
         _store_result(r, job_id, result)
+
+        if certify:
+            certified_path = _os.path.join(_tempfile.gettempdir(), f"cert_doc_{job_id}.pdf")
+            download_url = f"{BASE_URL}/download-document/{job_id}"
+            try:
+                from doc_certifier import stamp_document
+                stamp_document(
+                    src_path=tmp_path,
+                    dest_path=certified_path,
+                    cert_id=job_id,
+                    authenticity=authenticity,
+                    label=label,
+                    filename=filename,
+                    sha256=sha256,
+                    detail=detail,
+                )
+
+                if _os.path.exists(certified_path) and _os.path.getsize(certified_path) > 1000:
+                    try:
+                        _plan = _gus(email).get("plan", "free")
+                    except Exception:
+                        _plan = "free"
+
+                    _stored_in_r2 = False
+                    try:
+                        from storage import upload_certified_document, r2_available
+                        if r2_available():
+                            upload_certified_document(job_id, certified_path, _plan)
+                            _os.remove(certified_path)
+                            _stored_in_r2 = True
+                            log.info("Worker: certified document stored in R2: job=%s plan=%s", job_id, _plan)
+                    except Exception as _r2e:
+                        log.warning("R2 document cert upload failed, falling back to Redis: %s", _r2e)
+
+                    if not _stored_in_r2 and _os.path.exists(certified_path):
+                        _cert_ttl = {
+                            "free": 86400,
+                            "creator": 259200,
+                            "pro": 604800,
+                            "enterprise": 2592000,
+                        }.get(_plan, 86400)
+                        with open(certified_path, "rb") as df:
+                            doc_bytes = df.read()
+                        r.setex(f"doccert:{job_id}", _cert_ttl, doc_bytes)
+                        _os.remove(certified_path)
+                        log.info("Worker: certified document stored in Redis: job=%s size=%d bytes plan=%s ttl=%dh",
+                                 job_id, len(doc_bytes), _plan, _cert_ttl // 3600)
+
+                    result["document_ready"] = True
+                    result["certification_status"] = "ready"
+                    result["download_url"] = download_url
+                    _store_result(r, job_id, result)
+                else:
+                    raise RuntimeError("Stamped document output missing or too small")
+
+            except Exception as stamp_err:
+                log.error("Worker: document stamp failed for %s: %s", job_id, stamp_err)
+                result["document_ready"] = False
+                result["certification_status"] = "failed"
+                result["certification_error"] = "Certified document generation failed, but analysis completed."
+                _store_result(r, job_id, result)
+
         log.info("Worker: document detection complete job=%s label=%s auth=%d", job_id, label, authenticity)
         return result
 

@@ -205,6 +205,70 @@ def upload_certified_photo(job_id: str, cert_path: str,
     return key
 
 
+
+def upload_certified_document(job_id: str, cert_path: str, plan: str = "free") -> str:
+    """
+    Upload a certified/stamped document PDF to R2.
+    Stored at certified-documents/{plan}/{job_id}.pdf.
+    Returns the R2 object key.
+    """
+    key = f"certified-documents/{plan}/{job_id}.pdf"
+    client = _get_client()
+    client.upload_file(
+        cert_path,
+        BUCKET,
+        key,
+        ExtraArgs={
+            "ContentType": "application/pdf",
+            "Metadata": {
+                "plan": plan,
+                "job_id": job_id,
+                "type": "document",
+            },
+        },
+    )
+    log.info("storage: uploaded certified document → r2://%s/%s (plan=%s)", BUCKET, key, plan)
+    return key
+
+
+def certified_document_exists(job_id: str) -> bool:
+    """Check whether a certified document exists in R2 (any plan subfolder)."""
+    client = _get_client()
+    for plan in ["free", "creator", "pro", "enterprise"]:
+        try:
+            client.head_object(Bucket=BUCKET, Key=f"certified-documents/{plan}/{job_id}.pdf")
+            return True
+        except Exception:
+            continue
+    return False
+
+
+def get_certified_document_key(job_id: str) -> str:
+    """Find the R2 key for a certified document across plan subfolders."""
+    client = _get_client()
+    for plan in ["free", "creator", "pro", "enterprise"]:
+        key = f"certified-documents/{plan}/{job_id}.pdf"
+        try:
+            client.head_object(Bucket=BUCKET, Key=key)
+            return key
+        except Exception:
+            continue
+    return f"certified-documents/free/{job_id}.pdf"
+
+
+def get_document_download_url(job_id: str, expires: int = CERT_URL_TTL) -> str:
+    """Generate a presigned URL for downloading a certified document PDF."""
+    key = get_certified_document_key(job_id)
+    if PUBLIC_URL:
+        return f"{PUBLIC_URL.rstrip('/')}/{key}"
+    client = _get_client()
+    return client.generate_presigned_url(
+        "get_object",
+        Params={"Bucket": BUCKET, "Key": key},
+        ExpiresIn=expires,
+    )
+
+
 # ── Convenience: is R2 available? ────────────────────────────
 def r2_available() -> bool:
     return _is_configured()

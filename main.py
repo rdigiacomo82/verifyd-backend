@@ -894,6 +894,43 @@ async def upload_document(file: UploadFile = File(...), email: str = Form(...)):
     return JSONResponse({"job_id": job_id, "status": "queued", "media_type": "document"})
 
 
+@app.get("/download-document/{cid}")
+async def download_document(cid: str):
+    """
+    Serve certified/stamped document PDF — checks R2 first, falls back to Redis.
+    Mirrors /download/ and /download-photo/{cid}.
+    """
+    from fastapi.responses import RedirectResponse, Response
+
+    fname = f"VeriFYD_Certified_Document_{cid[:8]}.pdf"
+
+    # Try R2 first
+    try:
+        from storage import get_document_download_url, certified_document_exists, r2_available
+        if r2_available() and certified_document_exists(cid):
+            return RedirectResponse(url=get_document_download_url(cid), status_code=302)
+    except Exception as e:
+        log.warning("R2 document download lookup failed for %s: %s", cid, e)
+
+    # Redis fallback
+    try:
+        r = _get_redis()
+        data = r.get(f"doccert:{cid}")
+        if data:
+            return Response(
+                content=data,
+                media_type="application/pdf",
+                headers={
+                    "Content-Disposition": f'attachment; filename="{fname}"',
+                    "Cache-Control": "private, max-age=3600",
+                },
+            )
+    except Exception as e:
+        log.warning("Redis document download lookup failed for %s: %s", cid, e)
+
+    return JSONResponse({"error": "Certified document not found or expired."}, status_code=404)
+
+
 @app.get("/job-status/{job_id}")
 def job_status(job_id: str):
     """Poll endpoint for direct async frontends."""
