@@ -21,6 +21,7 @@ from contextlib import asynccontextmanager
 from detection import run_detection   # returns (authenticity, label, detail)
 from queue_helper import (enqueue_upload, enqueue_link,
                           enqueue_photo_upload, enqueue_photo_link,
+                          enqueue_document_upload,
                           get_job_result)
 from config import (                  # single source of truth for all settings
     BASE_URL,
@@ -751,6 +752,146 @@ async def download_photo(cid: str):
         pass
 
     return JSONResponse({"error": "Certified photo not found or expired."}, status_code=404)
+
+
+
+
+# ─────────────────────────────────────────────
+#  Document upload endpoint — VeriFYD Docs MVP
+# ─────────────────────────────────────────────
+DOCUMENT_ALLOWED_EXTENSIONS = {".pdf", ".docx", ".txt", ".md", ".csv"}
+DOCUMENT_SIZE_LIMITS = {
+    "free":        10 * 1024 * 1024,    # 10MB
+    "creator":     25 * 1024 * 1024,    # 25MB
+    "pro":         75 * 1024 * 1024,    # 75MB
+    "enterprise":  250 * 1024 * 1024,   # 250MB
+}
+
+DOCUMENT_LABEL_UI = {
+    "REAL":         ("REAL DOCUMENT VERIFIED", "green", True),
+    "UNDETERMINED": ("DOCUMENT UNDETERMINED",  "blue",  False),
+    "AI":           ("AI / TAMPERING DETECTED", "red",  False),
+}
+
+
+@app.post("/upload-document/")
+async def upload_document(file: UploadFile = File(...), email: str = Form(...)):
+    """
+    Document upload endpoint for VeriFYD Docs MVP.
+    Accepts PDF, DOCX, TXT/MD/CSV and returns a job_id for polling
+    through /job-status/{job_id}, matching video/photo behavior.
+    """
+    if not is_valid_email(email):
+        return JSONResponse({"error": "Invalid email address."}, status_code=400)
+
+    is_deliverable, reason = _verify_email_deliverable(email)
+    if not is_deliverable:
+        return JSONResponse({"error": reason}, status_code=400)
+
+    if not is_email_verified(email):
+        return JSONResponse({
+            "error":   "email_not_verified",
+            "message": "Please verify your email address before uploading.",
+        }, status_code=403)
+
+    ext = os.path.splitext(file.filename)[1].lower()
+    if ext not in DOCUMENT_ALLOWED_EXTENSIONS:
+        return JSONResponse({
+            "error":   "unsupported_format",
+            "message": "Unsupported document format. Accepted formats: PDF, DOCX, TXT, MD, CSV.",
+        }, status_code=415)
+
+    try:
+        _cleanup_old_files(max_age_hours=2.0)
+    except Exception:
+        pass
+
+    status = get_user_status(email)
+    if not status["allowed"]:
+        return JSONResponse({
+            "error":     "limit_reached",
+            "plan":      status["plan"],
+            "uses_left": 0,
+            "limit":     status["limit"],
+        }, status_code=402)
+
+    user_plan = status["plan"]
+    max_bytes = DOCUMENT_SIZE_LIMITS.get(user_plan, DOCUMENT_SIZE_LIMITS["free"])
+    max_mb = max_bytes // (1024 * 1024)
+    plan_label = {"free": "Free", "creator": "Creator", "pro": "Pro", "enterprise": "Enterprise"}.get(user_plan, user_plan.title())
+
+    if file.size and file.size > max_bytes:
+        return JSONResponse({
+            "error":   "file_too_large",
+            "message": f"Document exceeds the {max_mb}MB limit for your {plan_label} plan.",
+            "max_mb":  max_mb,
+            "plan":    user_plan,
+        }, status_code=413)
+
+    job_id = str(uuid.uuid4())
+    safe_name = os.path.basename(file.filename or f"document{ext}")
+    raw_path = f"{UPLOAD_DIR}/{job_id}_{safe_name}"
+
+    bytes_written = 0
+    with open(raw_path, "wb") as f_out:
+        while chunk := await file.read(1024 * 1024):
+            bytes_written += len(chunk)
+            if bytes_written > max_bytes:
+                try:
+                    os.remove(raw_path)
+                except Exception:
+                    pass
+                return JSONResponse({
+                    "error":   "file_too_large",
+                    "message": f"Document exceeds the {max_mb}MB limit for your {plan_label} plan.",
+                    "max_mb":  max_mb,
+                    "plan":    user_plan,
+                }, status_code=413)
+            f_out.write(chunk)
+
+    log.info("document_upload: saved %dKB for %s (plan=%s file=%s)",
+             bytes_written // 1024, email, user_plan, safe_name)
+
+    try:
+        enqueue_document_upload(job_id, raw_path, safe_name, email)
+        log.info("document_upload: queued job %s for %s file=%s", job_id, email, safe_name)
+    except Exception as e:
+        log.warning("Document queue unavailable (%s) — falling back to sync", e)
+        try:
+            from document_detection import run_document_detection
+            authenticity, label, detail = run_document_detection(raw_path)
+            increment_user_uses(email)
+            insert_certificate(
+                cert_id=job_id, email=email, original_file=safe_name,
+                label=label, authenticity=authenticity,
+                ai_score=detail["ai_score"], sha256=detail.get("sha256"),
+            )
+            ui_text, color, _ = DOCUMENT_LABEL_UI.get(label, ("DOCUMENT UNDETERMINED", "blue", False))
+            return JSONResponse({
+                "status":             ui_text,
+                "authenticity_score": authenticity,
+                "color":              color,
+                "label":              label,
+                "gpt_reasoning":      detail.get("gpt_reasoning", ""),
+                "gpt_flags":          detail.get("gpt_flags", []),
+                "signal_score":       detail.get("signal_ai_score", 0),
+                "gpt_score":          detail.get("gpt_ai_score", 0),
+                "metadata_score":     detail.get("metadata_score", 0),
+                "text_score":         detail.get("text_score", 0),
+                "document_type":      detail.get("document_type", ext.lstrip(".")),
+                "pages":              detail.get("pages", 0),
+                "embedded_images":    detail.get("embedded_images", 0),
+                "sha256":             detail.get("sha256", ""),
+                "media_type":         "document",
+            })
+        except Exception as sync_e:
+            log.exception("Document sync fallback failed")
+            return JSONResponse({"error": str(sync_e)[:200]}, status_code=500)
+        finally:
+            if os.path.exists(raw_path):
+                os.remove(raw_path)
+
+    return JSONResponse({"job_id": job_id, "status": "queued", "media_type": "document"})
 
 
 @app.get("/job-status/{job_id}")

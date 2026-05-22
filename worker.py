@@ -674,6 +674,113 @@ def process_link_job(job_id: str, video_url: str, email: str, double_count: bool
             os.remove(tmp_path)
 
 
+
+
+
+def process_document_upload_job(
+    file_key: str,
+    filename: str,
+    email: str,
+) -> dict:
+    """
+    Background job: retrieve document from R2/Redis, analyze it,
+    store result. Mirrors process_photo_upload_job but does not stamp
+    the source document in MVP v1. The certificate record stores SHA256.
+    """
+    import os as _os
+    import tempfile as _tempfile
+    import hashlib as _hashlib
+    from rq import get_current_job
+    from document_detection import run_document_detection
+    from database import insert_certificate, increment_user_uses
+
+    rq_job = get_current_job()
+    job_id = rq_job.id if rq_job else file_key.replace("file:", "")
+
+    r = _get_redis()
+
+    LABEL_UI = {
+        "REAL":         ("REAL DOCUMENT VERIFIED", "green", True),
+        "UNDETERMINED": ("DOCUMENT UNDETERMINED",  "blue",  False),
+        "AI":           ("AI / TAMPERING DETECTED", "red",  False),
+    }
+
+    ext = _os.path.splitext(filename)[1].lower() or ".pdf"
+    if ext not in (".pdf", ".docx", ".txt", ".md", ".csv"):
+        ext = ".pdf"
+    tmp_path = _os.path.join(_tempfile.gettempdir(), f"{job_id}{ext}")
+
+    try:
+        if file_key.startswith("r2:"):
+            r2_key = file_key[3:]
+            from storage import download_video, delete_video
+            download_video(r2_key, tmp_path)
+            delete_video(r2_key)
+            log.info("Retrieved document from R2: job=%s key=%s size=%d bytes",
+                     job_id, r2_key, _os.path.getsize(tmp_path))
+            sha256 = _sha256_file(tmp_path)
+        else:
+            file_bytes = r.get(file_key)
+            if not file_bytes:
+                result = {"job_status": "error", "error": "Document expired from queue. Please re-upload."}
+                _store_result(r, job_id, result)
+                return result
+            with open(tmp_path, "wb") as fh:
+                fh.write(file_bytes)
+            r.delete(file_key)
+            sha256 = _hashlib.sha256(file_bytes).hexdigest()
+
+        log.info("Worker: starting document detection job=%s email=%s filename=%s", job_id, email, filename)
+
+        authenticity, label, detail = run_document_detection(tmp_path)
+        ui_text, color, certify = LABEL_UI.get(label, ("DOCUMENT UNDETERMINED", "blue", False))
+
+        increment_user_uses(email)
+        insert_certificate(
+            cert_id       = job_id,
+            email         = email,
+            original_file = filename,
+            label         = label,
+            authenticity  = authenticity,
+            ai_score      = detail["ai_score"],
+            sha256        = sha256,
+        )
+
+        result = {
+            "status":             ui_text,
+            "authenticity_score": authenticity,
+            "color":              color,
+            "label":              label,
+            "gpt_reasoning":      detail.get("gpt_reasoning", ""),
+            "gpt_flags":          detail.get("gpt_flags", []),
+            "signal_score":       detail.get("signal_ai_score", 0),
+            "gpt_score":          detail.get("gpt_ai_score", 0),
+            "metadata_score":     detail.get("metadata_score", 0),
+            "text_score":         detail.get("text_score", 0),
+            "document_type":      detail.get("document_type", ext.lstrip(".")),
+            "pages":              detail.get("pages", 0),
+            "embedded_images":    detail.get("embedded_images", 0),
+            "sha256":             detail.get("sha256", sha256),
+            "media_type":         "document",
+            "job_status":         "complete",
+        }
+
+        _store_result(r, job_id, result)
+        log.info("Worker: document detection complete job=%s label=%s auth=%d", job_id, label, authenticity)
+        return result
+
+    except Exception as e:
+        log.exception("Worker: document job %s failed", job_id)
+        result = {"job_status": "error", "error": str(e)[:300]}
+        _store_result(r, job_id, result)
+        return result
+
+    finally:
+        if _os.path.exists(tmp_path):
+            _os.remove(tmp_path)
+            log.info("Worker: cleaned up document temp file %s", tmp_path)
+
+
 # ─────────────────────────────────────────────────────────────
 #  Keepalive job — prevents worker cold starts
 # ─────────────────────────────────────────────────────────────
@@ -693,7 +800,6 @@ def keepalive_ping():
     _ts = _time.strftime("%Y-%m-%d %H:%M:%S UTC", _time.gmtime())
     log.info("Keepalive ping: worker alive at %s — models cached in memory", _ts)
     return {"status": "alive", "ts": _ts}
-
 
 
 
