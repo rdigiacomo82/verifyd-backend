@@ -54,8 +54,15 @@ def _sha256_file(path: str) -> str:
 
 def _store_result(redis_conn, job_id: str, result: dict) -> None:
     redis_conn.setex(f"result:{job_id}", RESULT_TTL, json.dumps(result))
-    log.info("Stored result: job=%s label=%s auth=%s video_ready=%s",
-             job_id, result.get("label"), result.get("authenticity_score"), result.get("video_ready"))
+    log.info(
+        "Stored result: job=%s label=%s auth=%s video_ready=%s document_ready=%s download_url=%s",
+        job_id,
+        result.get("label"),
+        result.get("authenticity_score"),
+        result.get("video_ready"),
+        result.get("document_ready"),
+        result.get("download_url"),
+    )
 
 
 def process_upload_job(
@@ -695,6 +702,7 @@ def process_document_upload_job(
     from document_detection import run_document_detection
     from database import insert_certificate, increment_user_uses, get_user_status as _gus
     from config import BASE_URL
+    from emailer import send_certification_email
 
     rq_job = get_current_job()
     job_id = rq_job.id if rq_job else file_key.replace("file:", "")
@@ -781,6 +789,12 @@ def process_document_upload_job(
             download_url = f"{BASE_URL}/download-document/{job_id}"
             try:
                 from doc_certifier import stamp_document
+
+                log.info(
+                    "Worker: creating stamped certified document: job=%s src=%s dest=%s label=%s auth=%d",
+                    job_id, tmp_path, certified_path, label, authenticity,
+                )
+
                 stamp_document(
                     src_path=tmp_path,
                     dest_path=certified_path,
@@ -792,7 +806,15 @@ def process_document_upload_job(
                     detail=detail,
                 )
 
-                if _os.path.exists(certified_path) and _os.path.getsize(certified_path) > 1000:
+                _cert_exists = _os.path.exists(certified_path)
+                _cert_size = _os.path.getsize(certified_path) if _cert_exists else 0
+                _src_size = _os.path.getsize(tmp_path) if _os.path.exists(tmp_path) else 0
+                log.info(
+                    "Worker: stamped certified document created: job=%s exists=%s size=%d original_size=%d path=%s",
+                    job_id, _cert_exists, _cert_size, _src_size, certified_path,
+                )
+
+                if _cert_exists and _cert_size > 1000:
                     try:
                         _plan = _gus(email).get("plan", "free")
                     except Exception:
@@ -802,6 +824,10 @@ def process_document_upload_job(
                     try:
                         from storage import upload_certified_document, r2_available
                         if r2_available():
+                            log.info(
+                                "Worker: uploading STAMPED certified document to R2: job=%s path=%s size=%d plan=%s",
+                                job_id, certified_path, _os.path.getsize(certified_path), _plan,
+                            )
                             upload_certified_document(job_id, certified_path, _plan)
                             _os.remove(certified_path)
                             _stored_in_r2 = True
@@ -827,6 +853,20 @@ def process_document_upload_job(
                     result["certification_status"] = "ready"
                     result["download_url"] = download_url
                     _store_result(r, job_id, result)
+
+                    if email and "@" in email:
+                        try:
+                            _sent = send_certification_email(
+                                email,
+                                job_id,
+                                authenticity,
+                                filename,
+                                download_url,
+                                is_document=True,
+                            )
+                            log.info("Worker: document certification email sent=%s job=%s email=%s", _sent, job_id, email)
+                        except Exception as _em:
+                            log.warning("Worker: document certification email failed for %s: %s", job_id, _em)
                 else:
                     raise RuntimeError("Stamped document output missing or too small")
 

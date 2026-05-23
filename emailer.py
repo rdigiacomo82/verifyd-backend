@@ -125,29 +125,56 @@ def send_certification_email(
     original_filename: str,
     download_url: str,
     is_photo: bool = False,
+    is_document: bool = False,
 ) -> bool:
     """
-    Send post-certification email when a video or photo is certified REAL.
+    Send post-certification email when a video, photo, or document is certified REAL.
     Includes download link, certificate link, and score.
-    Pass is_photo=True for photo certifications to use correct language.
+    Pass is_photo=True or is_document=True for correct language.
     """
     cert_url      = f"{SITE_URL}/v/{certificate_id}"
     short_id      = certificate_id[:8].upper()
     safe_filename = original_filename[:40] + ("..." if len(original_filename) > 40 else "")
 
-    # Media-type strings — swap all "video" language to "photo" when is_photo=True
-    _media        = "photo" if is_photo else "video"
-    _Media        = "Photo" if is_photo else "Video"
-    _verified_lbl = "Real Photo Verified" if is_photo else "Real Video Verified"
-    _dl_label     = "Download Certified Photo" if is_photo else "Download Certified Video"
-    _share_label  = "Share Your Certified Photo" if is_photo else "Share Your Certified Video"
-    _share_desc   = f"Share this link with anyone to prove your {_media} is real:"
-    _share_tap    = f"Tap the link above to stream or share your certified {_media} directly."
-    _what_body    = (
-        f"VeriFYD's dual-engine analysis (signal detection + GPT-4o vision AI) assessed "
-        f"your {_media} and found no significant indicators of AI generation. Your certified "
-        f"{_media} includes the VeriFYD watermark as proof of authenticity."
-    )
+    # Media-type strings — keep existing video/photo behavior, add document wording safely.
+    if is_document:
+        _media = "document"
+        _Media = "Document"
+        _verified_lbl = "Real Document Verified"
+        _dl_label = "Download Certified Document"
+        _share_label = "Share Your Certified Document"
+        _share_desc = "Share this link with anyone to verify your certified document:"
+        _share_tap = "Tap the link above to open or download your certified document directly."
+        _what_body = (
+            "VeriFYD analyzed your document for metadata, content, and authenticity indicators. "
+            "Your certified document includes a small VeriFYD mark and a server-side certificate record."
+        )
+    elif is_photo:
+        _media = "photo"
+        _Media = "Photo"
+        _verified_lbl = "Real Photo Verified"
+        _dl_label = "Download Certified Photo"
+        _share_label = "Share Your Certified Photo"
+        _share_desc = f"Share this link with anyone to prove your {_media} is real:"
+        _share_tap = f"Tap the link above to stream or share your certified {_media} directly."
+        _what_body = (
+            f"VeriFYD's dual-engine analysis (signal detection + GPT-4o vision AI) assessed "
+            f"your {_media} and found no significant indicators of AI generation. Your certified "
+            f"{_media} includes the VeriFYD watermark as proof of authenticity."
+        )
+    else:
+        _media = "video"
+        _Media = "Video"
+        _verified_lbl = "Real Video Verified"
+        _dl_label = "Download Certified Video"
+        _share_label = "Share Your Certified Video"
+        _share_desc = f"Share this link with anyone to prove your {_media} is real:"
+        _share_tap = f"Tap the link above to stream or share your certified {_media} directly."
+        _what_body = (
+            f"VeriFYD's dual-engine analysis (signal detection + GPT-4o vision AI) assessed "
+            f"your {_media} and found no significant indicators of AI generation. Your certified "
+            f"{_media} includes the VeriFYD watermark as proof of authenticity."
+        )
     _subject      = f"&#10003; Your {_media} has been certified — VeriFYD #{short_id}"
 
     # Score color — green for high, yellow for moderate
