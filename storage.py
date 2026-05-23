@@ -273,3 +273,4 @@ def get_document_download_url(job_id: str, expires: int = CERT_URL_TTL) -> str:
 def r2_available() -> bool:
     return _is_configured()
 
+
