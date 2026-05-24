@@ -17,7 +17,9 @@
 #    - Adds only the small VeriFYD lower-right mark on each page.
 #
 #  PPTX input:
-#    - Renders slide text/tables into a certified PDF.
+#    - Renders a visual slide approximation into a certified PDF.
+#    - Preserves slide dimensions, positioned text boxes, tables, images,
+#      and basic filled shapes where possible.
 #    - Adds only the small VeriFYD lower-right mark on each page.
 #
 #  Other non-PDF inputs:
@@ -31,7 +33,7 @@ from __future__ import annotations
 
 import os
 import tempfile
-from typing import Dict, Any, Iterable, List, Tuple
+from typing import Any, Dict, Iterable, List, Tuple
 
 
 def _draw_verifyd_mark(c, width: float, y: float = 24, x_right_pad: float = 34) -> None:
@@ -132,6 +134,10 @@ def _create_image_pdf(src_path: str, dest_path: str, cert_id: str, authenticity:
     return dest_path
 
 
+# ─────────────────────────────────────────────
+# XLSX rendering
+# ─────────────────────────────────────────────
+
 def _extract_xlsx_rows(src_path: str, max_columns: int = 12, max_rows_per_sheet: int = 500) -> List[Tuple[str, List[List[str]]]]:
     """
     Extract visible workbook cell values for certified rendering.
@@ -155,7 +161,6 @@ def _extract_xlsx_rows(src_path: str, max_columns: int = 12, max_rows_per_sheet:
         for row in ws.iter_rows(values_only=True):
             values = [_safe_text(v) for v in list(row)[:max_columns]]
 
-            # Trim empty trailing cells so sparse rows don't waste space.
             while values and values[-1] == "":
                 values.pop()
 
@@ -302,174 +307,300 @@ def _create_xlsx_pdf(src_path: str, dest_path: str, cert_id: str, authenticity: 
     return dest_path
 
 
+# ─────────────────────────────────────────────
+# PPTX rendering
+# ─────────────────────────────────────────────
 
-def _extract_pptx_slides(src_path: str, max_slides: int = 80) -> List[Tuple[str, List[str]]]:
+def _pptx_emu_to_pt(value: Any) -> float:
+    """Convert PowerPoint EMUs to PDF points."""
+    try:
+        return float(value) / 914400.0 * 72.0
+    except Exception:
+        return 0.0
+
+
+def _pptx_rgb_tuple(color_obj: Any, default: Tuple[float, float, float] = (1, 1, 1)) -> Tuple[float, float, float]:
+    """Return ReportLab RGB floats from a python-pptx color object."""
+    try:
+        rgb = color_obj.rgb
+        if rgb:
+            return (rgb[0] / 255.0, rgb[1] / 255.0, rgb[2] / 255.0)
+    except Exception:
+        pass
+    return default
+
+
+def _pptx_text_runs(shape: Any) -> List[Tuple[str, bool, float]]:
+    """Extract text with basic bold/font-size hints from a PPTX text shape."""
+    runs: List[Tuple[str, bool, float]] = []
+    try:
+        tf = shape.text_frame
+        for para in tf.paragraphs:
+            parts: List[str] = []
+            bold = False
+            font_size = 11.0
+            for run in para.runs:
+                txt = (run.text or "").strip()
+                if not txt:
+                    continue
+                parts.append(txt)
+                try:
+                    bold = bool(run.font.bold) or bold
+                except Exception:
+                    pass
+                try:
+                    if run.font.size:
+                        font_size = max(6.0, min(30.0, float(run.font.size.pt)))
+                except Exception:
+                    pass
+            if parts:
+                runs.append((" ".join(parts), bold, font_size))
+            else:
+                txt = (getattr(para, "text", "") or "").strip()
+                if txt:
+                    runs.append((txt, False, font_size))
+    except Exception:
+        try:
+            txt = (shape.text or "").strip()
+            if txt:
+                for line in txt.splitlines():
+                    if line.strip():
+                        runs.append((line.strip(), False, 11.0))
+        except Exception:
+            pass
+    return runs
+
+
+def _wrap_reportlab_text(c, text: str, font_name: str, font_size: float, max_width: float) -> List[str]:
+    """Simple word wrapping for ReportLab text drawing."""
+    text = str(text or "").replace("\t", " ").strip()
+    if not text:
+        return []
+
+    lines: List[str] = []
+    current = ""
+    for word in text.split():
+        trial = (current + " " + word).strip()
+        if c.stringWidth(trial, font_name, font_size) <= max_width:
+            current = trial
+        else:
+            if current:
+                lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
+    return lines or [text]
+
+
+def _draw_pptx_visual_slide(c, slide: Any, slide_idx: int, prs_width: float, prs_height: float,
+                            page_w: float, page_h: float, filename: str, page_num: int,
+                            temp_files: List[str]) -> None:
+    """Draw one PPTX slide as a visual approximation with positioned shapes/text/images."""
+    from reportlab.lib.utils import ImageReader
+
+    margin = 34.0
+    footer_h = 28.0
+    max_w = page_w - (margin * 2)
+    max_h = page_h - (margin * 2) - footer_h
+    scale = min(max_w / max(1.0, prs_width), max_h / max(1.0, prs_height))
+    slide_w = prs_width * scale
+    slide_h = prs_height * scale
+    origin_x = (page_w - slide_w) / 2.0
+    origin_y = footer_h + margin + ((max_h - slide_h) / 2.0)
+
+    # Slide canvas.
+    c.saveState()
+    c.setFillColorRGB(1, 1, 1)
+    c.rect(origin_x, origin_y, slide_w, slide_h, fill=1, stroke=0)
+    c.setStrokeGray(0.70)
+    c.setLineWidth(0.8)
+    c.rect(origin_x, origin_y, slide_w, slide_h, fill=0, stroke=1)
+    c.restoreState()
+
+    # Best-effort visual rendering of slide contents.
+    for shape in slide.shapes:
+        try:
+            left = origin_x + _pptx_emu_to_pt(shape.left) * scale
+            top_from_slide = _pptx_emu_to_pt(shape.top) * scale
+            width = max(1.0, _pptx_emu_to_pt(shape.width) * scale)
+            height = max(1.0, _pptx_emu_to_pt(shape.height) * scale)
+            bottom = origin_y + slide_h - top_from_slide - height
+        except Exception:
+            continue
+
+        # Pictures: preserve embedded image content where possible.
+        try:
+            if hasattr(shape, "image") and getattr(shape, "image", None):
+                img_blob = shape.image.blob
+                ext = shape.image.ext or "png"
+                fd, img_path = tempfile.mkstemp(suffix=f"_pptx_img.{ext}")
+                os.close(fd)
+                with open(img_path, "wb") as fh:
+                    fh.write(img_blob)
+                temp_files.append(img_path)
+                c.drawImage(
+                    ImageReader(img_path),
+                    left,
+                    bottom,
+                    width=width,
+                    height=height,
+                    preserveAspectRatio=True,
+                    anchor="c",
+                    mask="auto",
+                )
+                continue
+        except Exception:
+            pass
+
+        # Tables: draw an approximate positioned grid.
+        try:
+            if getattr(shape, "has_table", False):
+                table = shape.table
+                rows = list(table.rows)
+                cols = len(table.columns) if table.columns else 1
+                row_h = height / max(1, len(rows))
+                col_w = width / max(1, cols)
+                for r_idx, row in enumerate(rows):
+                    y = bottom + height - ((r_idx + 1) * row_h)
+                    for c_idx, cell in enumerate(row.cells):
+                        x = left + (c_idx * col_w)
+                        c.setStrokeGray(0.70)
+                        c.setLineWidth(0.35)
+                        c.rect(x, y, col_w, row_h, fill=0, stroke=1)
+                        txt = _safe_text(cell.text, 80)
+                        if txt:
+                            c.setFont("Helvetica", max(4.5, min(8, row_h * 0.38)))
+                            c.setFillGray(0.05)
+                            c.drawString(x + 2, y + max(2, row_h - 9), _safe_text(txt, int(max(8, col_w / 4.2))))
+                continue
+        except Exception:
+            pass
+
+        # Basic filled auto-shapes.
+        try:
+            fill = getattr(shape, "fill", None)
+            if fill and getattr(fill, "type", None):
+                rgb = _pptx_rgb_tuple(fill.fore_color, default=(0.94, 0.94, 0.94))
+                c.saveState()
+                c.setFillColorRGB(*rgb)
+                c.setStrokeGray(0.82)
+                c.setLineWidth(0.25)
+                c.rect(left, bottom, width, height, fill=1, stroke=1)
+                c.restoreState()
+        except Exception:
+            pass
+
+        # Text boxes and shape text in approximate original position.
+        try:
+            if getattr(shape, "has_text_frame", False):
+                runs = _pptx_text_runs(shape)
+                if runs:
+                    c.saveState()
+                    c.setFillGray(0.05)
+                    y = bottom + height - 7
+                    for text, bold, font_size in runs:
+                        scaled_font = max(5.0, min(22.0, font_size * scale * 1.15))
+                        font_name = "Helvetica-Bold" if bold else "Helvetica"
+                        wrapped = _wrap_reportlab_text(c, text, font_name, scaled_font, max(10.0, width - 8))
+                        for line in wrapped[:8]:
+                            if y < bottom + 4:
+                                break
+                            c.setFont(font_name, scaled_font)
+                            c.drawString(left + 4, y, line)
+                            y -= scaled_font * 1.25
+                        y -= scaled_font * 0.25
+                    c.restoreState()
+        except Exception:
+            pass
+
+    c.setFont("Helvetica", 6.5)
+    c.setFillGray(0.45)
+    c.drawString(margin, 24, f"VeriFYD certified presentation rendering • Slide {slide_idx} • Page {page_num} • {filename[:80]}")
+    _draw_verifyd_mark(c, page_w, y=24, x_right_pad=34)
+
+
+def _create_pptx_pdf(src_path: str, dest_path: str, cert_id: str, authenticity: int,
+                     label: str, filename: str, sha256: str = "") -> str:
     """
-    Extract readable slide text/table values for certified rendering.
+    Render a PPTX presentation into a certified PDF with a visual slide approximation.
 
-    This is not intended to be a perfect PowerPoint visual clone. It creates a
-    readable certified PDF rendering of the deck contents so the returned
-    document is useful instead of only showing a certificate summary page.
+    Note: this avoids LibreOffice/system conversion dependencies, so it is safe for
+    Render. It preserves slide text, tables, pictures, and basic shape placement.
     """
     try:
         from pptx import Presentation
     except Exception as e:
         raise RuntimeError("Missing dependency: python-pptx. Add python-pptx>=0.6.23 to requirements.txt") from e
 
-    prs = Presentation(src_path)
-    slides: List[Tuple[str, List[str]]] = []
-
-    for idx, slide in enumerate(prs.slides, start=1):
-        if idx > max_slides:
-            slides.append(("VeriFYD note", [f"Presentation truncated after {max_slides} slides."]))
-            break
-
-        lines: List[str] = []
-        for shape in slide.shapes:
-            try:
-                if getattr(shape, "has_text_frame", False) and shape.text and shape.text.strip():
-                    for line in str(shape.text).splitlines():
-                        clean = _safe_text(line, 180)
-                        if clean:
-                            lines.append(clean)
-            except Exception:
-                pass
-
-            try:
-                if getattr(shape, "has_table", False):
-                    table = shape.table
-                    for row in table.rows:
-                        vals = []
-                        for cell in row.cells:
-                            clean = _safe_text(cell.text, 90)
-                            if clean:
-                                vals.append(clean)
-                        if vals:
-                            lines.append(" | ".join(vals))
-            except Exception:
-                pass
-
-        if not lines:
-            lines = ["[No extractable slide text found]"]
-
-        title = f"Slide {idx}"
-        if lines and not lines[0].startswith("["):
-            title = f"Slide {idx}: {_safe_text(lines[0], 70)}"
-
-        slides.append((title, lines))
-
-    if not slides:
-        slides = [("Presentation", ["[No slides found]"])]
-
-    return slides
-
-
-def _draw_pptx_slide_page(c, width: float, height: float, title: str, subtitle: str,
-                          lines: List[str], page_num: int) -> None:
-    """Draw one readable page for a PPTX slide."""
-    margin_x = 54
-    top = height - 54
-    bottom = 48
-
-    c.setFont("Helvetica-Bold", 16)
-    c.setFillGray(0.05)
-    c.drawString(margin_x, top, title[:95])
-
-    c.setFont("Helvetica", 8)
-    c.setFillGray(0.35)
-    c.drawString(margin_x, top - 16, subtitle[:130])
-
-    y = top - 48
-    line_h = 14
-
-    for idx, line in enumerate(lines[:34]):
-        if y < bottom + line_h:
-            c.setFont("Helvetica-Oblique", 8)
-            c.setFillGray(0.40)
-            c.drawString(margin_x, y, "[Additional slide text truncated on this certified rendering page]")
-            break
-
-        is_first = idx == 0 and not line.startswith("[")
-        c.setFont("Helvetica-Bold" if is_first else "Helvetica", 9 if is_first else 8.5)
-        c.setFillGray(0.08)
-
-        wrapped = []
-        current = ""
-        for word in str(line).split():
-            test = (current + " " + word).strip()
-            if c.stringWidth(test, "Helvetica", 8.5) > (width - margin_x * 2):
-                if current:
-                    wrapped.append(current)
-                current = word
-            else:
-                current = test
-        if current:
-            wrapped.append(current)
-
-        for wline in wrapped[:3]:
-            if y < bottom + line_h:
-                break
-            prefix = "" if is_first else "• "
-            c.drawString(margin_x, y, prefix + wline)
-            y -= line_h
-        y -= 2
-
-    c.setFont("Helvetica", 6.5)
-    c.setFillGray(0.45)
-    c.drawString(margin_x, 24, f"VeriFYD certified presentation rendering • Page {page_num}")
-    _draw_verifyd_mark(c, width, y=24, x_right_pad=34)
-
-
-def _create_pptx_pdf(src_path: str, dest_path: str, cert_id: str, authenticity: int,
-                     label: str, filename: str, sha256: str = "") -> str:
-    """Render a PPTX presentation into a readable certified PDF with a small VeriFYD mark."""
     from reportlab.pdfgen import canvas
     from reportlab.lib.pagesizes import landscape, letter
 
-    width, height = landscape(letter)
-    c = canvas.Canvas(dest_path, pagesize=(width, height))
-
-    slides = _extract_pptx_slides(src_path)
-    page_num = 1
+    prs = Presentation(src_path)
+    prs_width = _pptx_emu_to_pt(prs.slide_width)
+    prs_height = _pptx_emu_to_pt(prs.slide_height)
+    page_w, page_h = landscape(letter)
+    c = canvas.Canvas(dest_path, pagesize=(page_w, page_h))
+    temp_files: List[str] = []
 
     c.setAuthor("VeriFYD")
     c.setTitle(f"VeriFYD Certified Presentation {cert_id}")
     c.setSubject(f"{label} | Authenticity {authenticity}% | {filename}")
 
+    # Cover/verification page.
     c.setFont("Helvetica-Bold", 20)
-    c.drawString(54, height - 72, "VeriFYD Certified Presentation")
+    c.drawString(54, page_h - 72, "VeriFYD Certified Presentation")
     c.setFont("Helvetica", 10)
-    c.drawString(54, height - 105, f"Status: {label}")
-    c.drawString(54, height - 123, f"Authenticity Score: {authenticity}%")
-    c.drawString(54, height - 141, f"Certificate ID: {cert_id}")
-    c.drawString(54, height - 159, f"Original file: {filename}")
-    c.drawString(54, height - 177, f"Slides: {len(slides)}")
+    c.drawString(54, page_h - 105, f"Status: {label}")
+    c.drawString(54, page_h - 123, f"Authenticity Score: {authenticity}%")
+    c.drawString(54, page_h - 141, f"Certificate ID: {cert_id}")
+    c.drawString(54, page_h - 159, f"Original file: {filename}")
+    c.drawString(54, page_h - 177, f"Slides: {len(prs.slides)}")
     if sha256:
-        c.drawString(54, height - 198, "SHA-256:")
+        c.drawString(54, page_h - 198, "SHA-256:")
         c.setFont("Helvetica", 7.5)
-        c.drawString(54, height - 212, sha256[:120])
+        c.drawString(54, page_h - 212, sha256[:120])
     c.setFont("Helvetica-Oblique", 8)
     c.setFillGray(0.35)
     c.drawString(54, 42, "The following pages are a VeriFYD-rendered PDF view of the uploaded PPTX presentation.")
-    _draw_verifyd_mark(c, width, y=24, x_right_pad=34)
+    _draw_verifyd_mark(c, page_w, y=24, x_right_pad=34)
     c.showPage()
-    page_num += 1
 
-    for slide_title, lines in slides:
-        _draw_pptx_slide_page(
-            c,
-            width,
-            height,
-            title=slide_title,
-            subtitle=f"File: {filename}",
-            lines=lines,
-            page_num=page_num,
-        )
-        c.showPage()
-        page_num += 1
+    try:
+        if len(prs.slides) == 0:
+            c.setFont("Helvetica", 12)
+            c.drawString(54, page_h - 72, "[No slides found in uploaded presentation]")
+            _draw_verifyd_mark(c, page_w, y=24, x_right_pad=34)
+            c.showPage()
+        else:
+            for idx, slide in enumerate(prs.slides, start=1):
+                _draw_pptx_visual_slide(
+                    c=c,
+                    slide=slide,
+                    slide_idx=idx,
+                    prs_width=prs_width,
+                    prs_height=prs_height,
+                    page_w=page_w,
+                    page_h=page_h,
+                    filename=filename,
+                    page_num=idx + 1,
+                    temp_files=temp_files,
+                )
+                c.showPage()
+    finally:
+        for path in temp_files:
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except Exception:
+                pass
 
     c.save()
     return dest_path
+
+
+# ─────────────────────────────────────────────
+# Fallback and public entry point
+# ─────────────────────────────────────────────
 
 def _create_non_pdf_certificate(dest_path: str, cert_id: str, authenticity: int,
                                 label: str, filename: str, sha256: str = "") -> str:
@@ -508,7 +639,7 @@ def stamp_document(src_path: str, dest_path: str, cert_id: str,
     For PDFs: preserve original pages and add only a small lower-right VeriFYD mark.
     For JPG/JPEG/PNG: create a marked PDF containing the image.
     For XLSX: render workbook sheets into a marked PDF.
-    For PPTX: render presentation slides into a marked PDF.
+    For PPTX: render presentation slides into a visual marked PDF approximation.
     For other non-PDFs: create a simple PDF summary fallback.
     """
     ext = os.path.splitext(src_path)[1].lower()
