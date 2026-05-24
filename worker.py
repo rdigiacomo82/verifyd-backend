@@ -716,7 +716,7 @@ def process_document_upload_job(
     }
 
     ext = _os.path.splitext(filename)[1].lower() or ".pdf"
-    if ext not in (".pdf", ".docx", ".txt", ".md", ".csv"):
+    if ext not in (".pdf", ".docx", ".txt", ".md", ".csv", ".jpg", ".jpeg", ".png"):
         ext = ".pdf"
     tmp_path = _os.path.join(_tempfile.gettempdir(), f"{job_id}{ext}")
 
@@ -742,7 +742,26 @@ def process_document_upload_job(
 
         log.info("Worker: starting document detection job=%s email=%s filename=%s", job_id, email, filename)
 
-        authenticity, label, detail = run_document_detection(tmp_path)
+        image_document_exts = (".jpg", ".jpeg", ".png")
+        if ext in image_document_exts:
+            # Use VeriFYD's existing photo-authentication engines for image documents.
+            # This keeps image detection strong while preserving the document upload,
+            # certified-document PDF, and document email flow.
+            from photo_detection import run_photo_detection
+            authenticity, label, detail = run_photo_detection(tmp_path)
+            detail = dict(detail or {})
+            detail.setdefault("content_type", "document")
+            detail["document_type"] = ext.lstrip(".")
+            detail["media_type"] = "document"
+            detail.setdefault("pages", 1)
+            detail.setdefault("embedded_images", 1)
+            detail.setdefault("metadata_score", detail.get("signal_ai_score", 0))
+            detail.setdefault("text_score", 0)
+            detail.setdefault("sha256", sha256)
+            log.info("Worker: image-document detection used photo engine job=%s ext=%s label=%s auth=%d", job_id, ext, label, authenticity)
+        else:
+            authenticity, label, detail = run_document_detection(tmp_path)
+
         ui_text, color, certify = LABEL_UI.get(label, ("DOCUMENT UNDETERMINED", "blue", False))
 
         increment_user_uses(email)

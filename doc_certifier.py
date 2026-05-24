@@ -59,6 +59,60 @@ def _make_logo_overlay(width: float, height: float) -> str:
     return overlay_path
 
 
+def _create_image_pdf(src_path: str, dest_path: str, cert_id: str, authenticity: int,
+                      label: str, filename: str, sha256: str = "") -> str:
+    """Create a certified PDF that preserves the uploaded image visually and adds only the small VeriFYD mark."""
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib.utils import ImageReader
+    from PIL import Image
+
+    width, height = letter
+    c = canvas.Canvas(dest_path, pagesize=letter)
+
+    # Open once to calculate aspect ratio; ReportLab reads the original file.
+    with Image.open(src_path) as img:
+        img_w, img_h = img.size
+
+    margin = 36
+    max_w = width - (margin * 2)
+    max_h = height - (margin * 2)
+    scale = min(max_w / max(1, img_w), max_h / max(1, img_h))
+    draw_w = img_w * scale
+    draw_h = img_h * scale
+    x = (width - draw_w) / 2
+    y = (height - draw_h) / 2
+
+    c.drawImage(ImageReader(src_path), x, y, width=draw_w, height=draw_h, preserveAspectRatio=True, mask="auto")
+
+    # Small lower-right VeriFYD mark only.
+    c.saveState()
+    try:
+        c.setFillAlpha(0.72)
+    except Exception:
+        pass
+    c.setFont("Helvetica-Bold", 8)
+    x_right = width - 34
+    y_mark = 24
+    total_w = c.stringWidth("VERIFYD", "Helvetica-Bold", 8)
+    x_mark = x_right - total_w
+    c.setFillGray(0.15)
+    c.drawString(x_mark, y_mark, "VERI")
+    veri_w = c.stringWidth("VERI", "Helvetica-Bold", 8)
+    c.setFillColorRGB(0.96, 0.62, 0.04)
+    c.drawString(x_mark + veri_w, y_mark, "FYD")
+    c.setFont("Helvetica", 5.5)
+    c.setFillGray(0.35)
+    c.drawRightString(x_right, y_mark - 7, "certified")
+    c.restoreState()
+
+    c.setAuthor("VeriFYD")
+    c.setTitle(f"VeriFYD Certified Document {cert_id}")
+    c.setSubject(f"{label} | Authenticity {authenticity}% | {filename}")
+    c.save()
+    return dest_path
+
+
 def _create_non_pdf_certificate(dest_path: str, cert_id: str, authenticity: int,
                                 label: str, filename: str, sha256: str = "") -> str:
     """Fallback for non-PDF docs: create a simple marked PDF summary."""
@@ -100,6 +154,9 @@ def stamp_document(src_path: str, dest_path: str, cert_id: str,
     For non-PDFs: output a simple PDF certificate placeholder.
     """
     ext = os.path.splitext(src_path)[1].lower()
+
+    if ext in (".jpg", ".jpeg", ".png"):
+        return _create_image_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256)
 
     if ext == ".pdf":
         from pypdf import PdfReader, PdfWriter

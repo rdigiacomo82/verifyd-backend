@@ -184,6 +184,46 @@ def _read_txt(path: str) -> Tuple[str, Dict[str, Any]]:
     return data.decode("latin-1", errors="replace"), meta
 
 
+def _read_image(path: str) -> Tuple[str, Dict[str, Any]]:
+    """Best-effort metadata extraction for JPG/JPEG/PNG document images."""
+    meta: Dict[str, Any] = {"type": "image", "pages": 1, "embedded_images": 1, "metadata": {}}
+    try:
+        from PIL import Image, ExifTags
+    except Exception as e:
+        raise RuntimeError("Missing dependency: Pillow. Add Pillow>=10.0.0 to requirements.txt") from e
+
+    with Image.open(path) as img:
+        md: Dict[str, Any] = {
+            "format": img.format or "",
+            "mode": img.mode or "",
+            "width": str(img.width),
+            "height": str(img.height),
+        }
+
+        # PNG text/info chunks and software fields.
+        try:
+            for k, v in (img.info or {}).items():
+                if isinstance(v, (str, int, float)):
+                    md[str(k)] = str(v)[:500]
+        except Exception:
+            pass
+
+        # JPEG EXIF fields.
+        try:
+            exif = img.getexif()
+            tag_map = getattr(ExifTags, "TAGS", {})
+            for tag_id, value in exif.items():
+                tag_name = tag_map.get(tag_id, str(tag_id))
+                if isinstance(value, bytes):
+                    value = value[:80].hex()
+                md[str(tag_name)] = str(value)[:500]
+        except Exception:
+            pass
+
+    meta["metadata"] = md
+    return "", meta
+
+
 def _extract_document(path: str) -> Tuple[str, Dict[str, Any]]:
     ext = os.path.splitext(path)[1].lower()
     if ext == ".pdf":
@@ -192,6 +232,8 @@ def _extract_document(path: str) -> Tuple[str, Dict[str, Any]]:
         return _read_docx(path)
     if ext in (".txt", ".md", ".csv"):
         return _read_txt(path)
+    if ext in (".jpg", ".jpeg", ".png"):
+        return _read_image(path)
     raise RuntimeError(f"Unsupported document format: {ext}")
 
 
