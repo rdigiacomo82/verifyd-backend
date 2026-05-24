@@ -657,13 +657,112 @@ def _read_pptx(path: str) -> Tuple[str, Dict[str, Any]]:
     meta["embedded_images"] = embedded_images
     return "\n".join(text_parts), meta
 
+
+def _xml_text_content(elem: Any) -> str:
+    """Return collapsed text content from an XML element."""
+    parts: List[str] = []
+    try:
+        for t in elem.itertext():
+            if t and str(t).strip():
+                parts.append(str(t).strip())
+    except Exception:
+        pass
+    return re.sub(r"\s+", " ", " ".join(parts)).strip()
+
+
+def _read_odf(path: str) -> Tuple[str, Dict[str, Any]]:
+    """Best-effort OpenDocument extraction for ODT/ODS/ODP files."""
+    ext = os.path.splitext(path)[1].lower()
+    odf_type = {".odt": "odt", ".ods": "ods", ".odp": "odp"}.get(ext, "odf")
+    meta: Dict[str, Any] = {"type": odf_type, "pages": 0, "embedded_images": 0, "metadata": {}}
+    text_parts: List[str] = []
+
+    try:
+        import zipfile
+        import xml.etree.ElementTree as ET
+    except Exception as e:
+        raise RuntimeError("Missing Python ZIP/XML support for OpenDocument parsing.") from e
+
+    def _local(tag: str) -> str:
+        return str(tag).split("}")[-1].lower()
+
+    try:
+        with zipfile.ZipFile(path) as zf:
+            names = set(zf.namelist())
+            try:
+                if "mimetype" in names:
+                    meta["metadata"]["mimetype"] = zf.read("mimetype").decode("utf-8", errors="replace")[:300]
+            except Exception:
+                pass
+
+            if "meta.xml" in names:
+                try:
+                    root = ET.fromstring(zf.read("meta.xml"))
+                    md: Dict[str, str] = dict(meta.get("metadata") or {})
+                    for elem in root.iter():
+                        name = _local(elem.tag)
+                        if name in ("generator", "initial-creator", "creator", "creation-date", "date", "editing-duration", "document-statistic"):
+                            value = _xml_text_content(elem) or " ".join(f"{_local(k)}={v}" for k, v in elem.attrib.items())
+                            if value:
+                                md[name] = value[:500]
+                    meta["metadata"] = md
+                except Exception as e:
+                    log.debug("ODF meta.xml parse failed: %s", e)
+
+            if "content.xml" in names:
+                root = ET.fromstring(zf.read("content.xml"))
+                page_count = 0
+                for elem in root.iter():
+                    name = _local(elem.tag)
+                    if odf_type == "ods" and name == "table":
+                        table_name = elem.attrib.get("{urn:oasis:names:tc:opendocument:xmlns:table:1.0}name", "Sheet")
+                        text_parts.append(f"Worksheet: {table_name}")
+                        page_count += 1
+                    elif odf_type == "odp" and name == "page":
+                        page_name = elem.attrib.get("{urn:oasis:names:tc:opendocument:xmlns:drawing:1.0}name", f"Slide {page_count + 1}")
+                        text_parts.append(f"Slide: {page_name}")
+                        page_count += 1
+                    elif name in ("h", "p"):
+                        value = _xml_text_content(elem)
+                        if value:
+                            text_parts.append(value[:1000])
+                    elif odf_type == "ods" and name == "table-row":
+                        cells: List[str] = []
+                        for child in list(elem):
+                            if _local(child.tag) == "table-cell":
+                                value = _xml_text_content(child)
+                                if value:
+                                    cells.append(value[:300])
+                        if cells:
+                            text_parts.append(" | ".join(cells))
+                meta["pages"] = page_count or 1
+
+            try:
+                meta["embedded_images"] = len([n for n in names if n.lower().startswith("pictures/")])
+            except Exception:
+                meta["embedded_images"] = 0
+    except zipfile.BadZipFile as e:
+        raise RuntimeError(f"Invalid OpenDocument file: {e}") from e
+
+    if not text_parts:
+        text_parts.append("[No readable OpenDocument text could be extracted]")
+    return "\n".join(text_parts), meta
+
+
 def _read_image(path: str) -> Tuple[str, Dict[str, Any]]:
-    """Best-effort metadata extraction for JPG/JPEG/PNG/TIF/TIFF document images."""
+    """Best-effort metadata extraction for JPG/JPEG/PNG/TIF/TIFF/WEBP/HEIC document images."""
     meta: Dict[str, Any] = {"type": "image", "pages": 1, "embedded_images": 1, "metadata": {}}
     try:
         from PIL import Image, ExifTags
     except Exception as e:
         raise RuntimeError("Missing dependency: Pillow. Add Pillow>=10.0.0 to requirements.txt") from e
+
+    if os.path.splitext(path)[1].lower() in (".heic", ".heif"):
+        try:
+            from pillow_heif import register_heif_opener
+            register_heif_opener()
+        except Exception as e:
+            raise RuntimeError("Missing dependency: pillow-heif. Add pillow-heif>=0.16.0 to requirements.txt") from e
 
     with Image.open(path) as img:
         md: Dict[str, Any] = {
@@ -713,6 +812,8 @@ def _extract_document(path: str) -> Tuple[str, Dict[str, Any]]:
         return _read_pptx(path)
     if ext == ".ppt":
         return _read_ppt(path)
+    if ext in (".odt", ".ods", ".odp"):
+        return _read_odf(path)
     if ext in (".txt", ".md", ".csv"):
         return _read_txt(path)
     if ext == ".rtf":
@@ -721,7 +822,7 @@ def _extract_document(path: str) -> Tuple[str, Dict[str, Any]]:
         return _read_eml(path)
     if ext == ".msg":
         return _read_msg(path)
-    if ext in (".jpg", ".jpeg", ".png", ".tif", ".tiff"):
+    if ext in (".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp", ".heic", ".heif"):
         return _read_image(path)
     raise RuntimeError(f"Unsupported document format: {ext}")
 

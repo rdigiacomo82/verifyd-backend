@@ -710,8 +710,9 @@ def process_document_upload_job(
     ext = _os.path.splitext(filename)[1].lower() or ".pdf"
     if ext not in (
         ".pdf", ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt",
+        ".odt", ".ods", ".odp",
         ".txt", ".md", ".csv", ".rtf", ".eml", ".msg",
-        ".jpg", ".jpeg", ".png", ".tif", ".tiff",
+        ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp", ".heic", ".heif",
     ):
         ext = ".pdf"
     tmp_path = _os.path.join(_tempfile.gettempdir(), f"{job_id}{ext}")
@@ -738,7 +739,7 @@ def process_document_upload_job(
 
         log.info("Worker: starting document detection job=%s email=%s filename=%s", job_id, email, filename)
 
-        image_document_exts = (".jpg", ".jpeg", ".png", ".tif", ".tiff")
+        image_document_exts = (".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp", ".heic", ".heif")
         if ext in image_document_exts:
             # Use VeriFYD's existing photo-authentication engines for image documents.
             # This keeps image detection strong while preserving the document upload,

@@ -761,8 +761,9 @@ async def download_photo(cid: str):
 # ─────────────────────────────────────────────
 DOCUMENT_ALLOWED_EXTENSIONS = {
     ".pdf", ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt",
+    ".odt", ".ods", ".odp",
     ".txt", ".md", ".csv", ".rtf", ".eml", ".msg",
-    ".jpg", ".jpeg", ".png", ".tif", ".tiff",
+    ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp", ".heic", ".heif",
 }
 DOCUMENT_SIZE_LIMITS = {
     "free":        10 * 1024 * 1024,    # 10MB
@@ -802,7 +803,7 @@ async def upload_document(file: UploadFile = File(...), email: str = Form(...)):
     if ext not in DOCUMENT_ALLOWED_EXTENSIONS:
         return JSONResponse({
             "error":   "unsupported_format",
-            "message": "Unsupported document format. Accepted formats: PDF, DOCX, DOC, XLSX, XLS, PPTX, PPT, TXT, MD, CSV, RTF, EML, MSG, JPG, JPEG, PNG, TIF, TIFF.",
+            "message": "Unsupported document format. Accepted formats: PDF, DOC, DOCX, XLS, XLSX, PPT, PPTX, ODT, ODS, ODP, TXT, MD, CSV, RTF, EML, MSG, JPG, JPEG, PNG, TIF, TIFF, WEBP, HEIC.",
         }, status_code=415)
 
     try:

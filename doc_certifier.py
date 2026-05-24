@@ -100,6 +100,13 @@ def _create_image_pdf(src_path: str, dest_path: str, cert_id: str, authenticity:
     from reportlab.lib.utils import ImageReader
     from PIL import Image, ImageSequence
 
+    if os.path.splitext(src_path)[1].lower() in (".heic", ".heif"):
+        try:
+            from pillow_heif import register_heif_opener
+            register_heif_opener()
+        except Exception as e:
+            raise RuntimeError("Missing dependency: pillow-heif. Add pillow-heif>=0.16.0 to requirements.txt") from e
+
     width, height = letter
     c = canvas.Canvas(dest_path, pagesize=letter)
     c.setAuthor("VeriFYD")
@@ -130,7 +137,7 @@ def _create_image_pdf(src_path: str, dest_path: str, cert_id: str, authenticity:
                 frame = frame.convert("RGB")
 
             draw_source = src_path
-            if len(frames) > 1 or os.path.splitext(src_path)[1].lower() in (".tif", ".tiff"):
+            if len(frames) > 1 or os.path.splitext(src_path)[1].lower() in (".tif", ".tiff", ".webp", ".heic", ".heif"):
                 fd, tmp_img = tempfile.mkstemp(suffix=f"_verifyd_frame_{idx}.png")
                 os.close(fd)
                 frame.save(tmp_img, format="PNG")
@@ -1017,6 +1024,61 @@ def _read_msg_for_render(src_path: str) -> str:
     except Exception:
         return _read_ole_text_for_render(src_path)
 
+
+def _read_odf_for_render(src_path: str) -> str:
+    """Extract readable text/table content from ODT/ODS/ODP for certified PDF rendering."""
+    import re
+    import zipfile
+    import xml.etree.ElementTree as ET
+
+    ext = os.path.splitext(src_path)[1].lower()
+    kind = {".odt": "OpenDocument Text", ".ods": "OpenDocument Spreadsheet", ".odp": "OpenDocument Presentation"}.get(ext, "OpenDocument")
+    lines: List[str] = [kind]
+
+    def _local(tag: str) -> str:
+        return str(tag).split("}")[-1].lower()
+
+    def _text(elem: Any) -> str:
+        try:
+            return re.sub(r"\s+", " ", " ".join(t.strip() for t in elem.itertext() if t and t.strip())).strip()
+        except Exception:
+            return ""
+
+    try:
+        with zipfile.ZipFile(src_path) as zf:
+            names = set(zf.namelist())
+            if "content.xml" not in names:
+                return "[No OpenDocument content.xml found]"
+            root = ET.fromstring(zf.read("content.xml"))
+
+            for elem in root.iter():
+                name = _local(elem.tag)
+                if ext == ".ods" and name == "table":
+                    table_name = elem.attrib.get("{urn:oasis:names:tc:opendocument:xmlns:table:1.0}name", "Sheet")
+                    lines.append(f"\nWorksheet: {table_name}")
+                elif ext == ".odp" and name == "page":
+                    page_name = elem.attrib.get("{urn:oasis:names:tc:opendocument:xmlns:drawing:1.0}name", "Slide")
+                    lines.append(f"\nSlide: {page_name}")
+                elif ext == ".ods" and name == "table-row":
+                    cells: List[str] = []
+                    for child in list(elem):
+                        if _local(child.tag) == "table-cell":
+                            value = _text(child)
+                            if value:
+                                cells.append(value[:300])
+                    if cells:
+                        lines.append(" | ".join(cells))
+                elif name in ("h", "p"):
+                    value = _text(elem)
+                    if value:
+                        lines.append(value[:1000])
+    except Exception as e:
+        return f"[OpenDocument rendering failed: {str(e)[:120]}]"
+
+    cleaned = [line for line in lines if line and line.strip()]
+    return "\n".join(cleaned) if cleaned else "[No readable OpenDocument text could be extracted]"
+
+
 def _read_text_for_certified_render(src_path: str, ext: str) -> str:
     """Read RTF/EML/text-family documents for certified PDF rendering."""
     data = b""
@@ -1062,6 +1124,9 @@ def _read_text_for_certified_render(src_path: str, ext: str) -> str:
 
     if ext == ".msg":
         return _read_msg_for_render(src_path)
+
+    if ext in (".odt", ".ods", ".odp"):
+        return _read_odf_for_render(src_path)
 
     if ext in (".doc", ".ppt"):
         return _read_ole_text_for_render(src_path)
@@ -1201,7 +1266,7 @@ def stamp_document(src_path: str, dest_path: str, cert_id: str,
     """
     ext = os.path.splitext(src_path)[1].lower()
 
-    if ext in (".jpg", ".jpeg", ".png", ".tif", ".tiff"):
+    if ext in (".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp", ".heic", ".heif"):
         return _create_image_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256)
 
     if ext == ".xlsx":
@@ -1210,7 +1275,7 @@ def stamp_document(src_path: str, dest_path: str, cert_id: str,
     if ext == ".pptx":
         return _create_pptx_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256)
 
-    if ext in (".rtf", ".eml", ".msg", ".doc", ".ppt", ".xls"):
+    if ext in (".rtf", ".eml", ".msg", ".doc", ".ppt", ".xls", ".odt", ".ods", ".odp"):
         _create_text_render_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256)
         # Preserve exact source file for legal/forensic review, especially when
         # the certified PDF is a readable text rendering rather than a perfect
@@ -1261,4 +1326,5 @@ def stamp_document(src_path: str, dest_path: str, cert_id: str,
         return dest_path
 
     return _create_non_pdf_certificate(dest_path, cert_id, authenticity, label, filename, sha256)
+
 
