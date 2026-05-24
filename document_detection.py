@@ -186,29 +186,59 @@ def _read_txt(path: str) -> Tuple[str, Dict[str, Any]]:
 
 
 
+def _rtf_regex_fallback(raw: str) -> str:
+    """Table-preserving RTF cleanup used when striprtf over-strips forms."""
+    raw = raw or ""
+    # Drop only the noisiest embedded binary/image groups. Keep table/text control flow.
+    raw = re.sub(r"{\\\*?\\pict[^{}]*(?:{[^{}]*}[^{}]*)*}", " ", raw, flags=re.DOTALL)
+    raw = re.sub(r"{\\object[^{}]*(?:{[^{}]*}[^{}]*)*}", " ", raw, flags=re.DOTALL)
+
+    replacements = {
+        "\\par": "\n",
+        "\\line": "\n",
+        "\\tab": "\t",
+        "\\cell": "|",
+        "\\row": "\n",
+    }
+    for src, dst in replacements.items():
+        raw = raw.replace(src, dst)
+
+    def _hex_to_char(match):
+        try:
+            return bytes.fromhex(match.group(1)).decode("cp1252", errors="replace")
+        except Exception:
+            return " "
+
+    raw = re.sub(r"\\'([0-9a-fA-F]{2})", _hex_to_char, raw)
+    raw = re.sub(r"\\u(-?\d+)\??", lambda m: chr(int(m.group(1)) % 65536), raw)
+    raw = re.sub(r"\\[a-zA-Z]+-?\d* ?", "", raw)
+    raw = raw.replace("{", " ").replace("}", " ")
+    raw = re.sub(r"\x00+", " ", raw)
+    raw = re.sub(r"[ \t]+", " ", raw)
+    raw = re.sub(r" *\| *", "|", raw)
+    raw = re.sub(r"\n\s*\n\s*\n+", "\n\n", raw)
+    return raw.strip()
+
+
 def _strip_rtf_markup(raw: str) -> str:
-    """RTF-to-text cleanup. Uses striprtf when available, with a safe regex fallback."""
+    """RTF-to-text cleanup with a fallback that preserves forms/tables."""
+    regex_text = _rtf_regex_fallback(raw)
+
     try:
         from striprtf.striprtf import rtf_to_text
         text = rtf_to_text(raw or "")
         text = re.sub(r"\x00+", " ", text)
         text = re.sub(r"[ \t]+", " ", text)
         text = re.sub(r"\n\s*\n\s*\n+", "\n\n", text)
-        return text.strip()
+        text = text.strip()
+        # striprtf can over-strip table-based government forms. If its output
+        # is much shorter, keep the older table-preserving fallback.
+        if len(text) >= 500 or len(text) >= max(120, len(regex_text) * 0.35):
+            return text
     except Exception:
         pass
 
-    # Remove large embedded binary/image/object groups before stripping control words.
-    raw = re.sub(r"{\\\*?\\pict.*?}", " ", raw, flags=re.DOTALL)
-    raw = re.sub(r"{\\object.*?}", " ", raw, flags=re.DOTALL)
-    raw = raw.replace("\\par", "\n").replace("\\line", "\n").replace("\\tab", "\t")
-    raw = re.sub(r"\\'[0-9a-fA-F]{2}", " ", raw)
-    raw = re.sub(r"\\[a-zA-Z]+-?\d* ?", "", raw)
-    raw = raw.replace("{", " ").replace("}", " ")
-    raw = re.sub(r"\x00+", " ", raw)
-    raw = re.sub(r"[ \t]+", " ", raw)
-    raw = re.sub(r"\n\s*\n\s*\n+", "\n\n", raw)
-    return raw.strip()
+    return regex_text
 
 
 def _read_rtf(path: str) -> Tuple[str, Dict[str, Any]]:

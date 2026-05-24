@@ -818,29 +818,62 @@ def _create_pptx_pdf(src_path: str, dest_path: str, cert_id: str, authenticity: 
 
 
 
-def _strip_rtf_for_render(raw: str) -> str:
-    """RTF-to-text cleanup for certified rendering, with striprtf preferred."""
+def _rtf_regex_fallback_for_render(raw: str) -> str:
+    """Table-preserving RTF cleanup for certified PDF rendering."""
     import re
+    raw = raw or ""
+    # Remove only obvious embedded binary/image/object groups. Do not remove table
+    # structure because many legal/government RTFs are form-style tables.
+    raw = re.sub(r"{\\\*?\\pict[^{}]*(?:{[^{}]*}[^{}]*)*}", " ", raw, flags=re.DOTALL)
+    raw = re.sub(r"{\\object[^{}]*(?:{[^{}]*}[^{}]*)*}", " ", raw, flags=re.DOTALL)
+
+    replacements = {
+        "\\par": "\n",
+        "\\line": "\n",
+        "\\tab": "\t",
+        "\\cell": "|",
+        "\\row": "\n",
+    }
+    for src, dst in replacements.items():
+        raw = raw.replace(src, dst)
+
+    def _hex_to_char(match):
+        try:
+            return bytes.fromhex(match.group(1)).decode("cp1252", errors="replace")
+        except Exception:
+            return " "
+
+    raw = re.sub(r"\\'([0-9a-fA-F]{2})", _hex_to_char, raw)
+    raw = re.sub(r"\\u(-?\d+)\??", lambda m: chr(int(m.group(1)) % 65536), raw)
+    raw = re.sub(r"\\[a-zA-Z]+-?\d* ?", "", raw)
+    raw = raw.replace("{", " ").replace("}", " ")
+    raw = re.sub(r"\x00+", " ", raw)
+    raw = re.sub(r"[ \t]+", " ", raw)
+    raw = re.sub(r" *\| *", "|", raw)
+    raw = re.sub(r"\n\s*\n\s*\n+", "\n\n", raw)
+    return raw.strip()
+
+
+def _strip_rtf_for_render(raw: str) -> str:
+    """RTF-to-text cleanup for certified rendering with table-preserving fallback."""
+    import re
+    regex_text = _rtf_regex_fallback_for_render(raw)
+
     try:
         from striprtf.striprtf import rtf_to_text
         text = rtf_to_text(raw or "")
         text = re.sub(r"\x00+", " ", text)
         text = re.sub(r"[ \t]+", " ", text)
         text = re.sub(r"\n\s*\n\s*\n+", "\n\n", text)
-        return text.strip()
+        text = text.strip()
+        # striprtf is usually cleaner, but it can over-strip table-based forms.
+        # Keep the fallback when it preserves substantially more readable content.
+        if len(text) >= 500 or len(text) >= max(120, len(regex_text) * 0.35):
+            return text
     except Exception:
         pass
 
-    raw = re.sub(r"{\\\*?\\pict.*?}", " ", raw, flags=re.DOTALL)
-    raw = re.sub(r"{\\object.*?}", " ", raw, flags=re.DOTALL)
-    raw = raw.replace("\\par", "\n").replace("\\line", "\n").replace("\\tab", "\t")
-    raw = re.sub(r"\\'[0-9a-fA-F]{2}", " ", raw)
-    raw = re.sub(r"\\[a-zA-Z]+-?\d* ?", "", raw)
-    raw = raw.replace("{", " ").replace("}", " ")
-    raw = re.sub(r"\x00+", " ", raw)
-    raw = re.sub(r"[ \t]+", " ", raw)
-    raw = re.sub(r"\n\s*\n\s*\n+", "\n\n", raw)
-    return raw.strip()
+    return regex_text
 
 
 
@@ -1178,7 +1211,12 @@ def stamp_document(src_path: str, dest_path: str, cert_id: str,
         return _create_pptx_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256)
 
     if ext in (".rtf", ".eml", ".msg", ".doc", ".ppt", ".xls"):
-        return _create_text_render_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256)
+        _create_text_render_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256)
+        # Preserve exact source file for legal/forensic review, especially when
+        # the certified PDF is a readable text rendering rather than a perfect
+        # native-layout clone.
+        _attach_original_file_to_pdf(dest_path, src_path, filename or os.path.basename(src_path))
+        return dest_path
 
     if ext == ".pdf":
         from pypdf import PdfReader, PdfWriter
@@ -1223,3 +1261,4 @@ def stamp_document(src_path: str, dest_path: str, cert_id: str,
         return dest_path
 
     return _create_non_pdf_certificate(dest_path, cert_id, authenticity, label, filename, sha256)
+
