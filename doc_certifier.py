@@ -307,6 +307,150 @@ def _create_xlsx_pdf(src_path: str, dest_path: str, cert_id: str, authenticity: 
     return dest_path
 
 
+
+
+def _attach_original_file_to_pdf(pdf_path: str, original_path: str, original_filename: str) -> str:
+    """
+    Embed the original uploaded file inside the certified PDF as an attachment.
+
+    This is especially important for Office files such as PPTX where a pure Python
+    renderer cannot perfectly reproduce every visual detail, animation, theme,
+    background, or SmartArt element. The PDF remains the certified viewing copy,
+    while the exact original file is preserved inside the PDF for later review.
+    """
+    try:
+        from pypdf import PdfReader, PdfWriter
+    except Exception:
+        # pypdf is already required for PDF certification, but do not fail the
+        # whole certification if attachment support is unexpectedly unavailable.
+        return pdf_path
+
+    if not os.path.exists(pdf_path) or not os.path.exists(original_path):
+        return pdf_path
+
+    tmp_out = pdf_path + ".attached.tmp.pdf"
+    try:
+        reader = PdfReader(pdf_path)
+        writer = PdfWriter()
+        for page in reader.pages:
+            writer.add_page(page)
+
+        try:
+            existing_meta = reader.metadata or {}
+            metadata = {str(k): str(v) for k, v in existing_meta.items() if v is not None}
+            metadata.update({
+                "/VeriFYD_Embedded_Original": original_filename,
+            })
+            writer.add_metadata(metadata)
+        except Exception:
+            pass
+
+        with open(original_path, "rb") as fh:
+            original_bytes = fh.read()
+
+        # pypdf supports embedded file attachments using add_attachment.
+        writer.add_attachment(original_filename or os.path.basename(original_path), original_bytes)
+
+        with open(tmp_out, "wb") as out:
+            writer.write(out)
+
+        os.replace(tmp_out, pdf_path)
+    except Exception:
+        try:
+            if os.path.exists(tmp_out):
+                os.remove(tmp_out)
+        except Exception:
+            pass
+    return pdf_path
+
+
+def _stamp_existing_pdf_file(src_pdf_path: str, dest_path: str, cert_id: str,
+                             authenticity: int, label: str, sha256: str = "") -> str:
+    """Preserve an existing PDF's pages and add only the small lower-right VeriFYD mark."""
+    from pypdf import PdfReader, PdfWriter
+
+    reader = PdfReader(src_pdf_path)
+    writer = PdfWriter()
+    overlay_paths: list[str] = []
+
+    try:
+        for page in reader.pages:
+            width = float(page.mediabox.width)
+            height = float(page.mediabox.height)
+            overlay = _make_logo_overlay(width, height)
+            overlay_paths.append(overlay)
+            overlay_page = PdfReader(overlay).pages[0]
+            page.merge_page(overlay_page)
+            writer.add_page(page)
+
+        try:
+            existing_meta = reader.metadata or {}
+            metadata = {str(k): str(v) for k, v in existing_meta.items() if v is not None}
+            metadata.update({
+                "/VeriFYD": "Certified",
+                "/VeriFYD_Certificate_ID": cert_id,
+                "/VeriFYD_Label": label,
+                "/VeriFYD_Authenticity": str(authenticity),
+                "/VeriFYD_SHA256_Original": sha256 or "",
+            })
+            writer.add_metadata(metadata)
+        except Exception:
+            pass
+
+        with open(dest_path, "wb") as out:
+            writer.write(out)
+    finally:
+        for p in overlay_paths:
+            try:
+                if os.path.exists(p):
+                    os.remove(p)
+            except Exception:
+                pass
+    return dest_path
+
+
+def _try_convert_pptx_to_pdf_with_libreoffice(src_path: str) -> str | None:
+    """
+    Try to use LibreOffice/soffice for a true PPTX-to-PDF conversion.
+
+    Many Render Python environments do not include LibreOffice. When it is not
+    available, return None and let the pure-Python renderer handle the fallback.
+    """
+    try:
+        import shutil
+        import subprocess
+    except Exception:
+        return None
+
+    soffice = shutil.which("soffice") or shutil.which("libreoffice")
+    if not soffice:
+        return None
+
+    out_dir = tempfile.mkdtemp(prefix="verifyd_pptx_convert_")
+    try:
+        cmd = [
+            soffice,
+            "--headless",
+            "--convert-to",
+            "pdf",
+            "--outdir",
+            out_dir,
+            src_path,
+        ]
+        result = subprocess.run(cmd, capture_output=True, timeout=90)
+        if result.returncode != 0:
+            return None
+
+        base = os.path.splitext(os.path.basename(src_path))[0] + ".pdf"
+        converted = os.path.join(out_dir, base)
+        if os.path.exists(converted) and os.path.getsize(converted) > 1000:
+            # Caller is responsible for deleting the returned file and its folder.
+            return converted
+        return None
+    except Exception:
+        return None
+
+
 # ─────────────────────────────────────────────
 # PPTX rendering
 # ─────────────────────────────────────────────
@@ -522,15 +666,50 @@ def _draw_pptx_visual_slide(c, slide: Any, slide_idx: int, prs_width: float, prs
 def _create_pptx_pdf(src_path: str, dest_path: str, cert_id: str, authenticity: int,
                      label: str, filename: str, sha256: str = "") -> str:
     """
-    Render a PPTX presentation into a certified PDF with a visual slide approximation.
+    Render a PPTX presentation into a certified PDF.
 
-    Note: this avoids LibreOffice/system conversion dependencies, so it is safe for
-    Render. It preserves slide text, tables, pictures, and basic shape placement.
+    Preferred path:
+      1. If LibreOffice/soffice is available on the server, convert the PPTX to a
+         true PDF rendering, stamp each page, and embed the original PPTX.
+
+    Safe fallback:
+      2. If LibreOffice is unavailable, use a pure-Python visual approximation
+         and embed the original PPTX as a PDF attachment so the exact source file
+         travels with the certified PDF.
     """
     try:
         from pptx import Presentation
     except Exception as e:
         raise RuntimeError("Missing dependency: python-pptx. Add python-pptx>=0.6.23 to requirements.txt") from e
+
+    # First try a true Office conversion. This preserves the original slide
+    # visuals far better than python-pptx can. It will silently fall back if
+    # LibreOffice is not installed in Render.
+    converted_pdf = _try_convert_pptx_to_pdf_with_libreoffice(src_path)
+    if converted_pdf:
+        converted_dir = os.path.dirname(converted_pdf)
+        try:
+            _stamp_existing_pdf_file(
+                src_pdf_path=converted_pdf,
+                dest_path=dest_path,
+                cert_id=cert_id,
+                authenticity=authenticity,
+                label=label,
+                sha256=sha256,
+            )
+            _attach_original_file_to_pdf(dest_path, src_path, filename or os.path.basename(src_path))
+            return dest_path
+        finally:
+            try:
+                if os.path.exists(converted_pdf):
+                    os.remove(converted_pdf)
+            except Exception:
+                pass
+            try:
+                if converted_dir and os.path.isdir(converted_dir):
+                    os.rmdir(converted_dir)
+            except Exception:
+                pass
 
     from reportlab.pdfgen import canvas
     from reportlab.lib.pagesizes import landscape, letter
@@ -559,9 +738,11 @@ def _create_pptx_pdf(src_path: str, dest_path: str, cert_id: str, authenticity: 
         c.drawString(54, page_h - 198, "SHA-256:")
         c.setFont("Helvetica", 7.5)
         c.drawString(54, page_h - 212, sha256[:120])
+
     c.setFont("Helvetica-Oblique", 8)
     c.setFillGray(0.35)
-    c.drawString(54, 42, "The following pages are a VeriFYD-rendered PDF view of the uploaded PPTX presentation.")
+    c.drawString(54, 58, "The following pages are a VeriFYD-rendered PDF view of the uploaded PPTX presentation.")
+    c.drawString(54, 44, "The original PPTX file is embedded inside this certified PDF as an attachment for exact-source review.")
     _draw_verifyd_mark(c, page_w, y=24, x_right_pad=34)
     c.showPage()
 
@@ -595,8 +776,12 @@ def _create_pptx_pdf(src_path: str, dest_path: str, cert_id: str, authenticity: 
                 pass
 
     c.save()
-    return dest_path
 
+    # Embed the original deck so the certified PDF includes the exact source
+    # presentation even when pure-Python visual rendering cannot perfectly
+    # reproduce every PowerPoint feature.
+    _attach_original_file_to_pdf(dest_path, src_path, filename or os.path.basename(src_path))
+    return dest_path
 
 # ─────────────────────────────────────────────
 # Fallback and public entry point
