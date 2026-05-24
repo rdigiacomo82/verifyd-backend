@@ -54,15 +54,8 @@ def _sha256_file(path: str) -> str:
 
 def _store_result(redis_conn, job_id: str, result: dict) -> None:
     redis_conn.setex(f"result:{job_id}", RESULT_TTL, json.dumps(result))
-    log.info(
-        "Stored result: job=%s label=%s auth=%s video_ready=%s document_ready=%s download_url=%s",
-        job_id,
-        result.get("label"),
-        result.get("authenticity_score"),
-        result.get("video_ready"),
-        result.get("document_ready"),
-        result.get("download_url"),
-    )
+    log.info("Stored result: job=%s label=%s auth=%s video_ready=%s",
+             job_id, result.get("label"), result.get("authenticity_score"), result.get("video_ready"))
 
 
 def process_upload_job(
@@ -683,7 +676,6 @@ def process_link_job(job_id: str, video_url: str, email: str, double_count: bool
 
 
 
-
 def process_document_upload_job(
     file_key: str,
     filename: str,
@@ -716,7 +708,7 @@ def process_document_upload_job(
     }
 
     ext = _os.path.splitext(filename)[1].lower() or ".pdf"
-    if ext not in (".pdf", ".docx", ".txt", ".md", ".csv", ".jpg", ".jpeg", ".png"):
+    if ext not in (".pdf", ".docx", ".xlsx", ".txt", ".md", ".csv", ".jpg", ".jpeg", ".png"):
         ext = ".pdf"
     tmp_path = _os.path.join(_tempfile.gettempdir(), f"{job_id}{ext}")
 

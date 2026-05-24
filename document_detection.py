@@ -184,6 +184,70 @@ def _read_txt(path: str) -> Tuple[str, Dict[str, Any]]:
     return data.decode("latin-1", errors="replace"), meta
 
 
+def _read_xlsx(path: str) -> Tuple[str, Dict[str, Any]]:
+    """Best-effort XLSX text and workbook metadata extraction."""
+    meta: Dict[str, Any] = {"type": "xlsx", "pages": 0, "embedded_images": 0, "metadata": {}}
+    try:
+        from openpyxl import load_workbook
+    except Exception as e:
+        raise RuntimeError("Missing dependency: openpyxl. Add openpyxl>=3.1.0 to requirements.txt") from e
+
+    wb = load_workbook(path, data_only=True, read_only=True)
+    text_parts: List[str] = []
+    sheet_names = list(wb.sheetnames)
+
+    try:
+        props = wb.properties
+        meta["metadata"] = {
+            "creator": props.creator or "",
+            "last_modified_by": props.lastModifiedBy or "",
+            "created": props.created.isoformat() if props.created else "",
+            "modified": props.modified.isoformat() if props.modified else "",
+            "title": props.title or "",
+            "subject": props.subject or "",
+            "keywords": props.keywords or "",
+            "category": props.category or "",
+            "description": props.description or "",
+            "sheet_count": str(len(sheet_names)),
+            "sheet_names": ", ".join(sheet_names[:20]),
+        }
+    except Exception:
+        meta["metadata"] = {
+            "sheet_count": str(len(sheet_names)),
+            "sheet_names": ", ".join(sheet_names[:20]),
+        }
+
+    max_rows_total = 10000
+    rows_seen = 0
+    for ws in wb.worksheets:
+        text_parts.append(f"Worksheet: {ws.title}")
+        for row in ws.iter_rows(values_only=True):
+            vals = []
+            for cell in row:
+                if cell is None:
+                    continue
+                value = str(cell).strip()
+                if value:
+                    vals.append(value[:500])
+            if vals:
+                text_parts.append(" | ".join(vals))
+            rows_seen += 1
+            if rows_seen >= max_rows_total:
+                text_parts.append("[...workbook truncated for analysis length...]")
+                break
+        if rows_seen >= max_rows_total:
+            break
+
+    try:
+        wb.close()
+    except Exception:
+        pass
+
+    meta["pages"] = len(sheet_names)
+    meta["embedded_images"] = 0
+    return "\n".join(text_parts), meta
+
+
 def _read_image(path: str) -> Tuple[str, Dict[str, Any]]:
     """Best-effort metadata extraction for JPG/JPEG/PNG document images."""
     meta: Dict[str, Any] = {"type": "image", "pages": 1, "embedded_images": 1, "metadata": {}}
@@ -230,6 +294,8 @@ def _extract_document(path: str) -> Tuple[str, Dict[str, Any]]:
         return _read_pdf(path)
     if ext == ".docx":
         return _read_docx(path)
+    if ext == ".xlsx":
+        return _read_xlsx(path)
     if ext in (".txt", ".md", ".csv"):
         return _read_txt(path)
     if ext in (".jpg", ".jpeg", ".png"):
