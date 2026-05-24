@@ -1061,6 +1061,7 @@ def certificate_lookup(cid: str):
             video_available = bool(r.exists(f"cert:{cid}"))
         except Exception:
             pass
+    certified_to = cert.get("email") or ""
     return {
         "certificate_id":  cert["cert_id"],
         "label":           cert["label"],
@@ -1071,6 +1072,8 @@ def certificate_lookup(cid: str):
         "download_count":  cert["download_count"],
         "verified_by":     "VeriFYD",
         "video_available": video_available,
+        "certified_to":    certified_to,
+        "email":           certified_to,
     }
 
 
