@@ -16,6 +16,10 @@
 #    - Renders workbook sheets/cell values into a certified PDF.
 #    - Adds only the small VeriFYD lower-right mark on each page.
 #
+#  PPTX input:
+#    - Renders slide text/tables into a certified PDF.
+#    - Adds only the small VeriFYD lower-right mark on each page.
+#
 #  Other non-PDF inputs:
 #    - Creates a simple certified PDF summary fallback.
 #
@@ -298,6 +302,175 @@ def _create_xlsx_pdf(src_path: str, dest_path: str, cert_id: str, authenticity: 
     return dest_path
 
 
+
+def _extract_pptx_slides(src_path: str, max_slides: int = 80) -> List[Tuple[str, List[str]]]:
+    """
+    Extract readable slide text/table values for certified rendering.
+
+    This is not intended to be a perfect PowerPoint visual clone. It creates a
+    readable certified PDF rendering of the deck contents so the returned
+    document is useful instead of only showing a certificate summary page.
+    """
+    try:
+        from pptx import Presentation
+    except Exception as e:
+        raise RuntimeError("Missing dependency: python-pptx. Add python-pptx>=0.6.23 to requirements.txt") from e
+
+    prs = Presentation(src_path)
+    slides: List[Tuple[str, List[str]]] = []
+
+    for idx, slide in enumerate(prs.slides, start=1):
+        if idx > max_slides:
+            slides.append(("VeriFYD note", [f"Presentation truncated after {max_slides} slides."]))
+            break
+
+        lines: List[str] = []
+        for shape in slide.shapes:
+            try:
+                if getattr(shape, "has_text_frame", False) and shape.text and shape.text.strip():
+                    for line in str(shape.text).splitlines():
+                        clean = _safe_text(line, 180)
+                        if clean:
+                            lines.append(clean)
+            except Exception:
+                pass
+
+            try:
+                if getattr(shape, "has_table", False):
+                    table = shape.table
+                    for row in table.rows:
+                        vals = []
+                        for cell in row.cells:
+                            clean = _safe_text(cell.text, 90)
+                            if clean:
+                                vals.append(clean)
+                        if vals:
+                            lines.append(" | ".join(vals))
+            except Exception:
+                pass
+
+        if not lines:
+            lines = ["[No extractable slide text found]"]
+
+        title = f"Slide {idx}"
+        if lines and not lines[0].startswith("["):
+            title = f"Slide {idx}: {_safe_text(lines[0], 70)}"
+
+        slides.append((title, lines))
+
+    if not slides:
+        slides = [("Presentation", ["[No slides found]"])]
+
+    return slides
+
+
+def _draw_pptx_slide_page(c, width: float, height: float, title: str, subtitle: str,
+                          lines: List[str], page_num: int) -> None:
+    """Draw one readable page for a PPTX slide."""
+    margin_x = 54
+    top = height - 54
+    bottom = 48
+
+    c.setFont("Helvetica-Bold", 16)
+    c.setFillGray(0.05)
+    c.drawString(margin_x, top, title[:95])
+
+    c.setFont("Helvetica", 8)
+    c.setFillGray(0.35)
+    c.drawString(margin_x, top - 16, subtitle[:130])
+
+    y = top - 48
+    line_h = 14
+
+    for idx, line in enumerate(lines[:34]):
+        if y < bottom + line_h:
+            c.setFont("Helvetica-Oblique", 8)
+            c.setFillGray(0.40)
+            c.drawString(margin_x, y, "[Additional slide text truncated on this certified rendering page]")
+            break
+
+        is_first = idx == 0 and not line.startswith("[")
+        c.setFont("Helvetica-Bold" if is_first else "Helvetica", 9 if is_first else 8.5)
+        c.setFillGray(0.08)
+
+        wrapped = []
+        current = ""
+        for word in str(line).split():
+            test = (current + " " + word).strip()
+            if c.stringWidth(test, "Helvetica", 8.5) > (width - margin_x * 2):
+                if current:
+                    wrapped.append(current)
+                current = word
+            else:
+                current = test
+        if current:
+            wrapped.append(current)
+
+        for wline in wrapped[:3]:
+            if y < bottom + line_h:
+                break
+            prefix = "" if is_first else "• "
+            c.drawString(margin_x, y, prefix + wline)
+            y -= line_h
+        y -= 2
+
+    c.setFont("Helvetica", 6.5)
+    c.setFillGray(0.45)
+    c.drawString(margin_x, 24, f"VeriFYD certified presentation rendering • Page {page_num}")
+    _draw_verifyd_mark(c, width, y=24, x_right_pad=34)
+
+
+def _create_pptx_pdf(src_path: str, dest_path: str, cert_id: str, authenticity: int,
+                     label: str, filename: str, sha256: str = "") -> str:
+    """Render a PPTX presentation into a readable certified PDF with a small VeriFYD mark."""
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.pagesizes import landscape, letter
+
+    width, height = landscape(letter)
+    c = canvas.Canvas(dest_path, pagesize=(width, height))
+
+    slides = _extract_pptx_slides(src_path)
+    page_num = 1
+
+    c.setAuthor("VeriFYD")
+    c.setTitle(f"VeriFYD Certified Presentation {cert_id}")
+    c.setSubject(f"{label} | Authenticity {authenticity}% | {filename}")
+
+    c.setFont("Helvetica-Bold", 20)
+    c.drawString(54, height - 72, "VeriFYD Certified Presentation")
+    c.setFont("Helvetica", 10)
+    c.drawString(54, height - 105, f"Status: {label}")
+    c.drawString(54, height - 123, f"Authenticity Score: {authenticity}%")
+    c.drawString(54, height - 141, f"Certificate ID: {cert_id}")
+    c.drawString(54, height - 159, f"Original file: {filename}")
+    c.drawString(54, height - 177, f"Slides: {len(slides)}")
+    if sha256:
+        c.drawString(54, height - 198, "SHA-256:")
+        c.setFont("Helvetica", 7.5)
+        c.drawString(54, height - 212, sha256[:120])
+    c.setFont("Helvetica-Oblique", 8)
+    c.setFillGray(0.35)
+    c.drawString(54, 42, "The following pages are a VeriFYD-rendered PDF view of the uploaded PPTX presentation.")
+    _draw_verifyd_mark(c, width, y=24, x_right_pad=34)
+    c.showPage()
+    page_num += 1
+
+    for slide_title, lines in slides:
+        _draw_pptx_slide_page(
+            c,
+            width,
+            height,
+            title=slide_title,
+            subtitle=f"File: {filename}",
+            lines=lines,
+            page_num=page_num,
+        )
+        c.showPage()
+        page_num += 1
+
+    c.save()
+    return dest_path
+
 def _create_non_pdf_certificate(dest_path: str, cert_id: str, authenticity: int,
                                 label: str, filename: str, sha256: str = "") -> str:
     """Fallback for non-PDF docs: create a simple marked PDF summary."""
@@ -335,6 +508,7 @@ def stamp_document(src_path: str, dest_path: str, cert_id: str,
     For PDFs: preserve original pages and add only a small lower-right VeriFYD mark.
     For JPG/JPEG/PNG: create a marked PDF containing the image.
     For XLSX: render workbook sheets into a marked PDF.
+    For PPTX: render presentation slides into a marked PDF.
     For other non-PDFs: create a simple PDF summary fallback.
     """
     ext = os.path.splitext(src_path)[1].lower()
@@ -344,6 +518,9 @@ def stamp_document(src_path: str, dest_path: str, cert_id: str,
 
     if ext == ".xlsx":
         return _create_xlsx_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256)
+
+    if ext == ".pptx":
+        return _create_pptx_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256)
 
     if ext == ".pdf":
         from pypdf import PdfReader, PdfWriter

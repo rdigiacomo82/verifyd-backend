@@ -708,7 +708,7 @@ def process_document_upload_job(
     }
 
     ext = _os.path.splitext(filename)[1].lower() or ".pdf"
-    if ext not in (".pdf", ".docx", ".xlsx", ".txt", ".md", ".csv", ".jpg", ".jpeg", ".png"):
+    if ext not in (".pdf", ".docx", ".xlsx", ".pptx", ".txt", ".md", ".csv", ".jpg", ".jpeg", ".png"):
         ext = ".pdf"
     tmp_path = _os.path.join(_tempfile.gettempdir(), f"{job_id}{ext}")
 

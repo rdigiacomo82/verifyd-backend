@@ -248,6 +248,81 @@ def _read_xlsx(path: str) -> Tuple[str, Dict[str, Any]]:
     return "\n".join(text_parts), meta
 
 
+
+def _read_pptx(path: str) -> Tuple[str, Dict[str, Any]]:
+    """Best-effort PPTX slide text and presentation metadata extraction."""
+    meta: Dict[str, Any] = {"type": "pptx", "pages": 0, "embedded_images": 0, "metadata": {}}
+    try:
+        from pptx import Presentation
+    except Exception as e:
+        raise RuntimeError("Missing dependency: python-pptx. Add python-pptx>=0.6.23 to requirements.txt") from e
+
+    prs = Presentation(path)
+    text_parts: List[str] = []
+    embedded_images = 0
+
+    try:
+        props = prs.core_properties
+        meta["metadata"] = {
+            "author": props.author or "",
+            "last_modified_by": props.last_modified_by or "",
+            "created": props.created.isoformat() if props.created else "",
+            "modified": props.modified.isoformat() if props.modified else "",
+            "title": props.title or "",
+            "subject": props.subject or "",
+            "keywords": props.keywords or "",
+            "comments": props.comments or "",
+            "revision": str(props.revision or ""),
+            "category": props.category or "",
+        }
+    except Exception:
+        meta["metadata"] = {}
+
+    max_slides = 80
+    for slide_idx, slide in enumerate(prs.slides, start=1):
+        if slide_idx > max_slides:
+            text_parts.append("[...presentation truncated for analysis length...]")
+            break
+
+        slide_text: List[str] = []
+        for shape in slide.shapes:
+            try:
+                if getattr(shape, "has_text_frame", False) and shape.text and shape.text.strip():
+                    slide_text.append(shape.text.strip())
+            except Exception:
+                pass
+
+            try:
+                if getattr(shape, "shape_type", None) == 13:  # MSO_SHAPE_TYPE.PICTURE
+                    embedded_images += 1
+            except Exception:
+                pass
+
+            # Tables can hold quote/proposal values.
+            try:
+                if getattr(shape, "has_table", False):
+                    table = shape.table
+                    for row in table.rows:
+                        vals = []
+                        for cell in row.cells:
+                            value = (cell.text or "").strip()
+                            if value:
+                                vals.append(value[:300])
+                        if vals:
+                            slide_text.append(" | ".join(vals))
+            except Exception:
+                pass
+
+        text_parts.append(f"Slide {slide_idx}:")
+        if slide_text:
+            text_parts.extend(slide_text)
+        else:
+            text_parts.append("[No extractable slide text]")
+
+    meta["pages"] = len(prs.slides)
+    meta["embedded_images"] = embedded_images
+    return "\n".join(text_parts), meta
+
 def _read_image(path: str) -> Tuple[str, Dict[str, Any]]:
     """Best-effort metadata extraction for JPG/JPEG/PNG document images."""
     meta: Dict[str, Any] = {"type": "image", "pages": 1, "embedded_images": 1, "metadata": {}}
@@ -296,6 +371,8 @@ def _extract_document(path: str) -> Tuple[str, Dict[str, Any]]:
         return _read_docx(path)
     if ext == ".xlsx":
         return _read_xlsx(path)
+    if ext == ".pptx":
+        return _read_pptx(path)
     if ext in (".txt", ".md", ".csv"):
         return _read_txt(path)
     if ext in (".jpg", ".jpeg", ".png"):
