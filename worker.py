@@ -708,7 +708,11 @@ def process_document_upload_job(
     }
 
     ext = _os.path.splitext(filename)[1].lower() or ".pdf"
-    if ext not in (".pdf", ".docx", ".xlsx", ".pptx", ".txt", ".md", ".csv", ".jpg", ".jpeg", ".png"):
+    if ext not in (
+        ".pdf", ".docx", ".xlsx", ".pptx",
+        ".txt", ".md", ".csv", ".rtf", ".eml",
+        ".jpg", ".jpeg", ".png", ".tif", ".tiff",
+    ):
         ext = ".pdf"
     tmp_path = _os.path.join(_tempfile.gettempdir(), f"{job_id}{ext}")
 
@@ -734,7 +738,7 @@ def process_document_upload_job(
 
         log.info("Worker: starting document detection job=%s email=%s filename=%s", job_id, email, filename)
 
-        image_document_exts = (".jpg", ".jpeg", ".png")
+        image_document_exts = (".jpg", ".jpeg", ".png", ".tif", ".tiff")
         if ext in image_document_exts:
             # Use VeriFYD's existing photo-authentication engines for image documents.
             # This keeps image detection strong while preserving the document upload,
@@ -922,6 +926,7 @@ def keepalive_ping():
     _ts = _time.strftime("%Y-%m-%d %H:%M:%S UTC", _time.gmtime())
     log.info("Keepalive ping: worker alive at %s — models cached in memory", _ts)
     return {"status": "alive", "ts": _ts}
+
 
 
 

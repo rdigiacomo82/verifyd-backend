@@ -94,45 +94,78 @@ def _chunked_rows(rows: List[List[str]], rows_per_page: int) -> Iterable[List[Li
 
 def _create_image_pdf(src_path: str, dest_path: str, cert_id: str, authenticity: int,
                       label: str, filename: str, sha256: str = "") -> str:
-    """Create a certified PDF that preserves the uploaded image visually and adds only the small VeriFYD mark."""
+    """Create a certified PDF that preserves uploaded JPG/PNG/TIF/TIFF images visually."""
     from reportlab.pdfgen import canvas
     from reportlab.lib.pagesizes import letter
     from reportlab.lib.utils import ImageReader
-    from PIL import Image
+    from PIL import Image, ImageSequence
 
     width, height = letter
     c = canvas.Canvas(dest_path, pagesize=letter)
-
-    with Image.open(src_path) as img:
-        img_w, img_h = img.size
+    c.setAuthor("VeriFYD")
+    c.setTitle(f"VeriFYD Certified Document {cert_id}")
+    c.setSubject(f"{label} | Authenticity {authenticity}% | {filename}")
 
     margin = 36
     max_w = width - (margin * 2)
     max_h = height - (margin * 2)
-    scale = min(max_w / max(1, img_w), max_h / max(1, img_h))
-    draw_w = img_w * scale
-    draw_h = img_h * scale
-    x = (width - draw_w) / 2
-    y = (height - draw_h) / 2
+    temp_images: List[str] = []
 
-    c.drawImage(
-        ImageReader(src_path),
-        x,
-        y,
-        width=draw_w,
-        height=draw_h,
-        preserveAspectRatio=True,
-        mask="auto",
-    )
+    try:
+        with Image.open(src_path) as img:
+            frames = []
+            try:
+                for frame in ImageSequence.Iterator(img):
+                    frames.append(frame.copy())
+                    if len(frames) >= 50:
+                        break
+            except Exception:
+                frames = [img.copy()]
 
-    _draw_verifyd_mark(c, width)
+        if not frames:
+            frames = [Image.open(src_path).copy()]
 
-    c.setAuthor("VeriFYD")
-    c.setTitle(f"VeriFYD Certified Document {cert_id}")
-    c.setSubject(f"{label} | Authenticity {authenticity}% | {filename}")
+        for idx, frame in enumerate(frames):
+            if frame.mode not in ("RGB", "RGBA"):
+                frame = frame.convert("RGB")
+
+            draw_source = src_path
+            if len(frames) > 1 or os.path.splitext(src_path)[1].lower() in (".tif", ".tiff"):
+                fd, tmp_img = tempfile.mkstemp(suffix=f"_verifyd_frame_{idx}.png")
+                os.close(fd)
+                frame.save(tmp_img, format="PNG")
+                temp_images.append(tmp_img)
+                draw_source = tmp_img
+
+            img_w, img_h = frame.size
+            scale = min(max_w / max(1, img_w), max_h / max(1, img_h))
+            draw_w = img_w * scale
+            draw_h = img_h * scale
+            x = (width - draw_w) / 2
+            y = (height - draw_h) / 2
+
+            c.drawImage(
+                ImageReader(draw_source),
+                x,
+                y,
+                width=draw_w,
+                height=draw_h,
+                preserveAspectRatio=True,
+                mask="auto",
+            )
+            _draw_verifyd_mark(c, width)
+            if idx < len(frames) - 1:
+                c.showPage()
+    finally:
+        for t in temp_images:
+            try:
+                if os.path.exists(t):
+                    os.remove(t)
+            except Exception:
+                pass
+
     c.save()
     return dest_path
-
 
 # ─────────────────────────────────────────────
 # XLSX rendering
@@ -783,6 +816,149 @@ def _create_pptx_pdf(src_path: str, dest_path: str, cert_id: str, authenticity: 
     _attach_original_file_to_pdf(dest_path, src_path, filename or os.path.basename(src_path))
     return dest_path
 
+
+
+def _strip_rtf_for_render(raw: str) -> str:
+    """Lightweight RTF-to-text cleanup for certified rendering."""
+    import re
+    raw = raw.replace("\\par", "\n").replace("\\line", "\n").replace("\\tab", "\t")
+    raw = re.sub(r"\\'[0-9a-fA-F]{2}", " ", raw)
+    raw = re.sub(r"\\[a-zA-Z]+-?\d* ?", "", raw)
+    raw = raw.replace("{", " ").replace("}", " ")
+    raw = re.sub(r"[ \t]+", " ", raw)
+    raw = re.sub(r"\n\s*\n\s*\n+", "\n\n", raw)
+    return raw.strip()
+
+
+def _read_text_for_certified_render(src_path: str, ext: str) -> str:
+    """Read RTF/EML/text-family documents for certified PDF rendering."""
+    data = b""
+    with open(src_path, "rb") as fh:
+        data = fh.read(2_500_000)
+
+    if ext == ".eml":
+        try:
+            from email import policy
+            from email.parser import BytesParser
+            msg = BytesParser(policy=policy.default).parsebytes(data)
+            lines: List[str] = []
+            for h in ("From", "To", "Cc", "Subject", "Date", "Message-ID", "Reply-To", "Return-Path"):
+                v = str(msg.get(h, "") or "").strip()
+                if v:
+                    lines.append(f"{h}: {v}")
+            lines.append("")
+            body_parts: List[str] = []
+            if msg.is_multipart():
+                for part in msg.walk():
+                    ctype = part.get_content_type()
+                    disp = str(part.get_content_disposition() or "")
+                    if ctype == "text/plain" and disp != "attachment":
+                        try:
+                            body_parts.append(str(part.get_content()))
+                        except Exception:
+                            pass
+                    elif ctype == "text/html" and disp != "attachment" and not body_parts:
+                        try:
+                            import re
+                            body_parts.append(re.sub(r"<[^>]+>", " ", str(part.get_content())))
+                        except Exception:
+                            pass
+            else:
+                try:
+                    body_parts.append(str(msg.get_content()))
+                except Exception:
+                    pass
+            lines.append("\n\n".join(x.strip() for x in body_parts if x and x.strip()))
+            return "\n".join(lines).strip()
+        except Exception:
+            pass
+
+    text = ""
+    for enc in ("utf-8", "utf-16", "latin-1"):
+        try:
+            text = data.decode(enc, errors="replace")
+            break
+        except Exception:
+            continue
+    if not text:
+        text = data.decode("latin-1", errors="replace")
+    if ext == ".rtf":
+        return _strip_rtf_for_render(text)
+    return text.strip()
+
+
+def _create_text_render_pdf(src_path: str, dest_path: str, cert_id: str, authenticity: int,
+                            label: str, filename: str, sha256: str = "") -> str:
+    """Create a readable certified PDF rendering for EML/RTF/TXT-like documents."""
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.pagesizes import letter
+
+    width, height = letter
+    c = canvas.Canvas(dest_path, pagesize=letter)
+    c.setAuthor("VeriFYD")
+    c.setTitle(f"VeriFYD Certified Document {cert_id}")
+    c.setSubject(f"{label} | Authenticity {authenticity}% | {filename}")
+
+    ext = os.path.splitext(src_path)[1].lower()
+    text = _read_text_for_certified_render(src_path, ext)
+    if not text:
+        text = "[No readable text could be extracted from this document.]"
+
+    margin_x = 54
+    y = height - 54
+    line_h = 11
+    page_num = 1
+
+    def header() -> None:
+        nonlocal y
+        c.setFont("Helvetica-Bold", 14)
+        c.setFillGray(0.05)
+        c.drawString(margin_x, y, "VeriFYD Certified Document Rendering")
+        y -= 18
+        c.setFont("Helvetica", 7.5)
+        c.setFillGray(0.35)
+        c.drawString(margin_x, y, f"File: {filename} • Status: {label} • Authenticity: {authenticity}%")
+        y -= 22
+
+    def footer() -> None:
+        c.setFont("Helvetica", 6.5)
+        c.setFillGray(0.45)
+        c.drawString(margin_x, 24, f"VeriFYD certified text rendering • Page {page_num}")
+        _draw_verifyd_mark(c, width, y=24, x_right_pad=34)
+
+    header()
+    max_w = width - (margin_x * 2)
+    for paragraph in text.splitlines():
+        if not paragraph.strip():
+            y -= line_h
+            if y < 50:
+                footer(); c.showPage(); page_num += 1; y = height - 54; header()
+            continue
+        words = paragraph.split()
+        current = ""
+        for word in words:
+            trial = (current + " " + word).strip()
+            if c.stringWidth(trial, "Helvetica", 8.5) <= max_w:
+                current = trial
+            else:
+                if y < 50:
+                    footer(); c.showPage(); page_num += 1; y = height - 54; header()
+                c.setFont("Helvetica", 8.5)
+                c.setFillGray(0.08)
+                c.drawString(margin_x, y, current[:160])
+                y -= line_h
+                current = word
+        if current:
+            if y < 50:
+                footer(); c.showPage(); page_num += 1; y = height - 54; header()
+            c.setFont("Helvetica", 8.5)
+            c.setFillGray(0.08)
+            c.drawString(margin_x, y, current[:160])
+            y -= line_h
+    footer()
+    c.save()
+    return dest_path
+
 # ─────────────────────────────────────────────
 # Fallback and public entry point
 # ─────────────────────────────────────────────
@@ -829,7 +1005,7 @@ def stamp_document(src_path: str, dest_path: str, cert_id: str,
     """
     ext = os.path.splitext(src_path)[1].lower()
 
-    if ext in (".jpg", ".jpeg", ".png"):
+    if ext in (".jpg", ".jpeg", ".png", ".tif", ".tiff"):
         return _create_image_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256)
 
     if ext == ".xlsx":
@@ -837,6 +1013,9 @@ def stamp_document(src_path: str, dest_path: str, cert_id: str,
 
     if ext == ".pptx":
         return _create_pptx_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256)
+
+    if ext in (".rtf", ".eml"):
+        return _create_text_render_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256)
 
     if ext == ".pdf":
         from pypdf import PdfReader, PdfWriter

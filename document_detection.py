@@ -184,6 +184,108 @@ def _read_txt(path: str) -> Tuple[str, Dict[str, Any]]:
     return data.decode("latin-1", errors="replace"), meta
 
 
+
+
+def _strip_rtf_markup(raw: str) -> str:
+    """Very lightweight RTF-to-text fallback without external dependencies."""
+    raw = raw.replace("\\par", "\n").replace("\\line", "\n").replace("\\tab", "\t")
+    raw = re.sub(r"\\'[0-9a-fA-F]{2}", " ", raw)
+    raw = re.sub(r"\\[a-zA-Z]+-?\d* ?", "", raw)
+    raw = raw.replace("{", " ").replace("}", " ")
+    raw = re.sub(r"\s+", " ", raw)
+    return raw.strip()
+
+
+def _read_rtf(path: str) -> Tuple[str, Dict[str, Any]]:
+    """Best-effort RTF text extraction using safe built-in parsing."""
+    meta = {"type": "rtf", "pages": 0, "embedded_images": 0, "metadata": {}}
+    with open(path, "rb") as f:
+        data = f.read(2_000_000)
+    for enc in ("utf-8", "utf-16", "latin-1"):
+        try:
+            raw = data.decode(enc, errors="replace")
+            return _strip_rtf_markup(raw), meta
+        except Exception:
+            continue
+    return _strip_rtf_markup(data.decode("latin-1", errors="replace")), meta
+
+
+def _read_eml(path: str) -> Tuple[str, Dict[str, Any]]:
+    """Best-effort EML email extraction: headers, text/plain body, and attachment inventory."""
+    meta: Dict[str, Any] = {"type": "eml", "pages": 1, "embedded_images": 0, "metadata": {}}
+    try:
+        from email import policy
+        from email.parser import BytesParser
+    except Exception as e:
+        raise RuntimeError("Missing Python email parser support.") from e
+
+    with open(path, "rb") as f:
+        msg = BytesParser(policy=policy.default).parse(f)
+
+    headers = {
+        "from": str(msg.get("From", ""))[:500],
+        "to": str(msg.get("To", ""))[:500],
+        "cc": str(msg.get("Cc", ""))[:500],
+        "subject": str(msg.get("Subject", ""))[:500],
+        "date": str(msg.get("Date", ""))[:200],
+        "message_id": str(msg.get("Message-ID", ""))[:300],
+        "return_path": str(msg.get("Return-Path", ""))[:300],
+        "reply_to": str(msg.get("Reply-To", ""))[:300],
+        "content_type": str(msg.get_content_type()),
+    }
+
+    text_parts: List[str] = []
+    attachment_names: List[str] = []
+    embedded_images = 0
+
+    def _payload_to_text(part: Any) -> str:
+        try:
+            payload = part.get_content()
+            if isinstance(payload, str):
+                return payload
+        except Exception:
+            pass
+        try:
+            data = part.get_payload(decode=True) or b""
+            charset = part.get_content_charset() or "utf-8"
+            return data.decode(charset, errors="replace")
+        except Exception:
+            return ""
+
+    if msg.is_multipart():
+        for part in msg.walk():
+            ctype = part.get_content_type()
+            disposition = str(part.get_content_disposition() or "")
+            filename = part.get_filename()
+            if filename:
+                attachment_names.append(str(filename)[:200])
+            if ctype.startswith("image/"):
+                embedded_images += 1
+            if ctype == "text/plain" and disposition != "attachment":
+                body = _payload_to_text(part).strip()
+                if body:
+                    text_parts.append(body)
+            elif ctype == "text/html" and disposition != "attachment" and not text_parts:
+                html = _payload_to_text(part)
+                text = re.sub(r"<[^>]+>", " ", html)
+                text = re.sub(r"\s+", " ", text).strip()
+                if text:
+                    text_parts.append(text)
+    else:
+        body = _payload_to_text(msg).strip()
+        if body:
+            text_parts.append(body)
+
+    headers["attachment_count"] = str(len(attachment_names))
+    headers["attachment_names"] = ", ".join(attachment_names[:20])
+    meta["metadata"] = headers
+    meta["embedded_images"] = embedded_images
+
+    header_text = "\n".join(f"{k}: {v}" for k, v in headers.items() if v)
+    body_text = "\n\n".join(text_parts)
+    return (header_text + "\n\n" + body_text).strip(), meta
+
+
 def _read_xlsx(path: str) -> Tuple[str, Dict[str, Any]]:
     """Best-effort XLSX text and workbook metadata extraction."""
     meta: Dict[str, Any] = {"type": "xlsx", "pages": 0, "embedded_images": 0, "metadata": {}}
@@ -324,7 +426,7 @@ def _read_pptx(path: str) -> Tuple[str, Dict[str, Any]]:
     return "\n".join(text_parts), meta
 
 def _read_image(path: str) -> Tuple[str, Dict[str, Any]]:
-    """Best-effort metadata extraction for JPG/JPEG/PNG document images."""
+    """Best-effort metadata extraction for JPG/JPEG/PNG/TIF/TIFF document images."""
     meta: Dict[str, Any] = {"type": "image", "pages": 1, "embedded_images": 1, "metadata": {}}
     try:
         from PIL import Image, ExifTags
@@ -375,7 +477,11 @@ def _extract_document(path: str) -> Tuple[str, Dict[str, Any]]:
         return _read_pptx(path)
     if ext in (".txt", ".md", ".csv"):
         return _read_txt(path)
-    if ext in (".jpg", ".jpeg", ".png"):
+    if ext == ".rtf":
+        return _read_rtf(path)
+    if ext == ".eml":
+        return _read_eml(path)
+    if ext in (".jpg", ".jpeg", ".png", ".tif", ".tiff"):
         return _read_image(path)
     raise RuntimeError(f"Unsupported document format: {ext}")
 
