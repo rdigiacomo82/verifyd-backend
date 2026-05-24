@@ -709,8 +709,8 @@ def process_document_upload_job(
 
     ext = _os.path.splitext(filename)[1].lower() or ".pdf"
     if ext not in (
-        ".pdf", ".docx", ".xlsx", ".pptx",
-        ".txt", ".md", ".csv", ".rtf", ".eml",
+        ".pdf", ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt",
+        ".txt", ".md", ".csv", ".rtf", ".eml", ".msg",
         ".jpg", ".jpeg", ".png", ".tif", ".tiff",
     ):
         ext = ".pdf"

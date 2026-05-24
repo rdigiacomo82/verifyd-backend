@@ -187,12 +187,27 @@ def _read_txt(path: str) -> Tuple[str, Dict[str, Any]]:
 
 
 def _strip_rtf_markup(raw: str) -> str:
-    """Very lightweight RTF-to-text fallback without external dependencies."""
+    """RTF-to-text cleanup. Uses striprtf when available, with a safe regex fallback."""
+    try:
+        from striprtf.striprtf import rtf_to_text
+        text = rtf_to_text(raw or "")
+        text = re.sub(r"\x00+", " ", text)
+        text = re.sub(r"[ \t]+", " ", text)
+        text = re.sub(r"\n\s*\n\s*\n+", "\n\n", text)
+        return text.strip()
+    except Exception:
+        pass
+
+    # Remove large embedded binary/image/object groups before stripping control words.
+    raw = re.sub(r"{\\\*?\\pict.*?}", " ", raw, flags=re.DOTALL)
+    raw = re.sub(r"{\\object.*?}", " ", raw, flags=re.DOTALL)
     raw = raw.replace("\\par", "\n").replace("\\line", "\n").replace("\\tab", "\t")
     raw = re.sub(r"\\'[0-9a-fA-F]{2}", " ", raw)
     raw = re.sub(r"\\[a-zA-Z]+-?\d* ?", "", raw)
     raw = raw.replace("{", " ").replace("}", " ")
-    raw = re.sub(r"\s+", " ", raw)
+    raw = re.sub(r"\x00+", " ", raw)
+    raw = re.sub(r"[ \t]+", " ", raw)
+    raw = re.sub(r"\n\s*\n\s*\n+", "\n\n", raw)
     return raw.strip()
 
 
@@ -285,6 +300,193 @@ def _read_eml(path: str) -> Tuple[str, Dict[str, Any]]:
     body_text = "\n\n".join(text_parts)
     return (header_text + "\n\n" + body_text).strip(), meta
 
+
+
+def _clean_ole_extracted_text(data: bytes, limit: int = 2_000_000) -> str:
+    """Extract readable ASCII/UTF-16 text fragments from legacy OLE Office binaries."""
+    fragments: List[str] = []
+    sample = data[:limit]
+
+    for enc in ("utf-16-le", "latin-1"):
+        try:
+            decoded = sample.decode(enc, errors="ignore")
+        except Exception:
+            continue
+        decoded = decoded.replace("\x00", " ")
+        decoded = re.sub(r"[\x01-\x08\x0b\x0c\x0e-\x1f]+", " ", decoded)
+        decoded = re.sub(r"[ \t]+", " ", decoded)
+        pieces = re.findall(r"[A-Za-z0-9][A-Za-z0-9\s\.,;:\-_/@$%#&()\[\]{}'\"!?]{4,}", decoded)
+        fragments.extend(p.strip() for p in pieces if p and len(p.strip()) >= 5)
+
+    seen = set()
+    cleaned: List[str] = []
+    running = 0
+    for frag in fragments:
+        compact = re.sub(r"\s+", " ", frag).strip()
+        if len(compact) < 5:
+            continue
+        key = compact[:160].lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(compact)
+        running += len(compact)
+        if running > limit:
+            break
+
+    return "\n".join(cleaned)
+
+
+def _read_ole_office(path: str, doc_type: str) -> Tuple[str, Dict[str, Any]]:
+    """Best-effort metadata/text extraction for legacy .doc and .ppt OLE files."""
+    meta: Dict[str, Any] = {"type": doc_type, "pages": 0, "embedded_images": 0, "metadata": {}}
+    try:
+        import olefile
+    except Exception as e:
+        raise RuntimeError("Missing dependency: olefile. Add olefile>=0.47 to requirements.txt") from e
+
+    stream_names: List[str] = []
+    text_parts: List[str] = []
+
+    try:
+        with olefile.OleFileIO(path) as ole:
+            stream_names = ["/".join(s) for s in ole.listdir()]
+            meta["metadata"] = {
+                "ole_stream_count": str(len(stream_names)),
+                "ole_streams": ", ".join(stream_names[:30]),
+            }
+            meta["embedded_images"] = sum(
+                1 for name in stream_names
+                if any(token in name.lower() for token in ("picture", "image", "jpeg", "png", "wmf", "emf"))
+            )
+            for stream in ole.listdir()[:80]:
+                try:
+                    raw = ole.openstream(stream).read(750_000)
+                    txt = _clean_ole_extracted_text(raw, limit=750_000)
+                    if txt:
+                        text_parts.append(txt)
+                except Exception:
+                    continue
+    except Exception as e:
+        log.warning("OLE legacy Office extraction failed for %s: %s", path, e)
+
+    if not text_parts:
+        try:
+            with open(path, "rb") as fh:
+                text_parts.append(_clean_ole_extracted_text(fh.read(2_000_000)))
+        except Exception:
+            pass
+
+    return "\n".join(x for x in text_parts if x).strip(), meta
+
+
+def _read_doc(path: str) -> Tuple[str, Dict[str, Any]]:
+    """Best-effort legacy Microsoft Word .doc extraction."""
+    return _read_ole_office(path, "doc")
+
+
+def _read_ppt(path: str) -> Tuple[str, Dict[str, Any]]:
+    """Best-effort legacy Microsoft PowerPoint .ppt extraction."""
+    return _read_ole_office(path, "ppt")
+
+
+def _read_xls(path: str) -> Tuple[str, Dict[str, Any]]:
+    """Best-effort legacy Excel .xls extraction using xlrd."""
+    meta: Dict[str, Any] = {"type": "xls", "pages": 0, "embedded_images": 0, "metadata": {}}
+    try:
+        import xlrd
+    except Exception as e:
+        raise RuntimeError("Missing dependency: xlrd. Add xlrd==1.2.0 to requirements.txt") from e
+
+    text_parts: List[str] = []
+    book = xlrd.open_workbook(path, on_demand=True)
+    sheet_names = book.sheet_names()
+    meta["pages"] = len(sheet_names)
+    meta["metadata"] = {
+        "sheet_count": str(len(sheet_names)),
+        "sheet_names": ", ".join(sheet_names[:30]),
+    }
+
+    rows_seen = 0
+    max_rows_total = 10000
+    for sheet_name in sheet_names:
+        try:
+            sh = book.sheet_by_name(sheet_name)
+        except Exception:
+            continue
+        text_parts.append(f"Worksheet: {sheet_name}")
+        for r_idx in range(sh.nrows):
+            vals: List[str] = []
+            for c_idx in range(min(sh.ncols, 50)):
+                try:
+                    val = sh.cell_value(r_idx, c_idx)
+                except Exception:
+                    continue
+                if val in (None, ""):
+                    continue
+                if isinstance(val, float) and val.is_integer():
+                    val = int(val)
+                text = str(val).strip()
+                if text:
+                    vals.append(text[:500])
+            if vals:
+                text_parts.append(" | ".join(vals))
+            rows_seen += 1
+            if rows_seen >= max_rows_total:
+                text_parts.append("[...legacy workbook truncated for analysis length...]")
+                break
+        if rows_seen >= max_rows_total:
+            break
+
+    try:
+        book.release_resources()
+    except Exception:
+        pass
+    return "\n".join(text_parts), meta
+
+
+def _read_msg(path: str) -> Tuple[str, Dict[str, Any]]:
+    """Best-effort Outlook .msg extraction: headers, body, and attachment inventory."""
+    meta: Dict[str, Any] = {"type": "msg", "pages": 1, "embedded_images": 0, "metadata": {}}
+    try:
+        import extract_msg
+    except Exception as e:
+        raise RuntimeError("Missing dependency: extract-msg. Add extract-msg>=0.48.0 to requirements.txt") from e
+
+    msg = extract_msg.Message(path)
+    try:
+        attachments = list(getattr(msg, "attachments", []) or [])
+        attachment_names = []
+        embedded_images = 0
+        for att in attachments[:50]:
+            name = str(getattr(att, "longFilename", "") or getattr(att, "shortFilename", "") or "")
+            if name:
+                attachment_names.append(name[:200])
+                if os.path.splitext(name.lower())[1] in (".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tif", ".tiff"):
+                    embedded_images += 1
+        headers = {
+            "from": str(getattr(msg, "sender", "") or "")[:500],
+            "to": str(getattr(msg, "to", "") or "")[:500],
+            "cc": str(getattr(msg, "cc", "") or "")[:500],
+            "subject": str(getattr(msg, "subject", "") or "")[:500],
+            "date": str(getattr(msg, "date", "") or "")[:200],
+            "message_id": str(getattr(msg, "messageId", "") or "")[:300],
+            "attachment_count": str(len(attachments)),
+            "attachment_names": ", ".join(attachment_names[:20]),
+        }
+        body = str(getattr(msg, "body", "") or getattr(msg, "htmlBody", "") or "")
+        if body and "<" in body and ">" in body:
+            body = re.sub(r"<[^>]+>", " ", body)
+            body = re.sub(r"\s+", " ", body).strip()
+        meta["metadata"] = headers
+        meta["embedded_images"] = embedded_images
+        header_text = "\n".join(f"{k}: {v}" for k, v in headers.items() if v)
+        return (header_text + "\n\n" + body).strip(), meta
+    finally:
+        try:
+            msg.close()
+        except Exception:
+            pass
 
 def _read_xlsx(path: str) -> Tuple[str, Dict[str, Any]]:
     """Best-effort XLSX text and workbook metadata extraction."""
@@ -471,16 +673,24 @@ def _extract_document(path: str) -> Tuple[str, Dict[str, Any]]:
         return _read_pdf(path)
     if ext == ".docx":
         return _read_docx(path)
+    if ext == ".doc":
+        return _read_doc(path)
     if ext == ".xlsx":
         return _read_xlsx(path)
+    if ext == ".xls":
+        return _read_xls(path)
     if ext == ".pptx":
         return _read_pptx(path)
+    if ext == ".ppt":
+        return _read_ppt(path)
     if ext in (".txt", ".md", ".csv"):
         return _read_txt(path)
     if ext == ".rtf":
         return _read_rtf(path)
     if ext == ".eml":
         return _read_eml(path)
+    if ext == ".msg":
+        return _read_msg(path)
     if ext in (".jpg", ".jpeg", ".png", ".tif", ".tiff"):
         return _read_image(path)
     raise RuntimeError(f"Unsupported document format: {ext}")

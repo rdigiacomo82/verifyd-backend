@@ -66,4 +66,9 @@ python-docx>=1.1.0
 reportlab>=4.0.0
 openpyxl>=3.1.0
 python-pptx>=0.6.23
+# Legacy Office and email document support
+olefile>=0.47
+extract-msg>=0.48.0
+striprtf>=0.0.29
+xlrd==1.2.0
 

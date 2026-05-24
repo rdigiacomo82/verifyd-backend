@@ -760,8 +760,8 @@ async def download_photo(cid: str):
 #  Document upload endpoint — VeriFYD Docs MVP
 # ─────────────────────────────────────────────
 DOCUMENT_ALLOWED_EXTENSIONS = {
-    ".pdf", ".docx", ".xlsx", ".pptx",
-    ".txt", ".md", ".csv", ".rtf", ".eml",
+    ".pdf", ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt",
+    ".txt", ".md", ".csv", ".rtf", ".eml", ".msg",
     ".jpg", ".jpeg", ".png", ".tif", ".tiff",
 }
 DOCUMENT_SIZE_LIMITS = {
@@ -782,7 +782,7 @@ DOCUMENT_LABEL_UI = {
 async def upload_document(file: UploadFile = File(...), email: str = Form(...)):
     """
     Document upload endpoint for VeriFYD Docs MVP.
-    Accepts PDF, DOCX, XLSX, PPTX, TXT/MD/CSV/RTF/EML, JPG/JPEG/PNG/TIF/TIFF and returns a job_id for polling
+    Accepts PDF, DOCX/DOC, XLSX/XLS, PPTX/PPT, TXT/MD/CSV/RTF/EML/MSG, JPG/JPEG/PNG/TIF/TIFF and returns a job_id for polling
     through /job-status/{job_id}, matching video/photo behavior.
     """
     if not is_valid_email(email):
@@ -802,7 +802,7 @@ async def upload_document(file: UploadFile = File(...), email: str = Form(...)):
     if ext not in DOCUMENT_ALLOWED_EXTENSIONS:
         return JSONResponse({
             "error":   "unsupported_format",
-            "message": "Unsupported document format. Accepted formats: PDF, DOCX, XLSX, PPTX, TXT, MD, CSV, RTF, EML, JPG, JPEG, PNG, TIF, TIFF.",
+            "message": "Unsupported document format. Accepted formats: PDF, DOCX, DOC, XLSX, XLS, PPTX, PPT, TXT, MD, CSV, RTF, EML, MSG, JPG, JPEG, PNG, TIF, TIFF.",
         }, status_code=415)
 
     try:

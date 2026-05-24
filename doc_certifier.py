@@ -819,16 +819,170 @@ def _create_pptx_pdf(src_path: str, dest_path: str, cert_id: str, authenticity: 
 
 
 def _strip_rtf_for_render(raw: str) -> str:
-    """Lightweight RTF-to-text cleanup for certified rendering."""
+    """RTF-to-text cleanup for certified rendering, with striprtf preferred."""
     import re
+    try:
+        from striprtf.striprtf import rtf_to_text
+        text = rtf_to_text(raw or "")
+        text = re.sub(r"\x00+", " ", text)
+        text = re.sub(r"[ \t]+", " ", text)
+        text = re.sub(r"\n\s*\n\s*\n+", "\n\n", text)
+        return text.strip()
+    except Exception:
+        pass
+
+    raw = re.sub(r"{\\\*?\\pict.*?}", " ", raw, flags=re.DOTALL)
+    raw = re.sub(r"{\\object.*?}", " ", raw, flags=re.DOTALL)
     raw = raw.replace("\\par", "\n").replace("\\line", "\n").replace("\\tab", "\t")
     raw = re.sub(r"\\'[0-9a-fA-F]{2}", " ", raw)
     raw = re.sub(r"\\[a-zA-Z]+-?\d* ?", "", raw)
     raw = raw.replace("{", " ").replace("}", " ")
+    raw = re.sub(r"\x00+", " ", raw)
     raw = re.sub(r"[ \t]+", " ", raw)
     raw = re.sub(r"\n\s*\n\s*\n+", "\n\n", raw)
     return raw.strip()
 
+
+
+def _plain_text_from_binary_chunks(data: bytes, limit: int = 2_000_000) -> str:
+    """Best-effort readable text extraction from legacy Office binary streams."""
+    import re
+    fragments: List[str] = []
+    sample = data[:limit]
+    for enc in ("utf-16-le", "latin-1"):
+        try:
+            decoded = sample.decode(enc, errors="ignore")
+        except Exception:
+            continue
+        decoded = decoded.replace("\x00", " ")
+        decoded = re.sub(r"[\x01-\x08\x0b\x0c\x0e-\x1f]+", " ", decoded)
+        decoded = re.sub(r"[ \t]+", " ", decoded)
+        pieces = re.findall(r"[A-Za-z0-9][A-Za-z0-9\s\.,;:\-_/@$%#&()\[\]{}'\"!?]{4,}", decoded)
+        fragments.extend(p.strip() for p in pieces if p and len(p.strip()) >= 5)
+    seen = set()
+    cleaned: List[str] = []
+    for frag in fragments:
+        compact = re.sub(r"\s+", " ", frag).strip()
+        if len(compact) < 5:
+            continue
+        key = compact[:160].lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(compact)
+        if sum(len(x) for x in cleaned) > limit:
+            break
+    return "\n".join(cleaned)
+
+
+def _read_ole_text_for_render(src_path: str) -> str:
+    """Best-effort legacy DOC/PPT text rendering helper."""
+    try:
+        import olefile
+        parts: List[str] = []
+        with olefile.OleFileIO(src_path) as ole:
+            for stream in ole.listdir()[:80]:
+                try:
+                    raw = ole.openstream(stream).read(750_000)
+                    text = _plain_text_from_binary_chunks(raw, limit=750_000)
+                    if text:
+                        parts.append(text)
+                except Exception:
+                    continue
+        if parts:
+            return "\n".join(parts)
+    except Exception:
+        pass
+    try:
+        with open(src_path, "rb") as fh:
+            return _plain_text_from_binary_chunks(fh.read(2_000_000))
+    except Exception:
+        return ""
+
+
+def _read_xls_for_render(src_path: str) -> str:
+    """Render legacy XLS cell values into plain text for certified PDF output."""
+    try:
+        import xlrd
+        book = xlrd.open_workbook(src_path, on_demand=True)
+        lines: List[str] = []
+        rows_seen = 0
+        for sheet_name in book.sheet_names():
+            sh = book.sheet_by_name(sheet_name)
+            lines.append(f"Worksheet: {sheet_name}")
+            for r_idx in range(sh.nrows):
+                vals: List[str] = []
+                for c_idx in range(min(sh.ncols, 30)):
+                    try:
+                        val = sh.cell_value(r_idx, c_idx)
+                    except Exception:
+                        continue
+                    if val in (None, ""):
+                        continue
+                    if isinstance(val, float) and val.is_integer():
+                        val = int(val)
+                    text = str(val).strip()
+                    if text:
+                        vals.append(text[:300])
+                if vals:
+                    lines.append(" | ".join(vals))
+                rows_seen += 1
+                if rows_seen >= 5000:
+                    lines.append("[VeriFYD note: legacy workbook rendering truncated after 5000 scanned rows]")
+                    break
+            if rows_seen >= 5000:
+                break
+        try:
+            book.release_resources()
+        except Exception:
+            pass
+        return "\n".join(lines)
+    except Exception:
+        return _read_ole_text_for_render(src_path)
+
+
+def _read_msg_for_render(src_path: str) -> str:
+    """Render Outlook MSG headers/body into plain text for certified PDF output."""
+    try:
+        import extract_msg
+        msg = extract_msg.Message(src_path)
+        try:
+            lines: List[str] = []
+            header_map = [
+                ("From", getattr(msg, "sender", "") or ""),
+                ("To", getattr(msg, "to", "") or ""),
+                ("Cc", getattr(msg, "cc", "") or ""),
+                ("Subject", getattr(msg, "subject", "") or ""),
+                ("Date", getattr(msg, "date", "") or ""),
+                ("Message-ID", getattr(msg, "messageId", "") or ""),
+            ]
+            for label, value in header_map:
+                value = str(value or "").strip()
+                if value:
+                    lines.append(f"{label}: {value}")
+            attachments = list(getattr(msg, "attachments", []) or [])
+            if attachments:
+                names = []
+                for att in attachments[:30]:
+                    name = str(getattr(att, "longFilename", "") or getattr(att, "shortFilename", "") or "")
+                    if name:
+                        names.append(name)
+                lines.append(f"Attachments: {len(attachments)}" + (f" ({', '.join(names[:10])})" if names else ""))
+            lines.append("")
+            body = str(getattr(msg, "body", "") or getattr(msg, "htmlBody", "") or "")
+            if body and "<" in body and ">" in body:
+                import re
+                body = re.sub(r"<[^>]+>", " ", body)
+                body = re.sub(r"\s+", " ", body).strip()
+            lines.append(body)
+            return "\n".join(lines).strip()
+        finally:
+            try:
+                msg.close()
+            except Exception:
+                pass
+    except Exception:
+        return _read_ole_text_for_render(src_path)
 
 def _read_text_for_certified_render(src_path: str, ext: str) -> str:
     """Read RTF/EML/text-family documents for certified PDF rendering."""
@@ -872,6 +1026,15 @@ def _read_text_for_certified_render(src_path: str, ext: str) -> str:
             return "\n".join(lines).strip()
         except Exception:
             pass
+
+    if ext == ".msg":
+        return _read_msg_for_render(src_path)
+
+    if ext in (".doc", ".ppt"):
+        return _read_ole_text_for_render(src_path)
+
+    if ext == ".xls":
+        return _read_xls_for_render(src_path)
 
     text = ""
     for enc in ("utf-8", "utf-16", "latin-1"):
@@ -1014,7 +1177,7 @@ def stamp_document(src_path: str, dest_path: str, cert_id: str,
     if ext == ".pptx":
         return _create_pptx_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256)
 
-    if ext in (".rtf", ".eml"):
+    if ext in (".rtf", ".eml", ".msg", ".doc", ".ppt", ".xls"):
         return _create_text_render_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256)
 
     if ext == ".pdf":
