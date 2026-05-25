@@ -1019,12 +1019,89 @@ async def verify_document_seal(file: UploadFile = File(...)):
             pass
 
 
+
+def _sha256_bytes_for_verify(data: bytes) -> str:
+    """Return SHA-256 for bytes used during certified document integrity comparison."""
+    return hashlib.sha256(data or b"").hexdigest()
+
+
+def _lookup_stored_certified_document_hash(cid: str) -> dict:
+    """
+    Locate the issued certified PDF and return its SHA-256.
+
+    This is the key tamper-detection comparison:
+    uploaded certified PDF hash vs VeriFYD's stored certified PDF hash.
+    """
+    cid = (cid or "").strip()
+    result = {
+        "available": False,
+        "source": "",
+        "key": "",
+        "sha256": "",
+        "size_bytes": 0,
+        "error": "",
+    }
+    if not cid:
+        result["error"] = "missing_certificate_id"
+        return result
+
+    # R2 is the source of truth for production certified documents.
+    try:
+        from storage import _get_client, BUCKET, r2_available
+
+        if r2_available():
+            client = _get_client()
+            for plan in ("pro", "creator", "enterprise", "free"):
+                key = f"certified-documents/{plan}/{cid}.pdf"
+                try:
+                    obj = client.get_object(Bucket=BUCKET, Key=key)
+                    body = obj.get("Body")
+                    data = body.read() if body is not None else b""
+                    if data:
+                        result.update({
+                            "available": True,
+                            "source": "r2",
+                            "key": key,
+                            "sha256": _sha256_bytes_for_verify(data),
+                            "size_bytes": len(data),
+                            "error": "",
+                        })
+                        return result
+                except Exception:
+                    continue
+    except Exception as e:
+        result["error"] = f"r2_lookup_failed:{str(e)[:120]}"
+
+    # Redis fallback for local/dev or older fallback jobs.
+    try:
+        r = _get_redis()
+        data = r.get(f"doccert:{cid}")
+        if data:
+            result.update({
+                "available": True,
+                "source": "redis",
+                "key": f"doccert:{cid}",
+                "sha256": _sha256_bytes_for_verify(data),
+                "size_bytes": len(data),
+                "error": "",
+            })
+            return result
+    except Exception as e:
+        result["error"] = (result.get("error") + "; " if result.get("error") else "") + f"redis_lookup_failed:{str(e)[:120]}"
+
+    if not result.get("error"):
+        result["error"] = "stored_certified_document_not_found"
+    return result
+
+
 def _enrich_certificate_verification_result(result: dict) -> dict:
-    """Add database and storage context to a secure-seal verification response."""
+    """Add database, storage, and tamper-detection context to a secure-seal verification response."""
     result = dict(result or {})
     cid = str(result.get("certificate_id") or "").strip()
     db_record = None
     r2_available_for_cert = False
+    stored_doc = {}
+    uploaded_cert_hash = str(result.get("certified_pdf_sha256") or "").strip().lower()
 
     if cid:
         try:
@@ -1040,8 +1117,40 @@ def _enrich_certificate_verification_result(result: dict) -> dict:
         except Exception:
             r2_available_for_cert = False
 
+        # Strong integrity check: compare the uploaded certified PDF against
+        # VeriFYD's stored issued copy. This catches post-certification edits
+        # where the hidden seal metadata was left intact.
+        try:
+            stored_doc = _lookup_stored_certified_document_hash(cid)
+            if stored_doc.get("available"):
+                r2_available_for_cert = True
+        except Exception as e:
+            stored_doc = {"available": False, "error": str(e)[:120]}
+
     result["certificate_database_match"] = bool(db_record)
     result["certified_document_available"] = r2_available_for_cert
+
+    stored_hash = str((stored_doc or {}).get("sha256") or "").strip().lower()
+    if stored_doc:
+        result["stored_certified_document"] = {
+            "available": bool(stored_doc.get("available")),
+            "source": stored_doc.get("source", ""),
+            "key": stored_doc.get("key", ""),
+            "sha256": stored_doc.get("sha256", ""),
+            "size_bytes": stored_doc.get("size_bytes", 0),
+            "error": stored_doc.get("error", ""),
+        }
+
+    certified_pdf_hash_match = "NOT_CHECKED"
+    if uploaded_cert_hash and stored_hash:
+        certified_pdf_hash_match = "YES" if uploaded_cert_hash == stored_hash else "NO"
+    elif uploaded_cert_hash and cid:
+        certified_pdf_hash_match = "STORED_CERTIFIED_PDF_NOT_AVAILABLE"
+    elif cid:
+        certified_pdf_hash_match = "UPLOADED_CERTIFIED_PDF_HASH_NOT_AVAILABLE"
+
+    result["certified_pdf_hash_match"] = certified_pdf_hash_match
+    result["tamper_status"] = "UNKNOWN"
 
     if db_record:
         db_sha = str(db_record.get("sha256") or db_record.get("file_sha256") or db_record.get("original_sha256") or "")
@@ -1068,25 +1177,85 @@ def _enrich_certificate_verification_result(result: dict) -> dict:
     report = dict(result.get("verification_report") or {})
     report["database_match"] = "YES" if db_record else "NO"
     report["certified_document_available"] = "YES" if r2_available_for_cert else "UNKNOWN" if cid else "NO"
+    report["certified_pdf_hash_match"] = certified_pdf_hash_match
+    if stored_hash:
+        report["stored_certified_pdf_sha256"] = stored_hash
+    if uploaded_cert_hash:
+        report["uploaded_certified_pdf_sha256"] = uploaded_cert_hash
     if "database_original_hash_match" in result:
         report["original_hash_match"] = result.get("database_original_hash_match")
     if result.get("trust_level"):
         report["trust_level"] = result.get("trust_level")
 
-    if result.get("verified") and db_record:
+    # Integrity/tamper interpretation.
+    seal_ok = bool(result.get("seal_valid") and result.get("verified"))
+    original_hash_ok = str(result.get("database_original_hash_match", "")).upper() in (
+        "YES",
+        "DATABASE_HASH_NOT_AVAILABLE",
+        "NO_SEAL_ORIGINAL_HASH",
+    )
+    stored_hash_available = bool(stored_hash)
+    stored_hash_matches = certified_pdf_hash_match == "YES"
+    stored_hash_mismatch = certified_pdf_hash_match == "NO"
+
+    if stored_hash_mismatch:
+        result["verified"] = False
+        result["verification_status"] = "DOCUMENT_MODIFIED_AFTER_CERTIFICATION"
+        result["integrity_status"] = "FAILED"
+        result["tamper_status"] = "MODIFIED_AFTER_CERTIFICATION"
+        result["trust_level"] = "LOW"
+        report["status"] = "TAMPERED"
+        report["seal"] = "VALID" if result.get("seal_valid") else "INVALID"
+        report["integrity"] = "FAILED"
+        report["tamper_status"] = "MODIFIED_AFTER_CERTIFICATION"
+        report["trust_level"] = "LOW"
+        report["message"] = (
+            "The PDF contains a VeriFYD seal, but the uploaded file hash does not match "
+            "the certified PDF stored by VeriFYD. This indicates the certified PDF was "
+            "changed after certification or the submitted file is not the issued copy."
+        )
+    elif seal_ok and db_record and stored_hash_available and stored_hash_matches and original_hash_ok:
         result["verification_status"] = "AUTHENTIC_VERIFYD_DOCUMENT"
+        result["integrity_status"] = "VERIFIED"
+        result["tamper_status"] = "NOT_MODIFIED"
+        result["trust_level"] = result.get("trust_level") or "HIGH"
         report["status"] = "VALID"
-        report["message"] = "This document contains a valid VeriFYD secure seal and matches a VeriFYD certificate record."
-    elif result.get("verified"):
+        report["seal"] = "VALID"
+        report["integrity"] = "VERIFIED"
+        report["tamper_status"] = "NOT_MODIFIED"
+        report["message"] = (
+            "This document contains a valid VeriFYD secure seal, matches a VeriFYD "
+            "certificate record, and matches the certified PDF stored by VeriFYD."
+        )
+    elif seal_ok and db_record:
+        result["verification_status"] = "AUTHENTIC_VERIFYD_DOCUMENT_STORAGE_HASH_NOT_CONFIRMED"
+        result["integrity_status"] = "SEAL_VALID_STORAGE_HASH_NOT_CONFIRMED"
+        result["tamper_status"] = "NOT_CONFIRMED"
+        report["status"] = "VALID"
+        report["seal"] = "VALID"
+        report["integrity"] = "SEAL VALID - STORAGE HASH NOT CONFIRMED"
+        report["tamper_status"] = "NOT_CONFIRMED"
+        report["message"] = (
+            "This document contains a valid VeriFYD secure seal and matches a VeriFYD "
+            "certificate record. The stored certified PDF hash was not available for "
+            "full tamper comparison."
+        )
+    elif seal_ok:
         result["verification_status"] = "VALID_SEAL_DATABASE_NOT_CONFIRMED"
+        result["integrity_status"] = "SEAL_VALID_DATABASE_NOT_CONFIRMED"
+        result["tamper_status"] = "NOT_CONFIRMED"
         report["status"] = "VALID SEAL"
+        report["seal"] = "VALID"
+        report["integrity"] = "SEAL VALID - DATABASE NOT CONFIRMED"
         report["message"] = "This document contains a valid VeriFYD secure seal, but no matching certificate record was confirmed."
     else:
         result["verification_status"] = "NOT_VERIFIED"
+        result["tamper_status"] = "NOT_VERIFIED"
+        report["status"] = report.get("status") or "NOT VERIFIED"
+        report["integrity"] = result.get("integrity_status", "NOT VERIFIED")
 
     result["verification_report"] = report
     return result
-
 
 @app.post("/verify-certificate/")
 async def verify_certificate_upload(file: UploadFile = File(...)):
