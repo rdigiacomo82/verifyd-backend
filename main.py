@@ -783,6 +783,24 @@ DOCUMENT_LABEL_UI = {
 }
 
 
+def _uploaded_pdf_has_verifyd_seal(path: str) -> tuple[bool, str]:
+    """Return whether an uploaded PDF already contains a VeriFYD secure seal."""
+    try:
+        if not path or not path.lower().endswith(".pdf") or not os.path.exists(path):
+            return False, ""
+        from pypdf import PdfReader
+        reader = PdfReader(path)
+        md = reader.metadata or {}
+        seal = str(md.get("/VeriFYD_Secure_Seal") or "").strip().upper()
+        payload = str(md.get("/VeriFYD_Seal_Payload_B64") or "").strip()
+        cid = str(md.get("/VeriFYD_Seal_Certificate_ID") or md.get("/VeriFYD_Certificate_ID") or "").strip()
+        if seal == "PRESENT" or payload:
+            return True, cid
+    except Exception as e:
+        log.debug("already-certified PDF seal check failed: %s", e)
+    return False, ""
+
+
 @app.post("/upload-document/")
 async def upload_document(file: UploadFile = File(...), email: str = Form(...)):
     """
@@ -860,6 +878,21 @@ async def upload_document(file: UploadFile = File(...), email: str = Form(...)):
 
     log.info("document_upload: saved %dKB for %s (plan=%s file=%s)",
              bytes_written // 1024, email, user_plan, safe_name)
+
+    if ext == ".pdf":
+        already_certified, sealed_cid = _uploaded_pdf_has_verifyd_seal(raw_path)
+        if already_certified:
+            try:
+                os.remove(raw_path)
+            except Exception:
+                pass
+            return JSONResponse({
+                "error": "already_verifyd_certified",
+                "message": "This PDF already contains a VeriFYD secure seal. Use Verify Certified PDF / Verify Secure Seal instead of re-certifying it.",
+                "certificate_id": sealed_cid,
+                "verify_url": f"{BASE_URL}/verify-certificate/{sealed_cid}" if sealed_cid else "",
+                "recommended_action": "verify_secure_seal",
+            }, status_code=409)
 
     try:
         enqueue_document_upload(job_id, raw_path, safe_name, email)
@@ -1127,10 +1160,21 @@ def _enrich_certificate_verification_result(result: dict) -> dict:
         except Exception as e:
             stored_doc = {"available": False, "error": str(e)[:120]}
 
-    result["certificate_database_match"] = bool(db_record)
-    result["certified_document_available"] = r2_available_for_cert
-
     stored_hash = str((stored_doc or {}).get("sha256") or "").strip().lower()
+    storage_record_match = bool((stored_doc or {}).get("available"))
+    database_record_match = bool(db_record)
+    # Some production records may be confirmed by the stored issued PDF even
+    # when the certificate DB lookup is temporarily unavailable or delayed.
+    # Expose both the strict DB lookup and the practical record-confirmed value
+    # so the frontend does not show "Database Match: No" next to VERIFIED.
+    record_confirmed = database_record_match or storage_record_match
+
+    result["certificate_database_match"] = record_confirmed
+    result["database_record_match"] = database_record_match
+    result["storage_record_match"] = storage_record_match
+    result["record_match_source"] = "database" if database_record_match else "stored_certified_document" if storage_record_match else "none"
+    result["certified_document_available"] = r2_available_for_cert or storage_record_match
+
     if stored_doc:
         result["stored_certified_document"] = {
             "available": bool(stored_doc.get("available")),
@@ -1175,8 +1219,11 @@ def _enrich_certificate_verification_result(result: dict) -> dict:
         }
 
     report = dict(result.get("verification_report") or {})
-    report["database_match"] = "YES" if db_record else "NO"
-    report["certified_document_available"] = "YES" if r2_available_for_cert else "UNKNOWN" if cid else "NO"
+    report["database_match"] = "YES" if record_confirmed else "NO"
+    report["database_record_match"] = "YES" if database_record_match else "NO"
+    report["storage_record_match"] = "YES" if storage_record_match else "NO"
+    report["record_match_source"] = result.get("record_match_source", "none")
+    report["certified_document_available"] = "YES" if (r2_available_for_cert or storage_record_match) else "UNKNOWN" if cid else "NO"
     report["certified_pdf_hash_match"] = certified_pdf_hash_match
     if stored_hash:
         report["stored_certified_pdf_sha256"] = stored_hash
@@ -1214,20 +1261,21 @@ def _enrich_certificate_verification_result(result: dict) -> dict:
             "the certified PDF stored by VeriFYD. This indicates the certified PDF was "
             "changed after certification or the submitted file is not the issued copy."
         )
-    elif seal_ok and db_record and stored_hash_available and stored_hash_matches and original_hash_ok:
+    elif seal_ok and record_confirmed and stored_hash_available and stored_hash_matches and original_hash_ok:
         result["verification_status"] = "AUTHENTIC_VERIFYD_DOCUMENT"
         result["integrity_status"] = "VERIFIED"
         result["tamper_status"] = "NOT_MODIFIED"
-        result["trust_level"] = result.get("trust_level") or "HIGH"
+        result["trust_level"] = "HIGH"
         report["status"] = "VALID"
         report["seal"] = "VALID"
         report["integrity"] = "VERIFIED"
         report["tamper_status"] = "NOT_MODIFIED"
+        report["trust_level"] = "HIGH"
         report["message"] = (
-            "This document contains a valid VeriFYD secure seal, matches a VeriFYD "
-            "certificate record, and matches the certified PDF stored by VeriFYD."
+            "This document contains a valid VeriFYD secure seal, has a confirmed "
+            "VeriFYD record, and matches the certified PDF stored by VeriFYD."
         )
-    elif seal_ok and db_record:
+    elif seal_ok and record_confirmed:
         result["verification_status"] = "AUTHENTIC_VERIFYD_DOCUMENT_STORAGE_HASH_NOT_CONFIRMED"
         result["integrity_status"] = "SEAL_VALID_STORAGE_HASH_NOT_CONFIRMED"
         result["tamper_status"] = "NOT_CONFIRMED"
