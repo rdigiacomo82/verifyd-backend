@@ -1235,6 +1235,37 @@ def _enrich_certificate_verification_result(result: dict) -> dict:
         report["trust_level"] = result.get("trust_level")
 
     # Integrity/tamper interpretation.
+    # Phase 8: hard-stop forged/tampered V2 seals before database/storage enrichment
+    # can accidentally downgrade the result to a generic NOT_VERIFIED.
+    forged_or_tampered_seal = (
+        str(result.get("verification_status", "")).upper() == "FORGED_OR_TAMPERED_SEAL"
+        or str(result.get("status", "")).lower() == "forged_or_tampered_seal"
+        or (
+            str(result.get("seal_version", "")).upper() == "VERIFYD-SEAL-V2"
+            and str(result.get("signature_status", "")).upper() in ("INVALID", "MISSING", "ERROR")
+        )
+    )
+
+    if forged_or_tampered_seal:
+        result["verified"] = False
+        result["verification_status"] = "FORGED_OR_TAMPERED_SEAL"
+        result["integrity_status"] = "FAILED"
+        result["tamper_status"] = "FORGED_OR_TAMPERED_SEAL"
+        result["trust_level"] = "LOW"
+
+        report["status"] = "FORGED OR TAMPERED"
+        report["seal"] = "INVALID SIGNATURE"
+        report["integrity"] = "FAILED"
+        report["tamper_status"] = "FORGED_OR_TAMPERED_SEAL"
+        report["trust_level"] = "LOW"
+        report["message"] = (
+            "This PDF contains a VeriFYD seal payload, but the cryptographic "
+            "signature does not verify. The seal may have been forged or altered."
+        )
+
+        result["verification_report"] = report
+        return result
+
     seal_ok = bool(result.get("seal_valid") and result.get("verified"))
     original_hash_ok = str(result.get("database_original_hash_match", "")).upper() in (
         "YES",

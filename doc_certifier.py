@@ -1766,29 +1766,80 @@ def _append_document_risk_report_page(pdf_path: str, detail: Dict[str, Any] | No
 
 
 # ─────────────────────────────────────────────
-# VeriFYD Secure Seal
+# VeriFYD Secure Seal — Phase 8
+# V2 HMAC-SHA256 signed seals with V1 legacy compatibility
 # ─────────────────────────────────────────────
 
 def _seal_secret() -> str:
-    """Return the private seal secret. Set VERIFYD_SEAL_SECRET on Render for production."""
+    """
+    Return the private seal secret used for new V2 seals.
+
+    Production:
+      VERIFYD_SECRET_KEY must be set on both Render API and Worker services.
+
+    Fallbacks are retained only to keep older deployments from crashing.
+    """
     return (
-        os.environ.get("VERIFYD_SEAL_SECRET")
+        os.environ.get("VERIFYD_SECRET_KEY")
+        or os.environ.get("VERIFYD_SEAL_SECRET")
         or os.environ.get("DOCUMENT_SEAL_SECRET")
         or os.environ.get("ADMIN_KEY")
         or "verifyd-dev-seal-change-me"
     )
 
 
-def _build_secure_seal_payload(cert_id: str, filename: str, sha256: str,
-                               authenticity: int, label: str,
-                               detail: Dict[str, Any] | None = None) -> Dict[str, Any]:
+def _seal_secret_candidates() -> List[str]:
+    """
+    Return candidate secrets for verification.
+
+    This preserves V1 compatibility after VERIFYD_SECRET_KEY is introduced.
+    Existing V1 PDFs may have been signed with VERIFYD_SEAL_SECRET,
+    DOCUMENT_SEAL_SECRET, ADMIN_KEY, or the prior development fallback.
+    """
+    candidates = [
+        os.environ.get("VERIFYD_SECRET_KEY"),
+        os.environ.get("VERIFYD_SEAL_SECRET"),
+        os.environ.get("DOCUMENT_SEAL_SECRET"),
+        os.environ.get("ADMIN_KEY"),
+        "verifyd-dev-seal-change-me",
+    ]
+    out: List[str] = []
+    for value in candidates:
+        value = str(value or "").strip()
+        if value and value not in out:
+            out.append(value)
+    return out
+
+
+def _canonical_json(data: Dict[str, Any]) -> str:
+    """Canonical JSON used for stable HMAC signing and verification."""
+    return json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _build_secure_seal_payload(
+    cert_id: str,
+    filename: str,
+    sha256: str,
+    authenticity: int,
+    label: str,
+    detail: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    """
+    Build a V2 signed seal payload.
+
+    Important:
+      - version is numeric 2.
+      - signature is stored separately in PDF metadata.
+      - payload is canonicalized before HMAC signing.
+    """
     report = {}
     if isinstance(detail, dict):
         report = detail.get("document_risk_report") or detail.get("risk_report") or {}
         if not isinstance(report, dict):
             report = {}
+
     return {
-        "version": "VERIFYD-SEAL-V1",
+        "version": 2,
         "certificate_id": cert_id,
         "original_filename": filename or "",
         "original_sha256": sha256 or "",
@@ -1799,42 +1850,71 @@ def _build_secure_seal_payload(cert_id: str, filename: str, sha256: str,
         "risk_score": report.get("risk_score", ""),
         "metadata_integrity": report.get("metadata_integrity", "UNKNOWN"),
         "trust_level": _trust_level_from_report(report, seal_valid=True),
+        "issuer": "VeriFYD",
+        "seal_type": "VERIFYD_DOCUMENT_CERTIFICATION",
     }
 
 
 def _sign_secure_seal_payload(payload: Dict[str, Any]) -> Tuple[str, str]:
-    payload_json = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    sig = hmac.new(_seal_secret().encode("utf-8"), payload_json.encode("utf-8"), hashlib.sha256).hexdigest()
+    """Return payload_b64 and HMAC-SHA256 signature for a payload."""
+    payload_json = _canonical_json(payload)
+    signature = hmac.new(
+        _seal_secret().encode("utf-8"),
+        payload_json.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
     payload_b64 = base64.urlsafe_b64encode(payload_json.encode("utf-8")).decode("ascii")
-    return payload_b64, sig
+    return payload_b64, signature
 
 
-def _apply_verifyd_secure_seal(pdf_path: str, cert_id: str, filename: str, sha256: str,
-                                authenticity: int, label: str,
-                                detail: Dict[str, Any] | None = None) -> str:
-    """
-    Embed a hidden VeriFYD cryptographic seal inside the certified PDF metadata.
+def _verify_secure_seal_signature(payload_json: str, signature: str) -> bool:
+    """Verify HMAC signature using constant-time comparison."""
+    signature = str(signature or "").strip()
+    if not payload_json or not signature:
+        return False
 
-    This is not meant to be visible to users. VeriFYD can later read the payload
-    and validate the HMAC signature using the private server-side seal secret.
-    """
+    for secret in _seal_secret_candidates():
+        expected = hmac.new(
+            secret.encode("utf-8"),
+            payload_json.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        if hmac.compare_digest(expected, signature):
+            return True
+    return False
+
+
+def _apply_verifyd_secure_seal(
+    pdf_path: str,
+    cert_id: str,
+    filename: str,
+    sha256: str,
+    authenticity: int,
+    label: str,
+    detail: Dict[str, Any] | None = None,
+) -> str:
+    """Embed a hidden VeriFYD V2 cryptographic seal inside certified PDF metadata."""
     try:
         from pypdf import PdfReader, PdfWriter
     except Exception:
         return pdf_path
+
     if not os.path.exists(pdf_path):
         return pdf_path
 
     payload = _build_secure_seal_payload(cert_id, filename, sha256, authenticity, label, detail)
     payload_b64, signature = _sign_secure_seal_payload(payload)
     tmp_out = pdf_path + ".seal.tmp.pdf"
+
     try:
         reader = PdfReader(pdf_path)
         writer = PdfWriter()
+
         for page in reader.pages:
             writer.add_page(page)
+
+        # Preserve attachments/embedded originals where possible.
         try:
-            # Preserve attachments/embedded files when possible.
             for attachment_name, attachment_data in getattr(reader, "attachments", {}).items():
                 try:
                     if isinstance(attachment_data, list):
@@ -1846,26 +1926,32 @@ def _apply_verifyd_secure_seal(pdf_path: str, cert_id: str, filename: str, sha25
                     pass
         except Exception:
             pass
+
         metadata = {str(k): str(v) for k, v in (reader.metadata or {}).items() if v is not None}
         metadata.update({
             "/VeriFYD_Secure_Seal": "PRESENT",
-            "/VeriFYD_Seal_Version": "VERIFYD-SEAL-V1",
+            "/VeriFYD_Seal_Version": "VERIFYD-SEAL-V2",
             "/VeriFYD_Seal_Algorithm": "HMAC-SHA256",
             "/VeriFYD_Seal_Payload_B64": payload_b64,
             "/VeriFYD_Seal_Signature": signature,
             "/VeriFYD_Seal_Certificate_ID": cert_id,
             "/VeriFYD_Seal_Original_SHA256": sha256 or "",
         })
+
         writer.add_metadata(metadata)
+
         with open(tmp_out, "wb") as out:
             writer.write(out)
+
         os.replace(tmp_out, pdf_path)
+
     except Exception:
         try:
             if os.path.exists(tmp_out):
                 os.remove(tmp_out)
         except Exception:
             pass
+
     return pdf_path
 
 
@@ -1882,9 +1968,10 @@ def verify_secure_seal_pdf(pdf_path: str) -> Dict[str, Any]:
     """
     Verify a certified PDF's hidden VeriFYD secure seal.
 
-    This validates the server-side HMAC signature over the embedded seal
-    payload and returns a user-facing verification report suitable for an
-    enterprise submission portal or future public verify page.
+    Supports:
+      - V2 signed seals: required signature verification.
+      - V1 signed seals: legacy signature verification.
+      - V1 unsigned seals: legacy-valid, but trust is downgraded.
     """
     certified_pdf_sha256 = ""
     try:
@@ -1895,20 +1982,26 @@ def verify_secure_seal_pdf(pdf_path: str) -> Dict[str, Any]:
 
     try:
         from pypdf import PdfReader
+
         reader = PdfReader(pdf_path)
         md = reader.metadata or {}
-        payload_b64 = str(md.get("/VeriFYD_Seal_Payload_B64") or "")
-        signature = str(md.get("/VeriFYD_Seal_Signature") or "")
-        algorithm = str(md.get("/VeriFYD_Seal_Algorithm") or "HMAC-SHA256")
 
-        if not payload_b64 or not signature:
+        payload_b64 = str(md.get("/VeriFYD_Seal_Payload_B64") or "").strip()
+        signature = str(md.get("/VeriFYD_Seal_Signature") or "").strip()
+        algorithm = str(md.get("/VeriFYD_Seal_Algorithm") or "HMAC-SHA256").strip()
+        seal_version_meta = str(md.get("/VeriFYD_Seal_Version") or "").strip()
+
+        if not payload_b64:
             return {
                 "verified": False,
                 "status": "missing_seal",
                 "seal_valid": False,
+                "seal_version": "",
+                "signature_status": "MISSING",
                 "integrity_status": "NOT VERIFIED",
                 "reason": "No VeriFYD secure seal metadata found.",
                 "certified_pdf_sha256": certified_pdf_sha256,
+                "verification_status": "NOT_VERIFIED",
                 "verification_report": {
                     "title": "VeriFYD Certificate Verification Report",
                     "status": "NOT VERIFIED",
@@ -1918,30 +2011,87 @@ def verify_secure_seal_pdf(pdf_path: str) -> Dict[str, Any]:
             }
 
         payload_json = base64.urlsafe_b64decode(payload_b64.encode("ascii")).decode("utf-8")
-        expected = hmac.new(_seal_secret().encode("utf-8"), payload_json.encode("utf-8"), hashlib.sha256).hexdigest()
         payload = json.loads(payload_json)
-        ok = hmac.compare_digest(expected, signature)
 
-        certificate_id = str(payload.get("certificate_id", ""))
-        original_sha256 = str(payload.get("original_sha256", ""))
-        issued_at = str(payload.get("issued_at_utc", ""))
-        label = str(payload.get("label", ""))
-        authenticity = payload.get("authenticity", "")
-        risk = str(payload.get("overall_risk", "UNKNOWN"))
-        risk_score = payload.get("risk_score", "")
-        trust_level = str(payload.get("trust_level") or _trust_level_from_report(payload if isinstance(payload, dict) else {}, seal_valid=ok))
+        payload_version = payload.get("version", "") if isinstance(payload, dict) else ""
+        is_v2 = payload_version == 2 or seal_version_meta == "VERIFYD-SEAL-V2"
+        is_v1 = str(payload_version).upper() == "VERIFYD-SEAL-V1" or seal_version_meta == "VERIFYD-SEAL-V1"
+
+        if signature:
+            seal_valid = _verify_secure_seal_signature(payload_json, signature)
+            signature_status = "VALID" if seal_valid else "INVALID"
+        else:
+            # Legacy unsigned V1 compatibility.
+            seal_valid = bool(is_v1)
+            signature_status = "LEGACY_UNSIGNED" if is_v1 else "MISSING"
+
+        certificate_id = str(payload.get("certificate_id", "")) if isinstance(payload, dict) else ""
+        original_sha256 = str(payload.get("original_sha256", "")) if isinstance(payload, dict) else ""
+        issued_at = str(payload.get("issued_at_utc") or payload.get("issued_at") or "") if isinstance(payload, dict) else ""
+        label = str(payload.get("label", "")) if isinstance(payload, dict) else ""
+        authenticity = payload.get("authenticity", "") if isinstance(payload, dict) else ""
+        risk = str(payload.get("overall_risk", "UNKNOWN")) if isinstance(payload, dict) else "UNKNOWN"
+        risk_score = payload.get("risk_score", "") if isinstance(payload, dict) else ""
+
+        if is_v2:
+            seal_version = "VERIFYD-SEAL-V2"
+        elif is_v1:
+            seal_version = "VERIFYD-SEAL-V1"
+        else:
+            seal_version = seal_version_meta or str(payload_version or "UNKNOWN")
+
+        if is_v2 and not seal_valid:
+            return {
+                "verified": False,
+                "status": "forged_or_tampered_seal",
+                "verification_status": "FORGED_OR_TAMPERED_SEAL",
+                "seal_valid": False,
+                "seal_version": seal_version,
+                "signature_status": signature_status,
+                "integrity_status": "FAILED",
+                "tamper_status": "FORGED_OR_TAMPERED_SEAL",
+                "trust_level": "LOW",
+                "certificate_id": certificate_id,
+                "issued_at_utc": issued_at,
+                "original_sha256": original_sha256,
+                "certified_pdf_sha256": certified_pdf_sha256,
+                "algorithm": algorithm,
+                "payload": {},
+                "verification_report": {
+                    "title": "VeriFYD Certificate Verification Report",
+                    "status": "FORGED OR TAMPERED",
+                    "seal": "INVALID SIGNATURE",
+                    "certificate_id": certificate_id,
+                    "integrity": "FAILED",
+                    "tamper_status": "FORGED_OR_TAMPERED_SEAL",
+                    "trust_level": "LOW",
+                    "message": "This PDF contains a VeriFYD seal payload, but the cryptographic signature does not match. The seal may have been forged or altered.",
+                },
+            }
+
+        trust_level = str(
+            payload.get("trust_level")
+            or _trust_level_from_report(payload if isinstance(payload, dict) else {}, seal_valid=seal_valid)
+        ) if isinstance(payload, dict) else "LOW"
+
+        if signature_status == "LEGACY_UNSIGNED":
+            trust_level = "MODERATE"
+
         hash_match = "SEALED_ORIGINAL_HASH_PRESENT" if original_sha256 else "NO_ORIGINAL_HASH_IN_SEAL"
 
         return {
-            "verified": ok,
-            "status": "valid" if ok else "invalid_signature",
-            "seal_valid": ok,
-            "integrity_status": "VERIFIED" if ok else "FAILED",
-            "hash_match": hash_match if ok else "NOT VERIFIED",
-            "trust_level": trust_level if ok else "LOW",
+            "verified": bool(seal_valid),
+            "status": "valid" if seal_valid else "invalid_signature",
+            "verification_status": "AUTHENTIC_VERIFYD_DOCUMENT" if seal_valid else "FORGED_OR_TAMPERED_SEAL",
+            "seal_valid": bool(seal_valid),
+            "seal_version": seal_version,
+            "signature_status": signature_status,
+            "integrity_status": "VERIFIED" if seal_valid else "FAILED",
+            "hash_match": hash_match if seal_valid else "NOT VERIFIED",
+            "trust_level": trust_level if seal_valid else "LOW",
             "certificate_id": certificate_id,
             "issued_at_utc": issued_at,
-            "original_filename": payload.get("original_filename", ""),
+            "original_filename": payload.get("original_filename", "") if isinstance(payload, dict) else "",
             "original_sha256": original_sha256,
             "certified_pdf_sha256": certified_pdf_sha256,
             "label": label,
@@ -1949,11 +2099,13 @@ def verify_secure_seal_pdf(pdf_path: str) -> Dict[str, Any]:
             "overall_risk": risk,
             "risk_score": risk_score,
             "algorithm": algorithm,
-            "payload": payload if ok else {},
+            "payload": payload if seal_valid else {},
             "verification_report": {
                 "title": "VeriFYD Certificate Verification Report",
-                "status": "VALID" if ok else "INVALID",
-                "seal": "VALID" if ok else "INVALID",
+                "status": "VALID" if seal_valid else "INVALID",
+                "seal": "VALID" if seal_valid else "INVALID",
+                "seal_version": seal_version,
+                "signature_status": signature_status,
                 "certificate_id": certificate_id,
                 "issued_at_utc": issued_at,
                 "original_sha256": original_sha256,
@@ -1962,28 +2114,34 @@ def verify_secure_seal_pdf(pdf_path: str) -> Dict[str, Any]:
                 "authenticity": authenticity,
                 "overall_risk": risk,
                 "risk_score": risk_score,
-                "trust_level": trust_level if ok else "LOW",
-                "hash_match": hash_match if ok else "NOT VERIFIED",
+                "trust_level": trust_level if seal_valid else "LOW",
+                "hash_match": hash_match if seal_valid else "NOT VERIFIED",
                 "message": (
-                    "This certified PDF contains a valid VeriFYD secure seal."
-                    if ok else
-                    "This certified PDF contains a VeriFYD seal, but the cryptographic signature did not validate."
+                    "This document contains a valid VeriFYD signed seal."
+                    if is_v2 and seal_valid else
+                    "This document contains a valid legacy VeriFYD seal. Legacy V1 seals remain accepted, but new certificates use V2 cryptographic signatures."
+                    if seal_valid else
+                    "The VeriFYD seal signature could not be verified."
                 ),
             },
         }
+
     except Exception as e:
         return {
             "verified": False,
             "status": "verification_error",
             "seal_valid": False,
+            "seal_version": "",
+            "signature_status": "ERROR",
             "integrity_status": "ERROR",
-            "reason": str(e)[:200],
+            "reason": str(e)[:300],
             "certified_pdf_sha256": certified_pdf_sha256,
+            "verification_status": "NOT_VERIFIED",
             "verification_report": {
                 "title": "VeriFYD Certificate Verification Report",
                 "status": "ERROR",
-                "seal": "UNKNOWN",
-                "message": str(e)[:200],
+                "seal": "ERROR",
+                "message": "The PDF seal could not be verified because the verification process failed.",
             },
         }
 
