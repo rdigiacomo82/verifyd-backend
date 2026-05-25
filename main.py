@@ -1044,6 +1044,15 @@ def _enrich_certificate_verification_result(result: dict) -> dict:
     result["certified_document_available"] = r2_available_for_cert
 
     if db_record:
+        db_sha = str(db_record.get("sha256") or db_record.get("file_sha256") or db_record.get("original_sha256") or "")
+        seal_sha = str(result.get("original_sha256") or "")
+        if seal_sha and db_sha:
+            result["database_original_hash_match"] = "YES" if seal_sha.lower() == db_sha.lower() else "NO"
+        elif seal_sha:
+            result["database_original_hash_match"] = "DATABASE_HASH_NOT_AVAILABLE"
+        else:
+            result["database_original_hash_match"] = "NO_SEAL_ORIGINAL_HASH"
+
         result["database_record"] = {
             "certificate_id": db_record.get("cert_id", cid),
             "label": db_record.get("label", ""),
@@ -1053,11 +1062,16 @@ def _enrich_certificate_verification_result(result: dict) -> dict:
             "upload_time": db_record.get("upload_time", ""),
             "download_count": db_record.get("download_count", 0),
             "certified_to": db_record.get("email", ""),
+            "original_sha256": db_sha,
         }
 
     report = dict(result.get("verification_report") or {})
     report["database_match"] = "YES" if db_record else "NO"
     report["certified_document_available"] = "YES" if r2_available_for_cert else "UNKNOWN" if cid else "NO"
+    if "database_original_hash_match" in result:
+        report["original_hash_match"] = result.get("database_original_hash_match")
+    if result.get("trust_level"):
+        report["trust_level"] = result.get("trust_level")
 
     if result.get("verified") and db_record:
         result["verification_status"] = "AUTHENTIC_VERIFYD_DOCUMENT"
@@ -1124,7 +1138,8 @@ def verify_certificate_by_id(cid: str):
             "certificate_id": cid,
             "database_match": "YES",
             "certified_document_available": "YES" if document_available else "UNKNOWN",
-            "message": "This certificate ID exists in the VeriFYD certificate database.",
+            "trust_level": "DATABASE RECORD FOUND",
+            "message": "This certificate ID exists in the VeriFYD certificate database. Upload the certified PDF to verify the hidden secure seal and hash payload.",
         },
     })
 

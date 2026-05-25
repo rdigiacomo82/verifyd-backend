@@ -1583,6 +1583,49 @@ def _create_text_render_pdf(src_path: str, dest_path: str, cert_id: str, authent
     return dest_path
 
 
+
+
+def _trust_level_from_report(report: Dict[str, Any] | None, seal_valid: bool = True, hash_match: str = "UNKNOWN") -> str:
+    """Map risk/seal/hash state into a business-friendly trust level."""
+    report = report or {}
+    risk = str(report.get("overall_risk", "UNKNOWN")).upper()
+    metadata = str(report.get("metadata_integrity", "UNKNOWN")).upper()
+    try:
+        risk_score = int(float(report.get("risk_score", 50) or 50))
+    except Exception:
+        risk_score = 50
+
+    if not seal_valid or str(hash_match).upper() in ("NO", "MISMATCH", "FAILED"):
+        return "LOW"
+    if risk == "HIGH" or metadata == "FAIL" or risk_score >= 70:
+        return "LOW"
+    if risk == "MEDIUM" or metadata == "WARN" or risk_score >= 35:
+        return "MODERATE"
+    return "HIGH"
+
+
+def _ai_indicator_label(report: Dict[str, Any] | None) -> str:
+    """Use less alarming language for normal business documents."""
+    report = report or {}
+    raw = str(report.get("ai_indicators", "UNKNOWN")).upper()
+    try:
+        risk_score = int(float(report.get("risk_score", 0) or 0))
+    except Exception:
+        risk_score = 0
+    reasons = " ".join(str(x).lower() for x in (report.get("reasons") or []))
+    warnings = " ".join(str(x).lower() for x in (report.get("warnings") or []))
+    combined = reasons + " " + warnings
+
+    if raw in ("NONE", "NO", "NOT PRESENT", "NO SIGNIFICANT AI EVIDENCE"):
+        return "NO SIGNIFICANT AI EVIDENCE"
+    if "strong" in combined or risk_score >= 70:
+        return "STRONG SYNTHETIC / MANIPULATION INDICATORS"
+    if risk_score >= 45:
+        return "MODERATE SYNTHETIC INDICATORS"
+    if raw == "PRESENT":
+        return "LOW-CONFIDENCE SIGNALS DETECTED"
+    return raw or "UNKNOWN"
+
 def _append_document_risk_report_page(pdf_path: str, detail: Dict[str, Any] | None,
                                       cert_id: str, filename: str) -> str:
     """Append a business-readable Document Risk Report page to the certified PDF."""
@@ -1643,11 +1686,14 @@ def _append_document_risk_report_page(pdf_path: str, detail: Dict[str, Any] | No
         y = _line(c, "Author / Owner:", report.get("author", "Not found"), margin, y)
         y = _line(c, "Metadata Integrity:", report.get("metadata_integrity", "UNKNOWN"), margin, y)
         y = _line(c, "File Structure:", report.get("file_structure", "UNKNOWN"), margin, y)
-        y = _line(c, "AI Indicators:", report.get("ai_indicators", "UNKNOWN"), margin, y)
+        y = _line(c, "AI Indicators:", _ai_indicator_label(report), margin, y)
         y = _line(c, "Hidden Revisions:", report.get("hidden_revisions", "NOT CHECKED"), margin, y)
         y = _line(c, "Digital Signature:", report.get("digital_signature", "NOT CHECKED"), margin, y)
         y = _line(c, "Metadata Tool:", f"{report.get('metadata_tool', 'Python extractors')} ({report.get('metadata_tool_status', 'built_in')})", margin, y)
         y = _line(c, "VeriFYD Secure Seal:", "PRESENT", margin, y)
+        y = _line(c, "Trust Level:", _trust_level_from_report(report, seal_valid=True), margin, y)
+        if report.get("sha256") or report.get("original_sha256"):
+            y = _line(c, "Original SHA-256:", str(report.get("sha256") or report.get("original_sha256"))[:32] + "...", margin, y)
         y -= 10
 
         c.setFont("Helvetica-Bold", 10)
@@ -1752,6 +1798,7 @@ def _build_secure_seal_payload(cert_id: str, filename: str, sha256: str,
         "overall_risk": report.get("overall_risk", "UNKNOWN"),
         "risk_score": report.get("risk_score", ""),
         "metadata_integrity": report.get("metadata_integrity", "UNKNOWN"),
+        "trust_level": _trust_level_from_report(report, seal_valid=True),
     }
 
 
@@ -1882,12 +1929,16 @@ def verify_secure_seal_pdf(pdf_path: str) -> Dict[str, Any]:
         authenticity = payload.get("authenticity", "")
         risk = str(payload.get("overall_risk", "UNKNOWN"))
         risk_score = payload.get("risk_score", "")
+        trust_level = str(payload.get("trust_level") or _trust_level_from_report(payload if isinstance(payload, dict) else {}, seal_valid=ok))
+        hash_match = "SEALED_ORIGINAL_HASH_PRESENT" if original_sha256 else "NO_ORIGINAL_HASH_IN_SEAL"
 
         return {
             "verified": ok,
             "status": "valid" if ok else "invalid_signature",
             "seal_valid": ok,
             "integrity_status": "VERIFIED" if ok else "FAILED",
+            "hash_match": hash_match if ok else "NOT VERIFIED",
+            "trust_level": trust_level if ok else "LOW",
             "certificate_id": certificate_id,
             "issued_at_utc": issued_at,
             "original_filename": payload.get("original_filename", ""),
@@ -1911,6 +1962,8 @@ def verify_secure_seal_pdf(pdf_path: str) -> Dict[str, Any]:
                 "authenticity": authenticity,
                 "overall_risk": risk,
                 "risk_score": risk_score,
+                "trust_level": trust_level if ok else "LOW",
+                "hash_match": hash_match if ok else "NOT VERIFIED",
                 "message": (
                     "This certified PDF contains a valid VeriFYD secure seal."
                     if ok else
