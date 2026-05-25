@@ -1636,9 +1636,9 @@ def _metadata_score(meta: Dict[str, Any]) -> Tuple[int, List[str]]:
 
     created = md.get("creationdate", "") or md.get("created", "")
     modified = md.get("moddate", "") or md.get("modified", "")
-    if created and modified and created != modified:
-        score += 5
-        flags.append("creation and modification timestamps differ")
+    # Normal documents often have different creation and modification timestamps.
+    # Do not treat that as risk here. Timestamp ordering is handled later by the
+    # Document Risk Report, where modified-before-created is the actual concern.
 
     if meta.get("type") == "pdf" and meta.get("pages", 0) > 0 and meta.get("embedded_images", 0) >= meta.get("pages", 0):
         score += 8
@@ -1956,15 +1956,36 @@ def _build_document_risk_report(path: str, ext: str, meta: Dict[str, Any], meta_
             if "future" in f_low and "date" in f_low and not actual_future_timestamp:
                 continue
             filtered_flags.append(f_text)
-        if filtered_flags:
-            flag_text = "; ".join(filtered_flags[:5])
+        calibrated_flags: List[str] = []
+        benign_flags: List[str] = []
+        for f_text in filtered_flags:
+            f_low = str(f_text).lower()
+            if "creation and modification timestamps differ" in f_low and created_dt and modified_dt and modified_dt >= created_dt:
+                benign_flags.append("Creation and modification timestamps differ, but ordering is consistent.")
+                continue
+            if "structured data format" in f_low:
+                benign_flags.append("Structured form/table format detected; treated as normal for business forms.")
+                continue
+            if "repetitive pattern" in f_low or "repetitive patterns" in f_low:
+                benign_flags.append("Repeated form/table rows detected; treated as normal for forms, invoices, and logs.")
+                continue
+            calibrated_flags.append(str(f_text))
+        if calibrated_flags:
+            flag_text = "; ".join(calibrated_flags[:5])
             warnings.append("Detector flags: " + flag_text)
+        if benign_flags:
+            passed.extend(benign_flags[:3])
+
+    # Recalibrate normal business forms: LOW risk with no critical reasons should not be downgraded
+    # just because the file is a form/table or has normal edit timestamps.
+    if not reasons:
+        risk_points = max(0, min(risk_points, 24))
 
     risk_points = max(0, min(100, int(round(risk_points))))
     overall = _risk_level(risk_points)
     if reasons:
         metadata_integrity = "FAIL" if any("timestamp" in r.lower() or "future" in r.lower() for r in reasons) else "WARN"
-    elif warnings:
+    elif warnings and risk_points >= 25:
         metadata_integrity = "WARN"
     else:
         metadata_integrity = "PASS"
@@ -1984,7 +2005,7 @@ def _build_document_risk_report(path: str, ext: str, meta: Dict[str, Any], meta_
         "author": author or "Not found",
         "metadata_integrity": metadata_integrity,
         "file_structure": "PASS",
-        "ai_indicators": "PRESENT" if (ai_hits or gpt_score >= 65) else "NONE DETECTED",
+        "ai_indicators": "LOW-CONFIDENCE SIGNALS DETECTED" if (ai_hits or gpt_score >= 65) else "NO SIGNIFICANT AI EVIDENCE",
         "hidden_revisions": "NOT CHECKED",
         "digital_signature": "NOT CHECKED",
         "metadata_tool": (meta.get("external_metadata_tool") or {}).get("name", "Python extractors"),

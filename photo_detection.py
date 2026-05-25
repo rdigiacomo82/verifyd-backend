@@ -82,7 +82,6 @@ def _extract_photo_frames(image_path: str, n_crops: int = 4) -> list:
     This gives GPT both the overall view and close-up texture detail.
     Returns list of base64-encoded JPEG strings.
     """
-    import tempfile
     frames = []
     try:
         # HEIC conversion for frame extraction — cv2 and GPT both need JPEG
@@ -128,7 +127,6 @@ def _extract_photo_frames(image_path: str, n_crops: int = 4) -> list:
         frames.append(base64.b64encode(buf.tobytes()).decode("utf-8"))
 
         # Regional crops for texture/detail analysis
-        # Divide into quadrants + center crop
         crops = [
             (0,     0,     w//2,   h//2),   # top-left
             (w//2,  0,     w,      h//2),   # top-right
@@ -171,10 +169,10 @@ def _build_photo_gpt_context(signal_score: int, signal_context: dict) -> dict:
     ctx["is_photo"]      = True
 
     # Map photo-specific signals to GPT-readable names
-    ctx["avg_noise"]     = signal_context.get("avg_noise", 500)
+    ctx["avg_noise"]      = signal_context.get("avg_noise", 500)
     ctx["avg_saturation"] = signal_context.get("avg_saturation", 80)
-    ctx["flat_noise"]    = signal_context.get("flat_noise", 1.0)
-    ctx["chan_corr"]     = signal_context.get("chan_corr", 0.7)
+    ctx["flat_noise"]     = signal_context.get("flat_noise", 1.0)
+    ctx["chan_corr"]      = signal_context.get("chan_corr", 0.7)
 
     # Photo-specific hints
     ela = signal_context.get("ela_score", 50)
@@ -228,7 +226,7 @@ def _build_photo_gpt_context(signal_score: int, signal_context: dict) -> dict:
 
     if photo_notes:
         ctx["photo_signal_notes"] = "\n".join(
-            [f"PHOTO SIGNAL ANALYSIS — guide your inspection:"] + 
+            ["PHOTO SIGNAL ANALYSIS — guide your inspection:"] +
             [f"  • {n}" for n in photo_notes]
         )
 
@@ -300,13 +298,18 @@ def run_photo_detection(image_path: str) -> tuple:
     # ── Blend ────────────────────────────────────────────────
     gpt_failed = (
         not gpt_available or
-        gpt_reasoning.startswith("GPT analysis error")
+        gpt_reasoning.startswith("GPT analysis error") or
+        "can't assist" in (gpt_reasoning or "").lower() or
+        "cannot assist" in (gpt_reasoning or "").lower() or
+        "refus" in (gpt_reasoning or "").lower() or
+        any("refus" in str(flag).lower() for flag in (gpt_flags or []))
     )
 
     if gpt_failed:
         combined = float(signal_score)
         w_sig, w_gpt = 1.0, 0.0
-        mode = "signal-only (GPT failed)"
+        mode = "signal-only (GPT unavailable/refused)"
+        gpt_available = False
     else:
         gpt_dominant  = gpt_score >= 75 and signal_score < 60
         clash_ai      = signal_score > 65 and gpt_score < 40
@@ -387,7 +390,10 @@ def run_photo_detection(image_path: str) -> tuple:
     _gpt_specific = (
         gpt_reasoning and len(gpt_reasoning) > 60 and
         "inconclusive" not in gpt_reasoning.lower() and
-        "error" not in gpt_reasoning.lower()
+        "error" not in gpt_reasoning.lower() and
+        "can't assist" not in gpt_reasoning.lower() and
+        "cannot assist" not in gpt_reasoning.lower() and
+        "refus" not in gpt_reasoning.lower()
     )
 
     if label == "REAL":
@@ -428,7 +434,7 @@ def run_photo_detection(image_path: str) -> tuple:
         "content_type":       content_type,
         "ela_score":          signal_context.get("ela_score", 0),
         "flat_noise":         signal_context.get("flat_noise", 0),
-        "chan_corr":           signal_context.get("chan_corr", 0),
+        "chan_corr":          signal_context.get("chan_corr", 0),
         "metadata":           signal_context.get("metadata", {}),
         "threshold_real":     THRESHOLD_REAL,
         "threshold_undet":    THRESHOLD_UNDETERMINED,
