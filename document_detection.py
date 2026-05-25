@@ -1923,12 +1923,25 @@ def _build_document_risk_report(path: str, ext: str, meta: Dict[str, Any], meta_
     else:
         passed.append("No high-risk metadata producer indicators were found.")
 
-    if gpt_score >= 65:
+    # GPT semantic review is useful, but it should not by itself downgrade metadata
+    # integrity for highly structured business/government forms when metadata and
+    # timestamps are otherwise consistent. Treat isolated semantic signals as
+    # low-confidence review notes unless supported by metadata/text evidence.
+    isolated_semantic_signal = (
+        gpt_score >= 65
+        and meta_score < 15
+        and text_score <= 10
+        and not ai_hits
+    )
+    if gpt_score >= 75 and not isolated_semantic_signal:
         risk_points += 25
-        reasons.append("Semantic analysis found elevated AI/manipulation indicators.")
+        reasons.append("Semantic analysis found elevated AI/manipulation indicators supported by other signals.")
+    elif gpt_score >= 65:
+        risk_points += 12
+        warnings.append("Semantic analysis found low-confidence AI/manipulation indicators.")
     elif gpt_score >= 40:
-        risk_points += 10
-        warnings.append("Semantic analysis found moderate AI/manipulation indicators.")
+        risk_points += 8
+        warnings.append("Semantic analysis found minor AI/manipulation indicators.")
 
     if not md:
         warnings.append("Document metadata is empty or stripped.")
@@ -1966,8 +1979,14 @@ def _build_document_risk_report(path: str, ext: str, meta: Dict[str, Any], meta_
             if "structured data format" in f_low:
                 benign_flags.append("Structured form/table format detected; treated as normal for business forms.")
                 continue
-            if "repetitive pattern" in f_low or "repetitive patterns" in f_low:
+            if any(token in f_low for token in ("repetitive pattern", "repetitive patterns", "repetitive structure", "repeated structure")):
                 benign_flags.append("Repeated form/table rows detected; treated as normal for forms, invoices, and logs.")
+                continue
+            if ("lack of author" in f_low or "author details" in f_low or "owner details" in f_low) and (author or creator):
+                benign_flags.append("Author/creator metadata is present; generic author-detail flag ignored.")
+                continue
+            if "structured business" in f_low or "business form" in f_low:
+                benign_flags.append("Structured business form detected; treated as expected document layout.")
                 continue
             calibrated_flags.append(str(f_text))
         if calibrated_flags:
@@ -1977,22 +1996,31 @@ def _build_document_risk_report(path: str, ext: str, meta: Dict[str, Any], meta_
             passed.extend(benign_flags[:3])
 
     # Recalibrate normal business forms: LOW risk with no critical reasons should not be downgraded
-    # just because the file is a form/table or has normal edit timestamps.
-    if not reasons:
+    # just because the file is a form/table, has normal edit timestamps, or receives
+    # an isolated low-confidence semantic note.
+    critical_warning_terms = (
+        "missing timestamp", "only one primary", "no primary creation",
+        "metadata is empty", "very limited metadata", "image-heavy",
+        "dangerous", "unsafe", "signature", "tamper",
+    )
+    warning_text = " ".join(w.lower() for w in warnings)
+    has_critical_warning = any(term in warning_text for term in critical_warning_terms)
+    has_good_core_metadata = bool(created_dt and modified_dt and modified_dt >= created_dt and (author or creator))
+    if not reasons and (has_good_core_metadata or not has_critical_warning):
         risk_points = max(0, min(risk_points, 24))
 
     risk_points = max(0, min(100, int(round(risk_points))))
     overall = _risk_level(risk_points)
     if reasons:
         metadata_integrity = "FAIL" if any("timestamp" in r.lower() or "future" in r.lower() for r in reasons) else "WARN"
-    elif warnings and risk_points >= 25:
+    elif has_critical_warning and risk_points >= 25:
         metadata_integrity = "WARN"
     else:
         metadata_integrity = "PASS"
 
     if not reasons:
         if warnings:
-            reasons.append("No critical manipulation indicators found; minor metadata limitations noted.")
+            reasons.append("No critical manipulation indicators found; review notes are low-confidence or normal for this document type.")
         else:
             reasons.append("No material metadata or structure inconsistencies were detected.")
 
