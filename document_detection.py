@@ -20,6 +20,8 @@ import logging
 import math
 import os
 import re
+import shutil
+import subprocess
 from collections import Counter
 from datetime import datetime
 from typing import Any, Dict, List, Tuple
@@ -56,6 +58,109 @@ def _sha256_file(path: str) -> str:
         for chunk in iter(lambda: f.read(1024 * 1024), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def _run_exiftool_metadata(path: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """
+    Optional ExifTool metadata pass.
+
+    ExifTool is intentionally optional: if the binary is not installed on Render,
+    VeriFYD keeps using the existing Python extraction stack. When available,
+    this adds a stronger forensic metadata view across PDF, Office, images,
+    CAD/evidence files, and archive-like formats.
+    """
+    tool_info: Dict[str, Any] = {
+        "name": "ExifTool",
+        "available": False,
+        "used": False,
+        "status": "not_available",
+    }
+    exe = shutil.which("exiftool")
+    if not exe:
+        return {}, tool_info
+
+    tool_info["available"] = True
+    try:
+        result = subprocess.run(
+            [exe, "-j", "-a", "-G1", "-s", path],
+            capture_output=True,
+            text=True,
+            timeout=25,
+        )
+        if result.returncode != 0:
+            tool_info["status"] = f"error:{(result.stderr or '')[:120]}"
+            return {}, tool_info
+        parsed = json.loads(result.stdout or "[]")
+        if not parsed or not isinstance(parsed, list) or not isinstance(parsed[0], dict):
+            tool_info["status"] = "no_metadata_returned"
+            return {}, tool_info
+        raw_md = parsed[0]
+        cleaned: Dict[str, Any] = {}
+        for k, v in raw_md.items():
+            if k in ("SourceFile",):
+                continue
+            if isinstance(v, (str, int, float, bool)):
+                cleaned[str(k)] = str(v)[:1000]
+            elif isinstance(v, list):
+                cleaned[str(k)] = ", ".join(str(x) for x in v[:20])[:1000]
+            elif isinstance(v, dict):
+                cleaned[str(k)] = json.dumps(v, ensure_ascii=False)[:1000]
+        tool_info.update({
+            "used": True,
+            "status": "ok",
+            "field_count": len(cleaned),
+        })
+        return cleaned, tool_info
+    except Exception as e:
+        tool_info["status"] = f"exception:{str(e)[:120]}"
+        return {}, tool_info
+
+
+def _merge_exiftool_metadata(path: str, meta: Dict[str, Any]) -> Dict[str, Any]:
+    """Merge optional ExifTool metadata into the existing meta object safely."""
+    if not isinstance(meta, dict):
+        meta = {"type": "document", "pages": 0, "embedded_images": 0, "metadata": {}}
+    existing = dict(meta.get("metadata") or {})
+    exif_md, tool_info = _run_exiftool_metadata(path)
+    meta["external_metadata_tool"] = tool_info
+
+    if exif_md:
+        # Keep original parser keys untouched; add ExifTool keys under a prefix
+        # to avoid changing current scoring behavior unexpectedly.
+        for k, v in exif_md.items():
+            prefixed = f"exiftool_{k}"
+            if prefixed not in existing:
+                existing[prefixed] = v
+
+        # Promote common date/software fields only when the primary parser did
+        # not already provide them. This improves the risk report without
+        # overwriting pypdf/openpyxl/python-docx values.
+        promotion_map = {
+            "CreateDate": "created",
+            "PDF:CreateDate": "created",
+            "EXIF:CreateDate": "created",
+            "File:FileModifyDate": "modified",
+            "ModifyDate": "modified",
+            "PDF:ModifyDate": "modified",
+            "XMP:ModifyDate": "modified",
+            "Producer": "producer",
+            "PDF:Producer": "producer",
+            "Creator": "creator",
+            "XMP:CreatorTool": "creator",
+            "Author": "author",
+            "XMP:Author": "author",
+            "Software": "software",
+            "EXIF:Software": "software",
+        }
+        lowered_existing = {str(k).lower().replace("_", ""): k for k in existing.keys()}
+        for src_key, dst_key in promotion_map.items():
+            if dst_key.lower().replace("_", "") in lowered_existing:
+                continue
+            if src_key in exif_md and str(exif_md[src_key]).strip():
+                existing[dst_key] = str(exif_md[src_key]).strip()[:500]
+
+    meta["metadata"] = existing
+    return meta
 
 
 def _safe_int(value: Any, default: int = 0) -> int:
@@ -1707,6 +1812,8 @@ def _parse_any_date(value: Any) -> datetime | None:
             return datetime.strptime(s, "%Y%m%d%H%M%S")
         except Exception:
             pass
+    # Normalize common ExifTool timezone form: 2026:04:09 13:52:46-04:00
+    tz_normalized = re.sub(r"^(\d{4}:\d{2}:\d{2} \d{2}:\d{2}:\d{2})([+-]\d{2}:?\d{2})$", r"\1", raw)
     # EXIF-like timestamps.
     for fmt in (
         "%Y:%m:%d %H:%M:%S",
@@ -1720,14 +1827,14 @@ def _parse_any_date(value: Any) -> datetime | None:
         "%m/%d/%Y",
     ):
         try:
-            dt = datetime.strptime(raw.replace("Z", "+0000"), fmt)
+            dt = datetime.strptime(tz_normalized.replace("Z", "+0000"), fmt)
             if dt.tzinfo:
                 return dt.astimezone().replace(tzinfo=None)
             return dt
         except Exception:
             continue
     try:
-        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(tz_normalized.replace("Z", "+00:00"))
         if dt.tzinfo:
             return dt.astimezone().replace(tzinfo=None)
         return dt
@@ -1771,6 +1878,7 @@ def _build_document_risk_report(path: str, ext: str, meta: Dict[str, Any], meta_
     created_dt = _parse_any_date(created_raw)
     modified_dt = _parse_any_date(modified_raw)
     now = datetime.utcnow()
+    future_threshold = now.replace(microsecond=0)
 
     risk_points = 0
     reasons: List[str] = []
@@ -1790,8 +1898,13 @@ def _build_document_risk_report(path: str, ext: str, meta: Dict[str, Any], meta_
         warnings.append("No primary creation/modification timestamp was found.")
         risk_points += 12
 
+    actual_future_timestamp = False
     for label, dt in (("creation", created_dt), ("modification", modified_dt)):
-        if dt and dt > now.replace(microsecond=0):
+        # Allow a small clock/time-zone tolerance. This prevents GPT or metadata
+        # phrasing from creating a false future-date warning when the parsed
+        # document dates are actually in the past.
+        if dt and dt > future_threshold:
+            actual_future_timestamp = True
             risk_points += 25
             reasons.append(f"Document {label} timestamp appears to be in the future.")
 
@@ -1834,9 +1947,18 @@ def _build_document_risk_report(path: str, ext: str, meta: Dict[str, Any], meta_
         warnings.append("PDF appears image-heavy with little or no extractable text.")
 
     if flags:
-        # Existing flags are useful but may include AI style hints. Keep them as evidence.
-        flag_text = "; ".join(str(f) for f in flags[:5])
-        warnings.append("Detector flags: " + flag_text)
+        # Existing detector/GPT flags are useful, but validate future-date claims
+        # against parsed metadata so the report does not show false positives.
+        filtered_flags: List[str] = []
+        for f in flags[:8]:
+            f_text = str(f)
+            f_low = f_text.lower()
+            if "future" in f_low and "date" in f_low and not actual_future_timestamp:
+                continue
+            filtered_flags.append(f_text)
+        if filtered_flags:
+            flag_text = "; ".join(filtered_flags[:5])
+            warnings.append("Detector flags: " + flag_text)
 
     risk_points = max(0, min(100, int(round(risk_points))))
     overall = _risk_level(risk_points)
@@ -1865,6 +1987,8 @@ def _build_document_risk_report(path: str, ext: str, meta: Dict[str, Any], meta_
         "ai_indicators": "PRESENT" if (ai_hits or gpt_score >= 65) else "NONE DETECTED",
         "hidden_revisions": "NOT CHECKED",
         "digital_signature": "NOT CHECKED",
+        "metadata_tool": (meta.get("external_metadata_tool") or {}).get("name", "Python extractors"),
+        "metadata_tool_status": (meta.get("external_metadata_tool") or {}).get("status", "built_in"),
         "reasons": reasons[:8],
         "warnings": warnings[:8],
         "passed_checks": passed[:8],
@@ -1879,6 +2003,7 @@ def _build_document_risk_report(path: str, ext: str, meta: Dict[str, Any], meta_
             "Embedded object count",
             "AI / manipulation indicators",
             "File structure extraction",
+            "Optional ExifTool metadata extraction",
         ],
         "document_type": doc_type,
         "pages": pages,
@@ -1892,6 +2017,7 @@ def run_document_detection(path: str) -> Tuple[int, str, Dict[str, Any]]:
     size_bytes = os.path.getsize(path)
 
     text, meta = _extract_document(path)
+    meta = _merge_exiftool_metadata(path, meta)
     meta_score, meta_flags = _metadata_score(meta)
     text_score, text_flags, text_stats = _text_stats_score(text)
     gpt_score, gpt_reasoning, gpt_flags, gpt_available = _gpt_document_score(text, meta, ext)
@@ -1944,6 +2070,7 @@ def run_document_detection(path: str) -> Tuple[int, str, Dict[str, Any]]:
         "embedded_images": meta.get("embedded_images", 0),
         "text_stats": text_stats,
         "metadata": meta.get("metadata", {}),
+        "external_metadata_tool": meta.get("external_metadata_tool", {}),
         "document_risk_report": risk_report,
         "risk_report": risk_report,
         "overall_risk": risk_report.get("overall_risk"),

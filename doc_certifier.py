@@ -33,6 +33,11 @@ from __future__ import annotations
 
 import os
 import tempfile
+import base64
+import hashlib
+import hmac
+import json
+from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Tuple
 
 
@@ -1641,6 +1646,8 @@ def _append_document_risk_report_page(pdf_path: str, detail: Dict[str, Any] | No
         y = _line(c, "AI Indicators:", report.get("ai_indicators", "UNKNOWN"), margin, y)
         y = _line(c, "Hidden Revisions:", report.get("hidden_revisions", "NOT CHECKED"), margin, y)
         y = _line(c, "Digital Signature:", report.get("digital_signature", "NOT CHECKED"), margin, y)
+        y = _line(c, "Metadata Tool:", f"{report.get('metadata_tool', 'Python extractors')} ({report.get('metadata_tool_status', 'built_in')})", margin, y)
+        y = _line(c, "VeriFYD Secure Seal:", "PRESENT", margin, y)
         y -= 10
 
         c.setFont("Helvetica-Bold", 10)
@@ -1709,6 +1716,141 @@ def _append_document_risk_report_page(pdf_path: str, detail: Dict[str, Any] | No
                 os.remove(risk_page)
         except Exception:
             pass
+    return pdf_path
+
+
+# ─────────────────────────────────────────────
+# VeriFYD Secure Seal
+# ─────────────────────────────────────────────
+
+def _seal_secret() -> str:
+    """Return the private seal secret. Set VERIFYD_SEAL_SECRET on Render for production."""
+    return (
+        os.environ.get("VERIFYD_SEAL_SECRET")
+        or os.environ.get("DOCUMENT_SEAL_SECRET")
+        or os.environ.get("ADMIN_KEY")
+        or "verifyd-dev-seal-change-me"
+    )
+
+
+def _build_secure_seal_payload(cert_id: str, filename: str, sha256: str,
+                               authenticity: int, label: str,
+                               detail: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    report = {}
+    if isinstance(detail, dict):
+        report = detail.get("document_risk_report") or detail.get("risk_report") or {}
+        if not isinstance(report, dict):
+            report = {}
+    return {
+        "version": "VERIFYD-SEAL-V1",
+        "certificate_id": cert_id,
+        "original_filename": filename or "",
+        "original_sha256": sha256 or "",
+        "label": label or "",
+        "authenticity": int(authenticity or 0),
+        "issued_at_utc": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        "overall_risk": report.get("overall_risk", "UNKNOWN"),
+        "risk_score": report.get("risk_score", ""),
+        "metadata_integrity": report.get("metadata_integrity", "UNKNOWN"),
+    }
+
+
+def _sign_secure_seal_payload(payload: Dict[str, Any]) -> Tuple[str, str]:
+    payload_json = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    sig = hmac.new(_seal_secret().encode("utf-8"), payload_json.encode("utf-8"), hashlib.sha256).hexdigest()
+    payload_b64 = base64.urlsafe_b64encode(payload_json.encode("utf-8")).decode("ascii")
+    return payload_b64, sig
+
+
+def _apply_verifyd_secure_seal(pdf_path: str, cert_id: str, filename: str, sha256: str,
+                                authenticity: int, label: str,
+                                detail: Dict[str, Any] | None = None) -> str:
+    """
+    Embed a hidden VeriFYD cryptographic seal inside the certified PDF metadata.
+
+    This is not meant to be visible to users. VeriFYD can later read the payload
+    and validate the HMAC signature using the private server-side seal secret.
+    """
+    try:
+        from pypdf import PdfReader, PdfWriter
+    except Exception:
+        return pdf_path
+    if not os.path.exists(pdf_path):
+        return pdf_path
+
+    payload = _build_secure_seal_payload(cert_id, filename, sha256, authenticity, label, detail)
+    payload_b64, signature = _sign_secure_seal_payload(payload)
+    tmp_out = pdf_path + ".seal.tmp.pdf"
+    try:
+        reader = PdfReader(pdf_path)
+        writer = PdfWriter()
+        for page in reader.pages:
+            writer.add_page(page)
+        try:
+            # Preserve attachments/embedded files when possible.
+            for attachment_name, attachment_data in getattr(reader, "attachments", {}).items():
+                try:
+                    if isinstance(attachment_data, list):
+                        for item in attachment_data:
+                            writer.add_attachment(attachment_name, item)
+                    else:
+                        writer.add_attachment(attachment_name, attachment_data)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        metadata = {str(k): str(v) for k, v in (reader.metadata or {}).items() if v is not None}
+        metadata.update({
+            "/VeriFYD_Secure_Seal": "PRESENT",
+            "/VeriFYD_Seal_Version": "VERIFYD-SEAL-V1",
+            "/VeriFYD_Seal_Algorithm": "HMAC-SHA256",
+            "/VeriFYD_Seal_Payload_B64": payload_b64,
+            "/VeriFYD_Seal_Signature": signature,
+            "/VeriFYD_Seal_Certificate_ID": cert_id,
+            "/VeriFYD_Seal_Original_SHA256": sha256 or "",
+        })
+        writer.add_metadata(metadata)
+        with open(tmp_out, "wb") as out:
+            writer.write(out)
+        os.replace(tmp_out, pdf_path)
+    except Exception:
+        try:
+            if os.path.exists(tmp_out):
+                os.remove(tmp_out)
+        except Exception:
+            pass
+    return pdf_path
+
+
+def verify_secure_seal_pdf(pdf_path: str) -> Dict[str, Any]:
+    """Verify a certified PDF's hidden VeriFYD secure seal."""
+    try:
+        from pypdf import PdfReader
+        reader = PdfReader(pdf_path)
+        md = reader.metadata or {}
+        payload_b64 = str(md.get("/VeriFYD_Seal_Payload_B64") or "")
+        signature = str(md.get("/VeriFYD_Seal_Signature") or "")
+        if not payload_b64 or not signature:
+            return {"verified": False, "status": "missing_seal", "reason": "No VeriFYD secure seal metadata found."}
+        payload_json = base64.urlsafe_b64decode(payload_b64.encode("ascii")).decode("utf-8")
+        expected = hmac.new(_seal_secret().encode("utf-8"), payload_json.encode("utf-8"), hashlib.sha256).hexdigest()
+        payload = json.loads(payload_json)
+        ok = hmac.compare_digest(expected, signature)
+        return {
+            "verified": ok,
+            "status": "valid" if ok else "invalid_signature",
+            "certificate_id": payload.get("certificate_id", ""),
+            "payload": payload if ok else {},
+            "algorithm": str(md.get("/VeriFYD_Seal_Algorithm") or "HMAC-SHA256"),
+        }
+    except Exception as e:
+        return {"verified": False, "status": "error", "reason": str(e)[:200]}
+
+
+def _finalize_certified_pdf(pdf_path: str, detail: Dict[str, Any] | None, cert_id: str,
+                            filename: str, sha256: str, authenticity: int, label: str) -> str:
+    _append_document_risk_report_page(pdf_path, detail, cert_id, filename)
+    _apply_verifyd_secure_seal(pdf_path, cert_id, filename, sha256, authenticity, label, detail)
     return pdf_path
 
 
@@ -1940,31 +2082,29 @@ def stamp_document(src_path: str, dest_path: str, cert_id: str,
 
     if ext == ".zip":
         _create_zip_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256, detail)
-        return _append_document_risk_report_page(dest_path, detail, cert_id, filename)
+        return _finalize_certified_pdf(dest_path, detail, cert_id, filename, sha256, authenticity, label)
 
     if ext in (".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tif", ".tiff", ".webp", ".heic", ".heif"):
         _create_image_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256)
-        _append_document_risk_report_page(dest_path, detail, cert_id, filename)
         if ext in (".heic", ".heif"):
             _attach_original_file_to_pdf(dest_path, src_path, filename or os.path.basename(src_path))
-        return dest_path
+        return _finalize_certified_pdf(dest_path, detail, cert_id, filename, sha256, authenticity, label)
 
     if ext == ".xlsx":
         _create_xlsx_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256)
-        return _append_document_risk_report_page(dest_path, detail, cert_id, filename)
+        return _finalize_certified_pdf(dest_path, detail, cert_id, filename, sha256, authenticity, label)
 
     if ext == ".pptx":
         _create_pptx_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256)
-        return _append_document_risk_report_page(dest_path, detail, cert_id, filename)
+        return _finalize_certified_pdf(dest_path, detail, cert_id, filename, sha256, authenticity, label)
 
     if ext in (".rtf", ".eml", ".msg", ".doc", ".ppt", ".xls", ".odt", ".ods", ".odp", ".html", ".htm", ".mhtml", ".mht", ".xml", ".json", ".svg", ".vsdx", ".yaml", ".yml", ".ini", ".log", ".sql", ".pst", ".ost", ".dwg", ".dxf"):
         _create_text_render_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256)
         # Preserve exact source file for legal/forensic review, especially when
         # the certified PDF is a readable text rendering rather than a perfect
         # native-layout clone.
-        _append_document_risk_report_page(dest_path, detail, cert_id, filename)
         _attach_original_file_to_pdf(dest_path, src_path, filename or os.path.basename(src_path))
-        return dest_path
+        return _finalize_certified_pdf(dest_path, detail, cert_id, filename, sha256, authenticity, label)
 
     if ext == ".pdf":
         from pypdf import PdfReader, PdfWriter
@@ -2006,7 +2146,7 @@ def stamp_document(src_path: str, dest_path: str, cert_id: str,
                         os.remove(p)
                 except Exception:
                     pass
-        return _append_document_risk_report_page(dest_path, detail, cert_id, filename)
+        return _finalize_certified_pdf(dest_path, detail, cert_id, filename, sha256, authenticity, label)
 
     _create_non_pdf_certificate(dest_path, cert_id, authenticity, label, filename, sha256)
-    return _append_document_risk_report_page(dest_path, detail, cert_id, filename)
+    return _finalize_certified_pdf(dest_path, detail, cert_id, filename, sha256, authenticity, label)

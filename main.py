@@ -973,6 +973,50 @@ async def download_document(cid: str):
     return JSONResponse({"error": "Certified document not found or expired."}, status_code=404)
 
 
+@app.post("/verify-document-seal/")
+async def verify_document_seal(file: UploadFile = File(...)):
+    """
+    Verify the hidden VeriFYD Secure Seal embedded in a certified PDF.
+
+    This supports the enterprise submission workflow: organizations can require
+    a file to be VeriFYD certified, then submit the PDF back here to confirm the
+    hidden cryptographic seal is present and valid.
+    """
+    filename = file.filename or "certified.pdf"
+    ext = os.path.splitext(filename)[1].lower()
+    if ext != ".pdf":
+        return JSONResponse({
+            "verified": False,
+            "status": "unsupported_format",
+            "message": "Upload a VeriFYD certified PDF to verify its secure seal.",
+        }, status_code=415)
+
+    tmp_path = os.path.join(tempfile.gettempdir(), f"seal_verify_{uuid.uuid4()}.pdf")
+    try:
+        bytes_written = 0
+        with open(tmp_path, "wb") as f_out:
+            while chunk := await file.read(1024 * 1024):
+                bytes_written += len(chunk)
+                if bytes_written > 150 * 1024 * 1024:
+                    return JSONResponse({
+                        "verified": False,
+                        "status": "file_too_large",
+                        "message": "Certified PDF exceeds the seal verification size limit.",
+                    }, status_code=413)
+                f_out.write(chunk)
+
+        from doc_certifier import verify_secure_seal_pdf
+        result = verify_secure_seal_pdf(tmp_path)
+        status_code = 200 if result.get("verified") else 400
+        return JSONResponse(result, status_code=status_code)
+    finally:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
+
+
 @app.get("/job-status/{job_id}")
 def job_status(job_id: str):
     """Poll endpoint for direct async frontends."""

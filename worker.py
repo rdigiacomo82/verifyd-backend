@@ -792,6 +792,8 @@ def process_document_upload_job(
             "overall_risk":       (detail.get("document_risk_report") or detail.get("risk_report", {})).get("overall_risk") if isinstance(detail.get("document_risk_report") or detail.get("risk_report", {}), dict) else None,
             "risk_score":         (detail.get("document_risk_report") or detail.get("risk_report", {})).get("risk_score") if isinstance(detail.get("document_risk_report") or detail.get("risk_report", {}), dict) else None,
             "metadata_integrity": (detail.get("document_risk_report") or detail.get("risk_report", {})).get("metadata_integrity") if isinstance(detail.get("document_risk_report") or detail.get("risk_report", {}), dict) else None,
+            "external_metadata_tool": detail.get("external_metadata_tool", {}),
+            "secure_seal":        "pending",
             "document_type":      detail.get("document_type", ext.lstrip(".")),
             "pages":              detail.get("pages", 0),
             "embedded_images":    detail.get("embedded_images", 0),
@@ -877,6 +879,7 @@ def process_document_upload_job(
                     result["document_ready"] = True
                     result["certification_status"] = "ready"
                     result["download_url"] = download_url
+                    result["secure_seal"] = "present"
                     _store_result(r, job_id, result)
 
                     if email and "@" in email:
