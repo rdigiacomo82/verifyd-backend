@@ -1822,30 +1822,117 @@ def _apply_verifyd_secure_seal(pdf_path: str, cert_id: str, filename: str, sha25
     return pdf_path
 
 
+def _sha256_for_verify(path: str) -> str:
+    """Return SHA-256 for the certified PDF being verified."""
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def verify_secure_seal_pdf(pdf_path: str) -> Dict[str, Any]:
-    """Verify a certified PDF's hidden VeriFYD secure seal."""
+    """
+    Verify a certified PDF's hidden VeriFYD secure seal.
+
+    This validates the server-side HMAC signature over the embedded seal
+    payload and returns a user-facing verification report suitable for an
+    enterprise submission portal or future public verify page.
+    """
+    certified_pdf_sha256 = ""
+    try:
+        if os.path.exists(pdf_path):
+            certified_pdf_sha256 = _sha256_for_verify(pdf_path)
+    except Exception:
+        certified_pdf_sha256 = ""
+
     try:
         from pypdf import PdfReader
         reader = PdfReader(pdf_path)
         md = reader.metadata or {}
         payload_b64 = str(md.get("/VeriFYD_Seal_Payload_B64") or "")
         signature = str(md.get("/VeriFYD_Seal_Signature") or "")
+        algorithm = str(md.get("/VeriFYD_Seal_Algorithm") or "HMAC-SHA256")
+
         if not payload_b64 or not signature:
-            return {"verified": False, "status": "missing_seal", "reason": "No VeriFYD secure seal metadata found."}
+            return {
+                "verified": False,
+                "status": "missing_seal",
+                "seal_valid": False,
+                "integrity_status": "NOT VERIFIED",
+                "reason": "No VeriFYD secure seal metadata found.",
+                "certified_pdf_sha256": certified_pdf_sha256,
+                "verification_report": {
+                    "title": "VeriFYD Certificate Verification Report",
+                    "status": "NOT VERIFIED",
+                    "seal": "MISSING",
+                    "message": "This PDF does not contain a VeriFYD secure seal.",
+                },
+            }
+
         payload_json = base64.urlsafe_b64decode(payload_b64.encode("ascii")).decode("utf-8")
         expected = hmac.new(_seal_secret().encode("utf-8"), payload_json.encode("utf-8"), hashlib.sha256).hexdigest()
         payload = json.loads(payload_json)
         ok = hmac.compare_digest(expected, signature)
+
+        certificate_id = str(payload.get("certificate_id", ""))
+        original_sha256 = str(payload.get("original_sha256", ""))
+        issued_at = str(payload.get("issued_at_utc", ""))
+        label = str(payload.get("label", ""))
+        authenticity = payload.get("authenticity", "")
+        risk = str(payload.get("overall_risk", "UNKNOWN"))
+        risk_score = payload.get("risk_score", "")
+
         return {
             "verified": ok,
             "status": "valid" if ok else "invalid_signature",
-            "certificate_id": payload.get("certificate_id", ""),
+            "seal_valid": ok,
+            "integrity_status": "VERIFIED" if ok else "FAILED",
+            "certificate_id": certificate_id,
+            "issued_at_utc": issued_at,
+            "original_filename": payload.get("original_filename", ""),
+            "original_sha256": original_sha256,
+            "certified_pdf_sha256": certified_pdf_sha256,
+            "label": label,
+            "authenticity": authenticity,
+            "overall_risk": risk,
+            "risk_score": risk_score,
+            "algorithm": algorithm,
             "payload": payload if ok else {},
-            "algorithm": str(md.get("/VeriFYD_Seal_Algorithm") or "HMAC-SHA256"),
+            "verification_report": {
+                "title": "VeriFYD Certificate Verification Report",
+                "status": "VALID" if ok else "INVALID",
+                "seal": "VALID" if ok else "INVALID",
+                "certificate_id": certificate_id,
+                "issued_at_utc": issued_at,
+                "original_sha256": original_sha256,
+                "certified_pdf_sha256": certified_pdf_sha256,
+                "label": label,
+                "authenticity": authenticity,
+                "overall_risk": risk,
+                "risk_score": risk_score,
+                "message": (
+                    "This certified PDF contains a valid VeriFYD secure seal."
+                    if ok else
+                    "This certified PDF contains a VeriFYD seal, but the cryptographic signature did not validate."
+                ),
+            },
         }
     except Exception as e:
-        return {"verified": False, "status": "error", "reason": str(e)[:200]}
-
+        return {
+            "verified": False,
+            "status": "verification_error",
+            "seal_valid": False,
+            "integrity_status": "ERROR",
+            "reason": str(e)[:200],
+            "certified_pdf_sha256": certified_pdf_sha256,
+            "verification_report": {
+                "title": "VeriFYD Certificate Verification Report",
+                "status": "ERROR",
+                "seal": "UNKNOWN",
+                "message": str(e)[:200],
+            },
+        }
 
 def _finalize_certified_pdf(pdf_path: str, detail: Dict[str, Any] | None, cert_id: str,
                             filename: str, sha256: str, authenticity: int, label: str) -> str:

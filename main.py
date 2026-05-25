@@ -1007,14 +1007,126 @@ async def verify_document_seal(file: UploadFile = File(...)):
 
         from doc_certifier import verify_secure_seal_pdf
         result = verify_secure_seal_pdf(tmp_path)
+        result = _enrich_certificate_verification_result(result)
         status_code = 200 if result.get("verified") else 400
         return JSONResponse(result, status_code=status_code)
     finally:
         try:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
+
         except Exception:
             pass
+
+
+def _enrich_certificate_verification_result(result: dict) -> dict:
+    """Add database and storage context to a secure-seal verification response."""
+    result = dict(result or {})
+    cid = str(result.get("certificate_id") or "").strip()
+    db_record = None
+    r2_available_for_cert = False
+
+    if cid:
+        try:
+            db_record = get_certificate(cid)
+        except Exception as e:
+            log.warning("verify-certificate: database lookup failed for %s: %s", cid, e)
+            db_record = None
+
+        try:
+            from storage import r2_available, certified_document_exists
+            if r2_available():
+                r2_available_for_cert = bool(certified_document_exists(cid))
+        except Exception:
+            r2_available_for_cert = False
+
+    result["certificate_database_match"] = bool(db_record)
+    result["certified_document_available"] = r2_available_for_cert
+
+    if db_record:
+        result["database_record"] = {
+            "certificate_id": db_record.get("cert_id", cid),
+            "label": db_record.get("label", ""),
+            "authenticity": db_record.get("authenticity", ""),
+            "ai_score": db_record.get("ai_score", ""),
+            "original_file": db_record.get("original_file", ""),
+            "upload_time": db_record.get("upload_time", ""),
+            "download_count": db_record.get("download_count", 0),
+            "certified_to": db_record.get("email", ""),
+        }
+
+    report = dict(result.get("verification_report") or {})
+    report["database_match"] = "YES" if db_record else "NO"
+    report["certified_document_available"] = "YES" if r2_available_for_cert else "UNKNOWN" if cid else "NO"
+
+    if result.get("verified") and db_record:
+        result["verification_status"] = "AUTHENTIC_VERIFYD_DOCUMENT"
+        report["status"] = "VALID"
+        report["message"] = "This document contains a valid VeriFYD secure seal and matches a VeriFYD certificate record."
+    elif result.get("verified"):
+        result["verification_status"] = "VALID_SEAL_DATABASE_NOT_CONFIRMED"
+        report["status"] = "VALID SEAL"
+        report["message"] = "This document contains a valid VeriFYD secure seal, but no matching certificate record was confirmed."
+    else:
+        result["verification_status"] = "NOT_VERIFIED"
+
+    result["verification_report"] = report
+    return result
+
+
+@app.post("/verify-certificate/")
+async def verify_certificate_upload(file: UploadFile = File(...)):
+    """Enterprise-friendly alias for verifying a certified VeriFYD PDF upload."""
+    return await verify_document_seal(file)
+
+
+@app.get("/verify-certificate/{cid}")
+def verify_certificate_by_id(cid: str):
+    """Verify a certificate ID against the VeriFYD certificate database and R2 storage."""
+    cid = (cid or "").strip()
+    if not cid:
+        return JSONResponse({"verified": False, "status": "missing_certificate_id"}, status_code=400)
+
+    cert = get_certificate(cid)
+    if not cert:
+        return JSONResponse({
+            "verified": False,
+            "status": "not_found",
+            "certificate_id": cid,
+            "verification_status": "CERTIFICATE_NOT_FOUND",
+        }, status_code=404)
+
+    document_available = False
+    try:
+        from storage import r2_available, certified_document_exists
+        if r2_available():
+            document_available = bool(certified_document_exists(cid))
+    except Exception:
+        document_available = False
+
+    return JSONResponse({
+        "verified": True,
+        "status": "found",
+        "verification_status": "CERTIFICATE_RECORD_FOUND",
+        "certificate_id": cid,
+        "label": cert.get("label", ""),
+        "authenticity": cert.get("authenticity", ""),
+        "ai_score": cert.get("ai_score", ""),
+        "original_file": cert.get("original_file", ""),
+        "upload_time": cert.get("upload_time", ""),
+        "download_count": cert.get("download_count", 0),
+        "certified_to": cert.get("email", ""),
+        "certified_document_available": document_available,
+        "download_url": f"{BASE_URL}/download-document/{cid}" if document_available else "",
+        "verification_report": {
+            "title": "VeriFYD Certificate Verification Report",
+            "status": "FOUND",
+            "certificate_id": cid,
+            "database_match": "YES",
+            "certified_document_available": "YES" if document_available else "UNKNOWN",
+            "message": "This certificate ID exists in the VeriFYD certificate database.",
+        },
+    })
 
 
 @app.get("/job-status/{job_id}")
