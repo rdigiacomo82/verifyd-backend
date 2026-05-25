@@ -797,10 +797,336 @@ def _read_image(path: str) -> Tuple[str, Dict[str, Any]]:
 
 
 
+def _strip_html_to_text(html: str) -> str:
+    """Safely convert HTML markup into readable text without executing anything."""
+    try:
+        from html.parser import HTMLParser
+        from html import unescape
+    except Exception:
+        return re.sub(r"<[^>]+>", " ", html or "")
+
+    class _TextExtractor(HTMLParser):
+        def __init__(self):
+            super().__init__(convert_charrefs=True)
+            self.parts: List[str] = []
+            self.skip_depth = 0
+            self.title = ""
+            self._in_title = False
+
+        def handle_starttag(self, tag, attrs):
+            tag = str(tag or "").lower()
+            if tag in ("script", "style", "noscript", "template"):
+                self.skip_depth += 1
+            if tag == "title":
+                self._in_title = True
+            if tag in ("p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6", "section", "article"):
+                self.parts.append("\n")
+
+        def handle_endtag(self, tag):
+            tag = str(tag or "").lower()
+            if tag in ("script", "style", "noscript", "template") and self.skip_depth:
+                self.skip_depth -= 1
+            if tag == "title":
+                self._in_title = False
+            if tag in ("p", "div", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6", "section", "article"):
+                self.parts.append("\n")
+
+        def handle_data(self, data):
+            if self.skip_depth:
+                return
+            text = unescape(str(data or "")).strip()
+            if not text:
+                return
+            if self._in_title and not self.title:
+                self.title = text[:300]
+            self.parts.append(text)
+            self.parts.append(" ")
+
+    parser = _TextExtractor()
+    try:
+        parser.feed(html or "")
+        parser.close()
+    except Exception:
+        return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html or "")).strip()
+    text = "".join(parser.parts)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n\s*\n\s*\n+", "\n\n", text)
+    return text.strip()
+
+
+def _read_html(path: str) -> Tuple[str, Dict[str, Any]]:
+    """Best-effort HTML/HTM extraction for archived pages and web evidence."""
+    meta: Dict[str, Any] = {"type": "html", "pages": 1, "embedded_images": 0, "metadata": {}}
+    with open(path, "rb") as f:
+        data = f.read(3_000_000)
+    html_text = ""
+    for enc in ("utf-8", "utf-16", "latin-1"):
+        try:
+            html_text = data.decode(enc, errors="replace")
+            break
+        except Exception:
+            continue
+    if not html_text:
+        html_text = data.decode("latin-1", errors="replace")
+
+    title = ""
+    try:
+        m = re.search(r"<title[^>]*>(.*?)</title>", html_text, re.I | re.S)
+        if m:
+            title = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", m.group(1))).strip()[:300]
+    except Exception:
+        pass
+
+    meta_tags: Dict[str, str] = {}
+    for m in re.finditer(r"<meta\s+([^>]+)>", html_text[:500_000], re.I | re.S):
+        attrs = m.group(1)
+        name_m = re.search(r'(?:name|property)=["\']?([^"\'\s>]+)', attrs, re.I)
+        content_m = re.search(r'content=["\']([^"\']{0,500})', attrs, re.I | re.S)
+        if name_m and content_m:
+            meta_tags[name_m.group(1).lower()[:80]] = re.sub(r"\s+", " ", content_m.group(1)).strip()[:500]
+            if len(meta_tags) >= 20:
+                break
+
+    img_count = len(re.findall(r"<img\b", html_text, re.I))
+    meta["embedded_images"] = img_count
+    md = {"title": title, "html_bytes_scanned": str(len(data)), "image_tag_count": str(img_count)}
+    md.update({f"meta_{k}": v for k, v in meta_tags.items()})
+    meta["metadata"] = md
+    body_text = _strip_html_to_text(html_text)
+    if title and title not in body_text[:500]:
+        body_text = f"Title: {title}\n\n{body_text}"
+    return body_text, meta
+
+
+def _read_mhtml(path: str) -> Tuple[str, Dict[str, Any]]:
+    """Extract text and metadata from MHTML/MHT web archives."""
+    meta: Dict[str, Any] = {"type": "mhtml", "pages": 1, "embedded_images": 0, "metadata": {}}
+    from email import policy
+    from email.parser import BytesParser
+
+    with open(path, "rb") as f:
+        msg = BytesParser(policy=policy.default).parse(f)
+
+    headers = {
+        "from": str(msg.get("From", ""))[:300],
+        "subject": str(msg.get("Subject", ""))[:500],
+        "date": str(msg.get("Date", ""))[:200],
+        "content_type": str(msg.get_content_type()),
+    }
+    text_parts: List[str] = []
+    html_parts: List[str] = []
+    image_count = 0
+    part_count = 0
+
+    def _part_text(part: Any) -> str:
+        try:
+            payload = part.get_content()
+            if isinstance(payload, str):
+                return payload
+        except Exception:
+            pass
+        try:
+            data = part.get_payload(decode=True) or b""
+            charset = part.get_content_charset() or "utf-8"
+            return data.decode(charset, errors="replace")
+        except Exception:
+            return ""
+
+    if msg.is_multipart():
+        for part in msg.walk():
+            part_count += 1
+            ctype = part.get_content_type()
+            if ctype.startswith("image/"):
+                image_count += 1
+            elif ctype == "text/html":
+                html = _part_text(part)
+                if html:
+                    html_parts.append(_strip_html_to_text(html))
+            elif ctype == "text/plain":
+                txt = _part_text(part).strip()
+                if txt:
+                    text_parts.append(txt)
+    else:
+        content = _part_text(msg)
+        if msg.get_content_type() == "text/html":
+            html_parts.append(_strip_html_to_text(content))
+        else:
+            text_parts.append(content)
+
+    meta["embedded_images"] = image_count
+    headers.update({"part_count": str(part_count), "image_part_count": str(image_count)})
+    meta["metadata"] = headers
+    text = "\n\n".join(x for x in (text_parts + html_parts) if x and x.strip()).strip()
+    return text or "[No readable MHTML text could be extracted]", meta
+
+
+def _read_xml(path: str) -> Tuple[str, Dict[str, Any]]:
+    """Best-effort XML extraction for government/system exports and evidence logs."""
+    meta: Dict[str, Any] = {"type": "xml", "pages": 1, "embedded_images": 0, "metadata": {}}
+    import xml.etree.ElementTree as ET
+    data = open(path, "rb").read(3_000_000)
+    text_raw = data.decode("utf-8", errors="replace")
+
+    def _local(tag: str) -> str:
+        return str(tag).split("}")[-1]
+
+    try:
+        root = ET.fromstring(data)
+        tag_counts: Counter = Counter()
+        lines: List[str] = [f"Root: {_local(root.tag)}"]
+        for elem in root.iter():
+            name = _local(elem.tag)
+            tag_counts[name] += 1
+            value = re.sub(r"\s+", " ", " ".join(t.strip() for t in elem.itertext() if t and t.strip())).strip()
+            attrs = " ".join(f"{_local(k)}={v}" for k, v in list(elem.attrib.items())[:8])
+            if value or attrs:
+                line = f"{name}: " + (value[:800] if value else attrs[:800])
+                lines.append(line)
+            if len(lines) >= 2500:
+                lines.append("[VeriFYD note: XML rendering truncated for analysis length]")
+                break
+        meta["metadata"] = {
+            "root_tag": _local(root.tag),
+            "element_count": str(sum(tag_counts.values())),
+            "top_tags": ", ".join(f"{k}:{v}" for k, v in tag_counts.most_common(15)),
+        }
+        return "\n".join(lines), meta
+    except Exception as e:
+        meta["metadata"] = {"parse_error": str(e)[:200]}
+        fallback = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", text_raw)).strip()
+        return fallback or "[No readable XML text could be extracted]", meta
+
+
+def _json_to_lines(obj: Any, prefix: str = "", limit: int = 2500) -> List[str]:
+    """Flatten JSON into readable key/value lines for detection and certified rendering."""
+    lines: List[str] = []
+    def walk(value: Any, key: str, depth: int = 0):
+        if len(lines) >= limit or depth > 8:
+            return
+        if isinstance(value, dict):
+            if key:
+                lines.append(f"{key}: object({len(value)})")
+            for k, v in list(value.items())[:200]:
+                walk(v, f"{key}.{k}" if key else str(k), depth + 1)
+        elif isinstance(value, list):
+            lines.append(f"{key}: array({len(value)})")
+            for i, item in enumerate(value[:80]):
+                walk(item, f"{key}[{i}]", depth + 1)
+        else:
+            txt = str(value)
+            if txt.strip():
+                lines.append(f"{key}: {txt[:800]}")
+    walk(obj, prefix)
+    return lines
+
+
+def _read_json(path: str) -> Tuple[str, Dict[str, Any]]:
+    """Best-effort JSON extraction for audit logs, API exports, and AI/system evidence."""
+    meta: Dict[str, Any] = {"type": "json", "pages": 1, "embedded_images": 0, "metadata": {}}
+    data = open(path, "rb").read(5_000_000)
+    raw = data.decode("utf-8", errors="replace")
+    try:
+        parsed = json.loads(raw)
+        root_type = type(parsed).__name__
+        if isinstance(parsed, dict):
+            root_keys = list(parsed.keys())[:50]
+            meta["metadata"] = {"root_type": root_type, "root_keys": ", ".join(map(str, root_keys)), "byte_count": str(len(data))}
+        elif isinstance(parsed, list):
+            meta["metadata"] = {"root_type": root_type, "item_count": str(len(parsed)), "byte_count": str(len(data))}
+        else:
+            meta["metadata"] = {"root_type": root_type, "byte_count": str(len(data))}
+        lines = _json_to_lines(parsed)
+        return "\n".join(lines) if lines else raw[:12000], meta
+    except Exception as e:
+        meta["metadata"] = {"parse_error": str(e)[:200], "byte_count": str(len(data))}
+        return raw[:12000], meta
+
+
+def _read_vsdx(path: str) -> Tuple[str, Dict[str, Any]]:
+    """Best-effort Visio VSDX extraction for network/engineering diagrams."""
+    import zipfile
+    import xml.etree.ElementTree as ET
+
+    meta: Dict[str, Any] = {"type": "vsdx", "pages": 0, "embedded_images": 0, "metadata": {}}
+    text_parts: List[str] = ["VeriFYD Visio Diagram Text Extraction"]
+
+    def _local(tag: str) -> str:
+        return str(tag).split("}")[-1]
+
+    def _elem_text(elem: Any) -> str:
+        try:
+            return re.sub(r"\s+", " ", " ".join(t.strip() for t in elem.itertext() if t and t.strip())).strip()
+        except Exception:
+            return ""
+
+    try:
+        with zipfile.ZipFile(path, "r") as zf:
+            names = zf.namelist()
+            page_xmls = [n for n in names if n.lower().startswith("visio/pages/") and n.lower().endswith(".xml")]
+            image_files = [n for n in names if n.lower().startswith("visio/media/")]
+            meta["pages"] = len(page_xmls)
+            meta["embedded_images"] = len(image_files)
+            md: Dict[str, str] = {
+                "page_count": str(len(page_xmls)),
+                "embedded_media_count": str(len(image_files)),
+                "package_file_count": str(len(names)),
+            }
+
+            for prop_name in ("docProps/core.xml", "docProps/app.xml"):
+                if prop_name in names:
+                    try:
+                        root = ET.fromstring(zf.read(prop_name))
+                        for elem in root.iter():
+                            value = _elem_text(elem)
+                            if value:
+                                md[_local(elem.tag).lower()] = value[:500]
+                    except Exception:
+                        pass
+
+            for idx, name in enumerate(page_xmls[:80], start=1):
+                try:
+                    root = ET.fromstring(zf.read(name))
+                except Exception:
+                    continue
+                page_lines: List[str] = []
+                for elem in root.iter():
+                    lname = _local(elem.tag).lower()
+                    # Visio shape text is commonly in Text elements, but some
+                    # connectors/properties carry useful labels in attributes.
+                    if lname in ("text", "cp", "pp", "tp"):
+                        value = _elem_text(elem)
+                        if value and len(value) > 1:
+                            page_lines.append(value[:800])
+                    elif lname in ("shape", "page"):
+                        attrs = []
+                        for k in ("Name", "NameU", "Text", "Master", "ID"):
+                            if k in elem.attrib and str(elem.attrib[k]).strip():
+                                attrs.append(f"{k}={elem.attrib[k]}")
+                        if attrs:
+                            page_lines.append("; ".join(attrs)[:500])
+                if page_lines:
+                    text_parts.append(f"\nPage {idx}: {os.path.basename(name)}")
+                    # Deduplicate while preserving order.
+                    seen = set()
+                    for line in page_lines:
+                        key = re.sub(r"\s+", " ", line).strip().lower()[:200]
+                        if key and key not in seen:
+                            seen.add(key)
+                            text_parts.append(line)
+                else:
+                    text_parts.append(f"\nPage {idx}: {os.path.basename(name)} [No extractable shape text]")
+            meta["metadata"] = md
+    except zipfile.BadZipFile as e:
+        raise RuntimeError(f"Invalid VSDX package: {e}") from e
+
+    return "\n".join(text_parts), meta
+
+
 ZIP_SUPPORTED_INNER_EXTENSIONS = {
     ".pdf", ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt",
     ".odt", ".ods", ".odp", ".txt", ".md", ".csv", ".rtf", ".eml", ".msg",
     ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp", ".heic", ".heif",
+    ".html", ".htm", ".mhtml", ".mht", ".xml", ".json", ".vsdx",
 }
 ZIP_DANGEROUS_EXTENSIONS = {
     ".exe", ".dll", ".bat", ".cmd", ".com", ".scr", ".ps1", ".vbs", ".js",
@@ -1011,6 +1337,16 @@ def _extract_document(path: str) -> Tuple[str, Dict[str, Any]]:
         return _read_msg(path)
     if ext in (".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp", ".heic", ".heif"):
         return _read_image(path)
+    if ext in (".html", ".htm"):
+        return _read_html(path)
+    if ext in (".mhtml", ".mht"):
+        return _read_mhtml(path)
+    if ext == ".xml":
+        return _read_xml(path)
+    if ext == ".json":
+        return _read_json(path)
+    if ext == ".vsdx":
+        return _read_vsdx(path)
     if ext == ".zip":
         return _read_zip(path)
     raise RuntimeError(f"Unsupported document format: {ext}")

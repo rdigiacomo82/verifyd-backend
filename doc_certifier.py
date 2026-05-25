@@ -1128,11 +1128,207 @@ def _read_odf_for_render(src_path: str) -> str:
     return "\n".join(cleaned) if cleaned else "[No readable OpenDocument text could be extracted]"
 
 
+
+def _strip_html_for_render(html: str) -> str:
+    """Convert HTML markup into readable text for certified PDF rendering."""
+    import re
+    try:
+        from html.parser import HTMLParser
+        from html import unescape
+    except Exception:
+        return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html or "")).strip()
+
+    class _Parser(HTMLParser):
+        def __init__(self):
+            super().__init__(convert_charrefs=True)
+            self.parts: List[str] = []
+            self.skip = 0
+        def handle_starttag(self, tag, attrs):
+            tag = str(tag or "").lower()
+            if tag in ("script", "style", "noscript", "template"):
+                self.skip += 1
+            if tag in ("p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4", "section", "article"):
+                self.parts.append("\n")
+        def handle_endtag(self, tag):
+            tag = str(tag or "").lower()
+            if tag in ("script", "style", "noscript", "template") and self.skip:
+                self.skip -= 1
+            if tag in ("p", "div", "li", "tr", "h1", "h2", "h3", "h4", "section", "article"):
+                self.parts.append("\n")
+        def handle_data(self, data):
+            if not self.skip:
+                t = unescape(str(data or "")).strip()
+                if t:
+                    self.parts.append(t + " ")
+    parser = _Parser()
+    try:
+        parser.feed(html or "")
+        parser.close()
+        text = "".join(parser.parts)
+    except Exception:
+        text = re.sub(r"<[^>]+>", " ", html or "")
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n\s*\n\s*\n+", "\n\n", text)
+    return text.strip()
+
+
+def _read_html_for_render(src_path: str) -> str:
+    data = open(src_path, "rb").read(3_000_000)
+    for enc in ("utf-8", "utf-16", "latin-1"):
+        try:
+            return _strip_html_for_render(data.decode(enc, errors="replace"))
+        except Exception:
+            continue
+    return _strip_html_for_render(data.decode("latin-1", errors="replace"))
+
+
+def _read_mhtml_for_render(src_path: str) -> str:
+    from email import policy
+    from email.parser import BytesParser
+    with open(src_path, "rb") as fh:
+        msg = BytesParser(policy=policy.default).parse(fh)
+    lines: List[str] = []
+    for h in ("From", "Subject", "Date", "Content-Type"):
+        v = str(msg.get(h, "") or "").strip()
+        if v:
+            lines.append(f"{h}: {v}")
+    lines.append("")
+    parts: List[str] = []
+    if msg.is_multipart():
+        for part in msg.walk():
+            ctype = part.get_content_type()
+            if ctype not in ("text/plain", "text/html"):
+                continue
+            try:
+                content = part.get_content()
+            except Exception:
+                try:
+                    content = (part.get_payload(decode=True) or b"").decode(part.get_content_charset() or "utf-8", errors="replace")
+                except Exception:
+                    content = ""
+            if not content:
+                continue
+            parts.append(_strip_html_for_render(str(content)) if ctype == "text/html" else str(content).strip())
+    else:
+        try:
+            content = msg.get_content()
+        except Exception:
+            content = ""
+        parts.append(_strip_html_for_render(str(content)) if msg.get_content_type() == "text/html" else str(content).strip())
+    lines.append("\n\n".join(p for p in parts if p))
+    return "\n".join(lines).strip()
+
+
+def _read_xml_for_render(src_path: str) -> str:
+    import re
+    import xml.etree.ElementTree as ET
+    data = open(src_path, "rb").read(3_000_000)
+    try:
+        root = ET.fromstring(data)
+        def _local(tag: str) -> str:
+            return str(tag).split("}")[-1]
+        lines = [f"Root: {_local(root.tag)}"]
+        for elem in root.iter():
+            value = re.sub(r"\s+", " ", " ".join(t.strip() for t in elem.itertext() if t and t.strip())).strip()
+            attrs = " ".join(f"{_local(k)}={v}" for k, v in list(elem.attrib.items())[:8])
+            if value or attrs:
+                lines.append(f"{_local(elem.tag)}: {(value or attrs)[:900]}")
+            if len(lines) >= 2500:
+                lines.append("[VeriFYD note: XML rendering truncated]")
+                break
+        return "\n".join(lines)
+    except Exception:
+        raw = data.decode("utf-8", errors="replace")
+        return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", raw)).strip()
+
+
+def _read_json_for_render(src_path: str) -> str:
+    data = open(src_path, "rb").read(5_000_000)
+    raw = data.decode("utf-8", errors="replace")
+    try:
+        import json as _json
+        parsed = _json.loads(raw)
+        lines: List[str] = []
+        def walk(value: Any, key: str = "", depth: int = 0):
+            if len(lines) >= 2500 or depth > 8:
+                return
+            if isinstance(value, dict):
+                if key:
+                    lines.append(f"{key}: object({len(value)})")
+                for k, v in list(value.items())[:200]:
+                    walk(v, f"{key}.{k}" if key else str(k), depth + 1)
+            elif isinstance(value, list):
+                lines.append(f"{key}: array({len(value)})")
+                for i, item in enumerate(value[:80]):
+                    walk(item, f"{key}[{i}]", depth + 1)
+            else:
+                t = str(value).strip()
+                if t:
+                    lines.append(f"{key}: {t[:900]}")
+        walk(parsed)
+        return "\n".join(lines) if lines else raw[:12000]
+    except Exception:
+        return raw[:12000]
+
+
+def _read_vsdx_for_render(src_path: str) -> str:
+    import zipfile
+    import xml.etree.ElementTree as ET
+    import re
+    def _local(tag: str) -> str:
+        return str(tag).split("}")[-1]
+    def _text(elem: Any) -> str:
+        return re.sub(r"\s+", " ", " ".join(t.strip() for t in elem.itertext() if t and t.strip())).strip()
+    lines: List[str] = ["VeriFYD Visio Diagram Rendering"]
+    with zipfile.ZipFile(src_path, "r") as zf:
+        names = zf.namelist()
+        pages = [n for n in names if n.lower().startswith("visio/pages/") and n.lower().endswith(".xml")]
+        lines.append(f"Pages: {len(pages)}")
+        lines.append(f"Embedded media files: {len([n for n in names if n.lower().startswith('visio/media/')])}")
+        for idx, name in enumerate(pages[:80], start=1):
+            try:
+                root = ET.fromstring(zf.read(name))
+            except Exception:
+                continue
+            vals: List[str] = []
+            for elem in root.iter():
+                if _local(elem.tag).lower() in ("text", "cp", "pp", "tp"):
+                    value = _text(elem)
+                    if value and len(value) > 1:
+                        vals.append(value[:900])
+            lines.append(f"\nPage {idx}: {os.path.basename(name)}")
+            if vals:
+                seen = set()
+                for v in vals:
+                    k = v.lower()[:200]
+                    if k not in seen:
+                        seen.add(k)
+                        lines.append(v)
+            else:
+                lines.append("[No extractable shape text]")
+    return "\n".join(lines)
+
 def _read_text_for_certified_render(src_path: str, ext: str) -> str:
     """Read RTF/EML/text-family documents for certified PDF rendering."""
     data = b""
     with open(src_path, "rb") as fh:
         data = fh.read(2_500_000)
+
+
+    if ext in (".html", ".htm"):
+        return _read_html_for_render(src_path)
+
+    if ext in (".mhtml", ".mht"):
+        return _read_mhtml_for_render(src_path)
+
+    if ext == ".xml":
+        return _read_xml_for_render(src_path)
+
+    if ext == ".json":
+        return _read_json_for_render(src_path)
+
+    if ext == ".vsdx":
+        return _read_vsdx_for_render(src_path)
 
     if ext == ".eml":
         try:
@@ -1510,7 +1706,7 @@ def stamp_document(src_path: str, dest_path: str, cert_id: str,
     if ext == ".pptx":
         return _create_pptx_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256)
 
-    if ext in (".rtf", ".eml", ".msg", ".doc", ".ppt", ".xls", ".odt", ".ods", ".odp"):
+    if ext in (".rtf", ".eml", ".msg", ".doc", ".ppt", ".xls", ".odt", ".ods", ".odp", ".html", ".htm", ".mhtml", ".mht", ".xml", ".json", ".vsdx"):
         _create_text_render_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256)
         # Preserve exact source file for legal/forensic review, especially when
         # the certified PDF is a readable text rendering rather than a perfect
