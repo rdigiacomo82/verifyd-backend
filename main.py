@@ -902,26 +902,54 @@ async def upload_document(file: UploadFile = File(...), email: str = Form(...)):
 @app.get("/download-document/{cid}")
 async def download_document(cid: str):
     """
-    Serve certified/stamped document PDF — checks R2 first, falls back to Redis.
-    Mirrors /download/ and /download-photo/{cid}.
+    Serve certified/stamped document PDF.
+
+    R2 is the source of truth for certified documents. This route checks every
+    plan folder directly instead of relying only on the helper existence check.
+    That makes large certified PDFs, such as HEIC-generated document
+    certificates, more reliable immediately after upload.
     """
     from fastapi.responses import RedirectResponse, Response
 
     fname = f"VeriFYD_Certified_Document_{cid[:8]}.pdf"
 
-    # Try R2 first
+    # Try R2 first by looking directly in each plan folder.
     try:
-        from storage import get_document_download_url, certified_document_exists, r2_available
-        if r2_available() and certified_document_exists(cid):
-            return RedirectResponse(url=get_document_download_url(cid), status_code=302)
+        from storage import _get_client, BUCKET, PUBLIC_URL, CERT_URL_TTL, r2_available
+
+        if r2_available():
+            client = _get_client()
+            for plan in ("pro", "creator", "enterprise", "free"):
+                key = f"certified-documents/{plan}/{cid}.pdf"
+                try:
+                    # A successful HEAD proves the object exists in this plan folder.
+                    client.head_object(Bucket=BUCKET, Key=key)
+
+                    if PUBLIC_URL:
+                        url = f"{PUBLIC_URL.rstrip('/')}/{key}"
+                    else:
+                        url = client.generate_presigned_url(
+                            "get_object",
+                            Params={"Bucket": BUCKET, "Key": key},
+                            ExpiresIn=CERT_URL_TTL,
+                        )
+
+                    log.info("download-document: R2 hit job=%s key=%s", cid, key)
+                    return RedirectResponse(url=url, status_code=302)
+                except Exception:
+                    continue
+
+            log.warning("download-document: R2 object not found in any plan folder for %s", cid)
+
     except Exception as e:
         log.warning("R2 document download lookup failed for %s: %s", cid, e)
 
-    # Redis fallback
+    # Redis fallback for local/dev or old fallback jobs.
     try:
         r = _get_redis()
         data = r.get(f"doccert:{cid}")
         if data:
+            log.info("download-document: Redis fallback hit job=%s size=%d", cid, len(data))
             return Response(
                 content=data,
                 media_type="application/pdf",
