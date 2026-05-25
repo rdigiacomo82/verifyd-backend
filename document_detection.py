@@ -796,6 +796,193 @@ def _read_image(path: str) -> Tuple[str, Dict[str, Any]]:
     return "", meta
 
 
+
+ZIP_SUPPORTED_INNER_EXTENSIONS = {
+    ".pdf", ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt",
+    ".odt", ".ods", ".odp", ".txt", ".md", ".csv", ".rtf", ".eml", ".msg",
+    ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp", ".heic", ".heif",
+}
+ZIP_DANGEROUS_EXTENSIONS = {
+    ".exe", ".dll", ".bat", ".cmd", ".com", ".scr", ".ps1", ".vbs", ".js",
+    ".jar", ".msi", ".apk", ".app", ".sh", ".bash", ".zsh", ".lnk",
+}
+
+
+def _is_safe_zip_member(name: str) -> bool:
+    """Reject absolute paths, traversal, and Windows drive paths inside ZIP files."""
+    name = str(name or "").replace("\\", "/")
+    if not name or name.endswith("/"):
+        return False
+    if name.startswith("/") or name.startswith("../") or "/../" in name or name == "..":
+        return False
+    if re.match(r"^[A-Za-z]:", name):
+        return False
+    return True
+
+
+def _read_zip(path: str) -> Tuple[str, Dict[str, Any]]:
+    """
+    Safely inspect a ZIP evidence package.
+
+    This does not execute anything from the archive. It builds a manifest, hashes
+    contained files, analyzes supported document/image/email formats by extracting
+    them to temporary files, and skips scripts/executables or suspicious paths.
+    """
+    import zipfile
+    import tempfile
+    import shutil
+
+    meta: Dict[str, Any] = {"type": "zip", "pages": 0, "embedded_images": 0, "metadata": {}}
+    text_parts: List[str] = ["VeriFYD ZIP Evidence Package Manifest"]
+    manifest: List[Dict[str, Any]] = []
+
+    max_files = 100
+    max_total_uncompressed = 250 * 1024 * 1024
+    max_member_uncompressed = 50 * 1024 * 1024
+    max_text_per_file = 2500
+
+    supported_count = 0
+    skipped_count = 0
+    dangerous_count = 0
+    image_count = 0
+    total_uncompressed = 0
+
+    tmp_dir = tempfile.mkdtemp(prefix="verifyd_zip_extract_")
+    try:
+        with zipfile.ZipFile(path, "r") as zf:
+            infos = zf.infolist()
+            file_infos = [i for i in infos if not i.is_dir()]
+            meta["pages"] = len(file_infos)
+
+            for idx, info in enumerate(file_infos, start=1):
+                if idx > max_files:
+                    skipped_count += max(0, len(file_infos) - max_files + 1)
+                    text_parts.append(f"[VeriFYD note: ZIP manifest truncated after {max_files} files]")
+                    break
+
+                raw_name = info.filename or f"file_{idx}"
+                safe_name = raw_name.replace("\\", "/")
+                ext = os.path.splitext(safe_name.lower())[1]
+                file_size = int(getattr(info, "file_size", 0) or 0)
+                comp_size = int(getattr(info, "compress_size", 0) or 0)
+                total_uncompressed += file_size
+
+                entry: Dict[str, Any] = {
+                    "name": safe_name[:500],
+                    "extension": ext,
+                    "size_bytes": file_size,
+                    "compressed_bytes": comp_size,
+                    "supported": False,
+                    "status": "skipped",
+                    "sha256": "",
+                }
+
+                if not _is_safe_zip_member(safe_name):
+                    entry["status"] = "unsafe_path_skipped"
+                    skipped_count += 1
+                    manifest.append(entry)
+                    continue
+
+                if ext in ZIP_DANGEROUS_EXTENSIONS:
+                    entry["status"] = "dangerous_file_skipped"
+                    dangerous_count += 1
+                    skipped_count += 1
+                    manifest.append(entry)
+                    continue
+
+                if total_uncompressed > max_total_uncompressed:
+                    entry["status"] = "zip_total_size_limit_reached"
+                    skipped_count += 1
+                    manifest.append(entry)
+                    text_parts.append("[VeriFYD note: ZIP total uncompressed-size safety limit reached]")
+                    break
+
+                if file_size > max_member_uncompressed:
+                    entry["status"] = "member_too_large_skipped"
+                    skipped_count += 1
+                    manifest.append(entry)
+                    continue
+
+                if ext in (".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp", ".heic", ".heif"):
+                    image_count += 1
+
+                try:
+                    with zf.open(info, "r") as src:
+                        data = src.read(max_member_uncompressed + 1)
+                    if len(data) > max_member_uncompressed:
+                        entry["status"] = "member_read_limit_skipped"
+                        skipped_count += 1
+                        manifest.append(entry)
+                        continue
+                    entry["sha256"] = hashlib.sha256(data).hexdigest()
+                except Exception as e:
+                    entry["status"] = f"read_error: {str(e)[:80]}"
+                    skipped_count += 1
+                    manifest.append(entry)
+                    continue
+
+                if ext not in ZIP_SUPPORTED_INNER_EXTENSIONS:
+                    entry["status"] = "unsupported_type_manifest_only"
+                    skipped_count += 1
+                    manifest.append(entry)
+                    text_parts.append(f"{safe_name} | {file_size} bytes | unsupported type | sha256={entry['sha256'][:16]}")
+                    continue
+
+                member_path = os.path.join(tmp_dir, f"member_{idx}{ext}")
+                try:
+                    with open(member_path, "wb") as fh:
+                        fh.write(data)
+                    inner_text, inner_meta = _extract_document(member_path)
+                    entry["supported"] = True
+                    entry["status"] = "analyzed"
+                    entry["inner_type"] = inner_meta.get("type", ext.lstrip("."))
+                    supported_count += 1
+
+                    text_parts.append(
+                        f"\n--- ZIP Member {idx}: {safe_name} | {file_size} bytes | {ext} | sha256={entry['sha256'][:16]} ---"
+                    )
+                    cleaned = re.sub(r"\s+", " ", inner_text or "").strip()
+                    if cleaned:
+                        text_parts.append(cleaned[:max_text_per_file])
+                    else:
+                        text_parts.append("[No extractable text from this member]")
+                except Exception as e:
+                    entry["status"] = f"analysis_error: {str(e)[:100]}"
+                    skipped_count += 1
+                finally:
+                    try:
+                        if os.path.exists(member_path):
+                            os.remove(member_path)
+                    except Exception:
+                        pass
+
+                manifest.append(entry)
+
+    except zipfile.BadZipFile as e:
+        raise RuntimeError(f"Invalid ZIP archive: {e}") from e
+    finally:
+        try:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        except Exception:
+            pass
+
+    meta["embedded_images"] = image_count
+    meta["metadata"] = {
+        "zip_file_count": str(len(manifest)),
+        "zip_supported_count": str(supported_count),
+        "zip_skipped_count": str(skipped_count),
+        "zip_dangerous_count": str(dangerous_count),
+        "zip_total_uncompressed_bytes": str(total_uncompressed),
+        "zip_manifest_json": json.dumps(manifest[:80], ensure_ascii=False)[:12000],
+    }
+
+    if dangerous_count:
+        text_parts.append(f"\n[VeriFYD warning: {dangerous_count} potentially dangerous file(s) were skipped and not executed]")
+    if supported_count == 0:
+        text_parts.append("\n[No supported documents were found inside this ZIP package; manifest-only analysis performed]")
+
+    return "\n".join(text_parts), meta
+
 def _extract_document(path: str) -> Tuple[str, Dict[str, Any]]:
     ext = os.path.splitext(path)[1].lower()
     if ext == ".pdf":
@@ -824,6 +1011,8 @@ def _extract_document(path: str) -> Tuple[str, Dict[str, Any]]:
         return _read_msg(path)
     if ext in (".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp", ".heic", ".heif"):
         return _read_image(path)
+    if ext == ".zip":
+        return _read_zip(path)
     raise RuntimeError(f"Unsupported document format: {ext}")
 
 

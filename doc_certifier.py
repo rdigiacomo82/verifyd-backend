@@ -1301,6 +1301,186 @@ def _create_non_pdf_certificate(dest_path: str, cert_id: str, authenticity: int,
     return dest_path
 
 
+
+def _read_zip_manifest_for_certificate(src_path: str, max_files: int = 200) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+    """Build a safe manifest for a ZIP evidence package without executing contents."""
+    import zipfile
+
+    supported_exts = {
+        ".pdf", ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt",
+        ".odt", ".ods", ".odp", ".txt", ".md", ".csv", ".rtf", ".eml", ".msg",
+        ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp", ".heic", ".heif",
+    }
+    dangerous_exts = {
+        ".exe", ".dll", ".bat", ".cmd", ".com", ".scr", ".ps1", ".vbs", ".js",
+        ".jar", ".msi", ".apk", ".app", ".sh", ".bash", ".zsh", ".lnk",
+    }
+
+    def _safe_member(name: str) -> bool:
+        name = str(name or "").replace("\\", "/")
+        if not name or name.endswith("/"):
+            return False
+        if name.startswith("/") or name.startswith("../") or "/../" in name or name == "..":
+            return False
+        return True
+
+    manifest: List[Dict[str, Any]] = []
+    stats = {"total": 0, "supported": 0, "skipped": 0, "dangerous": 0, "bytes": 0}
+
+    with zipfile.ZipFile(src_path, "r") as zf:
+        infos = [i for i in zf.infolist() if not i.is_dir()]
+        stats["total"] = len(infos)
+        for idx, info in enumerate(infos[:max_files], start=1):
+            name = (info.filename or f"file_{idx}").replace("\\", "/")
+            ext = os.path.splitext(name.lower())[1]
+            size = int(getattr(info, "file_size", 0) or 0)
+            stats["bytes"] += size
+            status = "supported" if ext in supported_exts else "manifest_only"
+            if not _safe_member(name):
+                status = "unsafe_path_skipped"
+                stats["skipped"] += 1
+            elif ext in dangerous_exts:
+                status = "dangerous_skipped"
+                stats["dangerous"] += 1
+                stats["skipped"] += 1
+            elif ext in supported_exts:
+                stats["supported"] += 1
+            else:
+                stats["skipped"] += 1
+
+            sha = ""
+            if status not in ("unsafe_path_skipped", "dangerous_skipped") and size <= 50 * 1024 * 1024:
+                try:
+                    with zf.open(info, "r") as src:
+                        data = src.read(50 * 1024 * 1024 + 1)
+                    if len(data) <= 50 * 1024 * 1024:
+                        import hashlib
+                        sha = hashlib.sha256(data).hexdigest()
+                except Exception:
+                    pass
+
+            manifest.append({
+                "index": idx,
+                "name": name,
+                "extension": ext,
+                "size": size,
+                "status": status,
+                "sha256": sha,
+            })
+
+    if stats["total"] > max_files:
+        stats["skipped"] += stats["total"] - max_files
+    return manifest, stats
+
+
+def _create_zip_pdf(src_path: str, dest_path: str, cert_id: str, authenticity: int,
+                    label: str, filename: str, sha256: str = "",
+                    detail: Dict[str, Any] | None = None) -> str:
+    """Create a certified ZIP evidence-package PDF with a manifest and embedded original ZIP."""
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.pagesizes import landscape, letter
+
+    page_w, page_h = landscape(letter)
+    c = canvas.Canvas(dest_path, pagesize=(page_w, page_h))
+    c.setAuthor("VeriFYD")
+    c.setTitle(f"VeriFYD Certified ZIP Evidence Package {cert_id}")
+    c.setSubject(f"{label} | Authenticity {authenticity}% | {filename}")
+
+    try:
+        manifest, stats = _read_zip_manifest_for_certificate(src_path)
+        manifest_error = ""
+    except Exception as e:
+        manifest, stats = [], {"total": 0, "supported": 0, "skipped": 0, "dangerous": 0, "bytes": 0}
+        manifest_error = str(e)[:200]
+
+    # Cover page.
+    c.setFont("Helvetica-Bold", 20)
+    c.drawString(54, page_h - 72, "VeriFYD Certified ZIP Evidence Package")
+    c.setFont("Helvetica", 10)
+    c.drawString(54, page_h - 105, f"Status: {label}")
+    c.drawString(54, page_h - 123, f"Authenticity Score: {authenticity}%")
+    c.drawString(54, page_h - 141, f"Certificate ID: {cert_id}")
+    c.drawString(54, page_h - 159, f"Original file: {filename}")
+    c.drawString(54, page_h - 177, f"Files in package: {stats.get('total', 0)}")
+    c.drawString(54, page_h - 195, f"Supported files analyzed: {stats.get('supported', 0)}")
+    c.drawString(54, page_h - 213, f"Skipped / manifest-only files: {stats.get('skipped', 0)}")
+    c.drawString(54, page_h - 231, f"Potentially dangerous files skipped: {stats.get('dangerous', 0)}")
+    c.drawString(54, page_h - 249, f"Uncompressed manifest bytes: {stats.get('bytes', 0)}")
+    if sha256:
+        c.drawString(54, page_h - 274, "ZIP SHA-256:")
+        c.setFont("Helvetica", 7.5)
+        c.drawString(54, page_h - 288, sha256[:120])
+    if manifest_error:
+        c.setFont("Helvetica-Bold", 9)
+        c.setFillColorRGB(0.75, 0.10, 0.10)
+        c.drawString(54, page_h - 312, f"Manifest warning: {manifest_error}")
+        c.setFillGray(0)
+
+    c.setFont("Helvetica-Oblique", 8)
+    c.setFillGray(0.35)
+    c.drawString(54, 58, "VeriFYD safely inspected the ZIP manifest and supported inner documents without executing archive contents.")
+    c.drawString(54, 44, "The exact original ZIP package is embedded inside this certified PDF as an attachment for source review.")
+    _draw_verifyd_mark(c, page_w, y=24, x_right_pad=34)
+    c.showPage()
+
+    # Manifest pages.
+    rows_per_page = 24
+    chunks = [manifest[i:i + rows_per_page] for i in range(0, len(manifest), rows_per_page)] or [[]]
+    for page_idx, rows in enumerate(chunks, start=1):
+        c.setFont("Helvetica-Bold", 14)
+        c.setFillGray(0.05)
+        c.drawString(34, page_h - 36, f"ZIP Manifest — Page {page_idx}/{len(chunks)}")
+        c.setFont("Helvetica", 7)
+        c.setFillGray(0.35)
+        c.drawString(34, page_h - 50, f"File: {filename} • Certificate: {cert_id}")
+
+        y = page_h - 76
+        headers = [("#", 28), ("Name", 360), ("Ext", 45), ("Size", 70), ("Status", 115), ("SHA-256", 180)]
+        x0 = 34
+        c.setFont("Helvetica-Bold", 7)
+        c.setFillGray(0.90)
+        c.rect(x0, y - 4, sum(w for _, w in headers), 16, fill=1, stroke=0)
+        c.setFillGray(0.05)
+        x = x0
+        for title, w in headers:
+            c.drawString(x + 3, y + 1, title)
+            x += w
+        y -= 18
+
+        c.setFont("Helvetica", 6.5)
+        for row in rows:
+            x = x0
+            vals = [
+                str(row.get("index", "")),
+                str(row.get("name", ""))[:86],
+                str(row.get("extension", ""))[:8],
+                str(row.get("size", "")),
+                str(row.get("status", ""))[:28],
+                str(row.get("sha256", ""))[:32],
+            ]
+            for val, (_, w) in zip(vals, headers):
+                c.setStrokeGray(0.82)
+                c.rect(x, y - 4, w, 16, fill=0, stroke=1)
+                c.setFillGray(0.05)
+                c.drawString(x + 3, y + 1, val)
+                x += w
+            y -= 16
+
+        if not rows:
+            c.setFont("Helvetica", 10)
+            c.drawString(54, page_h - 100, "No readable ZIP file entries were available for this package.")
+
+        c.setFont("Helvetica", 6.5)
+        c.setFillGray(0.45)
+        c.drawString(34, 24, "VeriFYD certified ZIP evidence package manifest")
+        _draw_verifyd_mark(c, page_w, y=24, x_right_pad=34)
+        if page_idx < len(chunks):
+            c.showPage()
+
+    c.save()
+    _attach_original_file_to_pdf(dest_path, src_path, filename or os.path.basename(src_path))
+    return dest_path
+
 def stamp_document(src_path: str, dest_path: str, cert_id: str,
                    authenticity: int, label: str, filename: str,
                    sha256: str = "", detail: Dict[str, Any] | None = None) -> str:
@@ -1314,6 +1494,9 @@ def stamp_document(src_path: str, dest_path: str, cert_id: str,
     For other non-PDFs: create a simple PDF summary fallback.
     """
     ext = os.path.splitext(src_path)[1].lower()
+
+    if ext == ".zip":
+        return _create_zip_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256, detail)
 
     if ext in (".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp", ".heic", ".heif"):
         _create_image_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256)
@@ -1378,5 +1561,4 @@ def stamp_document(src_path: str, dest_path: str, cert_id: str,
         return dest_path
 
     return _create_non_pdf_certificate(dest_path, cert_id, authenticity, label, filename, sha256)
-
 

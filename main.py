@@ -764,6 +764,7 @@ DOCUMENT_ALLOWED_EXTENSIONS = {
     ".odt", ".ods", ".odp",
     ".txt", ".md", ".csv", ".rtf", ".eml", ".msg",
     ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp", ".heic", ".heif",
+    ".zip",
 }
 DOCUMENT_SIZE_LIMITS = {
     "free":        10 * 1024 * 1024,    # 10MB
@@ -783,7 +784,7 @@ DOCUMENT_LABEL_UI = {
 async def upload_document(file: UploadFile = File(...), email: str = Form(...)):
     """
     Document upload endpoint for VeriFYD Docs MVP.
-    Accepts PDF, DOCX/DOC, XLSX/XLS, PPTX/PPT, TXT/MD/CSV/RTF/EML/MSG, JPG/JPEG/PNG/TIF/TIFF and returns a job_id for polling
+    Accepts PDF, DOCX/DOC, XLSX/XLS, PPTX/PPT, ODT/ODS/ODP, TXT/MD/CSV/RTF/EML/MSG, JPG/JPEG/PNG/TIF/TIFF/WEBP/HEIC, and ZIP evidence packages and returns a job_id for polling
     through /job-status/{job_id}, matching video/photo behavior.
     """
     if not is_valid_email(email):
@@ -803,7 +804,7 @@ async def upload_document(file: UploadFile = File(...), email: str = Form(...)):
     if ext not in DOCUMENT_ALLOWED_EXTENSIONS:
         return JSONResponse({
             "error":   "unsupported_format",
-            "message": "Unsupported document format. Accepted formats: PDF, DOC, DOCX, XLS, XLSX, PPT, PPTX, ODT, ODS, ODP, TXT, MD, CSV, RTF, EML, MSG, JPG, JPEG, PNG, TIF, TIFF, WEBP, HEIC.",
+            "message": "Unsupported document format. Accepted formats: PDF, DOC, DOCX, XLS, XLSX, PPT, PPTX, ODT, ODS, ODP, TXT, MD, CSV, RTF, EML, MSG, JPG, JPEG, PNG, TIF, TIFF, WEBP, HEIC, ZIP.",
         }, status_code=415)
 
     try:

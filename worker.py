@@ -713,6 +713,7 @@ def process_document_upload_job(
         ".odt", ".ods", ".odp",
         ".txt", ".md", ".csv", ".rtf", ".eml", ".msg",
         ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp", ".heic", ".heif",
+        ".zip",
     ):
         ext = ".pdf"
     tmp_path = _os.path.join(_tempfile.gettempdir(), f"{job_id}{ext}")
@@ -927,6 +928,7 @@ def keepalive_ping():
     _ts = _time.strftime("%Y-%m-%d %H:%M:%S UTC", _time.gmtime())
     log.info("Keepalive ping: worker alive at %s — models cached in memory", _ts)
     return {"status": "alive", "ts": _ts}
+
 
 
 
