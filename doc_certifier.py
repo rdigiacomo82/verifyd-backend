@@ -1577,6 +1577,141 @@ def _create_text_render_pdf(src_path: str, dest_path: str, cert_id: str, authent
     c.save()
     return dest_path
 
+
+def _append_document_risk_report_page(pdf_path: str, detail: Dict[str, Any] | None,
+                                      cert_id: str, filename: str) -> str:
+    """Append a business-readable Document Risk Report page to the certified PDF."""
+    report = None
+    if isinstance(detail, dict):
+        report = detail.get("document_risk_report") or detail.get("risk_report")
+    if not isinstance(report, dict) or not report:
+        return pdf_path
+
+    try:
+        from reportlab.pdfgen import canvas
+        from reportlab.lib.pagesizes import letter
+        from pypdf import PdfReader, PdfWriter
+    except Exception:
+        return pdf_path
+
+    fd, risk_page = tempfile.mkstemp(suffix="_verifyd_risk_report.pdf")
+    os.close(fd)
+    tmp_out = pdf_path + ".risk.tmp.pdf"
+
+    def _line(c, label: str, value: Any, x: float, y: float) -> float:
+        c.setFont("Helvetica-Bold", 8.5)
+        c.setFillGray(0.12)
+        c.drawString(x, y, label)
+        c.setFont("Helvetica", 8.5)
+        c.setFillGray(0.18)
+        c.drawString(x + 118, y, str(value or "")[:95])
+        return y - 14
+
+    try:
+        width, height = letter
+        c = canvas.Canvas(risk_page, pagesize=letter)
+        c.setAuthor("VeriFYD")
+        c.setTitle(f"VeriFYD Document Risk Report {cert_id}")
+
+        margin = 54
+        y = height - 58
+        overall = str(report.get("overall_risk", "UNKNOWN"))
+        risk_score = report.get("risk_score", "")
+
+        c.setFont("Helvetica-Bold", 18)
+        c.setFillGray(0.05)
+        c.drawString(margin, y, "VeriFYD Document Risk Report")
+        y -= 24
+        c.setFont("Helvetica", 8)
+        c.setFillGray(0.35)
+        c.drawString(margin, y, f"File: {filename} • Certificate ID: {cert_id}")
+        y -= 26
+
+        c.setFont("Helvetica-Bold", 13)
+        c.setFillGray(0.05)
+        c.drawString(margin, y, f"Overall Risk: {overall}" + (f"  ({risk_score}/100)" if risk_score != "" else ""))
+        y -= 24
+
+        y = _line(c, "Created:", report.get("created", "Not found"), margin, y)
+        y = _line(c, "Modified:", report.get("modified", "Not found"), margin, y)
+        y = _line(c, "Creator / Software:", report.get("creator", "Not found"), margin, y)
+        y = _line(c, "Author / Owner:", report.get("author", "Not found"), margin, y)
+        y = _line(c, "Metadata Integrity:", report.get("metadata_integrity", "UNKNOWN"), margin, y)
+        y = _line(c, "File Structure:", report.get("file_structure", "UNKNOWN"), margin, y)
+        y = _line(c, "AI Indicators:", report.get("ai_indicators", "UNKNOWN"), margin, y)
+        y = _line(c, "Hidden Revisions:", report.get("hidden_revisions", "NOT CHECKED"), margin, y)
+        y = _line(c, "Digital Signature:", report.get("digital_signature", "NOT CHECKED"), margin, y)
+        y -= 10
+
+        c.setFont("Helvetica-Bold", 10)
+        c.setFillGray(0.08)
+        c.drawString(margin, y, "Reasons / Findings")
+        y -= 15
+        c.setFont("Helvetica", 8.2)
+        c.setFillGray(0.15)
+        for reason in list(report.get("reasons") or [])[:8]:
+            if y < 92:
+                break
+            c.drawString(margin + 10, y, f"• {str(reason)[:105]}")
+            y -= 12
+
+        warnings = list(report.get("warnings") or [])[:6]
+        if warnings and y > 115:
+            y -= 6
+            c.setFont("Helvetica-Bold", 10)
+            c.drawString(margin, y, "Warnings")
+            y -= 15
+            c.setFont("Helvetica", 8.2)
+            for warning in warnings:
+                if y < 92:
+                    break
+                c.drawString(margin + 10, y, f"• {str(warning)[:105]}")
+                y -= 12
+
+        signals = list(report.get("signals_checked") or [])[:10]
+        c.setFont("Helvetica-Bold", 9)
+        c.setFillGray(0.15)
+        c.drawString(margin, 76, "Signals checked: " + ", ".join(str(x) for x in signals[:6])[:115])
+        c.setFont("Helvetica-Oblique", 7.2)
+        c.setFillGray(0.42)
+        c.drawString(margin, 58, "VeriFYD risk reporting is an analytical aid for evidence review and is not legal notarization.")
+        _draw_verifyd_mark(c, width, y=24, x_right_pad=34)
+        c.save()
+
+        reader = PdfReader(pdf_path)
+        risk_reader = PdfReader(risk_page)
+        writer = PdfWriter()
+        for page in reader.pages:
+            writer.add_page(page)
+        writer.add_page(risk_reader.pages[0])
+        try:
+            metadata = {str(k): str(v) for k, v in (reader.metadata or {}).items() if v is not None}
+            metadata.update({
+                "/VeriFYD_Risk_Report": overall,
+                "/VeriFYD_Risk_Score": str(risk_score),
+                "/VeriFYD_Metadata_Integrity": str(report.get("metadata_integrity", "")),
+            })
+            writer.add_metadata(metadata)
+        except Exception:
+            pass
+        with open(tmp_out, "wb") as out:
+            writer.write(out)
+        os.replace(tmp_out, pdf_path)
+    except Exception:
+        try:
+            if os.path.exists(tmp_out):
+                os.remove(tmp_out)
+        except Exception:
+            pass
+    finally:
+        try:
+            if os.path.exists(risk_page):
+                os.remove(risk_page)
+        except Exception:
+            pass
+    return pdf_path
+
+
 # ─────────────────────────────────────────────
 # Fallback and public entry point
 # ─────────────────────────────────────────────
@@ -1804,25 +1939,30 @@ def stamp_document(src_path: str, dest_path: str, cert_id: str,
     ext = os.path.splitext(src_path)[1].lower()
 
     if ext == ".zip":
-        return _create_zip_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256, detail)
+        _create_zip_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256, detail)
+        return _append_document_risk_report_page(dest_path, detail, cert_id, filename)
 
     if ext in (".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tif", ".tiff", ".webp", ".heic", ".heif"):
         _create_image_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256)
+        _append_document_risk_report_page(dest_path, detail, cert_id, filename)
         if ext in (".heic", ".heif"):
             _attach_original_file_to_pdf(dest_path, src_path, filename or os.path.basename(src_path))
         return dest_path
 
     if ext == ".xlsx":
-        return _create_xlsx_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256)
+        _create_xlsx_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256)
+        return _append_document_risk_report_page(dest_path, detail, cert_id, filename)
 
     if ext == ".pptx":
-        return _create_pptx_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256)
+        _create_pptx_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256)
+        return _append_document_risk_report_page(dest_path, detail, cert_id, filename)
 
     if ext in (".rtf", ".eml", ".msg", ".doc", ".ppt", ".xls", ".odt", ".ods", ".odp", ".html", ".htm", ".mhtml", ".mht", ".xml", ".json", ".svg", ".vsdx", ".yaml", ".yml", ".ini", ".log", ".sql", ".pst", ".ost", ".dwg", ".dxf"):
         _create_text_render_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256)
         # Preserve exact source file for legal/forensic review, especially when
         # the certified PDF is a readable text rendering rather than a perfect
         # native-layout clone.
+        _append_document_risk_report_page(dest_path, detail, cert_id, filename)
         _attach_original_file_to_pdf(dest_path, src_path, filename or os.path.basename(src_path))
         return dest_path
 
@@ -1866,7 +2006,7 @@ def stamp_document(src_path: str, dest_path: str, cert_id: str,
                         os.remove(p)
                 except Exception:
                     pass
-        return dest_path
+        return _append_document_risk_report_page(dest_path, detail, cert_id, filename)
 
-    return _create_non_pdf_certificate(dest_path, cert_id, authenticity, label, filename, sha256)
-
+    _create_non_pdf_certificate(dest_path, cert_id, authenticity, label, filename, sha256)
+    return _append_document_risk_report_page(dest_path, detail, cert_id, filename)

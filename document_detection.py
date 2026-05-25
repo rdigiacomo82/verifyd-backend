@@ -1669,6 +1669,222 @@ def _build_reasoning(label: str, authenticity: int, flags: List[str], gpt_reason
     return f"{lead} Key evidence: {evidence}. Authenticity score: {authenticity}%."
 
 
+
+
+# ─────────────────────────────────────────────
+# Document Risk Report / Metadata Consistency Engine
+# ─────────────────────────────────────────────
+
+def _metadata_lookup(md: Dict[str, Any], candidates: Tuple[str, ...]) -> str:
+    """Find a metadata value using loose key matching across formats."""
+    if not md:
+        return ""
+    lowered = {str(k).lower().replace("_", "").replace("-", "").replace("/", "").strip(): v for k, v in md.items()}
+    for candidate in candidates:
+        key = candidate.lower().replace("_", "").replace("-", "").replace("/", "").strip()
+        if key in lowered and str(lowered[key]).strip():
+            return str(lowered[key]).strip()
+    for k, v in lowered.items():
+        for candidate in candidates:
+            key = candidate.lower().replace("_", "").replace("-", "").replace("/", "").strip()
+            if key and key in k and str(v).strip():
+                return str(v).strip()
+    return ""
+
+
+def _parse_any_date(value: Any) -> datetime | None:
+    """Parse common PDF/Office/EXIF/ISO timestamp formats into a naive UTC-ish datetime."""
+    if not value:
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return None
+    s = raw
+    if s.startswith("D:"):
+        # PDF format: D:YYYYMMDDHHmmSS+/-HH'mm'
+        s = s[2:16]
+        try:
+            return datetime.strptime(s, "%Y%m%d%H%M%S")
+        except Exception:
+            pass
+    # EXIF-like timestamps.
+    for fmt in (
+        "%Y:%m:%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S.%f%z",
+        "%Y-%m-%dT%H:%M:%S%z",
+        "%Y-%m-%dT%H:%M:%S.%f",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d",
+        "%m/%d/%Y %H:%M:%S",
+        "%m/%d/%Y",
+    ):
+        try:
+            dt = datetime.strptime(raw.replace("Z", "+0000"), fmt)
+            if dt.tzinfo:
+                return dt.astimezone().replace(tzinfo=None)
+            return dt
+        except Exception:
+            continue
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if dt.tzinfo:
+            return dt.astimezone().replace(tzinfo=None)
+        return dt
+    except Exception:
+        return None
+
+
+def _risk_level(score: int) -> str:
+    if score >= 70:
+        return "HIGH"
+    if score >= 35:
+        return "MEDIUM"
+    return "LOW"
+
+
+def _build_document_risk_report(path: str, ext: str, meta: Dict[str, Any], meta_score: int,
+                                text_score: int, gpt_score: int, flags: List[str]) -> Dict[str, Any]:
+    """
+    Build a business-friendly risk report for legal/insurance/compliance users.
+
+    This report explains why a document looks clean or suspicious. It is separate
+    from the AI score so VeriFYD can certify both authenticity indicators and
+    evidence integrity indicators.
+    """
+    md = dict(meta.get("metadata") or {})
+    doc_type = str(meta.get("type") or ext.lstrip(".") or "document")
+    pages = _safe_int(meta.get("pages", 0), 0)
+    embedded_images = _safe_int(meta.get("embedded_images", 0), 0)
+
+    created_raw = _metadata_lookup(md, (
+        "created", "creationdate", "creation-date", "createdate", "datecreated",
+        "created_time", "creation_time", "create_date", "datetimeoriginal",
+    ))
+    modified_raw = _metadata_lookup(md, (
+        "modified", "moddate", "modificationdate", "lastmodified", "last_modified_by",
+        "date", "modify_date", "metadata_date", "lastsaved", "lastsavedby",
+    ))
+    creator = _metadata_lookup(md, ("creator", "producer", "generator", "application", "software", "author"))
+    author = _metadata_lookup(md, ("author", "creator", "initial-creator", "last_modified_by", "lastmodifiedby"))
+
+    created_dt = _parse_any_date(created_raw)
+    modified_dt = _parse_any_date(modified_raw)
+    now = datetime.utcnow()
+
+    risk_points = 0
+    reasons: List[str] = []
+    passed: List[str] = []
+    warnings: List[str] = []
+
+    if created_dt and modified_dt:
+        if modified_dt < created_dt:
+            risk_points += 45
+            reasons.append("Modification timestamp predates creation timestamp.")
+        else:
+            passed.append("Creation/modification timestamp order is consistent.")
+    elif created_raw or modified_raw:
+        warnings.append("Only one primary document timestamp was found.")
+        risk_points += 8
+    else:
+        warnings.append("No primary creation/modification timestamp was found.")
+        risk_points += 12
+
+    for label, dt in (("creation", created_dt), ("modification", modified_dt)):
+        if dt and dt > now.replace(microsecond=0):
+            risk_points += 25
+            reasons.append(f"Document {label} timestamp appears to be in the future.")
+
+    joined_md = " ".join(str(v).lower() for v in md.values() if v is not None)
+    ai_hits = [kw for kw in AI_PRODUCER_KEYWORDS if kw in joined_md]
+    if ai_hits:
+        risk_points += 35
+        reasons.append("Metadata references AI/generative software: " + ", ".join(ai_hits[:5]))
+
+    if meta_score >= 35:
+        risk_points += 25
+        reasons.append("Metadata analysis produced elevated risk indicators.")
+    elif meta_score >= 15:
+        risk_points += 10
+        warnings.append("Metadata analysis produced moderate risk indicators.")
+    else:
+        passed.append("No high-risk metadata producer indicators were found.")
+
+    if gpt_score >= 65:
+        risk_points += 25
+        reasons.append("Semantic analysis found elevated AI/manipulation indicators.")
+    elif gpt_score >= 40:
+        risk_points += 10
+        warnings.append("Semantic analysis found moderate AI/manipulation indicators.")
+
+    if not md:
+        warnings.append("Document metadata is empty or stripped.")
+        risk_points += 10
+    elif len([v for v in md.values() if str(v).strip()]) <= 2:
+        warnings.append("Document has very limited metadata.")
+        risk_points += 6
+
+    if not author:
+        warnings.append("Author/owner metadata is missing.")
+    if not creator:
+        warnings.append("Creator/producer metadata is missing.")
+
+    if doc_type == "pdf" and embedded_images > 0 and text_score == 0:
+        risk_points += 12
+        warnings.append("PDF appears image-heavy with little or no extractable text.")
+
+    if flags:
+        # Existing flags are useful but may include AI style hints. Keep them as evidence.
+        flag_text = "; ".join(str(f) for f in flags[:5])
+        warnings.append("Detector flags: " + flag_text)
+
+    risk_points = max(0, min(100, int(round(risk_points))))
+    overall = _risk_level(risk_points)
+    if reasons:
+        metadata_integrity = "FAIL" if any("timestamp" in r.lower() or "future" in r.lower() for r in reasons) else "WARN"
+    elif warnings:
+        metadata_integrity = "WARN"
+    else:
+        metadata_integrity = "PASS"
+
+    if not reasons:
+        if warnings:
+            reasons.append("No critical manipulation indicators found; minor metadata limitations noted.")
+        else:
+            reasons.append("No material metadata or structure inconsistencies were detected.")
+
+    return {
+        "overall_risk": overall,
+        "risk_score": risk_points,
+        "created": created_raw or "Not found",
+        "modified": modified_raw or "Not found",
+        "creator": creator or "Not found",
+        "author": author or "Not found",
+        "metadata_integrity": metadata_integrity,
+        "file_structure": "PASS",
+        "ai_indicators": "PRESENT" if (ai_hits or gpt_score >= 65) else "NONE DETECTED",
+        "hidden_revisions": "NOT CHECKED",
+        "digital_signature": "NOT CHECKED",
+        "reasons": reasons[:8],
+        "warnings": warnings[:8],
+        "passed_checks": passed[:8],
+        "signals_checked": [
+            "Creation timestamp",
+            "Modification timestamp",
+            "Timestamp ordering",
+            "Future-dated metadata",
+            "Author / creator fields",
+            "Producer / software fields",
+            "Metadata stripping",
+            "Embedded object count",
+            "AI / manipulation indicators",
+            "File structure extraction",
+        ],
+        "document_type": doc_type,
+        "pages": pages,
+        "embedded_images": embedded_images,
+    }
+
 def run_document_detection(path: str) -> Tuple[int, str, Dict[str, Any]]:
     """Run document authentication and return (authenticity, label, detail)."""
     ext = os.path.splitext(path)[1].lower()
@@ -1704,6 +1920,7 @@ def run_document_detection(path: str) -> Tuple[int, str, Dict[str, Any]]:
 
     flags = meta_flags + text_flags + gpt_flags
     reasoning = _build_reasoning(label, authenticity, flags, gpt_reasoning, meta, text_stats)
+    risk_report = _build_document_risk_report(path, ext, meta, meta_score, text_score, gpt_score, flags)
 
     detail = {
         "ai_score": combined,
@@ -1727,6 +1944,11 @@ def run_document_detection(path: str) -> Tuple[int, str, Dict[str, Any]]:
         "embedded_images": meta.get("embedded_images", 0),
         "text_stats": text_stats,
         "metadata": meta.get("metadata", {}),
+        "document_risk_report": risk_report,
+        "risk_report": risk_report,
+        "overall_risk": risk_report.get("overall_risk"),
+        "risk_score": risk_report.get("risk_score"),
+        "metadata_integrity": risk_report.get("metadata_integrity"),
         "threshold_real": THRESHOLD_REAL,
         "threshold_undet": THRESHOLD_UNDETERMINED,
     }
