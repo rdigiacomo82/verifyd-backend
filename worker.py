@@ -713,7 +713,7 @@ def process_document_upload_job(
         ".odt", ".ods", ".odp",
         ".txt", ".md", ".csv", ".rtf", ".eml", ".msg",
         ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp", ".heic", ".heif",
-        ".zip",
+        ".zip", ".vsdx", ".html", ".htm", ".mhtml", ".mht", ".xml", ".json",
     ):
         ext = ".pdf"
     tmp_path = _os.path.join(_tempfile.gettempdir(), f"{job_id}{ext}")
