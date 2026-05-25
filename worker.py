@@ -712,8 +712,11 @@ def process_document_upload_job(
         ".pdf", ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt",
         ".odt", ".ods", ".odp",
         ".txt", ".md", ".csv", ".rtf", ".eml", ".msg",
-        ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp", ".heic", ".heif",
-        ".zip", ".vsdx", ".html", ".htm", ".mhtml", ".mht", ".xml", ".json",
+        ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tif", ".tiff", ".webp", ".heic", ".heif",
+        ".zip",
+        ".vsdx", ".html", ".htm", ".mhtml", ".mht", ".xml", ".json", ".svg",
+        ".yaml", ".yml", ".ini", ".log", ".sql",
+        ".pst", ".ost", ".dwg", ".dxf",
     ):
         ext = ".pdf"
     tmp_path = _os.path.join(_tempfile.gettempdir(), f"{job_id}{ext}")

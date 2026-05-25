@@ -763,8 +763,10 @@ DOCUMENT_ALLOWED_EXTENSIONS = {
     ".pdf", ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt",
     ".odt", ".ods", ".odp",
     ".txt", ".md", ".csv", ".rtf", ".eml", ".msg",
-    ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp", ".heic", ".heif",
-    ".html", ".htm", ".mhtml", ".mht", ".xml", ".json", ".vsdx",
+    ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tif", ".tiff", ".webp", ".heic", ".heif",
+    ".html", ".htm", ".mhtml", ".mht", ".xml", ".json", ".svg", ".vsdx",
+    ".yaml", ".yml", ".ini", ".log", ".sql",
+    ".pst", ".ost", ".dwg", ".dxf",
     ".zip",
 }
 DOCUMENT_SIZE_LIMITS = {

@@ -1308,6 +1308,106 @@ def _read_vsdx_for_render(src_path: str) -> str:
                 lines.append("[No extractable shape text]")
     return "\n".join(lines)
 
+
+
+def _read_extra_textlike_for_render(src_path: str, ext: str) -> str:
+    """Render lightweight text/config/log/code evidence formats."""
+    data = open(src_path, "rb").read(5_000_000)
+    text = ""
+    for enc in ("utf-8", "utf-16", "latin-1"):
+        try:
+            text = data.decode(enc, errors="replace")
+            break
+        except Exception:
+            continue
+    if not text:
+        text = data.decode("latin-1", errors="replace")
+    label = {
+        ".yaml": "YAML Configuration",
+        ".yml": "YAML Configuration",
+        ".ini": "INI Configuration",
+        ".log": "Log File",
+        ".sql": "SQL Script/Export",
+    }.get(ext, ext.upper())
+    return f"VeriFYD {label} Rendering\n\n" + text[:120000]
+
+
+def _read_dxf_for_render(src_path: str) -> str:
+    data = open(src_path, "rb").read(8_000_000)
+    text = data.decode("utf-8", errors="replace")
+    if "SECTION" not in text[:200000].upper():
+        text = data.decode("latin-1", errors="replace")
+    import re
+    layers = re.findall(r"\n\s*8\s*\n([^\n\r]{1,120})", text)
+    entities = re.findall(r"\n\s*0\s*\n(LINE|LWPOLYLINE|POLYLINE|CIRCLE|ARC|TEXT|MTEXT|INSERT|DIMENSION|HATCH|SPLINE)\b", text, flags=re.I)
+    lines = ["VeriFYD DXF CAD Evidence Rendering"]
+    if layers:
+        seen = []
+        for layer in layers:
+            layer = layer.strip()
+            if layer and layer not in seen:
+                seen.append(layer)
+            if len(seen) >= 60:
+                break
+        lines.append("Layers: " + ", ".join(seen))
+    if entities:
+        from collections import Counter
+        counts = Counter(x.upper() for x in entities)
+        lines.append("Entity counts: " + ", ".join(f"{k}:{v}" for k, v in counts.most_common(20)))
+    readable = re.findall(r"[A-Za-z0-9][A-Za-z0-9\s\.,;:\-_/@$%#&()\[\]{}'\"!?]{4,}", text[:1_500_000])
+    lines.extend(re.sub(r"\s+", " ", x).strip()[:500] for x in readable[:800])
+    return "\n".join(x for x in lines if x)
+
+
+def _read_binary_evidence_for_render(src_path: str, ext: str) -> str:
+    """Create a readable evidence record for PST/OST/DWG binary files."""
+    import re
+    size = os.path.getsize(src_path)
+    with open(src_path, "rb") as fh:
+        head = fh.read(64)
+        fh.seek(0)
+        sample = fh.read(3_000_000)
+    fragments: List[str] = []
+    for enc in ("utf-16-le", "latin-1"):
+        try:
+            decoded = sample.decode(enc, errors="ignore").replace("\x00", " ")
+        except Exception:
+            continue
+        pieces = re.findall(r"[A-Za-z0-9][A-Za-z0-9\s\.,;:\-_/@$%#&()\[\]{}'\"!?]{5,}", decoded)
+        for piece in pieces:
+            clean = re.sub(r"\s+", " ", piece).strip()
+            if len(clean) >= 6:
+                fragments.append(clean[:500])
+            if len(fragments) >= 300:
+                break
+        if len(fragments) >= 300:
+            break
+    type_label = {
+        ".pst": "Outlook PST email archive",
+        ".ost": "Outlook OST offline mailbox archive",
+        ".dwg": "AutoCAD DWG drawing",
+    }.get(ext, ext.upper())
+    lines = [
+        f"VeriFYD {type_label} Evidence Record",
+        f"File size: {size} bytes",
+        f"Magic/header hex: {head.hex()[:128]}",
+        "Analysis mode: lightweight evidence certification. Deep native parsing/rendering is not enabled for this format.",
+    ]
+    if fragments:
+        lines.append("\nReadable string samples:")
+        seen = set()
+        for frag in fragments:
+            key = frag.lower()[:160]
+            if key in seen:
+                continue
+            seen.add(key)
+            lines.append(frag)
+            if len(seen) >= 200:
+                break
+    else:
+        lines.append("\nNo readable text strings found in scanned binary sample.")
+    return "\n".join(lines)
+
 def _read_text_for_certified_render(src_path: str, ext: str) -> str:
     """Read RTF/EML/text-family documents for certified PDF rendering."""
     data = b""
@@ -1324,11 +1424,23 @@ def _read_text_for_certified_render(src_path: str, ext: str) -> str:
     if ext == ".xml":
         return _read_xml_for_render(src_path)
 
+    if ext == ".svg":
+        return _read_xml_for_render(src_path)
+
     if ext == ".json":
         return _read_json_for_render(src_path)
 
     if ext == ".vsdx":
         return _read_vsdx_for_render(src_path)
+
+    if ext in (".yaml", ".yml", ".ini", ".log", ".sql"):
+        return _read_extra_textlike_for_render(src_path, ext)
+
+    if ext == ".dxf":
+        return _read_dxf_for_render(src_path)
+
+    if ext in (".pst", ".ost", ".dwg"):
+        return _read_binary_evidence_for_render(src_path, ext)
 
     if ext == ".eml":
         try:
@@ -1694,7 +1806,7 @@ def stamp_document(src_path: str, dest_path: str, cert_id: str,
     if ext == ".zip":
         return _create_zip_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256, detail)
 
-    if ext in (".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp", ".heic", ".heif"):
+    if ext in (".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tif", ".tiff", ".webp", ".heic", ".heif"):
         _create_image_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256)
         if ext in (".heic", ".heif"):
             _attach_original_file_to_pdf(dest_path, src_path, filename or os.path.basename(src_path))
@@ -1706,7 +1818,7 @@ def stamp_document(src_path: str, dest_path: str, cert_id: str,
     if ext == ".pptx":
         return _create_pptx_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256)
 
-    if ext in (".rtf", ".eml", ".msg", ".doc", ".ppt", ".xls", ".odt", ".ods", ".odp", ".html", ".htm", ".mhtml", ".mht", ".xml", ".json", ".vsdx"):
+    if ext in (".rtf", ".eml", ".msg", ".doc", ".ppt", ".xls", ".odt", ".ods", ".odp", ".html", ".htm", ".mhtml", ".mht", ".xml", ".json", ".svg", ".vsdx", ".yaml", ".yml", ".ini", ".log", ".sql", ".pst", ".ost", ".dwg", ".dxf"):
         _create_text_render_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256)
         # Preserve exact source file for legal/forensic review, especially when
         # the certified PDF is a readable text rendering rather than a perfect

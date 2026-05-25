@@ -1125,8 +1125,10 @@ def _read_vsdx(path: str) -> Tuple[str, Dict[str, Any]]:
 ZIP_SUPPORTED_INNER_EXTENSIONS = {
     ".pdf", ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt",
     ".odt", ".ods", ".odp", ".txt", ".md", ".csv", ".rtf", ".eml", ".msg",
-    ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp", ".heic", ".heif",
-    ".html", ".htm", ".mhtml", ".mht", ".xml", ".json", ".vsdx",
+    ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tif", ".tiff", ".webp", ".heic", ".heif",
+    ".html", ".htm", ".mhtml", ".mht", ".xml", ".json", ".svg", ".vsdx",
+    ".yaml", ".yml", ".ini", ".log", ".sql",
+    ".pst", ".ost", ".dwg", ".dxf",
 }
 ZIP_DANGEROUS_EXTENSIONS = {
     ".exe", ".dll", ".bat", ".cmd", ".com", ".scr", ".ps1", ".vbs", ".js",
@@ -1229,7 +1231,7 @@ def _read_zip(path: str) -> Tuple[str, Dict[str, Any]]:
                     manifest.append(entry)
                     continue
 
-                if ext in (".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp", ".heic", ".heif"):
+                if ext in (".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tif", ".tiff", ".webp", ".heic", ".heif"):
                     image_count += 1
 
                 try:
@@ -1309,6 +1311,155 @@ def _read_zip(path: str) -> Tuple[str, Dict[str, Any]]:
 
     return "\n".join(text_parts), meta
 
+
+
+def _read_textlike_config(path: str, doc_type: str) -> Tuple[str, Dict[str, Any]]:
+    """Read plain-text evidence/config formats such as YAML, INI, LOG, and SQL."""
+    meta: Dict[str, Any] = {"type": doc_type, "pages": 1, "embedded_images": 0, "metadata": {}}
+    with open(path, "rb") as f:
+        data = f.read(5_000_000)
+    text = ""
+    for enc in ("utf-8", "utf-16", "latin-1"):
+        try:
+            text = data.decode(enc, errors="replace")
+            break
+        except Exception:
+            continue
+    if not text:
+        text = data.decode("latin-1", errors="replace")
+
+    line_count = text.count("\n") + 1 if text else 0
+    nonblank = len([ln for ln in text.splitlines() if ln.strip()])
+    meta["metadata"] = {
+        "byte_count": str(len(data)),
+        "line_count": str(line_count),
+        "nonblank_line_count": str(nonblank),
+    }
+    if doc_type in ("yaml", "yml"):
+        keys = re.findall(r"^\s*([A-Za-z0-9_\-.]+)\s*:", text, flags=re.MULTILINE)
+        meta["metadata"]["top_keys"] = ", ".join(keys[:40])
+    elif doc_type == "ini":
+        sections = re.findall(r"^\s*\[([^\]]+)\]", text, flags=re.MULTILINE)
+        meta["metadata"]["sections"] = ", ".join(sections[:40])
+    elif doc_type == "sql":
+        stmts = re.findall(r"\b(SELECT|INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|WITH)\b", text, flags=re.IGNORECASE)
+        meta["metadata"]["sql_statement_keywords"] = ", ".join(stmts[:50])
+    return text[:120000], meta
+
+
+def _read_svg(path: str) -> Tuple[str, Dict[str, Any]]:
+    """Best-effort SVG/XML extraction for vector evidence and diagrams."""
+    text, meta = _read_xml(path)
+    meta["type"] = "svg"
+    md = dict(meta.get("metadata") or {})
+    md["format"] = "SVG vector image/XML"
+    meta["metadata"] = md
+    return text, meta
+
+
+def _read_dxf(path: str) -> Tuple[str, Dict[str, Any]]:
+    """Best-effort DXF extraction. DXF is commonly text-based CAD evidence."""
+    meta: Dict[str, Any] = {"type": "dxf", "pages": 1, "embedded_images": 0, "metadata": {}}
+    with open(path, "rb") as f:
+        data = f.read(8_000_000)
+    text = data.decode("utf-8", errors="replace")
+    if "SECTION" not in text[:200000].upper() and "ENTITIES" not in text[:500000].upper():
+        text = data.decode("latin-1", errors="replace")
+
+    layers = re.findall(r"\n\s*8\s*\n([^\n\r]{1,120})", text)
+    entity_types = re.findall(r"\n\s*0\s*\n(LINE|LWPOLYLINE|POLYLINE|CIRCLE|ARC|TEXT|MTEXT|INSERT|DIMENSION|HATCH|SPLINE)\b", text, flags=re.I)
+    readable = re.findall(r"[A-Za-z0-9][A-Za-z0-9\s\.,;:\-_/@$%#&()\[\]{}'\"!?]{4,}", text[:1_500_000])
+    lines = ["VeriFYD DXF CAD Evidence Extraction"]
+    if layers:
+        seen_layers = []
+        for layer in layers:
+            layer = layer.strip()
+            if layer and layer not in seen_layers:
+                seen_layers.append(layer)
+            if len(seen_layers) >= 60:
+                break
+        lines.append("Layers: " + ", ".join(seen_layers))
+    if entity_types:
+        counts = Counter(x.upper() for x in entity_types)
+        lines.append("Entity counts: " + ", ".join(f"{k}:{v}" for k, v in counts.most_common(20)))
+    for frag in readable[:800]:
+        clean = re.sub(r"\s+", " ", frag).strip()
+        if clean and clean not in lines:
+            lines.append(clean[:500])
+    meta["metadata"] = {
+        "byte_count": str(len(data)),
+        "layer_count_sample": str(len(set(layers))),
+        "entity_type_sample": ", ".join(sorted(set(x.upper() for x in entity_types))[:25]),
+    }
+    return "\n".join(lines), meta
+
+
+def _read_binary_evidence(path: str, doc_type: str) -> Tuple[str, Dict[str, Any]]:
+    """
+    Lightweight binary evidence handler for PST/OST/DWG.
+
+    These formats are intentionally treated as package-level evidence here, not
+    deeply decoded archives. VeriFYD records file size, hash is handled upstream,
+    magic bytes, and recoverable string fragments without executing anything.
+    """
+    meta: Dict[str, Any] = {"type": doc_type, "pages": 1, "embedded_images": 0, "metadata": {}}
+    size = os.path.getsize(path)
+    with open(path, "rb") as f:
+        head = f.read(64)
+        f.seek(0)
+        sample = f.read(3_000_000)
+
+    fragments: List[str] = []
+    for enc in ("utf-16-le", "latin-1"):
+        try:
+            decoded = sample.decode(enc, errors="ignore").replace("\x00", " ")
+        except Exception:
+            continue
+        pieces = re.findall(r"[A-Za-z0-9][A-Za-z0-9\s\.,;:\-_/@$%#&()\[\]{}'\"!?]{5,}", decoded)
+        for piece in pieces:
+            clean = re.sub(r"\s+", " ", piece).strip()
+            if len(clean) >= 6:
+                fragments.append(clean[:500])
+            if len(fragments) >= 500:
+                break
+        if len(fragments) >= 500:
+            break
+
+    seen = set()
+    unique: List[str] = []
+    for frag in fragments:
+        key = frag.lower()[:160]
+        if key not in seen:
+            seen.add(key)
+            unique.append(frag)
+        if len(unique) >= 250:
+            break
+
+    type_label = {
+        "pst": "Outlook PST email archive",
+        "ost": "Outlook OST offline mailbox archive",
+        "dwg": "AutoCAD DWG drawing",
+    }.get(doc_type, doc_type.upper())
+    meta["metadata"] = {
+        "format": type_label,
+        "byte_count": str(size),
+        "magic_hex": head.hex()[:128],
+        "readable_string_sample_count": str(len(unique)),
+        "analysis_mode": "lightweight binary evidence manifest; deep native parsing not enabled",
+    }
+    lines = [
+        f"VeriFYD {type_label} Evidence Record",
+        f"File size: {size} bytes",
+        f"Magic/header hex: {head.hex()[:128]}",
+        "Analysis mode: lightweight evidence certification. Deep native parsing/rendering is not enabled for this format.",
+    ]
+    if unique:
+        lines.append("\nReadable string samples:")
+        lines.extend(unique)
+    else:
+        lines.append("\nNo readable text strings found in scanned binary sample.")
+    return "\n".join(lines), meta
+
 def _extract_document(path: str) -> Tuple[str, Dict[str, Any]]:
     ext = os.path.splitext(path)[1].lower()
     if ext == ".pdf":
@@ -1329,13 +1480,15 @@ def _extract_document(path: str) -> Tuple[str, Dict[str, Any]]:
         return _read_odf(path)
     if ext in (".txt", ".md", ".csv"):
         return _read_txt(path)
+    if ext in (".yaml", ".yml", ".ini", ".log", ".sql"):
+        return _read_textlike_config(path, ext.lstrip("."))
     if ext == ".rtf":
         return _read_rtf(path)
     if ext == ".eml":
         return _read_eml(path)
     if ext == ".msg":
         return _read_msg(path)
-    if ext in (".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp", ".heic", ".heif"):
+    if ext in (".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tif", ".tiff", ".webp", ".heic", ".heif"):
         return _read_image(path)
     if ext in (".html", ".htm"):
         return _read_html(path)
@@ -1343,10 +1496,16 @@ def _extract_document(path: str) -> Tuple[str, Dict[str, Any]]:
         return _read_mhtml(path)
     if ext == ".xml":
         return _read_xml(path)
+    if ext == ".svg":
+        return _read_svg(path)
     if ext == ".json":
         return _read_json(path)
     if ext == ".vsdx":
         return _read_vsdx(path)
+    if ext == ".dxf":
+        return _read_dxf(path)
+    if ext in (".pst", ".ost", ".dwg"):
+        return _read_binary_evidence(path, ext.lstrip("."))
     if ext == ".zip":
         return _read_zip(path)
     raise RuntimeError(f"Unsupported document format: {ext}")
