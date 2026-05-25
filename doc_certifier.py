@@ -92,20 +92,72 @@ def _chunked_rows(rows: List[List[str]], rows_per_page: int) -> Iterable[List[Li
         yield rows[i : i + rows_per_page]
 
 
+def _convert_heic_to_renderable_image(src_path: str) -> str:
+    """
+    Convert HEIC/HEIF to a temporary JPEG/PNG that ReportLab/Pillow can render.
+
+    The photo detector already handles HEIC by converting with ffmpeg. This helper
+    mirrors that behavior for document certification so the analysis result does
+    not succeed while the certified PDF fails to render/upload.
+    """
+    import subprocess
+    import shutil
+
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg:
+        fd, tmp_jpg = tempfile.mkstemp(suffix="_verifyd_heic_render.jpg")
+        os.close(fd)
+        try:
+            cmd = [ffmpeg, "-y", "-i", src_path, "-frames:v", "1", "-q:v", "2", tmp_jpg]
+            result = subprocess.run(cmd, capture_output=True, timeout=60)
+            if result.returncode == 0 and os.path.exists(tmp_jpg) and os.path.getsize(tmp_jpg) > 1000:
+                return tmp_jpg
+        except Exception:
+            pass
+        try:
+            if os.path.exists(tmp_jpg):
+                os.remove(tmp_jpg)
+        except Exception:
+            pass
+
+    try:
+        from pillow_heif import register_heif_opener
+        register_heif_opener()
+        from PIL import Image
+
+        fd, tmp_png = tempfile.mkstemp(suffix="_verifyd_heic_render.png")
+        os.close(fd)
+        with Image.open(src_path) as img:
+            if img.mode not in ("RGB", "RGBA"):
+                img = img.convert("RGB")
+            img.save(tmp_png, format="PNG")
+        if os.path.exists(tmp_png) and os.path.getsize(tmp_png) > 1000:
+            return tmp_png
+        try:
+            os.remove(tmp_png)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+    raise RuntimeError("HEIC/HEIF certification rendering failed. ffmpeg or pillow-heif could not convert the image.")
+
+
 def _create_image_pdf(src_path: str, dest_path: str, cert_id: str, authenticity: int,
                       label: str, filename: str, sha256: str = "") -> str:
-    """Create a certified PDF that preserves uploaded JPG/PNG/TIF/TIFF images visually."""
+    """Create a certified PDF that preserves uploaded image documents visually."""
     from reportlab.pdfgen import canvas
     from reportlab.lib.pagesizes import letter
     from reportlab.lib.utils import ImageReader
     from PIL import Image, ImageSequence
 
-    if os.path.splitext(src_path)[1].lower() in (".heic", ".heif"):
-        try:
-            from pillow_heif import register_heif_opener
-            register_heif_opener()
-        except Exception as e:
-            raise RuntimeError("Missing dependency: pillow-heif. Add pillow-heif>=0.16.0 to requirements.txt") from e
+    ext = os.path.splitext(src_path)[1].lower()
+    render_src = src_path
+    temp_images: List[str] = []
+
+    if ext in (".heic", ".heif"):
+        render_src = _convert_heic_to_renderable_image(src_path)
+        temp_images.append(render_src)
 
     width, height = letter
     c = canvas.Canvas(dest_path, pagesize=letter)
@@ -116,10 +168,9 @@ def _create_image_pdf(src_path: str, dest_path: str, cert_id: str, authenticity:
     margin = 36
     max_w = width - (margin * 2)
     max_h = height - (margin * 2)
-    temp_images: List[str] = []
 
     try:
-        with Image.open(src_path) as img:
+        with Image.open(render_src) as img:
             frames = []
             try:
                 for frame in ImageSequence.Iterator(img):
@@ -130,14 +181,15 @@ def _create_image_pdf(src_path: str, dest_path: str, cert_id: str, authenticity:
                 frames = [img.copy()]
 
         if not frames:
-            frames = [Image.open(src_path).copy()]
+            with Image.open(render_src) as img:
+                frames = [img.copy()]
 
         for idx, frame in enumerate(frames):
             if frame.mode not in ("RGB", "RGBA"):
                 frame = frame.convert("RGB")
 
-            draw_source = src_path
-            if len(frames) > 1 or os.path.splitext(src_path)[1].lower() in (".tif", ".tiff", ".webp", ".heic", ".heif"):
+            draw_source = render_src
+            if len(frames) > 1 or ext in (".tif", ".tiff", ".webp", ".heic", ".heif"):
                 fd, tmp_img = tempfile.mkstemp(suffix=f"_verifyd_frame_{idx}.png")
                 os.close(fd)
                 frame.save(tmp_img, format="PNG")
@@ -174,9 +226,6 @@ def _create_image_pdf(src_path: str, dest_path: str, cert_id: str, authenticity:
     c.save()
     return dest_path
 
-# ─────────────────────────────────────────────
-# XLSX rendering
-# ─────────────────────────────────────────────
 
 def _extract_xlsx_rows(src_path: str, max_columns: int = 12, max_rows_per_sheet: int = 500) -> List[Tuple[str, List[List[str]]]]:
     """
@@ -1267,7 +1316,10 @@ def stamp_document(src_path: str, dest_path: str, cert_id: str,
     ext = os.path.splitext(src_path)[1].lower()
 
     if ext in (".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp", ".heic", ".heif"):
-        return _create_image_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256)
+        _create_image_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256)
+        if ext in (".heic", ".heif"):
+            _attach_original_file_to_pdf(dest_path, src_path, filename or os.path.basename(src_path))
+        return dest_path
 
     if ext == ".xlsx":
         return _create_xlsx_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256)
