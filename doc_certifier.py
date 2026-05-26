@@ -41,8 +41,11 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Tuple
+
+log = logging.getLogger("verifyd.doc_certifier")
 
 
 def _draw_verifyd_mark(c, width: float, y: float = 24, x_right_pad: float = 34) -> None:
@@ -545,9 +548,13 @@ def _try_convert_document_to_pdf_with_libreoffice(src_path: str) -> Tuple[str, s
 
     soffice = shutil.which("soffice") or shutil.which("libreoffice")
     if not soffice:
+        log.warning("doc_certifier: LibreOffice/soffice not found on worker PATH")
         return None
 
+    log.info("doc_certifier: LibreOffice found at %s", soffice)
+
     if not os.path.exists(src_path):
+        log.warning("doc_certifier: source file does not exist for LibreOffice conversion: %s", src_path)
         return None
 
     out_dir = tempfile.mkdtemp(prefix="verifyd_lo_convert_")
@@ -569,9 +576,22 @@ def _try_convert_document_to_pdf_with_libreoffice(src_path: str) -> Tuple[str, s
             src_path,
         ]
 
+        log.info("doc_certifier: starting LibreOffice conversion cmd=%s", cmd)
         result = subprocess.run(cmd, capture_output=True, timeout=150)
 
+        log.info(
+            "doc_certifier: LibreOffice conversion finished returncode=%s stdout=%r stderr=%r",
+            result.returncode,
+            (result.stdout or b"")[:700],
+            (result.stderr or b"")[:700],
+        )
+
         if result.returncode != 0:
+            log.warning(
+                "doc_certifier: LibreOffice conversion failed returncode=%s file=%s",
+                result.returncode,
+                src_path,
+            )
             return None
 
         # LibreOffice usually writes basename.pdf, but names can be altered
@@ -587,12 +607,23 @@ def _try_convert_document_to_pdf_with_libreoffice(src_path: str) -> Tuple[str, s
             pdfs = []
 
         if not pdfs:
+            log.warning(
+                "doc_certifier: LibreOffice completed but produced no PDF. out_dir=%s files=%s",
+                out_dir,
+                os.listdir(out_dir) if os.path.isdir(out_dir) else [],
+            )
             return None
 
         pdfs.sort(key=lambda path: os.path.getmtime(path), reverse=True)
+        log.info(
+            "doc_certifier: LibreOffice produced PDF path=%s size=%s",
+            pdfs[0],
+            os.path.getsize(pdfs[0]) if os.path.exists(pdfs[0]) else 0,
+        )
         return pdfs[0], out_dir
 
-    except Exception:
+    except Exception as e:
+        log.warning("doc_certifier: LibreOffice conversion exception for file=%s error=%s", src_path, e)
         return None
     finally:
         # Do not delete out_dir here because the converted PDF lives there.
@@ -2570,11 +2601,16 @@ def stamp_document(src_path: str, dest_path: str, cert_id: str,
         try:
             _create_office_pdf_via_libreoffice(src_path, dest_path, cert_id, authenticity, label, filename, sha256)
             return _finalize_certified_pdf(dest_path, detail, cert_id, filename, sha256, authenticity, label)
-        except Exception:
+        except Exception as e:
             # Keep certification resilient. If LibreOffice is unavailable or a
             # specific file cannot be converted, use the existing safe fallback
-            # renderers below.
-            pass
+            # renderers below, but log the reason so Render can be diagnosed.
+            log.warning(
+                "doc_certifier: LibreOffice render failed for ext=%s file=%s; falling back to text renderer: %s",
+                ext,
+                filename,
+                e,
+            )
 
     if ext == ".xlsx":
         _create_xlsx_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256)
