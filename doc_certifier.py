@@ -1588,6 +1588,305 @@ def _read_binary_evidence_for_render(src_path: str, ext: str) -> str:
 
 
 
+
+# ─────────────────────────────────────────────
+# DOCX table-aware fallback rendering
+# ─────────────────────────────────────────────
+
+def _iter_docx_blocks(doc: Any):
+    """Yield DOCX paragraphs and tables in original body order."""
+    try:
+        from docx.oxml.text.paragraph import CT_P
+        from docx.oxml.table import CT_Tbl
+        from docx.text.paragraph import Paragraph
+        from docx.table import Table
+    except Exception:
+        return
+
+    body = getattr(doc, "element", None)
+    body = getattr(body, "body", None)
+    if body is None:
+        return
+
+    for child in body.iterchildren():
+        if isinstance(child, CT_P):
+            yield Paragraph(child, doc)
+        elif isinstance(child, CT_Tbl):
+            yield Table(child, doc)
+
+
+def _docx_para_text_for_pdf(para: Any) -> str:
+    """Return paragraph text with tabs normalized for PDF rendering."""
+    try:
+        text = para.text or ""
+    except Exception:
+        text = ""
+    text = text.replace("\t", "    ").replace("\r", " ")
+    return text.strip()
+
+
+def _docx_cell_text_for_pdf(cell: Any) -> str:
+    """Return readable table-cell text while preserving line breaks inside cells."""
+    parts: List[str] = []
+    try:
+        for para in cell.paragraphs:
+            t = _docx_para_text_for_pdf(para)
+            if t:
+                parts.append(t)
+    except Exception:
+        try:
+            t = str(cell.text or "").strip()
+            if t:
+                parts.append(t)
+        except Exception:
+            pass
+    return "\n".join(parts).strip()
+
+
+def _docx_is_boldish(para: Any) -> bool:
+    """Best-effort test for title/header-style paragraphs."""
+    try:
+        style_name = str(getattr(getattr(para, "style", None), "name", "") or "").lower()
+        if any(x in style_name for x in ("heading", "title", "subtitle")):
+            return True
+    except Exception:
+        pass
+    try:
+        runs = list(getattr(para, "runs", []) or [])
+        if runs and any(bool(getattr(getattr(r, "font", None), "bold", None)) or bool(getattr(r, "bold", None)) for r in runs):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _docx_alignment_name(para: Any) -> str:
+    """Return a ReportLab alignment keyword for a paragraph."""
+    try:
+        alignment = getattr(para, "alignment", None)
+        # python-docx WD_ALIGN_PARAGRAPH enum values: LEFT=0, CENTER=1, RIGHT=2, JUSTIFY=3
+        if alignment == 1:
+            return "CENTER"
+        if alignment == 2:
+            return "RIGHT"
+    except Exception:
+        pass
+    return "LEFT"
+
+
+def _docx_table_col_widths(rows: List[List[str]], available_width: float) -> List[float]:
+    """Compute stable column widths for DOCX table rendering."""
+    max_cols = max((len(r) for r in rows), default=1)
+    max_cols = max(1, min(max_cols, 12))
+
+    # Common review-comment/table template: number, drawing, comment, response, action/date.
+    if max_cols == 5:
+        weights = [0.72, 1.05, 5.45, 2.05, 1.15]
+    elif max_cols == 6:
+        weights = [0.65, 1.0, 4.7, 1.8, 1.0, 1.0]
+    elif max_cols == 4:
+        weights = [0.9, 1.4, 5.2, 2.1]
+    else:
+        # Estimate text-heavy columns a bit wider while keeping the layout predictable.
+        weights = []
+        for cidx in range(max_cols):
+            sample = " ".join((r[cidx] if cidx < len(r) else "") for r in rows[:25])
+            length = len(sample)
+            weights.append(max(0.8, min(3.0, 0.8 + (length / 260.0))))
+
+    total = sum(weights) or 1.0
+    return [available_width * (w / total) for w in weights]
+
+
+def _create_docx_layout_pdf(src_path: str, dest_path: str, cert_id: str, authenticity: int,
+                            label: str, filename: str, sha256: str = "") -> str:
+    """
+    Render DOCX using a table-aware pure-Python fallback.
+
+    This does not require LibreOffice and is intentionally safer for the current
+    Render Python worker. It will not perfectly clone Microsoft Word, but it
+    preserves paragraph/table order and renders table grids far better than the
+    old flat text renderer.
+    """
+    try:
+        from docx import Document
+    except Exception as e:
+        raise RuntimeError("Missing dependency: python-docx. Add python-docx>=1.1.0 to requirements.txt") from e
+
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, KeepTogether
+    from reportlab.lib.pagesizes import landscape, letter
+    from reportlab.lib import colors
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_RIGHT
+    from reportlab.lib.units import inch
+
+    docx_doc = Document(src_path)
+    page_size = landscape(letter)
+    page_w, page_h = page_size
+    left_margin = 0.32 * inch
+    right_margin = 0.32 * inch
+    top_margin = 0.34 * inch
+    bottom_margin = 0.42 * inch
+    available_w = page_w - left_margin - right_margin
+
+    pdf = SimpleDocTemplate(
+        dest_path,
+        pagesize=page_size,
+        leftMargin=left_margin,
+        rightMargin=right_margin,
+        topMargin=top_margin,
+        bottomMargin=bottom_margin,
+        title=f"VeriFYD Certified Word Document {cert_id}",
+        author="VeriFYD",
+        subject=f"{label} | Authenticity {authenticity}% | {filename}",
+    )
+
+    styles = getSampleStyleSheet()
+    base = ParagraphStyle(
+        "VeriFYD_DOCX_Base",
+        parent=styles["Normal"],
+        fontName="Helvetica",
+        fontSize=7.2,
+        leading=8.4,
+        spaceAfter=2.5,
+        alignment=TA_LEFT,
+    )
+    bold = ParagraphStyle(
+        "VeriFYD_DOCX_Bold",
+        parent=base,
+        fontName="Helvetica-Bold",
+        fontSize=7.4,
+        leading=8.8,
+        spaceAfter=3,
+    )
+    title = ParagraphStyle(
+        "VeriFYD_DOCX_Title",
+        parent=bold,
+        fontSize=11.0,
+        leading=12.5,
+        alignment=TA_CENTER,
+        spaceAfter=5,
+    )
+    right = ParagraphStyle("VeriFYD_DOCX_Right", parent=base, alignment=TA_RIGHT)
+    center = ParagraphStyle("VeriFYD_DOCX_Center", parent=base, alignment=TA_CENTER)
+    cell_style = ParagraphStyle(
+        "VeriFYD_DOCX_Cell",
+        parent=base,
+        fontSize=5.9,
+        leading=6.8,
+        spaceAfter=0,
+        wordWrap="CJK",
+    )
+    cell_bold = ParagraphStyle(
+        "VeriFYD_DOCX_Cell_Bold",
+        parent=cell_style,
+        fontName="Helvetica-Bold",
+        fontSize=5.8,
+        leading=6.7,
+    )
+
+    def esc(text: str) -> str:
+        import html
+        return html.escape(str(text or "")).replace("\n", "<br/>")
+
+    story: List[Any] = []
+    block_count = 0
+    rendered_any = False
+
+    for block in _iter_docx_blocks(docx_doc):
+        block_count += 1
+        if block_count > 1200:
+            story.append(Paragraph("[VeriFYD note: DOCX rendering truncated after 1200 body blocks]", bold))
+            break
+
+        # Tables are the key improvement over the old flat text renderer.
+        if hasattr(block, "rows"):
+            rows: List[List[str]] = []
+            try:
+                for row in block.rows:
+                    values = [_docx_cell_text_for_pdf(cell) for cell in row.cells]
+                    # Keep empty row structure for form-like documents, but remove exact duplicate
+                    # trailing columns introduced by some merged Word cells.
+                    while len(values) > 1 and values[-1] == "" and all(v == "" for v in values[-2:]):
+                        values.pop()
+                    rows.append(values)
+            except Exception:
+                rows = []
+
+            if not rows:
+                continue
+
+            max_cols = max((len(r) for r in rows), default=1)
+            normalized: List[List[Any]] = []
+            for ridx, row in enumerate(rows):
+                out_row = []
+                for cidx in range(max_cols):
+                    val = row[cidx] if cidx < len(row) else ""
+                    style = cell_bold if ridx == 0 else cell_style
+                    out_row.append(Paragraph(esc(val), style))
+                normalized.append(out_row)
+
+            col_widths = _docx_table_col_widths(rows, available_w)
+            # Ensure width count matches normalized max columns.
+            if len(col_widths) < max_cols:
+                extra = (available_w - sum(col_widths)) / max(1, max_cols - len(col_widths))
+                col_widths.extend([extra] * (max_cols - len(col_widths)))
+            col_widths = col_widths[:max_cols]
+
+            table = Table(normalized, colWidths=col_widths, repeatRows=1 if len(normalized) > 1 else 0, splitByRow=1)
+            table.setStyle(TableStyle([
+                ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#777777")),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 2.2),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 2.2),
+                ("TOPPADDING", (0, 0), (-1, -1), 2.0),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 2.0),
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#EEEEEE")),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#FAFAFA")]),
+            ]))
+            story.append(table)
+            story.append(Spacer(1, 4))
+            rendered_any = True
+            continue
+
+        # Paragraphs.
+        text = _docx_para_text_for_pdf(block)
+        if not text:
+            # Preserve occasional white space without flooding the page.
+            if story and block_count < 80:
+                story.append(Spacer(1, 2.5))
+            continue
+
+        align = _docx_alignment_name(block)
+        if align == "CENTER":
+            style = title if len(text) <= 80 and _docx_is_boldish(block) else center
+        elif align == "RIGHT":
+            style = right
+        elif _docx_is_boldish(block) or (len(text) <= 80 and text.upper() == text and any(ch.isalpha() for ch in text)):
+            style = bold
+        else:
+            style = base
+        story.append(Paragraph(esc(text), style))
+        rendered_any = True
+
+    if not rendered_any:
+        story.append(Paragraph("[No readable DOCX body content could be rendered.]", base))
+
+    def _on_page(c, _doc):
+        c.saveState()
+        try:
+            c.setFont("Helvetica", 6.2)
+            c.setFillGray(0.40)
+            c.drawString(left_margin, 16, f"VeriFYD certified Word rendering • {filename[:90]}")
+            c.drawRightString(page_w - right_margin, 16, f"Certificate: {cert_id[:18]}")
+            _draw_verifyd_mark(c, page_w, y=24, x_right_pad=34)
+        finally:
+            c.restoreState()
+
+    pdf.build(story, onFirstPage=_on_page, onLaterPages=_on_page)
+    return dest_path
+
+
 def _read_docx_for_render(src_path: str) -> str:
     """Extract DOCX paragraphs and tables for certified PDF fallback rendering."""
     try:
@@ -2608,6 +2907,20 @@ def stamp_document(src_path: str, dest_path: str, cert_id: str,
             log.warning(
                 "doc_certifier: LibreOffice render failed for ext=%s file=%s; falling back to text renderer: %s",
                 ext,
+                filename,
+                e,
+            )
+
+    if ext == ".docx":
+        try:
+            _create_docx_layout_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256)
+            # Preserve exact source file for legal/forensic review. The visible PDF
+            # is a table-aware rendering, not a perfect native Word clone.
+            _attach_original_file_to_pdf(dest_path, src_path, filename or os.path.basename(src_path))
+            return _finalize_certified_pdf(dest_path, detail, cert_id, filename, sha256, authenticity, label)
+        except Exception as e:
+            log.warning(
+                "doc_certifier: DOCX table-aware fallback failed for file=%s; using text renderer: %s",
                 filename,
                 e,
             )
