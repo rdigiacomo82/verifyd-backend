@@ -22,8 +22,12 @@
 #      and basic filled shapes where possible.
 #    - Adds only the small VeriFYD lower-right mark on each page.
 #
+#  Office/text inputs:
+#    - Attempts LibreOffice PDF conversion first to preserve original pages.
+#    - Falls back to safe readable text/rendered output when conversion fails.
+#
 #  Other non-PDF inputs:
-#    - Creates a simple certified PDF summary fallback.
+#    - Creates a certified PDF rendering/summary fallback.
 #
 #  The official certificate details remain in the database, email,
 #  and /certificate endpoint.
@@ -501,6 +505,144 @@ def _stamp_existing_pdf_file(src_pdf_path: str, dest_path: str, cert_id: str,
             except Exception:
                 pass
     return dest_path
+
+
+
+
+# ─────────────────────────────────────────────
+# Universal document rendering via LibreOffice
+# ─────────────────────────────────────────────
+
+LIBREOFFICE_RENDER_EXTENSIONS = {
+    ".docx", ".doc", ".odt", ".rtf",
+    ".xlsx", ".xls", ".ods", ".csv",
+    ".pptx", ".ppt", ".odp",
+    ".txt", ".md",
+    ".html", ".htm",
+}
+
+
+def _try_convert_document_to_pdf_with_libreoffice(src_path: str) -> Tuple[str, str] | None:
+    """
+    Try to use LibreOffice/soffice for true document-to-PDF conversion.
+
+    This is the preferred path for Word, Excel, PowerPoint, OpenDocument,
+    CSV, TXT, Markdown, and HTML because it preserves the original visual
+    document pages far better than text extraction.
+
+    Returns:
+      (converted_pdf_path, output_directory) on success.
+      None on failure/unavailable.
+
+    Caller is responsible for deleting both the returned PDF and output dir.
+    """
+    try:
+        import shutil
+        import subprocess
+        import uuid
+    except Exception:
+        return None
+
+    soffice = shutil.which("soffice") or shutil.which("libreoffice")
+    if not soffice:
+        return None
+
+    if not os.path.exists(src_path):
+        return None
+
+    out_dir = tempfile.mkdtemp(prefix="verifyd_lo_convert_")
+    user_profile_dir = tempfile.mkdtemp(prefix="verifyd_lo_profile_")
+
+    try:
+        cmd = [
+            soffice,
+            "--headless",
+            "--nologo",
+            "--nofirststartwizard",
+            "--nodefault",
+            "--nolockcheck",
+            f"-env:UserInstallation=file://{user_profile_dir}",
+            "--convert-to",
+            "pdf",
+            "--outdir",
+            out_dir,
+            src_path,
+        ]
+
+        result = subprocess.run(cmd, capture_output=True, timeout=150)
+
+        if result.returncode != 0:
+            return None
+
+        # LibreOffice usually writes basename.pdf, but names can be altered
+        # for odd filenames. Use any non-empty PDF in the output directory.
+        pdfs = []
+        try:
+            for name in os.listdir(out_dir):
+                if name.lower().endswith(".pdf"):
+                    candidate = os.path.join(out_dir, name)
+                    if os.path.exists(candidate) and os.path.getsize(candidate) > 1000:
+                        pdfs.append(candidate)
+        except Exception:
+            pdfs = []
+
+        if not pdfs:
+            return None
+
+        pdfs.sort(key=lambda path: os.path.getmtime(path), reverse=True)
+        return pdfs[0], out_dir
+
+    except Exception:
+        return None
+    finally:
+        # Do not delete out_dir here because the converted PDF lives there.
+        # The caller deletes out_dir after stamping. The LibreOffice user profile
+        # can always be removed immediately.
+        try:
+            import shutil
+            if os.path.isdir(user_profile_dir):
+                shutil.rmtree(user_profile_dir, ignore_errors=True)
+        except Exception:
+            pass
+
+
+def _create_office_pdf_via_libreoffice(src_path: str, dest_path: str, cert_id: str,
+                                        authenticity: int, label: str,
+                                        filename: str, sha256: str = "") -> str:
+    """
+    Convert a supported source document to PDF using LibreOffice, stamp the
+    rendered pages with the lower-right VeriFYD mark, and embed the exact
+    original source file into the certified PDF as an attachment.
+    """
+    import shutil
+
+    converted = _try_convert_document_to_pdf_with_libreoffice(src_path)
+    if not converted:
+        raise RuntimeError("LibreOffice conversion unavailable or failed.")
+
+    converted_pdf, converted_dir = converted
+    try:
+        _stamp_existing_pdf_file(
+            src_pdf_path=converted_pdf,
+            dest_path=dest_path,
+            cert_id=cert_id,
+            authenticity=authenticity,
+            label=label,
+            sha256=sha256,
+        )
+        _attach_original_file_to_pdf(dest_path, src_path, filename or os.path.basename(src_path))
+        return dest_path
+    finally:
+        try:
+            if converted_pdf and os.path.exists(converted_pdf):
+                os.remove(converted_pdf)
+        except Exception:
+            pass
+        try:
+            if converted_dir and os.path.isdir(converted_dir):
+                shutil.rmtree(converted_dir, ignore_errors=True)
+        except Exception:
+            pass
 
 
 def _try_convert_pptx_to_pdf_with_libreoffice(src_path: str) -> str | None:
@@ -1413,12 +1555,47 @@ def _read_binary_evidence_for_render(src_path: str, ext: str) -> str:
         lines.append("\nNo readable text strings found in scanned binary sample.")
     return "\n".join(lines)
 
+
+
+def _read_docx_for_render(src_path: str) -> str:
+    """Extract DOCX paragraphs and tables for certified PDF fallback rendering."""
+    try:
+        from docx import Document
+    except Exception:
+        return "[DOCX fallback rendering unavailable: python-docx is not installed.]"
+
+    try:
+        doc = Document(src_path)
+        parts: List[str] = []
+
+        for para in doc.paragraphs:
+            text = (para.text or "").strip()
+            if text:
+                parts.append(text)
+
+        for table in doc.tables:
+            for row in table.rows:
+                values: List[str] = []
+                for cell in row.cells:
+                    value = (cell.text or "").strip()
+                    if value:
+                        values.append(value.replace("\n", " "))
+                if values:
+                    parts.append(" | ".join(values))
+
+        return "\n".join(parts).strip() or "[No readable DOCX text could be extracted.]"
+    except Exception as e:
+        return f"[DOCX fallback rendering failed: {str(e)[:120]}]"
+
+
 def _read_text_for_certified_render(src_path: str, ext: str) -> str:
     """Read RTF/EML/text-family documents for certified PDF rendering."""
     data = b""
     with open(src_path, "rb") as fh:
         data = fh.read(2_500_000)
 
+    if ext == ".docx":
+        return _read_docx_for_render(src_path)
 
     if ext in (".html", ".htm"):
         return _read_html_for_render(src_path)
@@ -2384,19 +2561,31 @@ def stamp_document(src_path: str, dest_path: str, cert_id: str,
 
     if ext in (".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tif", ".tiff", ".webp", ".heic", ".heif"):
         _create_image_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256)
-        if ext in (".heic", ".heif"):
-            _attach_original_file_to_pdf(dest_path, src_path, filename or os.path.basename(src_path))
+        # Preserve the exact uploaded image as an embedded attachment, while the
+        # visible certified PDF remains the official stamped viewing copy.
+        _attach_original_file_to_pdf(dest_path, src_path, filename or os.path.basename(src_path))
         return _finalize_certified_pdf(dest_path, detail, cert_id, filename, sha256, authenticity, label)
+
+    if ext in LIBREOFFICE_RENDER_EXTENSIONS:
+        try:
+            _create_office_pdf_via_libreoffice(src_path, dest_path, cert_id, authenticity, label, filename, sha256)
+            return _finalize_certified_pdf(dest_path, detail, cert_id, filename, sha256, authenticity, label)
+        except Exception:
+            # Keep certification resilient. If LibreOffice is unavailable or a
+            # specific file cannot be converted, use the existing safe fallback
+            # renderers below.
+            pass
 
     if ext == ".xlsx":
         _create_xlsx_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256)
+        _attach_original_file_to_pdf(dest_path, src_path, filename or os.path.basename(src_path))
         return _finalize_certified_pdf(dest_path, detail, cert_id, filename, sha256, authenticity, label)
 
     if ext == ".pptx":
         _create_pptx_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256)
         return _finalize_certified_pdf(dest_path, detail, cert_id, filename, sha256, authenticity, label)
 
-    if ext in (".rtf", ".eml", ".msg", ".doc", ".ppt", ".xls", ".odt", ".ods", ".odp", ".html", ".htm", ".mhtml", ".mht", ".xml", ".json", ".svg", ".vsdx", ".yaml", ".yml", ".ini", ".log", ".sql", ".pst", ".ost", ".dwg", ".dxf"):
+    if ext in (".docx", ".txt", ".md", ".csv", ".rtf", ".eml", ".msg", ".doc", ".ppt", ".xls", ".odt", ".ods", ".odp", ".html", ".htm", ".mhtml", ".mht", ".xml", ".json", ".svg", ".vsdx", ".yaml", ".yml", ".ini", ".log", ".sql", ".pst", ".ost", ".dwg", ".dxf"):
         _create_text_render_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256)
         # Preserve exact source file for legal/forensic review, especially when
         # the certified PDF is a readable text rendering rather than a perfect
