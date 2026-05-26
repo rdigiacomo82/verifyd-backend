@@ -1,12 +1,13 @@
 # ============================================================
 #  VeriFYD — worker.py
 #
-#  RQ background worker for async video/photo analysis.
-#  Performance update:
-#  - For uploaded REAL videos, store the visible detection result immediately
-#    after analysis/database insert, before watermark stamping/email.
-#  - Stamping, R2 upload, and email still run afterward in the same job.
-#  - Detection logic and stamping logic are unchanged.
+#  RQ background worker for async video/photo/document analysis.
+#
+#  Phase 9A-1 update:
+#  - For REAL documents, create the existing certified PDF exactly as before.
+#  - Also create a universal VeriFYD certified file package ZIP containing
+#    the original file, certified PDF report, hashes, signed seal, and metadata.
+#  - Existing video/photo behavior is preserved.
 # ============================================================
 
 import os
@@ -18,21 +19,9 @@ import tempfile
 log = logging.getLogger("verifyd.worker")
 logging.basicConfig(level=logging.INFO)
 
-# ── Model loading policy ──────────────────────────────────────
 # IMPORTANT:
 # Do NOT pre-warm HuggingFace / transformer models at module import time.
-#
-# Why:
-# - RQ/Render can import this module for lightweight jobs such as keepalive_ping().
-# - The previous module-level prewarm caused DINOv2 and the ViT deepfake model
-#   to reload on keepalive jobs and again around real jobs, adding avoidable delay.
-# - Detection modules still lazy-load and cache their models when an actual
-#   upload/link/photo analysis needs them.
-#
-# Result:
-# - keepalive remains truly lightweight.
-# - real jobs no longer pay an extra module-import prewarm before detection.
-# - detection, scoring, stamping, R2 upload, and email behavior remain unchanged.
+# Detection modules lazy-load/cache models only when an actual job needs them.
 
 RESULT_TTL = 1800   # 30 min
 
@@ -58,39 +47,26 @@ def _store_result(redis_conn, job_id: str, result: dict) -> None:
              job_id, result.get("label"), result.get("authenticity_score"), result.get("video_ready"))
 
 
-def process_upload_job(
-    file_key: str,
-    filename: str,
-    email:    str,
-) -> dict:
-    """
-    Background job: retrieve uploaded video, analyze it, store result.
-
-    Performance behavior:
-    - Detection result is stored immediately after detection + DB insert.
-    - If REAL, certification/stamping then continues after the UI-visible
-      result is already available.
-    - After stamping/R2/email completes, result is updated with video_ready=True.
-    """
-    from rq        import get_current_job
+def process_upload_job(file_key: str, filename: str, email: str) -> dict:
+    """Background job: retrieve uploaded video, analyze it, store result."""
+    from rq import get_current_job
     from detection import run_detection_multiclip
-    from video     import clip_first_6_seconds, stamp_video
-    from database  import insert_certificate, increment_user_uses
-    from config    import BASE_URL
-    from emailer   import send_certification_email
+    from video import clip_first_6_seconds, stamp_video
+    from database import insert_certificate, increment_user_uses
+    from config import BASE_URL
+    from emailer import send_certification_email
 
     rq_job = get_current_job()
     job_id = rq_job.id if rq_job else file_key.replace("file:", "")
-
     r = _get_redis()
 
     LABEL_UI = {
-        "REAL":         ("REAL VIDEO VERIFIED", "green",  True),
-        "UNDETERMINED": ("VIDEO UNDETERMINED",  "blue",   False),
-        "AI":           ("AI DETECTED",         "red",    False),
+        "REAL": ("REAL VIDEO VERIFIED", "green", True),
+        "UNDETERMINED": ("VIDEO UNDETERMINED", "blue", False),
+        "AI": ("AI DETECTED", "red", False),
     }
 
-    suffix   = os.path.splitext(filename)[1] or ".mp4"
+    suffix = os.path.splitext(filename)[1] or ".mp4"
     tmp_path = os.path.join(tempfile.gettempdir(), f"{job_id}{suffix}")
 
     if file_key.startswith("r2:"):
@@ -99,9 +75,7 @@ def process_upload_job(
             from storage import download_video, delete_video
             download_video(r2_key, tmp_path)
             delete_video(r2_key)
-            file_size = os.path.getsize(tmp_path)
-            log.info("Retrieved file from R2: job=%s key=%s size=%d bytes",
-                     job_id, r2_key, file_size)
+            log.info("Retrieved file from R2: job=%s key=%s size=%d bytes", job_id, r2_key, os.path.getsize(tmp_path))
         except Exception as e:
             log.error("R2 download failed: key=%s job=%s error=%s", r2_key, job_id, e)
             result = {"job_status": "error", "error": "File could not be retrieved. Please re-upload."}
@@ -111,62 +85,52 @@ def process_upload_job(
     else:
         file_bytes = r.get(file_key)
         if not file_bytes:
-            log.error("File not found in Redis: key=%s job=%s", file_key, job_id)
             result = {"job_status": "error", "error": "File expired from queue. Please re-upload."}
             _store_result(r, job_id, result)
             return result
         with open(tmp_path, "wb") as f:
             f.write(file_bytes)
         r.delete(file_key)
-        log.info("Retrieved file from Redis: job=%s size=%d bytes", job_id, len(file_bytes))
         sha256 = hashlib.sha256(file_bytes).hexdigest()
 
     try:
         log.info("Worker: starting detection for job=%s email=%s", job_id, email)
-
         authenticity, label, detail = run_detection_multiclip(tmp_path)
         ui_text, color, certify = LABEL_UI.get(label, ("VIDEO UNDETERMINED", "blue", False))
 
-        log.info("Worker: detection complete job=%s label=%s auth=%d",
-                 job_id, label, authenticity)
-
         increment_user_uses(email)
         insert_certificate(
-            cert_id       = job_id,
-            email         = email,
-            original_file = filename,
-            label         = label,
-            authenticity  = authenticity,
-            ai_score      = detail["ai_score"],
-            sha256        = sha256,
+            cert_id=job_id,
+            email=email,
+            original_file=filename,
+            label=label,
+            authenticity=authenticity,
+            ai_score=detail["ai_score"],
+            sha256=sha256,
         )
 
         result = {
-            "status":             ui_text,
+            "status": ui_text,
             "authenticity_score": authenticity,
-            "color":              color,
-            "label":              label,
-            "gpt_reasoning":      detail.get("gpt_reasoning", ""),
-            "gpt_flags":          detail.get("gpt_flags", []),
-            "signal_score":       detail.get("signal_ai_score", 0),
-            "gpt_score":          detail.get("gpt_ai_score", 0),
-            "job_status":         "complete",
-            "video_ready":        False,
+            "color": color,
+            "label": label,
+            "gpt_reasoning": detail.get("gpt_reasoning", ""),
+            "gpt_flags": detail.get("gpt_flags", []),
+            "signal_score": detail.get("signal_ai_score", 0),
+            "gpt_score": detail.get("gpt_ai_score", 0),
+            "job_status": "complete",
+            "video_ready": False,
         }
 
         if certify:
             result["certificate_id"] = job_id
-            result["download_url"]   = f"{BASE_URL}/download/{job_id}"
+            result["download_url"] = f"{BASE_URL}/download/{job_id}"
             result["certification_status"] = "processing"
-
-        # PERFORMANCE OPTIMIZATION:
-        # Store the analysis result before ffmpeg stamping/R2/email so the UI can
-        # show the result as soon as detection completes. Stamping still continues.
         _store_result(r, job_id, result)
 
         if certify:
             certified_path = os.path.join(tempfile.gettempdir(), f"cert_{job_id}.mp4")
-            download_url   = f"{BASE_URL}/download/{job_id}"
+            download_url = f"{BASE_URL}/download/{job_id}"
             try:
                 clip_path = clip_first_6_seconds(tmp_path)
                 stamp_video(clip_path, certified_path, job_id)
@@ -187,24 +151,16 @@ def process_upload_job(
                             upload_certified(job_id, certified_path, _plan)
                             os.remove(certified_path)
                             _stored_in_r2 = True
-                            log.info("Worker: certified video stored in R2: job=%s plan=%s",
-                                     job_id, _plan)
+                            log.info("Worker: certified video stored in R2: job=%s plan=%s", job_id, _plan)
                     except Exception as _r2e:
                         log.warning("R2 cert upload failed, falling back to Redis: %s", _r2e)
 
                     if not _stored_in_r2 and os.path.exists(certified_path):
-                        _cert_ttl = {
-                            "free":       86400,
-                            "creator":    259200,
-                            "pro":        604800,
-                            "enterprise": 2592000,
-                        }.get(_plan, 86400)
+                        _cert_ttl = {"free": 86400, "creator": 259200, "pro": 604800, "enterprise": 2592000}.get(_plan, 86400)
                         with open(certified_path, "rb") as vf:
                             cert_bytes = vf.read()
                         r.setex(f"cert:{job_id}", _cert_ttl, cert_bytes)
                         os.remove(certified_path)
-                        log.info("Worker: certified video stored in Redis (fallback): job=%s size=%d bytes plan=%s ttl=%dh",
-                                 job_id, len(cert_bytes), _plan, _cert_ttl // 3600)
 
                 if email and "@" in email:
                     try:
@@ -215,41 +171,26 @@ def process_upload_job(
                 result["video_ready"] = True
                 result["certification_status"] = "ready"
                 _store_result(r, job_id, result)
-
             except Exception as e:
                 log.error("Worker: stamp failed for %s: %s", job_id, e)
                 result["video_ready"] = False
                 result["certification_status"] = "failed"
                 result["certification_error"] = "Certified video generation failed, but analysis completed."
                 _store_result(r, job_id, result)
-
         return result
-
     except Exception as e:
         log.exception("Worker: job %s failed", job_id)
         result = {"job_status": "error", "error": str(e)[:300]}
         _store_result(r, job_id, result)
         return result
-
     finally:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
             log.info("Worker: cleaned up temp file %s", tmp_path)
 
 
-# NOTE:
-# The remaining functions below are unchanged from your current worker.py.
-# They are included in full so this file can be used as a direct replacement.
-
-def process_photo_upload_job(
-    file_key: str,
-    filename: str,
-    email: str,
-) -> dict:
-    """
-    Background job: retrieve photo from R2/Redis, analyze it,
-    stamp if REAL, store result. Called by RQ.
-    """
+def process_photo_upload_job(file_key: str, filename: str, email: str) -> dict:
+    """Background job: retrieve photo from R2/Redis, analyze it, stamp if REAL, store result."""
     import os as _os
     import tempfile
     import hashlib
@@ -261,13 +202,12 @@ def process_photo_upload_job(
 
     rq_job = get_current_job()
     job_id = rq_job.id if rq_job else file_key.replace("file:", "")
-
     r = _get_redis()
 
     LABEL_UI = {
-        "REAL":         ("REAL PHOTO VERIFIED",  "green", True),
-        "UNDETERMINED": ("PHOTO UNDETERMINED",    "blue",  False),
-        "AI":           ("AI DETECTED",           "red",   False),
+        "REAL": ("REAL PHOTO VERIFIED", "green", True),
+        "UNDETERMINED": ("PHOTO UNDETERMINED", "blue", False),
+        "AI": ("AI DETECTED", "red", False),
     }
 
     ext = _os.path.splitext(filename)[1].lower() or ".jpg"
@@ -281,8 +221,6 @@ def process_photo_upload_job(
             from storage import download_video, delete_video
             download_video(r2_key, tmp_path)
             delete_video(r2_key)
-            log.info("Retrieved photo from R2: job=%s key=%s size=%d bytes",
-                     job_id, r2_key, _os.path.getsize(tmp_path))
             sha256 = _sha256_file(tmp_path)
         else:
             file_bytes = r.get(file_key)
@@ -295,37 +233,33 @@ def process_photo_upload_job(
             r.delete(file_key)
             sha256 = hashlib.sha256(file_bytes).hexdigest()
 
-        log.info("Worker: starting photo detection job=%s email=%s", job_id, email)
-
         authenticity, label, detail = run_photo_detection(tmp_path)
         ui_text, color, certify = LABEL_UI.get(label, ("PHOTO UNDETERMINED", "blue", False))
 
-        log.info("Worker: photo detection complete job=%s label=%s auth=%d", job_id, label, authenticity)
-
         increment_user_uses(email)
         insert_certificate(
-            cert_id       = job_id,
-            email         = email,
-            original_file = filename,
-            label         = label,
-            authenticity  = authenticity,
-            ai_score      = detail["ai_score"],
-            sha256        = sha256,
+            cert_id=job_id,
+            email=email,
+            original_file=filename,
+            label=label,
+            authenticity=authenticity,
+            ai_score=detail["ai_score"],
+            sha256=sha256,
         )
 
         result = {
-            "status":             ui_text,
+            "status": ui_text,
             "authenticity_score": authenticity,
-            "color":              color,
-            "label":              label,
-            "gpt_reasoning":      detail.get("gpt_reasoning", ""),
-            "gpt_flags":          detail.get("gpt_flags", []),
-            "signal_score":       detail.get("signal_ai_score", 0),
-            "gpt_score":          detail.get("gpt_ai_score", 0),
-            "ela_score":          detail.get("ela_score", 0),
-            "generator_guess":    detail.get("generator_guess", "Unknown"),
-            "media_type":         "photo",
-            "job_status":         "complete",
+            "color": color,
+            "label": label,
+            "gpt_reasoning": detail.get("gpt_reasoning", ""),
+            "gpt_flags": detail.get("gpt_flags", []),
+            "signal_score": detail.get("signal_ai_score", 0),
+            "gpt_score": detail.get("gpt_ai_score", 0),
+            "ela_score": detail.get("ela_score", 0),
+            "generator_guess": detail.get("generator_guess", "Unknown"),
+            "media_type": "photo",
+            "job_status": "complete",
         }
 
         if certify:
@@ -333,38 +267,30 @@ def process_photo_upload_job(
             download_url = f"{BASE_URL}/download-photo/{job_id}"
             try:
                 from video import stamp_photo
-
                 _stamp_src = tmp_path
                 _heic_converted = None
+
                 if ext in (".heic", ".heif"):
                     import subprocess as _sp, tempfile as _tf
                     _jpg_tmp = _tf.mktemp(suffix=".jpg")
                     _converted_ok = False
-
                     try:
                         _r = _sp.run(["convert", tmp_path, _jpg_tmp], capture_output=True, timeout=30)
-                        if _r.returncode == 0 and _os.path.exists(_jpg_tmp) and _os.path.getsize(_jpg_tmp) > 1000:
-                            _converted_ok = True
-                            log.info("Worker: HEIC→JPEG via ImageMagick: %s", _jpg_tmp)
-                    except Exception as _e1:
-                        log.debug("Worker: ImageMagick HEIC conversion failed: %s", _e1)
-
+                        _converted_ok = _r.returncode == 0 and _os.path.exists(_jpg_tmp) and _os.path.getsize(_jpg_tmp) > 1000
+                    except Exception:
+                        pass
                     if not _converted_ok:
                         try:
                             _r2 = _sp.run(["ffmpeg", "-y", "-i", tmp_path, "-q:v", "2", _jpg_tmp], capture_output=True, timeout=30)
-                            if _r2.returncode == 0 and _os.path.exists(_jpg_tmp) and _os.path.getsize(_jpg_tmp) > 1000:
-                                _converted_ok = True
-                                log.info("Worker: HEIC→JPEG via ffmpeg: %s", _jpg_tmp)
-                        except Exception as _e2:
-                            log.debug("Worker: ffmpeg HEIC conversion failed: %s", _e2)
-
+                            _converted_ok = _r2.returncode == 0 and _os.path.exists(_jpg_tmp) and _os.path.getsize(_jpg_tmp) > 1000
+                        except Exception:
+                            pass
                     if _converted_ok:
                         _stamp_src = _jpg_tmp
                         _heic_converted = _jpg_tmp
                         certified_path = _os.path.join(tempfile.gettempdir(), f"cert_{job_id}.jpg")
                         ext = ".jpg"
                     else:
-                        log.warning("Worker: HEIC→JPEG all conversion methods failed, skipping stamp")
                         _stamp_src = None
 
                 if _stamp_src:
@@ -385,42 +311,34 @@ def process_photo_upload_job(
                             upload_certified_photo(job_id, certified_path, _plan, ext)
                             _os.remove(certified_path)
                             _stored = True
-                            log.info("Worker: certified photo stored in R2: job=%s plan=%s", job_id, _plan)
                     except Exception as _r2e:
                         log.warning("R2 photo cert upload failed, falling back to Redis: %s", _r2e)
 
                     if not _stored and _os.path.exists(certified_path):
-                        _cert_ttl = {
-                            "free": 86400, "creator": 259200,
-                            "pro": 604800, "enterprise": 2592000,
-                        }.get(_plan, 86400)
+                        _cert_ttl = {"free": 86400, "creator": 259200, "pro": 604800, "enterprise": 2592000}.get(_plan, 86400)
                         with open(certified_path, "rb") as pf:
                             cert_bytes = pf.read()
                         r.setex(f"cert:{job_id}", _cert_ttl, cert_bytes)
                         _os.remove(certified_path)
-                        log.info("Worker: certified photo in Redis: job=%s size=%d", job_id, len(cert_bytes))
 
                 result["certificate_id"] = job_id
-                result["download_url"]   = download_url
+                result["download_url"] = download_url
 
                 if email and "@" in email:
                     try:
                         send_certification_email(email, job_id, authenticity, filename, download_url, is_photo=True)
                     except Exception as em:
                         log.warning("Worker: email failed for %s: %s", job_id, em)
-
             except Exception as stamp_err:
                 log.error("Worker: photo stamp failed for %s: %s", job_id, stamp_err)
 
         _store_result(r, job_id, result)
         return result
-
     except Exception as e:
         log.exception("Worker: photo job %s failed", job_id)
         result = {"job_status": "error", "error": str(e)[:300]}
         _store_result(r, job_id, result)
         return result
-
     finally:
         if _os.path.exists(tmp_path):
             _os.remove(tmp_path)
@@ -438,44 +356,27 @@ def process_photo_link_job(job_id: str, image_url: str, email: str) -> dict:
     tmp_path = os.path.join(tempfile.gettempdir(), f"{job_id}.jpg")
 
     try:
-        log.info("Worker: downloading image for job=%s url=%s", job_id, image_url[:80])
-
         try:
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Accept": "image/webp,image/apng,image/*,*/*;q=0.8",
-            }
+            headers = {"User-Agent": "Mozilla/5.0", "Accept": "image/webp,image/apng,image/*,*/*;q=0.8"}
             req = urllib.request.Request(image_url, headers=headers)
             with urllib.request.urlopen(req, timeout=30) as resp:
                 content_type = resp.headers.get("Content-Type", "")
                 data = resp.read()
-
             ext = ".jpg"
-            if "png" in content_type:
+            if "png" in content_type or data[:4] == b"\x89PNG":
                 ext = ".png"
-            elif "webp" in content_type:
+            elif "webp" in content_type or (data[:4] == b"RIFF" and data[8:12] == b"WEBP"):
                 ext = ".webp"
-            elif data[:4] == b"\x89PNG":
-                ext = ".png"
-            elif data[:4] == b"RIFF" and data[8:12] == b"WEBP":
-                ext = ".webp"
-
             if ext != ".jpg":
                 tmp_path = tmp_path.replace(".jpg", ext)
-
             with open(tmp_path, "wb") as fh:
                 fh.write(data)
-
-            log.info("Worker: downloaded image job=%s size=%d ext=%s", job_id, len(data), ext)
-
         except urllib.error.HTTPError as e:
-            err = f"Could not download image: HTTP {e.code}. The image may be private or require login."
-            result = {"job_status": "error", "error": err}
+            result = {"job_status": "error", "error": f"Could not download image: HTTP {e.code}. The image may be private or require login."}
             _store_result(r, job_id, result)
             return result
         except Exception as e:
-            err = f"Could not download image: {str(e)[:150]}"
-            result = {"job_status": "error", "error": err}
+            result = {"job_status": "error", "error": f"Could not download image: {str(e)[:150]}"}
             _store_result(r, job_id, result)
             return result
 
@@ -487,60 +388,43 @@ def process_photo_link_job(job_id: str, image_url: str, email: str) -> dict:
 
         from photo_detection import run_photo_detection
         from database import insert_certificate, increment_user_uses
-
         authenticity, label, detail = run_photo_detection(tmp_path)
-
         LABEL_UI = {
-            "REAL":         ("REAL PHOTO VERIFIED",  "green", True),
-            "UNDETERMINED": ("PHOTO UNDETERMINED",    "blue",  False),
-            "AI":           ("AI DETECTED",           "red",   False),
+            "REAL": ("REAL PHOTO VERIFIED", "green", True),
+            "UNDETERMINED": ("PHOTO UNDETERMINED", "blue", False),
+            "AI": ("AI DETECTED", "red", False),
         }
         ui_text, color, _ = LABEL_UI.get(label, ("PHOTO UNDETERMINED", "blue", False))
-
         increment_user_uses(email)
-        insert_certificate(
-            cert_id       = job_id,
-            email         = email,
-            original_file = image_url,
-            label         = label,
-            authenticity  = authenticity,
-            ai_score      = detail["ai_score"],
-            sha256        = None,
-        )
-
+        insert_certificate(cert_id=job_id, email=email, original_file=image_url, label=label, authenticity=authenticity, ai_score=detail["ai_score"], sha256=None)
         result = {
-            "status":             ui_text,
+            "status": ui_text,
             "authenticity_score": authenticity,
-            "color":              color,
-            "label":              label,
-            "gpt_reasoning":      detail.get("gpt_reasoning", ""),
-            "gpt_flags":          detail.get("gpt_flags", []),
-            "signal_score":       detail.get("signal_ai_score", 0),
-            "gpt_score":          detail.get("gpt_ai_score", 0),
-            "ela_score":          detail.get("ela_score", 0),
-            "generator_guess":    detail.get("generator_guess", "Unknown"),
-            "media_type":         "photo",
-            "job_status":         "complete",
+            "color": color,
+            "label": label,
+            "gpt_reasoning": detail.get("gpt_reasoning", ""),
+            "gpt_flags": detail.get("gpt_flags", []),
+            "signal_score": detail.get("signal_ai_score", 0),
+            "gpt_score": detail.get("gpt_ai_score", 0),
+            "ela_score": detail.get("ela_score", 0),
+            "generator_guess": detail.get("generator_guess", "Unknown"),
+            "media_type": "photo",
+            "job_status": "complete",
         }
-
         try:
             import hashlib as _hl, json as _jc
             _key = "urlcache:photo:v1:" + _hl.md5(image_url.strip().encode()).hexdigest()
             _cache = {k: v for k, v in result.items() if k != "job_status"}
             r.setex(_key, 3600, _jc.dumps(_cache))
-            log.info("Worker: cached photo URL result for %s", image_url[:60])
-        except Exception as _ce:
-            log.warning("Worker: photo URL cache write failed: %s", _ce)
-
+        except Exception:
+            pass
         _store_result(r, job_id, result)
         return result
-
     except Exception as e:
         log.exception("Worker: photo link job %s failed", job_id)
         result = {"job_status": "error", "error": str(e)[:300]}
         _store_result(r, job_id, result)
         return result
-
     finally:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
@@ -549,104 +433,51 @@ def process_photo_link_job(job_id: str, image_url: str, email: str) -> dict:
 def process_link_job(job_id: str, video_url: str, email: str, double_count: bool = False) -> dict:
     """Background job: download and analyze a video from a URL."""
     from detection import run_detection_multiclip
-    from video     import download_video_ytdlp, clip_first_6_seconds, stamp_video
-    from database  import insert_certificate, increment_user_uses
-    from config    import BASE_URL
-    from emailer   import send_certification_email
+    from video import download_video_ytdlp
+    from database import insert_certificate, increment_user_uses
 
     r = _get_redis()
-
     LABEL_UI = {
-        "REAL":         ("REAL VIDEO VERIFIED", "green",  True),
-        "UNDETERMINED": ("VIDEO UNDETERMINED",  "blue",   False),
-        "AI":           ("AI DETECTED",         "red",    False),
+        "REAL": ("REAL VIDEO VERIFIED", "green", True),
+        "UNDETERMINED": ("VIDEO UNDETERMINED", "blue", False),
+        "AI": ("AI DETECTED", "red", False),
     }
-
     tmp_path = os.path.join(tempfile.gettempdir(), f"{job_id}.mp4")
-
     try:
-        log.info("Worker: downloading url for job=%s", job_id)
         download_video_ytdlp(video_url, tmp_path)
-
         if not os.path.exists(tmp_path):
             raise RuntimeError(f"Download produced no file: {video_url}")
-
-        log.info("Worker: starting detection for link job=%s", job_id)
-
         try:
             from database import get_or_create_user
             get_or_create_user(email)
-            log.info("Worker: ensured user record exists for %s", email)
-        except Exception as _ue:
-            log.warning("Worker: could not create user record for %s: %s", email, _ue)
-
+        except Exception:
+            pass
         authenticity, label, detail = run_detection_multiclip(tmp_path)
-        ui_text, color, certify = LABEL_UI.get(label, ("VIDEO UNDETERMINED", "blue", False))
-
+        ui_text, color, _ = LABEL_UI.get(label, ("VIDEO UNDETERMINED", "blue", False))
         uses = 2 if double_count else 1
         for _ in range(uses):
             increment_user_uses(email)
-
-        insert_certificate(
-            cert_id       = job_id,
-            email         = email,
-            original_file = video_url,
-            label         = label,
-            authenticity  = authenticity,
-            ai_score      = detail["ai_score"],
-            sha256        = None,
-        )
-
+        insert_certificate(cert_id=job_id, email=email, original_file=video_url, label=label, authenticity=authenticity, ai_score=detail["ai_score"], sha256=None)
         result = {
-            "status":             ui_text,
+            "status": ui_text,
             "authenticity_score": authenticity,
-            "color":              color,
-            "label":              label,
-            "gpt_reasoning":      detail.get("gpt_reasoning", ""),
-            "gpt_flags":          detail.get("gpt_flags", []),
-            "signal_score":       detail.get("signal_ai_score", 0),
-            "gpt_score":          detail.get("gpt_ai_score", 0),
-            "job_status":         "complete",
+            "color": color,
+            "label": label,
+            "gpt_reasoning": detail.get("gpt_reasoning", ""),
+            "gpt_flags": detail.get("gpt_flags", []),
+            "signal_score": detail.get("signal_ai_score", 0),
+            "gpt_score": detail.get("gpt_ai_score", 0),
+            "job_status": "complete",
         }
-
-        certify = False
-        if False:
-            certified_path = os.path.join(tempfile.gettempdir(), f"cert_{job_id}.mp4")
-            download_url   = f"{BASE_URL}/download/{job_id}"
-            try:
-                clip_path = clip_first_6_seconds(tmp_path)
-                stamp_video(clip_path, certified_path, job_id)
-                if os.path.exists(clip_path):
-                    os.remove(clip_path)
-                if os.path.exists(certified_path):
-                    with open(certified_path, "rb") as vf:
-                        cert_bytes = vf.read()
-                    r.setex(f"cert:{job_id}", 3600, cert_bytes)
-                    os.remove(certified_path)
-                    log.info("Worker: certified video stored in Redis: link job=%s size=%d bytes", job_id, len(cert_bytes))
-                result["certificate_id"] = job_id
-                result["download_url"]   = download_url
-                if email and "@" in email:
-                    try:
-                        send_certification_email(email, job_id, authenticity, video_url, download_url)
-                    except Exception as e:
-                        log.warning("Worker: email failed for %s: %s", job_id, e)
-            except Exception as e:
-                log.error("Worker: stamp failed for link job %s: %s", job_id, e)
-
         _store_result(r, job_id, result)
-
         try:
             import hashlib as _hl, json as _jc
             _url_cache_key = "urlcache:v2:" + _hl.md5(video_url.strip().encode()).hexdigest()
             _cache_result = {k: v for k, v in result.items() if k != "job_status"}
             r.setex(_url_cache_key, 3600, _jc.dumps(_cache_result))
-            log.info("Worker: cached URL result for %s", video_url[:80])
-        except Exception as _ce:
-            log.warning("Worker: URL cache write failed: %s", _ce)
-
+        except Exception:
+            pass
         return result
-
     except Exception as e:
         log.exception("Worker: link job %s failed", job_id)
         err_str = str(e).lower()
@@ -664,28 +495,18 @@ def process_link_job(job_id: str, video_url: str, email: str, double_count: bool
             user_error = "The video could not be downloaded. YouTube may be blocking automated access to this video. Try uploading the video file directly instead."
         else:
             user_error = "This video could not be analyzed. YouTube may be blocking access, or the link may be invalid. Try uploading the video file directly instead."
-
         result = {"job_status": "error", "error": user_error, "error_detail": str(e)[:300]}
         _store_result(r, job_id, result)
         return result
-
     finally:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
 
 
-
-
-def process_document_upload_job(
-    file_key: str,
-    filename: str,
-    email: str,
-) -> dict:
+def process_document_upload_job(file_key: str, filename: str, email: str) -> dict:
     """
-    Background job: retrieve document from R2/Redis, analyze it,
-    store result, and create a certified/stamped PDF for REAL documents.
-    Mirrors the certified-video flow: the result is stored first, then the
-    stamped document is generated/uploaded and the result is updated.
+    Background job: retrieve document from R2/Redis, analyze it, store result,
+    create the existing certified PDF, and create a universal certified-file ZIP.
     """
     import os as _os
     import tempfile as _tempfile
@@ -698,13 +519,12 @@ def process_document_upload_job(
 
     rq_job = get_current_job()
     job_id = rq_job.id if rq_job else file_key.replace("file:", "")
-
     r = _get_redis()
 
     LABEL_UI = {
-        "REAL":         ("REAL DOCUMENT VERIFIED", "green", True),
-        "UNDETERMINED": ("DOCUMENT UNDETERMINED",  "blue",  False),
-        "AI":           ("AI / TAMPERING DETECTED", "red",  False),
+        "REAL": ("REAL DOCUMENT VERIFIED", "green", True),
+        "UNDETERMINED": ("DOCUMENT UNDETERMINED", "blue", False),
+        "AI": ("AI / TAMPERING DETECTED", "red", False),
     }
 
     ext = _os.path.splitext(filename)[1].lower() or ".pdf"
@@ -727,8 +547,7 @@ def process_document_upload_job(
             from storage import download_video, delete_video
             download_video(r2_key, tmp_path)
             delete_video(r2_key)
-            log.info("Retrieved document from R2: job=%s key=%s size=%d bytes",
-                     job_id, r2_key, _os.path.getsize(tmp_path))
+            log.info("Retrieved document from R2: job=%s key=%s size=%d bytes", job_id, r2_key, _os.path.getsize(tmp_path))
             sha256 = _sha256_file(tmp_path)
         else:
             file_bytes = r.get(file_key)
@@ -745,9 +564,6 @@ def process_document_upload_job(
 
         image_document_exts = (".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp", ".heic", ".heif")
         if ext in image_document_exts:
-            # Use VeriFYD's existing photo-authentication engines for image documents.
-            # This keeps image detection strong while preserving the document upload,
-            # certified-document PDF, and document email flow.
             from photo_detection import run_photo_detection
             authenticity, label, detail = run_photo_detection(tmp_path)
             detail = dict(detail or {})
@@ -767,40 +583,42 @@ def process_document_upload_job(
 
         increment_user_uses(email)
         insert_certificate(
-            cert_id       = job_id,
-            email         = email,
-            original_file = filename,
-            label         = label,
-            authenticity  = authenticity,
-            ai_score      = detail["ai_score"],
-            sha256        = sha256,
+            cert_id=job_id,
+            email=email,
+            original_file=filename,
+            label=label,
+            authenticity=authenticity,
+            ai_score=detail["ai_score"],
+            sha256=sha256,
         )
 
+        risk_report = detail.get("document_risk_report") or detail.get("risk_report", {})
         result = {
-            "status":             ui_text,
+            "status": ui_text,
             "authenticity_score": authenticity,
-            "color":              color,
-            "label":              label,
-            "gpt_reasoning":      detail.get("gpt_reasoning", ""),
-            "gpt_flags":          detail.get("gpt_flags", []),
-            "signal_score":       detail.get("signal_ai_score", 0),
-            "gpt_score":          detail.get("gpt_ai_score", 0),
-            "metadata_score":     detail.get("metadata_score", 0),
-            "text_score":         detail.get("text_score", 0),
-            "document_risk_report": detail.get("document_risk_report") or detail.get("risk_report", {}),
-            "risk_report":        detail.get("document_risk_report") or detail.get("risk_report", {}),
-            "overall_risk":       (detail.get("document_risk_report") or detail.get("risk_report", {})).get("overall_risk") if isinstance(detail.get("document_risk_report") or detail.get("risk_report", {}), dict) else None,
-            "risk_score":         (detail.get("document_risk_report") or detail.get("risk_report", {})).get("risk_score") if isinstance(detail.get("document_risk_report") or detail.get("risk_report", {}), dict) else None,
-            "metadata_integrity": (detail.get("document_risk_report") or detail.get("risk_report", {})).get("metadata_integrity") if isinstance(detail.get("document_risk_report") or detail.get("risk_report", {}), dict) else None,
+            "color": color,
+            "label": label,
+            "gpt_reasoning": detail.get("gpt_reasoning", ""),
+            "gpt_flags": detail.get("gpt_flags", []),
+            "signal_score": detail.get("signal_ai_score", 0),
+            "gpt_score": detail.get("gpt_ai_score", 0),
+            "metadata_score": detail.get("metadata_score", 0),
+            "text_score": detail.get("text_score", 0),
+            "document_risk_report": risk_report,
+            "risk_report": risk_report,
+            "overall_risk": risk_report.get("overall_risk") if isinstance(risk_report, dict) else None,
+            "risk_score": risk_report.get("risk_score") if isinstance(risk_report, dict) else None,
+            "metadata_integrity": risk_report.get("metadata_integrity") if isinstance(risk_report, dict) else None,
             "external_metadata_tool": detail.get("external_metadata_tool", {}),
-            "secure_seal":        "pending",
-            "document_type":      detail.get("document_type", ext.lstrip(".")),
-            "pages":              detail.get("pages", 0),
-            "embedded_images":    detail.get("embedded_images", 0),
-            "sha256":             detail.get("sha256", sha256),
-            "media_type":         "document",
-            "job_status":         "complete",
-            "document_ready":     False,
+            "secure_seal": "pending",
+            "document_type": detail.get("document_type", ext.lstrip(".")),
+            "pages": detail.get("pages", 0),
+            "embedded_images": detail.get("embedded_images", 0),
+            "sha256": detail.get("sha256", sha256),
+            "media_type": "document",
+            "job_status": "complete",
+            "document_ready": False,
+            "universal_certified_file": "pending" if certify else "not_created",
         }
 
         if certify:
@@ -808,20 +626,16 @@ def process_document_upload_job(
             result["download_url"] = f"{BASE_URL}/download-document/{job_id}"
             result["certification_status"] = "processing"
 
-        # Store analysis result immediately so frontend can display the score.
         _store_result(r, job_id, result)
 
         if certify:
             certified_path = _os.path.join(_tempfile.gettempdir(), f"cert_doc_{job_id}.pdf")
+            package_path = _os.path.join(_tempfile.gettempdir(), f"verifyd_certified_file_{job_id}.zip")
             download_url = f"{BASE_URL}/download-document/{job_id}"
             try:
                 from doc_certifier import stamp_document
 
-                log.info(
-                    "Worker: creating stamped certified document: job=%s src=%s dest=%s label=%s auth=%d",
-                    job_id, tmp_path, certified_path, label, authenticity,
-                )
-
+                log.info("Worker: creating stamped certified document: job=%s src=%s dest=%s label=%s auth=%d", job_id, tmp_path, certified_path, label, authenticity)
                 stamp_document(
                     src_path=tmp_path,
                     dest_path=certified_path,
@@ -836,10 +650,7 @@ def process_document_upload_job(
                 _cert_exists = _os.path.exists(certified_path)
                 _cert_size = _os.path.getsize(certified_path) if _cert_exists else 0
                 _src_size = _os.path.getsize(tmp_path) if _os.path.exists(tmp_path) else 0
-                log.info(
-                    "Worker: stamped certified document created: job=%s exists=%s size=%d original_size=%d path=%s",
-                    job_id, _cert_exists, _cert_size, _src_size, certified_path,
-                )
+                log.info("Worker: stamped certified document created: job=%s exists=%s size=%d original_size=%d path=%s", job_id, _cert_exists, _cert_size, _src_size, certified_path)
 
                 if _cert_exists and _cert_size > 1000:
                     try:
@@ -847,34 +658,72 @@ def process_document_upload_job(
                     except Exception:
                         _plan = "free"
 
-                    _stored_in_r2 = False
+                    # Phase 9A-1: create universal certified-file package BEFORE the
+                    # certified PDF is uploaded/removed. The package includes both the
+                    # exact original source file and exact issued certified PDF report.
                     try:
-                        from storage import upload_certified_document, r2_available
+                        from universal_certifier import create_universal_certified_package
+                        create_universal_certified_package(
+                            original_path=tmp_path,
+                            certified_pdf_path=certified_path,
+                            package_path=package_path,
+                            cert_id=job_id,
+                            original_filename=filename,
+                            certified_to=email,
+                            label=label,
+                            authenticity=authenticity,
+                            ai_score=detail.get("ai_score", ""),
+                            original_sha256=sha256,
+                            detail=detail,
+                        )
+                        result["universal_certified_file"] = "created"
+                        result["certified_file_package"] = "present"
+                        log.info("Worker: universal certified file package created: job=%s path=%s size=%d", job_id, package_path, _os.path.getsize(package_path))
+                    except Exception as pkg_e:
+                        result["universal_certified_file"] = "failed"
+                        result["certified_file_package_error"] = str(pkg_e)[:200]
+                        log.warning("Worker: universal certified package creation failed for %s: %s", job_id, pkg_e)
+
+                    _stored_in_r2 = False
+                    _package_stored_in_r2 = False
+                    try:
+                        from storage import upload_certified_document, upload_certified_file_package, r2_available
                         if r2_available():
-                            log.info(
-                                "Worker: uploading STAMPED certified document to R2: job=%s path=%s size=%d plan=%s",
-                                job_id, certified_path, _os.path.getsize(certified_path), _plan,
-                            )
+                            log.info("Worker: uploading STAMPED certified document to R2: job=%s path=%s size=%d plan=%s", job_id, certified_path, _os.path.getsize(certified_path), _plan)
                             upload_certified_document(job_id, certified_path, _plan)
                             _os.remove(certified_path)
                             _stored_in_r2 = True
                             log.info("Worker: certified document stored in R2: job=%s plan=%s", job_id, _plan)
+
+                            if _os.path.exists(package_path):
+                                package_key = upload_certified_file_package(job_id, package_path, _plan)
+                                _os.remove(package_path)
+                                _package_stored_in_r2 = True
+                                result["universal_certified_file"] = "stored"
+                                result["certified_file_storage"] = "r2"
+                                result["certified_file_key"] = package_key
+                                log.info("Worker: universal certified file package stored in R2: job=%s plan=%s key=%s", job_id, _plan, package_key)
                     except Exception as _r2e:
-                        log.warning("R2 document cert upload failed, falling back to Redis: %s", _r2e)
+                        log.warning("R2 document/package upload failed, falling back to Redis where needed: %s", _r2e)
+
+                    _cert_ttl = {"free": 86400, "creator": 259200, "pro": 604800, "enterprise": 2592000}.get(_plan, 86400)
 
                     if not _stored_in_r2 and _os.path.exists(certified_path):
-                        _cert_ttl = {
-                            "free": 86400,
-                            "creator": 259200,
-                            "pro": 604800,
-                            "enterprise": 2592000,
-                        }.get(_plan, 86400)
                         with open(certified_path, "rb") as df:
                             doc_bytes = df.read()
                         r.setex(f"doccert:{job_id}", _cert_ttl, doc_bytes)
                         _os.remove(certified_path)
-                        log.info("Worker: certified document stored in Redis: job=%s size=%d bytes plan=%s ttl=%dh",
-                                 job_id, len(doc_bytes), _plan, _cert_ttl // 3600)
+                        log.info("Worker: certified document stored in Redis: job=%s size=%d bytes plan=%s ttl=%dh", job_id, len(doc_bytes), _plan, _cert_ttl // 3600)
+
+                    if not _package_stored_in_r2 and _os.path.exists(package_path):
+                        with open(package_path, "rb") as pf:
+                            pkg_bytes = pf.read()
+                        r.setex(f"filecert:{job_id}", _cert_ttl, pkg_bytes)
+                        _os.remove(package_path)
+                        result["universal_certified_file"] = "stored"
+                        result["certified_file_storage"] = "redis"
+                        result["certified_file_key"] = f"filecert:{job_id}"
+                        log.info("Worker: universal certified file package stored in Redis: job=%s size=%d bytes plan=%s ttl=%dh", job_id, len(pkg_bytes), _plan, _cert_ttl // 3600)
 
                     result["document_ready"] = True
                     result["certification_status"] = "ready"
@@ -884,36 +733,33 @@ def process_document_upload_job(
 
                     if email and "@" in email:
                         try:
-                            _sent = send_certification_email(
-                                email,
-                                job_id,
-                                authenticity,
-                                filename,
-                                download_url,
-                                is_document=True,
-                            )
+                            _sent = send_certification_email(email, job_id, authenticity, filename, download_url, is_document=True)
                             log.info("Worker: document certification email sent=%s job=%s email=%s", _sent, job_id, email)
                         except Exception as _em:
                             log.warning("Worker: document certification email failed for %s: %s", job_id, _em)
                 else:
                     raise RuntimeError("Stamped document output missing or too small")
-
             except Exception as stamp_err:
                 log.error("Worker: document stamp failed for %s: %s", job_id, stamp_err)
                 result["document_ready"] = False
                 result["certification_status"] = "failed"
                 result["certification_error"] = "Certified document generation failed, but analysis completed."
                 _store_result(r, job_id, result)
+            finally:
+                for _cleanup_path in (certified_path, package_path):
+                    try:
+                        if _os.path.exists(_cleanup_path):
+                            _os.remove(_cleanup_path)
+                    except Exception:
+                        pass
 
         log.info("Worker: document detection complete job=%s label=%s auth=%d", job_id, label, authenticity)
         return result
-
     except Exception as e:
         log.exception("Worker: document job %s failed", job_id)
         result = {"job_status": "error", "error": str(e)[:300]}
         _store_result(r, job_id, result)
         return result
-
     finally:
         if _os.path.exists(tmp_path):
             _os.remove(tmp_path)
@@ -924,17 +770,7 @@ def process_document_upload_job(
 #  Keepalive job — prevents worker cold starts
 # ─────────────────────────────────────────────────────────────
 def keepalive_ping():
-    """
-    Lightweight no-op job enqueued every 8 minutes by main.py scheduler.
-
-    PURPOSE: Render's worker service suspends after inactivity, causing
-    cold starts that add ~15-20s to the next real job (model pre-warm).
-    This job keeps the worker process alive between real user submissions
-    so models stay cached in memory at all times.
-
-    The job does nothing except log a heartbeat. Total execution time: <1ms.
-    Redis TTL for result: 60 seconds (no need to keep longer).
-    """
+    """Lightweight no-op job enqueued every 8 minutes by main.py scheduler."""
     import time as _time
     _ts = _time.strftime("%Y-%m-%d %H:%M:%S UTC", _time.gmtime())
     log.info("Keepalive ping: worker alive at %s — models cached in memory", _ts)

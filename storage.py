@@ -17,6 +17,7 @@
 
 import os
 import logging
+import mimetypes
 import boto3
 from botocore.config import Config
 
@@ -50,12 +51,20 @@ def _get_client():
         region_name="auto",
     )
 
-# ── Upload raw video file ─────────────────────────────────────
+
+def _content_type_for_path(path: str, default: str = "application/octet-stream") -> str:
+    guessed, _ = mimetypes.guess_type(path or "")
+    return guessed or default
+
+# ── Upload raw video/file upload ──────────────────────────────
 def upload_video(job_id: str, file_path: str, filename: str) -> str:
     """
-    Upload a raw video file to R2.
+    Upload a raw file to R2.
+
+    Historical name is upload_video because video was the first VeriFYD media
+    type. This helper is also used by document/photo upload staging, so Phase 9A
+    now stores a safer content type based on the uploaded filename.
     Returns the R2 object key.
-    Raises RuntimeError if R2 is not configured.
     """
     if not _is_configured():
         raise RuntimeError("R2 not configured — missing env vars")
@@ -68,23 +77,21 @@ def upload_video(job_id: str, file_path: str, filename: str) -> str:
         file_path,
         BUCKET,
         key,
-        ExtraArgs={"ContentType": "video/mp4"},
+        ExtraArgs={"ContentType": _content_type_for_path(filename, "application/octet-stream")},
     )
     log.info("storage: uploaded %s → r2://%s/%s", filename, BUCKET, key)
     return key
 
-# ── Download raw video file ───────────────────────────────────
+# ── Download raw video/file upload ────────────────────────────
 def download_video(key: str, dest_path: str) -> None:
-    """
-    Download a video file from R2 to dest_path.
-    """
+    """Download a staged upload from R2 to dest_path."""
     client = _get_client()
     client.download_file(BUCKET, key, dest_path)
     log.info("storage: downloaded r2://%s/%s → %s", BUCKET, key, dest_path)
 
-# ── Delete raw video file ────────────────────────────────────
+# ── Delete raw video/file upload ──────────────────────────────
 def delete_video(key: str) -> None:
-    """Delete a video file from R2 (call after worker finishes)."""
+    """Delete a staged upload from R2 (call after worker finishes)."""
     try:
         client = _get_client()
         client.delete_object(Bucket=BUCKET, Key=key)
@@ -101,12 +108,11 @@ CERT_RETENTION_DAYS = {
     "enterprise": 30,   # 30 days
 }
 
+_PLAN_ORDER = ["free", "creator", "pro", "enterprise"]
+_LOOKUP_PLAN_ORDER = ["pro", "creator", "enterprise", "free"]
+
 def upload_certified(job_id: str, cert_path: str, plan: str = "free") -> str:
-    """
-    Upload a certified (stamped) video to R2.
-    Tags with plan so Cloudflare lifecycle rules can expire by tier.
-    Returns the R2 object key.
-    """
+    """Upload a certified (stamped) video to R2."""
     key = f"certified/{plan}/{job_id}.mp4"
     client = _get_client()
     client.upload_file(
@@ -115,10 +121,7 @@ def upload_certified(job_id: str, cert_path: str, plan: str = "free") -> str:
         key,
         ExtraArgs={
             "ContentType": "video/mp4",
-            "Metadata": {
-                "plan":   plan,
-                "job_id": job_id,
-            },
+            "Metadata": {"plan": plan, "job_id": job_id},
         },
     )
     log.info("storage: uploaded certified video → r2://%s/%s (plan=%s)", BUCKET, key, plan)
@@ -126,29 +129,20 @@ def upload_certified(job_id: str, cert_path: str, plan: str = "free") -> str:
 
 # ── Generate presigned download URL ──────────────────────────
 def get_download_url(job_id: str, expires: int = CERT_URL_TTL) -> str:
-    """
-    Generate a presigned URL for downloading a certified video.
-    Finds the correct key across plan subfolders.
-    If R2_PUBLIC_URL is set, returns a direct public URL instead.
-    """
     key = get_certified_key(job_id)
-
     if PUBLIC_URL:
         return f"{PUBLIC_URL.rstrip('/')}/{key}"
-
     client = _get_client()
-    url = client.generate_presigned_url(
+    return client.generate_presigned_url(
         "get_object",
         Params={"Bucket": BUCKET, "Key": key},
         ExpiresIn=expires,
     )
-    return url
 
 # ── Check if certified video exists ──────────────────────────
 def certified_exists(job_id: str) -> bool:
-    """Check whether a certified video exists in R2 (any plan subfolder)."""
     client = _get_client()
-    for plan in ["free", "creator", "pro", "enterprise"]:
+    for plan in _PLAN_ORDER:
         try:
             client.head_object(Bucket=BUCKET, Key=f"certified/{plan}/{job_id}.mp4")
             return True
@@ -158,25 +152,19 @@ def certified_exists(job_id: str) -> bool:
 
 
 def get_certified_key(job_id: str) -> str:
-    """Find the R2 key for a certified video across plan subfolders."""
     client = _get_client()
-    for plan in ["free", "creator", "pro", "enterprise"]:
+    for plan in _PLAN_ORDER:
         key = f"certified/{plan}/{job_id}.mp4"
         try:
             client.head_object(Bucket=BUCKET, Key=key)
             return key
         except Exception:
             continue
-    return f"certified/free/{job_id}.mp4"  # fallback
+    return f"certified/free/{job_id}.mp4"
 
 def upload_certified_photo(job_id: str, cert_path: str,
                            plan: str = "free", ext: str = ".jpg") -> str:
-    """
-    Upload a certified (stamped) photo to R2.
-    Stored at certified-photos/{plan}/{job_id}{ext}.
-    Tags with plan for lifecycle rules.
-    Returns the R2 object key.
-    """
+    """Upload a certified (stamped) photo to R2."""
     content_types = {
         ".jpg":  "image/jpeg",
         ".jpeg": "image/jpeg",
@@ -193,25 +181,16 @@ def upload_certified_photo(job_id: str, cert_path: str,
         key,
         ExtraArgs={
             "ContentType": content_type,
-            "Metadata": {
-                "plan":   plan,
-                "job_id": job_id,
-                "type":   "photo",
-            },
+            "Metadata": {"plan": plan, "job_id": job_id, "type": "photo"},
         },
     )
-    log.info("storage: uploaded certified photo → r2://%s/%s (plan=%s)",
-             BUCKET, key, plan)
+    log.info("storage: uploaded certified photo → r2://%s/%s (plan=%s)", BUCKET, key, plan)
     return key
 
 
 
 def upload_certified_document(job_id: str, cert_path: str, plan: str = "free") -> str:
-    """
-    Upload a certified/stamped document PDF to R2.
-    Stored at certified-documents/{plan}/{job_id}.pdf.
-    Returns the R2 object key.
-    """
+    """Upload a certified/stamped document PDF to R2."""
     key = f"certified-documents/{plan}/{job_id}.pdf"
     client = _get_client()
     client.upload_file(
@@ -220,11 +199,7 @@ def upload_certified_document(job_id: str, cert_path: str, plan: str = "free") -
         key,
         ExtraArgs={
             "ContentType": "application/pdf",
-            "Metadata": {
-                "plan": plan,
-                "job_id": job_id,
-                "type": "document",
-            },
+            "Metadata": {"plan": plan, "job_id": job_id, "type": "document"},
         },
     )
     log.info("storage: uploaded certified document → r2://%s/%s (plan=%s)", BUCKET, key, plan)
@@ -234,7 +209,7 @@ def upload_certified_document(job_id: str, cert_path: str, plan: str = "free") -
 def certified_document_exists(job_id: str) -> bool:
     """Check whether a certified document exists in R2 (any plan subfolder)."""
     client = _get_client()
-    for plan in ["free", "creator", "pro", "enterprise"]:
+    for plan in _PLAN_ORDER:
         try:
             client.head_object(Bucket=BUCKET, Key=f"certified-documents/{plan}/{job_id}.pdf")
             return True
@@ -246,7 +221,7 @@ def certified_document_exists(job_id: str) -> bool:
 def get_certified_document_key(job_id: str) -> str:
     """Find the R2 key for a certified document across plan subfolders."""
     client = _get_client()
-    for plan in ["free", "creator", "pro", "enterprise"]:
+    for plan in _PLAN_ORDER:
         key = f"certified-documents/{plan}/{job_id}.pdf"
         try:
             client.head_object(Bucket=BUCKET, Key=key)
@@ -269,8 +244,76 @@ def get_document_download_url(job_id: str, expires: int = CERT_URL_TTL) -> str:
     )
 
 
+# ─────────────────────────────────────────────
+# Phase 9A — Universal Certified File Package
+# ─────────────────────────────────────────────
+
+def upload_certified_file_package(job_id: str, package_path: str, plan: str = "free") -> str:
+    """
+    Upload a universal VeriFYD certified file package to R2.
+    Stored at certified-files/{plan}/{job_id}.zip.
+    """
+    key = f"certified-files/{plan}/{job_id}.zip"
+    client = _get_client()
+    client.upload_file(
+        package_path,
+        BUCKET,
+        key,
+        ExtraArgs={
+            "ContentType": "application/zip",
+            "Metadata": {
+                "plan": plan,
+                "job_id": job_id,
+                "type": "universal_certified_file",
+                "format": "zip",
+            },
+        },
+    )
+    log.info("storage: uploaded certified file package → r2://%s/%s (plan=%s)", BUCKET, key, plan)
+    return key
+
+
+def certified_file_package_exists(job_id: str) -> bool:
+    """Check whether a universal certified file package exists in R2."""
+    client = _get_client()
+    for plan in _PLAN_ORDER:
+        try:
+            client.head_object(Bucket=BUCKET, Key=f"certified-files/{plan}/{job_id}.zip")
+            return True
+        except Exception:
+            continue
+    return False
+
+
+def get_certified_file_package_key(job_id: str) -> str:
+    """Find the R2 key for a universal certified file package."""
+    client = _get_client()
+    for plan in _PLAN_ORDER:
+        key = f"certified-files/{plan}/{job_id}.zip"
+        try:
+            client.head_object(Bucket=BUCKET, Key=key)
+            return key
+        except Exception:
+            continue
+    return f"certified-files/free/{job_id}.zip"
+
+
+def get_certified_file_package_download_url(job_id: str, expires: int = CERT_URL_TTL) -> str:
+    """Generate a presigned URL for downloading a universal certified file package."""
+    key = get_certified_file_package_key(job_id)
+    if PUBLIC_URL:
+        return f"{PUBLIC_URL.rstrip('/')}/{key}"
+    client = _get_client()
+    return client.generate_presigned_url(
+        "get_object",
+        Params={"Bucket": BUCKET, "Key": key},
+        ExpiresIn=expires,
+    )
+
+
 # ── Convenience: is R2 available? ────────────────────────────
 def r2_available() -> bool:
     return _is_configured()
+
 
 
