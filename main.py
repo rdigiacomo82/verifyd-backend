@@ -1040,7 +1040,7 @@ async def verify_document_seal(file: UploadFile = File(...)):
 
         from doc_certifier import verify_secure_seal_pdf
         result = verify_secure_seal_pdf(tmp_path)
-        result = _enrich_certificate_verification_result(result)
+        result = _enrich_certificate_verification_result(result, uploaded_pdf_path=tmp_path)
         status_code = 200 if result.get("verified") else 400
         return JSONResponse(result, status_code=status_code)
     finally:
@@ -1127,7 +1127,190 @@ def _lookup_stored_certified_document_hash(cid: str) -> dict:
     return result
 
 
-def _enrich_certificate_verification_result(result: dict) -> dict:
+
+def _classify_post_certification_pdf_change(
+    uploaded_pdf_path: str,
+    stored_doc: dict | None = None,
+    seal_result: dict | None = None,
+) -> dict:
+    """
+    Classify the likely reason a certified PDF changed after VeriFYD certification.
+
+    This does not decide whether tampering occurred. The tamper decision remains
+    deterministic and hash-based. This helper only explains the likely type of
+    post-certification PDF change using PDF structure clues.
+    """
+    stored_doc = stored_doc or {}
+    seal_result = seal_result or {}
+
+    classification = {
+        "tamper_reason_code": "PDF_CHANGED_AFTER_CERTIFICATION",
+        "tamper_reason": "PDF changed after certification",
+        "tamper_confidence": "LOW",
+        "tamper_evidence": [],
+        "tamper_explanation": (
+            "The VeriFYD seal is present, but this PDF no longer matches the exact certified copy "
+            "stored by VeriFYD. The file was changed after certification, but the specific type "
+            "of PDF change could not be confidently identified from the available structure."
+        ),
+    }
+
+    evidence = classification["tamper_evidence"]
+
+    if seal_result.get("seal_valid"):
+        evidence.append("VeriFYD secure seal signature is valid")
+    if str(seal_result.get("seal_version") or "").upper():
+        evidence.append(f"Seal version: {seal_result.get('seal_version')}")
+    if seal_result.get("certified_pdf_sha256"):
+        evidence.append("Uploaded certified PDF hash differs from the VeriFYD stored certified PDF hash")
+
+    try:
+        uploaded_size = os.path.getsize(uploaded_pdf_path) if uploaded_pdf_path and os.path.exists(uploaded_pdf_path) else 0
+    except Exception:
+        uploaded_size = 0
+
+    stored_size = 0
+    try:
+        stored_size = int(stored_doc.get("size_bytes") or 0)
+    except Exception:
+        stored_size = 0
+
+    if uploaded_size and stored_size:
+        delta = uploaded_size - stored_size
+        evidence.append(f"Uploaded file size delta versus issued copy: {delta:+d} bytes")
+
+    try:
+        with open(uploaded_pdf_path, "rb") as fh:
+            raw = fh.read()
+    except Exception as e:
+        evidence.append(f"PDF structure scan unavailable: {str(e)[:100]}")
+        return classification
+
+    # Decode as latin-1 so PDF object names survive without requiring valid text encoding.
+    text = raw.decode("latin-1", errors="ignore")
+    lower = text.lower()
+
+    eof_count = text.count("%%EOF")
+    startxref_count = lower.count("startxref")
+    incremental_update = eof_count > 1 or startxref_count > 1
+    if incremental_update:
+        evidence.append(f"PDF appears to contain incremental updates (%%EOF={eof_count}, startxref={startxref_count})")
+
+    has_signature_markers = any(marker in text for marker in ("/Type /Sig", "/FT /Sig", "/SubFilter", "/ByteRange"))
+    has_byte_range = "/ByteRange" in text
+    has_sig_type = "/Type /Sig" in text or "/FT /Sig" in text
+    has_signature_contents = "/Contents" in text and ("/SubFilter" in text or "/ByteRange" in text)
+
+    if has_byte_range:
+        evidence.append("PDF contains /ByteRange signature data")
+    if has_sig_type:
+        evidence.append("PDF contains a /Sig signature object or signature form field")
+    if has_signature_contents:
+        evidence.append("PDF contains signature-related /Contents and /SubFilter fields")
+
+    # Digital signatures are frequently stored as incremental PDF updates. This is the
+    # exact case seen when a user signs a VeriFYD-certified PDF after issuance.
+    if has_signature_markers:
+        classification.update({
+            "tamper_reason_code": "DIGITAL_SIGNATURE_ADDED_AFTER_CERTIFICATION",
+            "tamper_reason": "Digital signature added after certification",
+            "tamper_confidence": "HIGH" if has_byte_range and (has_sig_type or incremental_update) else "MEDIUM",
+            "tamper_explanation": (
+                "A digital signature or signature-related PDF object appears to have been added "
+                "after VeriFYD certification. The VeriFYD seal itself remains cryptographically valid, "
+                "but the submitted PDF is no longer byte-for-byte identical to the certified copy "
+                "stored by VeriFYD. This is commonly caused by signing the certified PDF after it was issued."
+            ),
+        })
+        return classification
+
+    has_annots = "/Annots" in text or "/Annot" in text
+    has_acroform = "/AcroForm" in text
+    has_widget = "/Widget" in text
+    has_xfa = "/XFA" in text
+    if has_annots:
+        evidence.append("PDF contains annotation objects")
+    if has_acroform:
+        evidence.append("PDF contains an AcroForm form structure")
+    if has_widget:
+        evidence.append("PDF contains widget/form-field objects")
+    if has_xfa:
+        evidence.append("PDF contains XFA form data")
+
+    if has_annots or has_acroform or has_widget or has_xfa:
+        classification.update({
+            "tamper_reason_code": "ANNOTATION_OR_FORM_FIELD_ADDED_AFTER_CERTIFICATION",
+            "tamper_reason": "Annotation or form field added after certification",
+            "tamper_confidence": "MEDIUM",
+            "tamper_explanation": (
+                "The certified PDF appears to contain annotation or form-field structures that are consistent "
+                "with a post-certification edit, such as adding a comment, marking up the file, filling a form, "
+                "or saving an interactive field. The VeriFYD seal remains valid, but the submitted file no longer "
+                "matches the issued certified copy stored by VeriFYD."
+            ),
+        })
+        return classification
+
+    has_moddate = "/ModDate" in text
+    has_producer = "/Producer" in text
+    has_creator = "/Creator" in text
+    has_xmp_modify = "xmp:modifydate" in lower or "pdf:producer" in lower
+    if has_moddate:
+        evidence.append("PDF contains /ModDate metadata")
+    if has_producer:
+        evidence.append("PDF contains /Producer metadata")
+    if has_creator:
+        evidence.append("PDF contains /Creator metadata")
+    if has_xmp_modify:
+        evidence.append("PDF contains XMP modification/producer metadata")
+
+    if incremental_update and (has_moddate or has_producer or has_creator or has_xmp_modify):
+        classification.update({
+            "tamper_reason_code": "PDF_RESAVED_OR_METADATA_CHANGED_AFTER_CERTIFICATION",
+            "tamper_reason": "PDF re-saved or metadata changed after certification",
+            "tamper_confidence": "MEDIUM",
+            "tamper_explanation": (
+                "The certified PDF appears to have been re-saved or updated after VeriFYD certification. "
+                "The change may be metadata-only or caused by a PDF editor rewriting the file. The VeriFYD seal "
+                "may still be valid, but the submitted file is no longer the exact issued certified copy."
+            ),
+        })
+        return classification
+
+    # If the size changed substantially but we did not find signature/annotation markers,
+    # call it a significant post-certification modification rather than guessing the cause.
+    if uploaded_size and stored_size:
+        delta_abs = abs(uploaded_size - stored_size)
+        if delta_abs > max(4096, int(stored_size * 0.02)):
+            evidence.append("File size changed substantially without clear signature or annotation markers")
+            classification.update({
+                "tamper_reason_code": "CONTENT_OR_STRUCTURE_CHANGED_AFTER_CERTIFICATION",
+                "tamper_reason": "Content or PDF structure changed after certification",
+                "tamper_confidence": "MEDIUM",
+                "tamper_explanation": (
+                    "The certified PDF changed substantially compared with the copy stored by VeriFYD, but the "
+                    "structure scan did not identify a simple digital signature, annotation, or metadata-only update. "
+                    "This may indicate that page content, embedded objects, or the internal PDF structure changed after certification."
+                ),
+            })
+            return classification
+
+    if incremental_update:
+        classification.update({
+            "tamper_reason_code": "INCREMENTAL_UPDATE_AFTER_CERTIFICATION",
+            "tamper_reason": "Incremental PDF update after certification",
+            "tamper_confidence": "MEDIUM",
+            "tamper_explanation": (
+                "The PDF appears to contain an incremental update after the original certified file was issued. "
+                "This usually means the file was opened and saved, signed, annotated, or otherwise updated after VeriFYD certification."
+            ),
+        })
+        return classification
+
+    return classification
+
+
+def _enrich_certificate_verification_result(result: dict, uploaded_pdf_path: str = "") -> dict:
     """Add database, storage, and tamper-detection context to a secure-seal verification response."""
     result = dict(result or {})
     cid = str(result.get("certificate_id") or "").strip()
@@ -1248,6 +1431,8 @@ def _enrich_certificate_verification_result(result: dict) -> dict:
 
     if forged_or_tampered_seal:
         result["verified"] = False
+        result["status"] = "forged_or_tampered_seal"
+        result["seal_status"] = "invalid"
         result["verification_status"] = "FORGED_OR_TAMPERED_SEAL"
         result["integrity_status"] = "FAILED"
         result["tamper_status"] = "FORGED_OR_TAMPERED_SEAL"
@@ -1277,22 +1462,48 @@ def _enrich_certificate_verification_result(result: dict) -> dict:
     stored_hash_mismatch = certified_pdf_hash_match == "NO"
 
     if stored_hash_mismatch:
+        tamper_detail = _classify_post_certification_pdf_change(
+            uploaded_pdf_path=uploaded_pdf_path,
+            stored_doc=stored_doc,
+            seal_result=result,
+        ) if uploaded_pdf_path else {
+            "tamper_reason_code": "PDF_CHANGED_AFTER_CERTIFICATION",
+            "tamper_reason": "PDF changed after certification",
+            "tamper_confidence": "LOW",
+            "tamper_evidence": ["Uploaded certified PDF hash differs from the VeriFYD stored certified PDF hash"],
+            "tamper_explanation": (
+                "The VeriFYD seal is present, but this PDF no longer matches the exact certified copy "
+                "stored by VeriFYD. The file was changed after certification."
+            ),
+        }
+
         result["verified"] = False
+        result["status"] = "modified_after_certification"
+        result["seal_status"] = "valid" if result.get("seal_valid") else "invalid"
         result["verification_status"] = "DOCUMENT_MODIFIED_AFTER_CERTIFICATION"
         result["integrity_status"] = "FAILED"
         result["tamper_status"] = "MODIFIED_AFTER_CERTIFICATION"
+        result["tamper_reason_code"] = tamper_detail.get("tamper_reason_code", "PDF_CHANGED_AFTER_CERTIFICATION")
+        result["tamper_reason"] = tamper_detail.get("tamper_reason", "PDF changed after certification")
+        result["tamper_confidence"] = tamper_detail.get("tamper_confidence", "LOW")
+        result["tamper_evidence"] = tamper_detail.get("tamper_evidence", [])
+        result["tamper_explanation"] = tamper_detail.get("tamper_explanation", "The certified PDF changed after VeriFYD certification.")
         result["trust_level"] = "LOW"
+
         report["status"] = "TAMPERED"
         report["seal"] = "VALID" if result.get("seal_valid") else "INVALID"
+        report["seal_status"] = result.get("seal_status")
         report["integrity"] = "FAILED"
         report["tamper_status"] = "MODIFIED_AFTER_CERTIFICATION"
+        report["tamper_reason_code"] = result["tamper_reason_code"]
+        report["tamper_reason"] = result["tamper_reason"]
+        report["tamper_confidence"] = result["tamper_confidence"]
+        report["tamper_evidence"] = result["tamper_evidence"]
         report["trust_level"] = "LOW"
-        report["message"] = (
-            "The PDF contains a VeriFYD seal, but the uploaded file hash does not match "
-            "the certified PDF stored by VeriFYD. This indicates the certified PDF was "
-            "changed after certification or the submitted file is not the issued copy."
-        )
+        report["message"] = result["tamper_explanation"]
     elif seal_ok and record_confirmed and stored_hash_available and stored_hash_matches and original_hash_ok:
+        result["status"] = "authentic"
+        result["seal_status"] = "valid"
         result["verification_status"] = "AUTHENTIC_VERIFYD_DOCUMENT"
         result["integrity_status"] = "VERIFIED"
         result["tamper_status"] = "NOT_MODIFIED"
@@ -1307,6 +1518,8 @@ def _enrich_certificate_verification_result(result: dict) -> dict:
             "VeriFYD record, and matches the certified PDF stored by VeriFYD."
         )
     elif seal_ok and record_confirmed:
+        result["status"] = "seal_valid_storage_hash_not_confirmed"
+        result["seal_status"] = "valid"
         result["verification_status"] = "AUTHENTIC_VERIFYD_DOCUMENT_STORAGE_HASH_NOT_CONFIRMED"
         result["integrity_status"] = "SEAL_VALID_STORAGE_HASH_NOT_CONFIRMED"
         result["tamper_status"] = "NOT_CONFIRMED"
@@ -1320,6 +1533,8 @@ def _enrich_certificate_verification_result(result: dict) -> dict:
             "full tamper comparison."
         )
     elif seal_ok:
+        result["status"] = "valid_seal_database_not_confirmed"
+        result["seal_status"] = "valid"
         result["verification_status"] = "VALID_SEAL_DATABASE_NOT_CONFIRMED"
         result["integrity_status"] = "SEAL_VALID_DATABASE_NOT_CONFIRMED"
         result["tamper_status"] = "NOT_CONFIRMED"
@@ -1328,6 +1543,8 @@ def _enrich_certificate_verification_result(result: dict) -> dict:
         report["integrity"] = "SEAL VALID - DATABASE NOT CONFIRMED"
         report["message"] = "This document contains a valid VeriFYD secure seal, but no matching certificate record was confirmed."
     else:
+        result["status"] = "not_verified"
+        result["seal_status"] = "invalid" if not result.get("seal_valid") else "unknown"
         result["verification_status"] = "NOT_VERIFIED"
         result["tamper_status"] = "NOT_VERIFIED"
         report["status"] = report.get("status") or "NOT VERIFIED"
