@@ -15,6 +15,7 @@ import logging
 import hashlib
 import json
 import tempfile
+import shutil
 
 log = logging.getLogger("verifyd.worker")
 logging.basicConfig(level=logging.INFO)
@@ -45,6 +46,98 @@ def _store_result(redis_conn, job_id: str, result: dict) -> None:
     redis_conn.setex(f"result:{job_id}", RESULT_TTL, json.dumps(result))
     log.info("Stored result: job=%s label=%s auth=%s video_ready=%s",
              job_id, result.get("label"), result.get("authenticity_score"), result.get("video_ready"))
+
+
+# ─────────────────────────────────────────────────────────────
+#  Runtime diagnostics / document-rendering dependencies
+# ─────────────────────────────────────────────────────────────
+_OFFICE_DIAGNOSTICS_LOGGED = False
+
+_OFFICE_EXTRA_PATHS = (
+    "/usr/lib/libreoffice/program",
+    "/usr/local/lib/libreoffice/program",
+    "/opt/libreoffice/program",
+)
+
+
+def _ensure_office_paths() -> None:
+    """
+    Make common LibreOffice executable folders visible to child modules.
+
+    Some Linux images install soffice under /usr/lib/libreoffice/program
+    even when /usr/bin/soffice is not present. doc_certifier.py uses
+    shutil.which("soffice") / shutil.which("libreoffice"), so updating PATH
+    here allows the existing conversion logic to work without changing
+    doc_certifier.py again.
+    """
+    current_path = os.environ.get("PATH", "")
+    parts = [p for p in current_path.split(os.pathsep) if p]
+    changed = False
+
+    for extra in _OFFICE_EXTRA_PATHS:
+        if os.path.isdir(extra) and extra not in parts:
+            parts.insert(0, extra)
+            changed = True
+
+    if changed:
+        os.environ["PATH"] = os.pathsep.join(parts)
+
+
+def _which_office_binary() -> str:
+    """Return the best LibreOffice/soffice executable path available."""
+    _ensure_office_paths()
+
+    found = shutil.which("soffice") or shutil.which("libreoffice")
+    if found:
+        return found
+
+    for extra in _OFFICE_EXTRA_PATHS:
+        for name in ("soffice", "libreoffice"):
+            candidate = os.path.join(extra, name)
+            if os.path.exists(candidate) and os.access(candidate, os.X_OK):
+                return candidate
+
+    return ""
+
+
+def _office_version(binary: str) -> str:
+    """Best-effort LibreOffice version string for Render logs."""
+    if not binary:
+        return ""
+    try:
+        import subprocess
+        proc = subprocess.run([binary, "--version"], capture_output=True, text=True, timeout=20)
+        output = (proc.stdout or proc.stderr or "").strip()
+        return output[:300]
+    except Exception as e:
+        return f"version_check_failed: {e}"[:300]
+
+
+def _log_worker_runtime_dependencies(context: str = "startup", force: bool = False) -> None:
+    """
+    Log the exact worker runtime state needed to diagnose document rendering.
+
+    This intentionally logs only paths/binary availability, not secrets.
+    """
+    global _OFFICE_DIAGNOSTICS_LOGGED
+    if _OFFICE_DIAGNOSTICS_LOGGED and not force:
+        return
+
+    _ensure_office_paths()
+    office_bin = _which_office_binary()
+    log.info("Worker runtime diagnostics [%s]: PATH=%s", context, os.environ.get("PATH", ""))
+    log.info("Worker runtime diagnostics [%s]: shutil.which('soffice')=%s", context, shutil.which("soffice"))
+    log.info("Worker runtime diagnostics [%s]: shutil.which('libreoffice')=%s", context, shutil.which("libreoffice"))
+    log.info("Worker runtime diagnostics [%s]: selected_office_binary=%s", context, office_bin or "NOT_FOUND")
+    if office_bin:
+        log.info("Worker runtime diagnostics [%s]: office_version=%s", context, _office_version(office_bin))
+
+    _OFFICE_DIAGNOSTICS_LOGGED = True
+
+
+# Log once when the RQ worker imports this module.
+_log_worker_runtime_dependencies("module_import")
+
 
 
 def process_upload_job(file_key: str, filename: str, email: str) -> dict:
@@ -521,6 +614,8 @@ def process_document_upload_job(file_key: str, filename: str, email: str) -> dic
     job_id = rq_job.id if rq_job else file_key.replace("file:", "")
     r = _get_redis()
 
+    _log_worker_runtime_dependencies("document_job_start")
+
     LABEL_UI = {
         "REAL": ("REAL DOCUMENT VERIFIED", "green", True),
         "UNDETERMINED": ("DOCUMENT UNDETERMINED", "blue", False),
@@ -633,6 +728,7 @@ def process_document_upload_job(file_key: str, filename: str, email: str) -> dic
             package_path = _os.path.join(_tempfile.gettempdir(), f"verifyd_certified_file_{job_id}.zip")
             download_url = f"{BASE_URL}/download-document/{job_id}"
             try:
+                _log_worker_runtime_dependencies("before_stamp_document", force=True)
                 from doc_certifier import stamp_document
 
                 log.info("Worker: creating stamped certified document: job=%s src=%s dest=%s label=%s auth=%d", job_id, tmp_path, certified_path, label, authenticity)
@@ -772,9 +868,11 @@ def process_document_upload_job(file_key: str, filename: str, email: str) -> dic
 def keepalive_ping():
     """Lightweight no-op job enqueued every 8 minutes by main.py scheduler."""
     import time as _time
+    _log_worker_runtime_dependencies("keepalive", force=True)
     _ts = _time.strftime("%Y-%m-%d %H:%M:%S UTC", _time.gmtime())
     log.info("Keepalive ping: worker alive at %s — models cached in memory", _ts)
     return {"status": "alive", "ts": _ts}
+
 
 
 
