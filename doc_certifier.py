@@ -1698,15 +1698,16 @@ def _docx_table_col_widths(rows: List[List[str]], available_width: float) -> Lis
     return [available_width * (w / total) for w in weights]
 
 
+
 def _create_docx_layout_pdf(src_path: str, dest_path: str, cert_id: str, authenticity: int,
                             label: str, filename: str, sha256: str = "") -> str:
     """
     Render DOCX using a table-aware pure-Python fallback.
 
     This does not require LibreOffice and is intentionally safer for the current
-    Render Python worker. It will not perfectly clone Microsoft Word, but it
-    preserves paragraph/table order and renders table grids far better than the
-    old flat text renderer.
+    Render Python worker. It will not perfectly clone Microsoft Word, but it now
+    preserves section headers, header tables, body tables, footer text, and footer
+    action-code tables so SCA-style review forms remain recognizable.
     """
     try:
         from docx import Document
@@ -1723,10 +1724,12 @@ def _create_docx_layout_pdf(src_path: str, dest_path: str, cert_id: str, authent
     docx_doc = Document(src_path)
     page_size = landscape(letter)
     page_w, page_h = page_size
-    left_margin = 0.32 * inch
-    right_margin = 0.32 * inch
-    top_margin = 0.34 * inch
-    bottom_margin = 0.42 * inch
+
+    # Tight margins help landscape review forms keep all response/action columns.
+    left_margin = 0.24 * inch
+    right_margin = 0.24 * inch
+    top_margin = 0.26 * inch
+    bottom_margin = 0.38 * inch
     available_w = page_w - left_margin - right_margin
 
     pdf = SimpleDocTemplate(
@@ -1746,34 +1749,42 @@ def _create_docx_layout_pdf(src_path: str, dest_path: str, cert_id: str, authent
         "VeriFYD_DOCX_Base",
         parent=styles["Normal"],
         fontName="Helvetica",
-        fontSize=7.2,
-        leading=8.4,
-        spaceAfter=2.5,
+        fontSize=7.1,
+        leading=8.25,
+        spaceAfter=2.0,
         alignment=TA_LEFT,
+        wordWrap="CJK",
     )
     bold = ParagraphStyle(
         "VeriFYD_DOCX_Bold",
         parent=base,
         fontName="Helvetica-Bold",
-        fontSize=7.4,
-        leading=8.8,
-        spaceAfter=3,
+        fontSize=7.25,
+        leading=8.5,
+        spaceAfter=2.4,
     )
     title = ParagraphStyle(
         "VeriFYD_DOCX_Title",
         parent=bold,
-        fontSize=11.0,
-        leading=12.5,
+        fontSize=10.4,
+        leading=11.4,
         alignment=TA_CENTER,
-        spaceAfter=5,
+        spaceAfter=3.0,
     )
     right = ParagraphStyle("VeriFYD_DOCX_Right", parent=base, alignment=TA_RIGHT)
     center = ParagraphStyle("VeriFYD_DOCX_Center", parent=base, alignment=TA_CENTER)
+    small = ParagraphStyle(
+        "VeriFYD_DOCX_Small",
+        parent=base,
+        fontSize=5.9,
+        leading=6.7,
+        spaceAfter=1.2,
+    )
     cell_style = ParagraphStyle(
         "VeriFYD_DOCX_Cell",
         parent=base,
-        fontSize=5.9,
-        leading=6.8,
+        fontSize=5.65,
+        leading=6.35,
         spaceAfter=0,
         wordWrap="CJK",
     )
@@ -1781,93 +1792,253 @@ def _create_docx_layout_pdf(src_path: str, dest_path: str, cert_id: str, authent
         "VeriFYD_DOCX_Cell_Bold",
         parent=cell_style,
         fontName="Helvetica-Bold",
-        fontSize=5.8,
-        leading=6.7,
+        fontSize=5.55,
+        leading=6.25,
+    )
+    header_cell = ParagraphStyle(
+        "VeriFYD_DOCX_HeaderCell",
+        parent=cell_bold,
+        fontSize=5.35,
+        leading=6.05,
+        alignment=TA_CENTER,
+    )
+    review_cell = ParagraphStyle(
+        "VeriFYD_DOCX_ReviewCell",
+        parent=cell_style,
+        fontSize=4.95,
+        leading=5.55,
+        spaceAfter=0,
+        wordWrap="CJK",
+    )
+    review_header_cell = ParagraphStyle(
+        "VeriFYD_DOCX_ReviewHeaderCell",
+        parent=review_cell,
+        fontName="Helvetica-Bold",
+        fontSize=4.95,
+        leading=5.45,
+        alignment=TA_CENTER,
     )
 
-    def esc(text: str) -> str:
+    def esc(value: str) -> str:
         import html
-        return html.escape(str(text or "")).replace("\n", "<br/>")
+        return html.escape(str(value or "")).replace("\n", "<br/>")
+
+    def clean_cell_values(row_cells: List[Any]) -> List[str]:
+        """Extract row cells and reduce duplicate text caused by Word merged cells."""
+        values: List[str] = []
+        last_tc_id = None
+        last_text = None
+        for cell in row_cells:
+            text_value = _docx_cell_text_for_pdf(cell)
+            tc_id = None
+            try:
+                tc_id = id(cell._tc)
+            except Exception:
+                tc_id = None
+
+            # Merged cells often appear multiple times. Keep the first visual slot
+            # and blank the repeated slots so the grid remains but text is not duplicated.
+            if values and ((tc_id is not None and tc_id == last_tc_id) or (text_value and text_value == last_text and len(text_value) > 18)):
+                values.append("")
+            else:
+                values.append(text_value)
+                if text_value:
+                    last_text = text_value
+            last_tc_id = tc_id
+
+        # Preserve form columns, but trim useless all-empty duplicate tail cells.
+        while len(values) > 1 and values[-1] == "" and values[-2] == "":
+            values.pop()
+        return values
+
+    def table_has_header(rows: List[List[str]]) -> bool:
+        sample = " ".join(" ".join(r) for r in rows[:2]).lower()
+        return any(x in sample for x in ("comment no", "drawing no", "reviewer comments", "designer responses", "action"))
+
+    def looks_like_review_comment_table(rows: List[List[str]]) -> bool:
+        if not rows:
+            return False
+        hits = 0
+        for row in rows[:8]:
+            if len(row) >= 3:
+                first = str(row[0]).strip().rstrip(".")
+                second = str(row[1]).strip().upper()
+                third = str(row[2]).strip()
+                if first.isdigit() and (second.startswith("E") or second) and third:
+                    hits += 1
+        return hits >= 2
+
+    def append_paragraph(story: List[Any], para: Any, force_style: Any | None = None) -> bool:
+        text = _docx_para_text_for_pdf(para) if not isinstance(para, str) else str(para or "").strip()
+        if not text:
+            return False
+        if force_style is not None:
+            style = force_style
+        elif not isinstance(para, str):
+            align = _docx_alignment_name(para)
+            if align == "CENTER":
+                style = title if len(text) <= 90 and _docx_is_boldish(para) else center
+            elif align == "RIGHT":
+                style = right
+            elif _docx_is_boldish(para) or (len(text) <= 90 and text.upper() == text and any(ch.isalpha() for ch in text)):
+                style = bold
+            else:
+                style = base
+        else:
+            style = base
+        story.append(Paragraph(esc(text), style))
+        return True
+
+    def append_table(story: List[Any], table_obj: Any, *, section: str = "body") -> bool:
+        rows: List[List[str]] = []
+        try:
+            for row in table_obj.rows:
+                rows.append(clean_cell_values(list(row.cells)))
+        except Exception:
+            rows = []
+        if not rows:
+            return False
+
+        max_cols = max((len(r) for r in rows), default=1)
+        max_cols = max(1, min(max_cols, 12))
+        for row in rows:
+            while len(row) < max_cols:
+                row.append("")
+
+        has_header = table_has_header(rows)
+        review_table = looks_like_review_comment_table(rows)
+
+        # If the body review table is missing its header because the Word template
+        # stores headers in the document header, insert a matching header row.
+        if section == "body" and review_table and not has_header and max_cols >= 5:
+            rows = [[
+                "Comment No.",
+                "Drawing No. / Report Section",
+                "Reviewer Comments\n[Insert Date]",
+                "Designer Responses\n[Insert Date]",
+                "Reviewer Action\n[Insert Date]",
+            ]] + [r[:5] for r in rows]
+            max_cols = 5
+            has_header = True
+
+        normalized: List[List[Any]] = []
+        for ridx, row in enumerate(rows):
+            out_row = []
+            for cidx in range(max_cols):
+                val = row[cidx] if cidx < len(row) else ""
+                if review_table:
+                    style = review_header_cell if (has_header and ridx == 0) else review_cell
+                else:
+                    style = header_cell if (has_header and ridx == 0) else (cell_bold if section == "header" and ridx == 0 else cell_style)
+                out_row.append(Paragraph(esc(val), style))
+            normalized.append(out_row)
+
+        col_widths = _docx_table_col_widths(rows, available_w)
+        if len(col_widths) < max_cols:
+            extra = max(8.0, (available_w - sum(col_widths)) / max(1, max_cols - len(col_widths)))
+            col_widths.extend([extra] * (max_cols - len(col_widths)))
+        col_widths = col_widths[:max_cols]
+
+        if review_table and max_cols == 5:
+            # SCA review form: keep comment column wide while preserving blank response/action fields.
+            weights = [0.62, 0.95, 4.25, 1.70, 1.15]
+            total = sum(weights)
+            col_widths = [available_w * (w / total) for w in weights]
+        elif section == "header" and max_cols == 6:
+            weights = [1.55, 1.15, 1.15, 1.55, 1.75, 0.75]
+            total = sum(weights)
+            col_widths = [available_w * (w / total) for w in weights]
+
+        row_heights = None
+        if review_table:
+            row_heights = []
+            for ridx, row in enumerate(rows):
+                if has_header and ridx == 0:
+                    row_heights.append(20.0)
+                    continue
+                comment_text = str(row[2] if len(row) > 2 else " ".join(row))
+                approx_lines = max(1, min(6, (len(comment_text) // 105) + 1))
+                row_heights.append(max(12.5, min(42.0, 6.5 + (approx_lines * 5.8))))
+
+        tbl = Table(normalized, colWidths=col_widths, rowHeights=row_heights, repeatRows=1 if has_header else 0, splitByRow=1)
+        style_cmds = [
+            ("GRID", (0, 0), (-1, -1), 0.32, colors.HexColor("#777777")),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 1.9),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 1.9),
+            ("TOPPADDING", (0, 0), (-1, -1), 1.5),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 1.5),
+        ]
+        if has_header:
+            style_cmds.append(("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#EEEEEE")))
+            style_cmds.append(("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"))
+            style_cmds.append(("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#FAFAFA")]))
+        elif section == "header":
+            style_cmds.append(("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#F5F5F5")))
+        else:
+            style_cmds.append(("ROWBACKGROUNDS", (0, 0), (-1, -1), [colors.white, colors.HexColor("#FAFAFA")]))
+        tbl.setStyle(TableStyle(style_cmds))
+        story.append(tbl)
+        story.append(Spacer(1, 3 if section != "footer" else 2))
+        return True
+
+    def _append_docx_part_tables_and_paragraphs(story: List[Any], part: Any, *, section: str) -> bool:
+        """Append paragraphs/tables from a header/footer/body-like part."""
+        added = False
+        try:
+            # Header/footer XML order matters, but python-docx exposes paragraphs/tables separately.
+            # For these templates, paragraphs first then tables matches the visual intent better.
+            for para in getattr(part, "paragraphs", []) or []:
+                if append_paragraph(story, para, force_style=small if section == "footer" else None):
+                    added = True
+            for table_obj in getattr(part, "tables", []) or []:
+                if append_table(story, table_obj, section=section):
+                    added = True
+        except Exception:
+            pass
+        return added
 
     story: List[Any] = []
-    block_count = 0
     rendered_any = False
 
+    # Original Word headers contain the SCA form title, building/project metadata,
+    # and often the comment-table column headers. Render them before body content.
+    try:
+        header = docx_doc.sections[0].header
+        if _append_docx_part_tables_and_paragraphs(story, header, section="header"):
+            rendered_any = True
+            story.append(Spacer(1, 2))
+    except Exception:
+        pass
+
+    block_count = 0
     for block in _iter_docx_blocks(docx_doc):
         block_count += 1
         if block_count > 1200:
             story.append(Paragraph("[VeriFYD note: DOCX rendering truncated after 1200 body blocks]", bold))
             break
 
-        # Tables are the key improvement over the old flat text renderer.
         if hasattr(block, "rows"):
-            rows: List[List[str]] = []
-            try:
-                for row in block.rows:
-                    values = [_docx_cell_text_for_pdf(cell) for cell in row.cells]
-                    # Keep empty row structure for form-like documents, but remove exact duplicate
-                    # trailing columns introduced by some merged Word cells.
-                    while len(values) > 1 and values[-1] == "" and all(v == "" for v in values[-2:]):
-                        values.pop()
-                    rows.append(values)
-            except Exception:
-                rows = []
+            if append_table(story, block, section="body"):
+                rendered_any = True
+            continue
 
-            if not rows:
-                continue
-
-            max_cols = max((len(r) for r in rows), default=1)
-            normalized: List[List[Any]] = []
-            for ridx, row in enumerate(rows):
-                out_row = []
-                for cidx in range(max_cols):
-                    val = row[cidx] if cidx < len(row) else ""
-                    style = cell_bold if ridx == 0 else cell_style
-                    out_row.append(Paragraph(esc(val), style))
-                normalized.append(out_row)
-
-            col_widths = _docx_table_col_widths(rows, available_w)
-            # Ensure width count matches normalized max columns.
-            if len(col_widths) < max_cols:
-                extra = (available_w - sum(col_widths)) / max(1, max_cols - len(col_widths))
-                col_widths.extend([extra] * (max_cols - len(col_widths)))
-            col_widths = col_widths[:max_cols]
-
-            table = Table(normalized, colWidths=col_widths, repeatRows=1 if len(normalized) > 1 else 0, splitByRow=1)
-            table.setStyle(TableStyle([
-                ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#777777")),
-                ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("LEFTPADDING", (0, 0), (-1, -1), 2.2),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 2.2),
-                ("TOPPADDING", (0, 0), (-1, -1), 2.0),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 2.0),
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#EEEEEE")),
-                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#FAFAFA")]),
-            ]))
-            story.append(table)
-            story.append(Spacer(1, 4))
+        if append_paragraph(story, block):
             rendered_any = True
-            continue
+        elif story and block_count < 80:
+            story.append(Spacer(1, 1.7))
 
-        # Paragraphs.
-        text = _docx_para_text_for_pdf(block)
-        if not text:
-            # Preserve occasional white space without flooding the page.
-            if story and block_count < 80:
-                story.append(Spacer(1, 2.5))
-            continue
-
-        align = _docx_alignment_name(block)
-        if align == "CENTER":
-            style = title if len(text) <= 80 and _docx_is_boldish(block) else center
-        elif align == "RIGHT":
-            style = right
-        elif _docx_is_boldish(block) or (len(text) <= 80 and text.upper() == text and any(ch.isalpha() for ch in text)):
-            style = bold
-        else:
-            style = base
-        story.append(Paragraph(esc(text), style))
-        rendered_any = True
+    # Footer section carries the legal note, SCA text, page marker, and action-code legend.
+    try:
+        footer = docx_doc.sections[0].footer
+        footer_story: List[Any] = []
+        if _append_docx_part_tables_and_paragraphs(footer_story, footer, section="footer"):
+            if story:
+                story.append(Spacer(1, 4))
+            story.extend(footer_story)
+            rendered_any = True
+    except Exception:
+        pass
 
     if not rendered_any:
         story.append(Paragraph("[No readable DOCX body content could be rendered.]", base))
@@ -1875,7 +2046,7 @@ def _create_docx_layout_pdf(src_path: str, dest_path: str, cert_id: str, authent
     def _on_page(c, _doc):
         c.saveState()
         try:
-            c.setFont("Helvetica", 6.2)
+            c.setFont("Helvetica", 6.1)
             c.setFillGray(0.40)
             c.drawString(left_margin, 16, f"VeriFYD certified Word rendering • {filename[:90]}")
             c.drawRightString(page_w - right_margin, 16, f"Certificate: {cert_id[:18]}")
