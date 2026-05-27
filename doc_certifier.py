@@ -2925,6 +2925,339 @@ def _read_dxf_for_render(src_path: str) -> str:
 
 
 # ─────────────────────────────────────────────
+# DXF / converter-backed CAD visual rendering
+# ─────────────────────────────────────────────
+
+def _cad_try_convert_dwg_to_dxf(src_path: str) -> str:
+    import shutil
+    import subprocess
+    import tempfile
+
+    candidates = [
+        shutil.which("dwg2dxf"),
+        shutil.which("ODAFileConverter"),
+        shutil.which("ODAFileConverter.exe"),
+        shutil.which("TeighaFileConverter"),
+    ]
+    candidates = [c for c in candidates if c]
+    if not candidates:
+        raise RuntimeError("No DWG-to-DXF converter found on PATH")
+
+    out_dir = tempfile.mkdtemp(prefix="verifyd_dwg_to_dxf_")
+    base = os.path.splitext(os.path.basename(src_path))[0]
+    out_path = os.path.join(out_dir, base + ".dxf")
+    last_error = ""
+    for exe in candidates:
+        try:
+            name = os.path.basename(exe).lower()
+            if "dwg2dxf" in name:
+                cmd = [exe, src_path, out_path]
+            else:
+                in_dir = os.path.dirname(src_path) or "."
+                cmd = [exe, in_dir, out_dir, "ACAD2018", "DXF", "0", "1"]
+            result = subprocess.run(cmd, capture_output=True, timeout=90)
+            if os.path.exists(out_path) and os.path.getsize(out_path) > 100:
+                return out_path
+            for fn in os.listdir(out_dir):
+                if fn.lower().endswith(".dxf"):
+                    candidate = os.path.join(out_dir, fn)
+                    if os.path.getsize(candidate) > 100:
+                        return candidate
+            last_error = (result.stderr or result.stdout or b"").decode("utf-8", errors="replace")[:300]
+        except Exception as e:
+            last_error = str(e)[:300]
+    raise RuntimeError(f"DWG-to-DXF conversion failed: {last_error}")
+
+
+def _dxf_pairs_for_visual_render(src_path: str, max_pairs: int = 450000) -> List[Tuple[str, str]]:
+    data = open(src_path, "rb").read(8_000_000)
+    text = _dxf_decode_text(data)
+    raw_lines = [ln.rstrip("\r") for ln in text.replace("\r\n", "\n").replace("\r", "\n").split("\n")]
+    pairs: List[Tuple[str, str]] = []
+    i = 0
+    while i + 1 < len(raw_lines):
+        code = raw_lines[i].strip()
+        value = raw_lines[i + 1].strip()
+        if code:
+            pairs.append((code, value))
+        i += 2
+        if len(pairs) >= max_pairs:
+            break
+    return pairs
+
+
+def _dxf_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(str(value).strip())
+    except Exception:
+        return default
+
+
+def _dxf_clean_text_value(value: Any) -> str:
+    import re
+    text = str(value or "")
+    text = re.sub(r"\\[A-Za-z]+[0-9.;,-]*", " ", text)
+    text = text.replace("\\P", "\n")
+    text = text.replace("{", "").replace("}", "")
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+def _dxf_collect_entity_visuals(src_path: str) -> Dict[str, Any]:
+    pairs = _dxf_pairs_for_visual_render(src_path)
+    entities: List[Dict[str, Any]] = []
+    counts: Dict[str, int] = {}
+    layers: Dict[str, int] = {}
+    current_type = ""
+    current: Dict[str, Any] = {}
+
+    def finish_entity() -> None:
+        nonlocal current_type, current
+        if not current_type:
+            return
+        typ = current_type.upper()
+        if typ in ("SECTION", "ENDSEC", "EOF", "TABLE", "ENDTAB", "BLOCK", "ENDBLK", "SEQEND"):
+            current_type = ""
+            current = {}
+            return
+        counts[typ] = counts.get(typ, 0) + 1
+        layer = str(current.get("layer") or "")
+        if layer:
+            layers[layer] = layers.get(layer, 0) + 1
+        if typ == "LINE":
+            entities.append({"type": "line", "layer": layer, "x1": current.get("10", 0.0), "y1": current.get("20", 0.0), "x2": current.get("11", 0.0), "y2": current.get("21", 0.0)})
+        elif typ == "CIRCLE":
+            entities.append({"type": "circle", "layer": layer, "cx": current.get("10", 0.0), "cy": current.get("20", 0.0), "r": abs(current.get("40", 0.0))})
+        elif typ == "ARC":
+            entities.append({"type": "arc", "layer": layer, "cx": current.get("10", 0.0), "cy": current.get("20", 0.0), "r": abs(current.get("40", 0.0)), "start": current.get("50", 0.0), "end": current.get("51", 0.0)})
+        elif typ in ("TEXT", "MTEXT", "ATTRIB", "ATTDEF"):
+            text = _dxf_clean_text_value(current.get("1") or current.get("3") or "")
+            if text:
+                entities.append({"type": "text", "layer": layer, "x": current.get("10", 0.0), "y": current.get("20", 0.0), "text": text[:160], "height": abs(current.get("40", 0.12)) or 0.12})
+        elif typ == "POINT":
+            entities.append({"type": "point", "layer": layer, "x": current.get("10", 0.0), "y": current.get("20", 0.0)})
+        elif typ == "LWPOLYLINE":
+            pts = current.get("points") or []
+            if len(pts) >= 2:
+                entities.append({"type": "polyline", "layer": layer, "points": pts[:800], "closed": bool(int(current.get("70", 0) or 0) & 1)})
+        current_type = ""
+        current = {}
+
+    idx = 0
+    while idx < len(pairs):
+        code, value = pairs[idx]
+        if code == "0":
+            finish_entity()
+            current_type = value.upper()
+            current = {}
+            idx += 1
+            continue
+        if current_type:
+            if code == "8":
+                current["layer"] = value
+            elif code in ("10", "20", "11", "21", "40", "50", "51", "70"):
+                if current_type == "LWPOLYLINE" and code == "10":
+                    current["_last_x"] = _dxf_float(value)
+                elif current_type == "LWPOLYLINE" and code == "20":
+                    x = current.pop("_last_x", None)
+                    if x is not None:
+                        current.setdefault("points", []).append((float(x), _dxf_float(value)))
+                else:
+                    current[code] = _dxf_float(value)
+            elif code in ("1", "3"):
+                current[code] = (str(current.get(code) or "") + " " + value).strip()
+        idx += 1
+    finish_entity()
+
+    poly_points: List[Tuple[float, float]] = []
+    poly_layer = ""
+    in_poly = False
+    idx = 0
+    while idx < len(pairs):
+        code, value = pairs[idx]
+        if code == "0" and value.upper() == "POLYLINE":
+            in_poly = True
+            poly_points = []
+            poly_layer = ""
+            idx += 1
+            continue
+        if in_poly and code == "0" and value.upper() == "VERTEX":
+            vx: Dict[str, float] = {}
+            idx += 1
+            while idx < len(pairs) and pairs[idx][0] != "0":
+                c, v = pairs[idx]
+                if c == "8":
+                    poly_layer = v
+                elif c in ("10", "20"):
+                    vx[c] = _dxf_float(v)
+                idx += 1
+            if "10" in vx and "20" in vx:
+                poly_points.append((vx["10"], vx["20"]))
+            continue
+        if in_poly and code == "0" and value.upper() == "SEQEND":
+            if len(poly_points) >= 2:
+                entities.append({"type": "polyline", "layer": poly_layer, "points": poly_points[:1000], "closed": False})
+            in_poly = False
+        idx += 1
+    return {"entities": entities[:2500], "counts": counts, "layers": layers, "pair_count": len(pairs)}
+
+
+def _dxf_visual_bounds(entities: List[Dict[str, Any]]) -> Tuple[float, float, float, float]:
+    xs: List[float] = []
+    ys: List[float] = []
+    for e in entities:
+        typ = e.get("type")
+        if typ == "line":
+            xs.extend([float(e.get("x1", 0)), float(e.get("x2", 0))])
+            ys.extend([float(e.get("y1", 0)), float(e.get("y2", 0))])
+        elif typ in ("circle", "arc"):
+            cx = float(e.get("cx", 0)); cy = float(e.get("cy", 0)); r = abs(float(e.get("r", 0)))
+            xs.extend([cx - r, cx + r]); ys.extend([cy - r, cy + r])
+        elif typ in ("text", "point"):
+            xs.append(float(e.get("x", 0))); ys.append(float(e.get("y", 0)))
+        elif typ == "polyline":
+            for x, y in e.get("points") or []:
+                xs.append(float(x)); ys.append(float(y))
+    if not xs or not ys:
+        return (0, 0, 10, 7.5)
+    min_x, max_x = min(xs), max(xs)
+    min_y, max_y = min(ys), max(ys)
+    if max_x - min_x < 0.1:
+        max_x = min_x + 10
+    if max_y - min_y < 0.1:
+        max_y = min_y + 7.5
+    pad_x = (max_x - min_x) * 0.06
+    pad_y = (max_y - min_y) * 0.06
+    return min_x - pad_x, min_y - pad_y, max_x + pad_x, max_y + pad_y
+
+
+def _draw_dxf_visual_page(c: Any, entities: List[Dict[str, Any]], page_w: float, page_h: float, filename: str, cert_id: str) -> None:
+    margin = 34
+    title_h = 58
+    draw_x = margin
+    draw_y = margin + 24
+    draw_w = page_w - margin * 2
+    draw_h = page_h - title_h - draw_y
+    c.setFont("Helvetica-Bold", 13)
+    c.setFillGray(0.05)
+    c.drawString(margin, page_h - 34, "VeriFYD Certified DXF Visual Drawing Preview")
+    c.setFont("Helvetica", 7)
+    c.setFillGray(0.36)
+    c.drawString(margin, page_h - 48, f"File: {filename} • Certificate: {cert_id[:18]} • Entities drawn: {len(entities)}")
+    c.setStrokeGray(0.70)
+    c.setLineWidth(0.8)
+    c.rect(draw_x, draw_y, draw_w, draw_h, fill=0, stroke=1)
+    min_x, min_y, max_x, max_y = _dxf_visual_bounds(entities)
+    scale = min(draw_w / max(0.001, max_x - min_x), draw_h / max(0.001, max_y - min_y))
+    def tx(x: float) -> float:
+        return draw_x + (float(x) - min_x) * scale
+    def ty(y: float) -> float:
+        return draw_y + (float(y) - min_y) * scale
+    c.setStrokeGray(0.12)
+    c.setFillGray(0.08)
+    for e in entities:
+        typ = e.get("type")
+        try:
+            if typ == "line":
+                c.setLineWidth(0.45)
+                c.line(tx(e.get("x1", 0)), ty(e.get("y1", 0)), tx(e.get("x2", 0)), ty(e.get("y2", 0)))
+            elif typ == "polyline":
+                pts = e.get("points") or []
+                if len(pts) >= 2:
+                    p = c.beginPath()
+                    p.moveTo(tx(pts[0][0]), ty(pts[0][1]))
+                    for x, y in pts[1:]:
+                        p.lineTo(tx(x), ty(y))
+                    if e.get("closed"):
+                        p.close()
+                    c.setLineWidth(0.45)
+                    c.drawPath(p, fill=0, stroke=1)
+            elif typ == "circle":
+                cx = tx(e.get("cx", 0)); cy = ty(e.get("cy", 0)); r = abs(float(e.get("r", 0))) * scale
+                c.circle(cx, cy, r, fill=0, stroke=1)
+            elif typ == "arc":
+                cx = tx(e.get("cx", 0)); cy = ty(e.get("cy", 0)); r = abs(float(e.get("r", 0))) * scale
+                c.arc(cx - r, cy - r, cx + r, cy + r, float(e.get("start", 0)), float(e.get("end", 0)))
+            elif typ == "point":
+                x = tx(e.get("x", 0)); y = ty(e.get("y", 0))
+                c.circle(x, y, 1.4, fill=1, stroke=0)
+            elif typ == "text":
+                text = str(e.get("text") or "")[:70]
+                if text:
+                    fs = max(4.2, min(8.5, abs(float(e.get("height", 0.12))) * scale * 0.55))
+                    c.setFont("Helvetica", fs)
+                    c.drawString(tx(e.get("x", 0)), ty(e.get("y", 0)), text)
+        except Exception:
+            continue
+    _drawing_draw_footer(c, page_w, 1, filename, cert_id)
+
+
+def _create_full_drawing_visual_pdf(src_path: str, dest_path: str, cert_id: str, authenticity: int,
+                                    label: str, filename: str, sha256: str = "") -> str:
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.pagesizes import landscape, letter
+    ext = os.path.splitext(filename or src_path)[1].lower() or os.path.splitext(src_path)[1].lower()
+    visual_src = src_path
+    converted_temp = ""
+    if ext in (".dwg", ".dwt"):
+        try:
+            visual_src = _cad_try_convert_dwg_to_dxf(src_path)
+            converted_temp = visual_src
+            ext = ".dxf"
+        except Exception:
+            return _create_drawing_render_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256)
+    if ext != ".dxf":
+        return _create_drawing_render_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256)
+    try:
+        model = _dxf_collect_entity_visuals(visual_src)
+        entities = list(model.get("entities") or [])
+        if not entities:
+            return _create_drawing_render_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256)
+        page_w, page_h = landscape(letter)
+        c = canvas.Canvas(dest_path, pagesize=(page_w, page_h))
+        c.setAuthor("VeriFYD")
+        c.setTitle(f"VeriFYD Certified DXF Visual Drawing {cert_id}")
+        c.setSubject(f"{label} | Authenticity {authenticity}% | {filename}")
+        c.setFont("Helvetica-Bold", 15)
+        c.setFillGray(0.05)
+        c.drawString(36, page_h - 38, "VeriFYD Certified CAD/Drawing Visual Rendering")
+        c.setFont("Helvetica", 7.4)
+        c.setFillGray(0.32)
+        c.drawString(36, page_h - 54, f"File: {filename} • Status: {label} • Authenticity: {authenticity}% • Certificate: {cert_id}")
+        if sha256:
+            c.drawString(36, page_h - 68, f"Original SHA-256: {sha256}")
+        y = page_h - 94
+        c.setFont("Helvetica-Bold", 9)
+        c.setFillGray(0.07)
+        c.drawString(36, y, "Visual Rendering Summary")
+        y -= 15
+        c.setFont("Helvetica", 8)
+        c.setFillGray(0.14)
+        counts = dict(model.get("counts") or {})
+        layers = dict(model.get("layers") or {})
+        c.drawString(36, y, f"DXF group-code pairs scanned: {model.get('pair_count', 0)} • Entities drawn: {len(entities)}")
+        y -= 13
+        if counts:
+            c.drawString(36, y, ("Entity counts: " + ", ".join(f"{k}: {v}" for k, v in sorted(counts.items())[:20]))[:155])
+            y -= 13
+        if layers:
+            c.drawString(36, y, ("Layers: " + ", ".join(f"{k}: {v}" for k, v in sorted(layers.items())[:20]))[:155])
+            y -= 13
+        c.drawString(36, y, "This is a VeriFYD-rendered visual preview from DXF entities. Exact source file remains preserved in the certified package.")
+        _drawing_draw_footer(c, page_w, 1, filename, cert_id)
+        c.showPage()
+        _draw_dxf_visual_page(c, entities, page_w, page_h, filename, cert_id)
+        c.showPage()
+        c.save()
+        return dest_path
+    finally:
+        if converted_temp:
+            try:
+                os.remove(converted_temp)
+            except Exception:
+                pass
+
+# ─────────────────────────────────────────────
 # CAD/drawing certified evidence fallback rendering
 # ─────────────────────────────────────────────
 
@@ -5130,7 +5463,7 @@ def stamp_document(src_path: str, dest_path: str, cert_id: str,
         return _finalize_certified_pdf(dest_path, detail, cert_id, filename, sha256, authenticity, label)
 
     if ext in DRAWING_RENDER_EXTENSIONS:
-        _create_drawing_render_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256)
+        _create_full_drawing_visual_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256)
         # Preserve exact source drawing/CAD file for legal/forensic review.
         _attach_original_file_to_pdf(dest_path, src_path, filename or os.path.basename(src_path))
         return _finalize_certified_pdf(dest_path, detail, cert_id, filename, sha256, authenticity, label)
