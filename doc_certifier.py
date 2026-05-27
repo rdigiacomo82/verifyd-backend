@@ -2585,6 +2585,296 @@ def _read_vsdx_for_render(src_path: str) -> str:
 
 
 
+# ─────────────────────────────────────────────
+# Configuration/code certified file fallback rendering
+# ─────────────────────────────────────────────
+
+CONFIG_RENDER_EXTENSIONS = {
+    ".yaml", ".yml", ".json", ".xml", ".ini", ".toml", ".env",
+    ".properties", ".conf", ".cfg", ".config", ".cnf",
+    ".log", ".sql",
+}
+
+
+def _config_read_text(src_path: str, max_bytes: int = 2_500_000) -> str:
+    """Read a config/code-like file safely for certified rendering."""
+    with open(src_path, "rb") as fh:
+        data = fh.read(max_bytes + 1)
+
+    truncated = len(data) > max_bytes
+    data = data[:max_bytes]
+
+    text = ""
+    for enc in ("utf-8-sig", "utf-8", "utf-16", "cp1252", "latin-1"):
+        try:
+            text = data.decode(enc, errors="replace")
+            break
+        except Exception:
+            continue
+    if not text:
+        text = data.decode("latin-1", errors="replace")
+
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = text.replace("\x00", "")
+    if truncated:
+        text += "\n\n[VeriFYD note: configuration preview truncated after 2.5 MB; exact original file is preserved in the certified package.]"
+    return text
+
+
+def _config_pretty_text(raw_text: str, ext: str) -> str:
+    """Pretty-format common config file types without requiring optional packages."""
+    import json
+    ext = (ext or "").lower()
+
+    if ext == ".json":
+        try:
+            obj = json.loads(raw_text)
+            return json.dumps(obj, indent=2, ensure_ascii=False, sort_keys=False)
+        except Exception:
+            return raw_text
+
+    if ext == ".xml":
+        try:
+            import xml.dom.minidom
+            parsed = xml.dom.minidom.parseString(raw_text.encode("utf-8", errors="ignore"))
+            return parsed.toprettyxml(indent="  ")
+        except Exception:
+            return raw_text
+
+    return raw_text
+
+
+def _config_file_kind(ext: str, filename: str = "") -> str:
+    """Human-readable config/data file label."""
+    ext = (ext or "").lower()
+    name = (filename or "").lower()
+    if ext in (".yaml", ".yml"):
+        return "YAML Configuration"
+    if ext == ".json":
+        return "JSON Configuration/Data"
+    if ext == ".xml":
+        return "XML Configuration/Data"
+    if ext in (".ini", ".cnf"):
+        return "INI Configuration"
+    if ext == ".toml":
+        return "TOML Configuration"
+    if ext == ".env" or name.endswith(".env"):
+        return "Environment Configuration"
+    if ext == ".properties":
+        return "Properties Configuration"
+    if ext in (".conf", ".cfg", ".config"):
+        return "Configuration File"
+    if ext == ".sql":
+        return "SQL Script"
+    if ext == ".log":
+        return "Log File"
+    return "Configuration/Text File"
+
+
+def _config_analyze_text(text: str, ext: str) -> Dict[str, Any]:
+    """Collect simple, non-invasive config preview statistics."""
+    import re
+    lines = text.splitlines()
+    nonempty = [ln for ln in lines if ln.strip()]
+    comment_prefixes = ("#", "//", ";", "--")
+    comment_count = sum(1 for ln in nonempty if ln.lstrip().startswith(comment_prefixes))
+    key_like = 0
+    secret_like = 0
+    secret_patterns = re.compile(r"(?i)(password|passwd|secret|token|api[_-]?key|private[_-]?key|client[_-]?secret|bearer)")
+    for ln in nonempty:
+        stripped = ln.strip()
+        if ":" in stripped or "=" in stripped:
+            key_like += 1
+        if secret_patterns.search(stripped):
+            secret_like += 1
+    return {
+        "line_count": len(lines),
+        "nonempty_count": len(nonempty),
+        "comment_count": comment_count,
+        "key_like_count": key_like,
+        "secret_like_count": secret_like,
+        "max_line_length": max((len(x) for x in lines), default=0),
+    }
+
+
+def _config_draw_footer(c: Any, page_w: float, page_num: int, filename: str, cert_id: str) -> None:
+    c.setFont("Helvetica", 6.4)
+    c.setFillGray(0.45)
+    c.drawString(36, 24, f"VeriFYD certified configuration rendering • Page {page_num} • {filename[:75]}")
+    c.drawRightString(page_w - 36, 24, f"Certificate: {cert_id[:18]}")
+    _draw_verifyd_mark(c, page_w, y=24, x_right_pad=34)
+
+
+def _config_token_segments(line: str, ext: str) -> List[Tuple[str, Tuple[float, float, float]]]:
+    """
+    Split one config line into simple syntax-colored segments.
+    Uses only conservative coloring so it remains readable in black-and-white.
+    """
+    ext = (ext or "").lower()
+    default = (0.06, 0.06, 0.06)
+    key_color = (0.06, 0.20, 0.45)
+    value_color = (0.10, 0.33, 0.12)
+    comment_color = (0.38, 0.38, 0.38)
+    string_color = (0.45, 0.15, 0.08)
+
+    stripped = line.lstrip()
+
+    if not stripped:
+        return [(line, default)]
+
+    if stripped.startswith(("#", ";", "//", "--")):
+        return [(line, comment_color)]
+
+    sep_idx = -1
+    sep_char = ""
+    for sep in (":", "="):
+        idx = line.find(sep)
+        if idx >= 0:
+            sep_idx = idx
+            sep_char = sep
+            break
+
+    if sep_idx > 0 and ext in (".yaml", ".yml", ".ini", ".env", ".properties", ".conf", ".cfg", ".config", ".cnf", ".toml"):
+        return [
+            (line[:sep_idx], key_color),
+            (sep_char, default),
+            (line[sep_idx + 1 :], value_color),
+        ]
+
+    if ext in (".json", ".xml") and '"' in line:
+        return [(line, string_color)]
+
+    if ext == ".sql":
+        upper = stripped.upper()
+        if any(upper.startswith(k) for k in ("SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "ALTER", "DROP", "FROM", "WHERE")):
+            return [(line, key_color)]
+
+    return [(line, default)]
+
+
+def _draw_config_code_line(c: Any, line: str, x: float, y: float, max_w: float, ext: str,
+                           font_name: str = "Courier", font_size: float = 7.2) -> None:
+    """Draw a monospaced config line with simple segment coloring."""
+    c.setFont(font_name, font_size)
+    cur_x = x
+    max_chars = max(20, int(max_w / max(3.5, font_size * 0.56)))
+    display = str(line or "")
+    if len(display) > max_chars:
+        display = display[: max_chars - 1] + "…"
+
+    for segment, color in _config_token_segments(display, ext):
+        if not segment:
+            continue
+        c.setFillColorRGB(*color)
+        c.drawString(cur_x, y, segment)
+        cur_x += c.stringWidth(segment, font_name, font_size)
+
+
+def _create_config_render_pdf(src_path: str, dest_path: str, cert_id: str, authenticity: int,
+                              label: str, filename: str, sha256: str = "") -> str:
+    """Create a clean certified PDF preview for YAML/JSON/XML/INI/ENV/SQL/log/config files."""
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.pagesizes import landscape, letter
+
+    ext = os.path.splitext(filename or src_path)[1].lower() or os.path.splitext(src_path)[1].lower()
+    raw_text = _config_read_text(src_path)
+    text = _config_pretty_text(raw_text, ext)
+    kind = _config_file_kind(ext, filename)
+    stats = _config_analyze_text(text, ext)
+
+    page_w, page_h = landscape(letter)
+    c = canvas.Canvas(dest_path, pagesize=(page_w, page_h))
+    c.setAuthor("VeriFYD")
+    c.setTitle(f"VeriFYD Certified {kind} {cert_id}")
+    c.setSubject(f"{label} | Authenticity {authenticity}% | {filename}")
+
+    margin_x = 36
+    top = page_h - 34
+    bottom = 44
+    page_num = 1
+
+    def header(title_suffix: str = "") -> float:
+        c.setFont("Helvetica-Bold", 14)
+        c.setFillGray(0.05)
+        title = f"VeriFYD Certified {kind}"
+        if title_suffix:
+            title += f" • {title_suffix}"
+        c.drawString(margin_x, top, title[:120])
+        c.setFont("Helvetica", 7.2)
+        c.setFillGray(0.34)
+        c.drawString(margin_x, top - 13, f"File: {filename} • Status: {label} • Authenticity: {authenticity}% • Certificate: {cert_id}")
+        if sha256:
+            c.drawString(margin_x, top - 24, f"Original SHA-256: {sha256}")
+            return top - 42
+        return top - 32
+
+    y = header("Preview Summary")
+
+    c.setFillGray(0.965)
+    c.setStrokeGray(0.75)
+    c.roundRect(margin_x, y - 76, page_w - 2 * margin_x, 72, 5, fill=1, stroke=1)
+    c.setFont("Helvetica-Bold", 9)
+    c.setFillGray(0.07)
+    c.drawString(margin_x + 10, y - 18, "Configuration Preview Details")
+    c.setFont("Helvetica", 8)
+    c.setFillGray(0.16)
+    c.drawString(margin_x + 10, y - 34, f"Lines: {stats['line_count']}  •  Non-empty: {stats['nonempty_count']}  •  Comments: {stats['comment_count']}  •  Key/value-like entries: {stats['key_like_count']}")
+    c.drawString(margin_x + 10, y - 49, f"Maximum line length: {stats['max_line_length']} characters  •  Extension: {ext or 'none'}")
+    if stats["secret_like_count"]:
+        c.setFillColorRGB(0.50, 0.20, 0.05)
+        c.drawString(margin_x + 10, y - 64, f"Note: {stats['secret_like_count']} line(s) contain secret-like keywords. Values are preserved exactly for certification review.")
+    else:
+        c.drawString(margin_x + 10, y - 64, "No secret-like keyword lines were detected by the preview renderer.")
+    y -= 94
+
+    c.setFont("Helvetica-Bold", 10)
+    c.setFillGray(0.06)
+    c.drawString(margin_x, y, "Rendered Configuration Content")
+    y -= 16
+
+    line_num_w = 38
+    code_x = margin_x + line_num_w + 8
+    code_w = page_w - code_x - margin_x
+    line_h = 10.0
+    lines = text.splitlines() or ["[No readable configuration text found.]"]
+
+    for idx, line in enumerate(lines, start=1):
+        if y < bottom + line_h:
+            _config_draw_footer(c, page_w, page_num, filename, cert_id)
+            c.showPage()
+            page_num += 1
+            y = header("Continued")
+            c.setFont("Helvetica-Bold", 8)
+            c.setFillGray(0.20)
+            c.drawString(margin_x, y, "Line")
+            c.drawString(code_x, y, "Content")
+            y -= 12
+
+        if idx % 2 == 0:
+            c.setFillGray(0.985)
+            c.rect(margin_x - 2, y - 2, page_w - 2 * margin_x + 4, line_h, fill=1, stroke=0)
+
+        c.setFont("Courier", 6.8)
+        c.setFillGray(0.48)
+        c.drawRightString(margin_x + line_num_w, y, str(idx))
+        _draw_config_code_line(c, line, code_x, y, code_w, ext)
+        y -= line_h
+
+        if idx >= 3500:
+            if y < bottom + 20:
+                _config_draw_footer(c, page_w, page_num, filename, cert_id)
+                c.showPage()
+                page_num += 1
+                y = header("Continued")
+            c.setFont("Helvetica-Oblique", 8)
+            c.setFillGray(0.35)
+            c.drawString(margin_x, y, "[VeriFYD note: visible configuration preview truncated after 3500 lines; exact original file is preserved.]")
+            break
+
+    _config_draw_footer(c, page_w, page_num, filename, cert_id)
+    c.save()
+    return dest_path
+
 def _read_extra_textlike_for_render(src_path: str, ext: str) -> str:
     """Render lightweight text/config/log/code evidence formats."""
     data = open(src_path, "rb").read(5_000_000)
@@ -4535,6 +4825,12 @@ def stamp_document(src_path: str, dest_path: str, cert_id: str,
     if ext == ".rtf":
         _create_rtf_form_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256)
         # Preserve exact source RTF file for legal/forensic review.
+        _attach_original_file_to_pdf(dest_path, src_path, filename or os.path.basename(src_path))
+        return _finalize_certified_pdf(dest_path, detail, cert_id, filename, sha256, authenticity, label)
+
+    if ext in CONFIG_RENDER_EXTENSIONS:
+        _create_config_render_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256)
+        # Preserve exact source config file for legal/forensic review.
         _attach_original_file_to_pdf(dest_path, src_path, filename or os.path.basename(src_path))
         return _finalize_certified_pdf(dest_path, detail, cert_id, filename, sha256, authenticity, label)
 
