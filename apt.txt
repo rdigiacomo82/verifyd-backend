@@ -4,3 +4,10 @@ libreoffice-calc
 libreoffice-impress
 fontconfig
 fonts-dejavu
+libxinerama1
+libxrandr2
+libxrender1
+libxtst6
+libxi6
+libcups2
+default-jre-headless
