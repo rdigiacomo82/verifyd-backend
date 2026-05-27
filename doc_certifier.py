@@ -2156,6 +2156,396 @@ def _read_json_for_render(src_path: str) -> str:
         return raw[:12000]
 
 
+# ─────────────────────────────────────────────
+# VSDX certified Visio visual fallback rendering
+# ─────────────────────────────────────────────
+
+def _vsdx_local_name(tag: Any) -> str:
+    """Return local XML tag name without namespace."""
+    return str(tag).split("}")[-1]
+
+
+def _vsdx_float(value: Any, default: float = 0.0) -> float:
+    """Parse Visio numeric values safely."""
+    try:
+        text = str(value or "").strip()
+        if not text:
+            return default
+        import re
+        m = re.search(r"[-+]?\d+(?:\.\d+)?", text)
+        if not m:
+            return default
+        return float(m.group(0))
+    except Exception:
+        return default
+
+
+def _vsdx_clean_text(value: Any) -> str:
+    """Clean text extracted from Visio XML."""
+    import html
+    import re
+    text = html.unescape(str(value or ""))
+    text = text.replace("\r", "\n").replace("\t", " ")
+    text = re.sub(r"\s*\n\s*", "\n", text)
+    text = re.sub(r"[ \u00a0]+", " ", text)
+    return text.strip()
+
+
+def _vsdx_element_text(elem: Any) -> str:
+    """Extract readable text from a Visio XML element."""
+    try:
+        text = " ".join(t for t in elem.itertext() if t is not None)
+    except Exception:
+        text = ""
+    return _vsdx_clean_text(text)
+
+
+def _vsdx_shape_cells(shape: Any) -> Dict[str, str]:
+    """Collect Visio Cell values from a Shape element."""
+    cells: Dict[str, str] = {}
+    try:
+        for child in shape.iter():
+            if _vsdx_local_name(getattr(child, "tag", "")).lower() == "cell":
+                name = str(child.attrib.get("N") or child.attrib.get("Name") or "").strip()
+                value = str(child.attrib.get("V") or child.attrib.get("Value") or child.attrib.get("F") or "").strip()
+                if name:
+                    cells[name] = value
+    except Exception:
+        pass
+    return cells
+
+
+def _vsdx_shape_type(shape: Any, cells: Dict[str, str], text: str) -> str:
+    """Best-effort shape type label for the visual fallback."""
+    try:
+        raw_type = str(shape.attrib.get("Type") or "").lower()
+        master = str(shape.attrib.get("Master") or shape.attrib.get("MasterShape") or "").lower()
+    except Exception:
+        raw_type = ""
+        master = ""
+
+    sample = " ".join([raw_type, master, text.lower()])
+    if any(x in sample for x in ("connector", "dynamic connector", "arrow")):
+        return "connector"
+    if any(x in sample for x in ("ellipse", "oval", "circle")):
+        return "ellipse"
+    if any(x in sample for x in ("decision", "diamond")):
+        return "diamond"
+    if any(x in sample for x in ("swimlane", "container")):
+        return "container"
+    return "box"
+
+
+def _vsdx_extract_pages(src_path: str) -> List[Dict[str, Any]]:
+    """
+    Extract a lightweight visual model from a VSDX package.
+
+    This is not a full Visio rendering engine. It reads page XML and draws a
+    reviewable diagram approximation: shape bounds, connectors where possible,
+    labels/text, and a manifest summary. The exact original VSDX is still
+    attached to the certified PDF/package for source review.
+    """
+    import zipfile
+    import xml.etree.ElementTree as ET
+    import os
+    pages: List[Dict[str, Any]] = []
+
+    with zipfile.ZipFile(src_path, "r") as zf:
+        names = zf.namelist()
+        page_names = [
+            n for n in names
+            if n.lower().startswith("visio/pages/")
+            and n.lower().endswith(".xml")
+            and "/_rels/" not in n.lower()
+        ]
+        page_names.sort()
+
+        for pidx, name in enumerate(page_names, start=1):
+            shapes: List[Dict[str, Any]] = []
+            raw_xml = zf.read(name)
+            try:
+                root = ET.fromstring(raw_xml)
+            except Exception as e:
+                pages.append({
+                    "index": pidx,
+                    "name": os.path.basename(name),
+                    "shapes": [],
+                    "error": f"Could not parse page XML: {str(e)[:120]}",
+                })
+                continue
+
+            for elem in root.iter():
+                if _vsdx_local_name(getattr(elem, "tag", "")).lower() != "shape":
+                    continue
+
+                cells = _vsdx_shape_cells(elem)
+                text = ""
+                for child in elem.iter():
+                    if _vsdx_local_name(getattr(child, "tag", "")).lower() == "text":
+                        t = _vsdx_element_text(child)
+                        if t:
+                            text = t
+                            break
+
+                pin_x = _vsdx_float(cells.get("PinX"), 0.0)
+                pin_y = _vsdx_float(cells.get("PinY"), 0.0)
+                width = abs(_vsdx_float(cells.get("Width"), 1.0))
+                height = abs(_vsdx_float(cells.get("Height"), 0.55))
+                begin_x = _vsdx_float(cells.get("BeginX"), pin_x)
+                begin_y = _vsdx_float(cells.get("BeginY"), pin_y)
+                end_x = _vsdx_float(cells.get("EndX"), pin_x)
+                end_y = _vsdx_float(cells.get("EndY"), pin_y)
+
+                shape_id = str(elem.attrib.get("ID") or elem.attrib.get("Id") or "")
+                shape_name = str(elem.attrib.get("Name") or elem.attrib.get("NameU") or "")
+                shape_type = _vsdx_shape_type(elem, cells, text)
+
+                if not text and not cells and not shape_id and not shape_name:
+                    continue
+
+                shapes.append({
+                    "id": shape_id,
+                    "name": shape_name,
+                    "text": text,
+                    "type": shape_type,
+                    "pin_x": pin_x,
+                    "pin_y": pin_y,
+                    "width": max(width, 0.08),
+                    "height": max(height, 0.08),
+                    "begin_x": begin_x,
+                    "begin_y": begin_y,
+                    "end_x": end_x,
+                    "end_y": end_y,
+                })
+                if len(shapes) >= 700:
+                    shapes.append({
+                        "id": "",
+                        "name": "truncated",
+                        "text": "[VeriFYD note: VSDX page rendering truncated after 700 shapes]",
+                        "type": "box",
+                        "pin_x": 0,
+                        "pin_y": 0,
+                        "width": 3,
+                        "height": 0.4,
+                        "begin_x": 0,
+                        "begin_y": 0,
+                        "end_x": 0,
+                        "end_y": 0,
+                    })
+                    break
+
+            pages.append({
+                "index": pidx,
+                "name": os.path.basename(name),
+                "shapes": shapes,
+                "error": "",
+            })
+
+    return pages
+
+
+def _vsdx_diagram_bounds(shapes: List[Dict[str, Any]]) -> Tuple[float, float, float, float]:
+    """Compute diagram bounds in Visio coordinate units."""
+    xs: List[float] = []
+    ys: List[float] = []
+    for s in shapes:
+        if s.get("type") == "connector":
+            xs.extend([float(s.get("begin_x", 0)), float(s.get("end_x", 0))])
+            ys.extend([float(s.get("begin_y", 0)), float(s.get("end_y", 0))])
+        else:
+            px = float(s.get("pin_x", 0))
+            py = float(s.get("pin_y", 0))
+            w = float(s.get("width", 0.1))
+            h = float(s.get("height", 0.1))
+            xs.extend([px - w / 2, px + w / 2])
+            ys.extend([py - h / 2, py + h / 2])
+    if not xs or not ys:
+        return (0, 0, 10, 7.5)
+    min_x, max_x = min(xs), max(xs)
+    min_y, max_y = min(ys), max(ys)
+    if max_x - min_x < 0.1:
+        max_x = min_x + 10
+    if max_y - min_y < 0.1:
+        max_y = min_y + 7.5
+    return (min_x, min_y, max_x, max_y)
+
+
+def _vsdx_draw_wrapped_label(c: Any, text: str, x: float, y: float, w: float, h: float, font_size: float = 6.2) -> None:
+    """Draw a compact wrapped label inside a shape."""
+    import textwrap
+    text = _vsdx_clean_text(text)
+    if not text:
+        return
+    approx_chars = max(6, int(w / max(2.5, font_size * 0.46)))
+    lines: List[str] = []
+    for para in text.split("\n"):
+        lines.extend(textwrap.wrap(para, width=approx_chars) or [""])
+        if len(lines) >= 5:
+            break
+    c.setFont("Helvetica", font_size)
+    c.setFillGray(0.05)
+    line_h = font_size + 1
+    total_h = len(lines) * line_h
+    start_y = y + (h / 2) + (total_h / 2) - line_h
+    for idx, line in enumerate(lines[:5]):
+        draw_y = start_y - idx * line_h
+        if draw_y < y + 2:
+            break
+        c.drawCentredString(x + w / 2, draw_y, line[:max(6, approx_chars + 6)])
+
+
+def _create_vsdx_diagram_pdf(src_path: str, dest_path: str, cert_id: str, authenticity: int,
+                             label: str, filename: str, sha256: str = "") -> str:
+    """
+    Create a certified visual/evidence rendering for Visio VSDX files.
+
+    The current Render environment does not have Visio or LibreOffice available,
+    so this is a pure-Python diagram approximation from the VSDX XML package.
+    The exact original VSDX remains embedded/packaged for source review.
+    """
+    import zipfile
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.pagesizes import landscape, letter
+
+    width, height = landscape(letter)
+    c = canvas.Canvas(dest_path, pagesize=(width, height))
+    c.setAuthor("VeriFYD")
+    c.setTitle(f"VeriFYD Certified Visio Diagram {cert_id}")
+    c.setSubject(f"{label} | Authenticity {authenticity}% | {filename}")
+
+    try:
+        pages = _vsdx_extract_pages(src_path)
+    except Exception as e:
+        pages = [{"index": 1, "name": "VSDX", "shapes": [], "error": f"VSDX extraction failed: {str(e)[:160]}"}]
+
+    try:
+        with zipfile.ZipFile(src_path, "r") as zf:
+            names = zf.namelist()
+            package_files = len(names)
+            media_files = len([n for n in names if n.lower().startswith("visio/media/")])
+            page_count = len([n for n in names if n.lower().startswith("visio/pages/") and n.lower().endswith(".xml")])
+    except Exception:
+        package_files = 0
+        media_files = 0
+        page_count = len(pages)
+
+    c.setFont("Helvetica-Bold", 18)
+    c.setFillGray(0.05)
+    c.drawString(42, height - 54, "VeriFYD Certified Visio Diagram")
+    c.setFont("Helvetica", 9)
+    c.setFillGray(0.20)
+    y = height - 78
+    for line in [
+        f"File: {filename}",
+        f"Status: {label} • Authenticity: {authenticity}%",
+        f"Certificate ID: {cert_id}",
+        f"Pages discovered: {page_count}",
+        f"Package files: {package_files}",
+        f"Embedded media files: {media_files}",
+        f"SHA-256: {sha256 or 'not provided'}",
+        "The following pages are a VeriFYD-rendered visual approximation of the VSDX XML diagram. The exact original VSDX remains embedded in the certified PDF/package.",
+    ]:
+        c.drawString(42, y, line[:155])
+        y -= 15
+    _draw_verifyd_mark(c, width, y=24, x_right_pad=34)
+    c.showPage()
+
+    if not pages:
+        pages = [{"index": 1, "name": "No pages found", "shapes": [], "error": "No Visio page XML files were found in this VSDX package."}]
+
+    for page in pages:
+        shapes = list(page.get("shapes") or [])
+        c.setFont("Helvetica-Bold", 13)
+        c.setFillGray(0.05)
+        c.drawString(34, height - 34, f"Visio Page {page.get('index', '')}: {page.get('name', '')}"[:120])
+        c.setFont("Helvetica", 7)
+        c.setFillGray(0.38)
+        c.drawString(34, height - 48, f"File: {filename} • Certificate: {cert_id[:18]} • Shapes rendered: {len(shapes)}")
+
+        draw_x = 34
+        draw_y = 54
+        draw_w = width - 68
+        draw_h = height - 120
+
+        c.setStrokeGray(0.72)
+        c.setLineWidth(0.8)
+        c.rect(draw_x, draw_y, draw_w, draw_h, fill=0, stroke=1)
+
+        if page.get("error"):
+            c.setFont("Helvetica", 9)
+            c.setFillGray(0.20)
+            c.drawString(draw_x + 14, height - 88, str(page.get("error"))[:130])
+        elif not shapes:
+            c.setFont("Helvetica", 10)
+            c.setFillGray(0.20)
+            c.drawString(draw_x + 14, height - 88, "No drawable shapes or extractable shape text were found in this Visio page XML.")
+            c.setFont("Helvetica", 8)
+            c.setFillGray(0.38)
+            c.drawString(draw_x + 14, height - 104, "The file is still certified and the exact source VSDX is preserved in the certified package.")
+        else:
+            min_x, min_y, max_x, max_y = _vsdx_diagram_bounds(shapes)
+            margin = 18
+            scale = min((draw_w - 2 * margin) / max(0.1, max_x - min_x), (draw_h - 2 * margin) / max(0.1, max_y - min_y))
+
+            def tx(v: float) -> float:
+                return draw_x + margin + ((v - min_x) * scale)
+
+            def ty(v: float) -> float:
+                return draw_y + margin + ((v - min_y) * scale)
+
+            for s in shapes:
+                if s.get("type") != "connector":
+                    continue
+                x1, y1 = tx(float(s.get("begin_x", 0))), ty(float(s.get("begin_y", 0)))
+                x2, y2 = tx(float(s.get("end_x", 0))), ty(float(s.get("end_y", 0)))
+                c.setStrokeGray(0.28)
+                c.setLineWidth(0.8)
+                c.line(x1, y1, x2, y2)
+
+            for s in shapes:
+                if s.get("type") == "connector":
+                    continue
+                px = float(s.get("pin_x", 0))
+                py = float(s.get("pin_y", 0))
+                sw = max(10, float(s.get("width", 0.4)) * scale)
+                sh = max(8, float(s.get("height", 0.25)) * scale)
+                x = tx(px) - sw / 2
+                y0 = ty(py) - sh / 2
+                kind = str(s.get("type") or "box")
+                text = str(s.get("text") or s.get("name") or "")
+
+                c.setLineWidth(0.7)
+                c.setStrokeGray(0.25)
+                if text:
+                    c.setFillGray(0.96)
+                else:
+                    c.setFillGray(0.99)
+
+                if kind == "ellipse":
+                    c.ellipse(x, y0, x + sw, y0 + sh, fill=1, stroke=1)
+                elif kind == "diamond":
+                    pts = [(x + sw / 2, y0 + sh), (x + sw, y0 + sh / 2), (x + sw / 2, y0), (x, y0 + sh / 2)]
+                    p = c.beginPath()
+                    p.moveTo(*pts[0])
+                    for pt in pts[1:]:
+                        p.lineTo(*pt)
+                    p.close()
+                    c.drawPath(p, fill=1, stroke=1)
+                else:
+                    c.roundRect(x, y0, sw, sh, radius=3, fill=1, stroke=1)
+
+                if text:
+                    _vsdx_draw_wrapped_label(c, text, x + 2, y0 + 2, max(6, sw - 4), max(6, sh - 4), font_size=6.1)
+
+        c.setFont("Helvetica", 6.5)
+        c.setFillGray(0.45)
+        c.drawString(34, 24, f"VeriFYD certified Visio rendering • Page {page.get('index', '')}")
+        _draw_verifyd_mark(c, width, y=24, x_right_pad=34)
+        c.showPage()
+
+    c.save()
+    return dest_path
+
 def _read_vsdx_for_render(src_path: str) -> str:
     import zipfile
     import xml.etree.ElementTree as ET
@@ -3815,6 +4205,12 @@ def stamp_document(src_path: str, dest_path: str, cert_id: str,
     if ext in (".eml", ".msg"):
         _create_email_render_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256)
         # Preserve exact source email file for legal/forensic review.
+        _attach_original_file_to_pdf(dest_path, src_path, filename or os.path.basename(src_path))
+        return _finalize_certified_pdf(dest_path, detail, cert_id, filename, sha256, authenticity, label)
+
+    if ext == ".vsdx":
+        _create_vsdx_diagram_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256)
+        # Preserve exact source Visio file for legal/forensic review.
         _attach_original_file_to_pdf(dest_path, src_path, filename or os.path.basename(src_path))
         return _finalize_certified_pdf(dest_path, detail, cert_id, filename, sha256, authenticity, label)
 
