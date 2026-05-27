@@ -24,6 +24,7 @@ from typing import Any, Dict, Optional
 log = logging.getLogger("verifyd.queue")
 
 QUEUE_NAME = os.environ.get("RQ_QUEUE", "verifyd")
+DOCUMENT_QUEUE_NAME = os.environ.get("RQ_DOCUMENT_QUEUE", "verifyd-documents")
 FILE_TTL_SECONDS = int(os.environ.get("VERIFYD_FILE_TTL", "1800"))
 RESULT_TTL_SECONDS = int(os.environ.get("VERIFYD_RESULT_TTL", "1800"))
 
@@ -38,11 +39,24 @@ def _get_redis(decode_responses: bool = False):
     )
 
 
-def _get_queue(redis_conn=None):
-    """Return the RQ queue used by VeriFYD workers."""
+def _get_queue(redis_conn=None, queue_name: Optional[str] = None):
+    """
+    Return an RQ queue used by VeriFYD workers.
+
+    Default queue:
+      verifyd
+
+    Document/Office/CAD queue:
+      verifyd-documents
+
+    Queue names can be overridden with:
+      RQ_QUEUE
+      RQ_DOCUMENT_QUEUE
+    """
     import rq
 
-    return rq.Queue(QUEUE_NAME, connection=redis_conn or _get_redis())
+    selected_queue = queue_name or QUEUE_NAME
+    return rq.Queue(selected_queue, connection=redis_conn or _get_redis())
 
 
 def _safe_remove(path: str) -> None:
@@ -96,6 +110,7 @@ def _enqueue_file_job(
     email: str,
     worker_func,
     job_timeout: int = 900,
+    queue_name: Optional[str] = None,
 ):
     """
     Common upload helper:
@@ -105,7 +120,16 @@ def _enqueue_file_job(
     4. Remove the local upload temp file after it is stored.
     """
     r = _get_redis(decode_responses=False)
-    q = _get_queue(r)
+    selected_queue = queue_name or QUEUE_NAME
+    q = _get_queue(r, selected_queue)
+
+    log.info(
+        "Enqueue file job: job_id=%s filename=%s worker_func=%s queue=%s",
+        job_id,
+        filename,
+        getattr(worker_func, "__name__", str(worker_func)),
+        selected_queue,
+    )
 
     r2_key = _try_store_file_in_r2(job_id, raw_path, filename)
     if r2_key:
@@ -155,7 +179,8 @@ def enqueue_link(job_id: str, video_url: str, email: str, double_count: bool = F
     from worker import process_link_job
 
     r = _get_redis(decode_responses=False)
-    q = _get_queue(r)
+    q = _get_queue(r, QUEUE_NAME)
+    log.info("Enqueue link job: job_id=%s queue=%s url=%s", job_id, QUEUE_NAME, video_url)
     return q.enqueue(
         process_link_job,
         job_id,
@@ -224,6 +249,7 @@ def enqueue_document_upload(job_id: str, raw_path: str, filename: str, email: st
         email=email,
         worker_func=process_document_upload_job,
         job_timeout=300,
+        queue_name=DOCUMENT_QUEUE_NAME,
     )
 
 
