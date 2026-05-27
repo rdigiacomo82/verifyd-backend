@@ -1543,6 +1543,378 @@ def _read_xls_for_render(src_path: str) -> str:
         return _read_ole_text_for_render(src_path)
 
 
+
+# ─────────────────────────────────────────────
+# MSG/EML certified email fallback rendering
+# ─────────────────────────────────────────────
+
+def _decode_email_value(value: Any) -> str:
+    """Decode bytes/byte-string/HTML-ish email body values into readable text."""
+    import ast
+    import html
+    import re
+
+    if value is None:
+        return ""
+
+    if isinstance(value, bytes):
+        raw_bytes = value
+        for enc in ("utf-8", "utf-16", "cp1252", "latin-1"):
+            try:
+                value = raw_bytes.decode(enc, errors="replace")
+                break
+            except Exception:
+                continue
+        if isinstance(value, bytes):
+            value = raw_bytes.decode("latin-1", errors="replace")
+    else:
+        value = str(value)
+
+    text = str(value or "")
+
+    # Some libraries expose bytes as the literal string b'...'. Convert back.
+    stripped = text.strip()
+    if (stripped.startswith("b'") and stripped.endswith("'")) or (stripped.startswith('b"') and stripped.endswith('"')):
+        try:
+            lit = ast.literal_eval(stripped)
+            if isinstance(lit, bytes):
+                text = lit.decode("utf-8", errors="replace")
+        except Exception:
+            pass
+
+    # Decode common escaped byte sequences only when they are visibly present.
+    if "\\x" in text or "\\u" in text:
+        try:
+            text = text.encode("utf-8", errors="ignore").decode("unicode_escape", errors="replace")
+        except Exception:
+            pass
+
+    text = html.unescape(text)
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = text.replace("\xa0", " ").replace("\u00a0", " ").replace("\u200b", "")
+    text = text.replace("\ufeff", "")
+
+    # Preserve useful line breaks around common HTML block tags, then strip tags.
+    text = re.sub(r"(?i)<\s*br\s*/?\s*>", "\n", text)
+    text = re.sub(r"(?i)</\s*(p|div|tr|li|table|blockquote|h[1-6])\s*>", "\n", text)
+    text = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", text)
+    text = re.sub(r"(?s)<[^>]+>", " ", text)
+
+    # Clean Outlook/HTML noise without removing the actual thread.
+    text = text.replace("&nbsp;", " ")
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r" *\n *", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def _email_header_value(value: Any) -> str:
+    """Single-line safe display value for email headers."""
+    text = _decode_email_value(value)
+    text = " ".join(text.split())
+    return text.strip()
+
+
+def _email_body_from_msg(src_path: str) -> Dict[str, Any]:
+    """Extract a structured certified email record from an Outlook MSG file."""
+    try:
+        import extract_msg
+    except Exception as e:
+        raise RuntimeError("Missing dependency: extract-msg. Add extract-msg to requirements.txt") from e
+
+    msg = extract_msg.Message(src_path)
+    try:
+        attachments: List[str] = []
+        try:
+            for att in list(getattr(msg, "attachments", []) or [])[:60]:
+                name = (
+                    getattr(att, "longFilename", "")
+                    or getattr(att, "shortFilename", "")
+                    or getattr(att, "displayName", "")
+                    or ""
+                )
+                name = _email_header_value(name)
+                if name:
+                    attachments.append(name)
+        except Exception:
+            attachments = []
+
+        body_plain = _decode_email_value(getattr(msg, "body", "") or "")
+        body_html = _decode_email_value(getattr(msg, "htmlBody", "") or getattr(msg, "html_body", "") or "")
+        body = body_plain if len(body_plain) >= max(40, len(body_html) * 0.35) else body_html
+
+        return {
+            "kind": "MSG",
+            "from": _email_header_value(getattr(msg, "sender", "") or getattr(msg, "sender_email", "")),
+            "to": _email_header_value(getattr(msg, "to", "")),
+            "cc": _email_header_value(getattr(msg, "cc", "")),
+            "bcc": _email_header_value(getattr(msg, "bcc", "")),
+            "subject": _email_header_value(getattr(msg, "subject", "")),
+            "date": _email_header_value(getattr(msg, "date", "")),
+            "message_id": _email_header_value(getattr(msg, "messageId", "") or getattr(msg, "message_id", "")),
+            "attachments": attachments,
+            "body": body,
+        }
+    finally:
+        try:
+            msg.close()
+        except Exception:
+            pass
+
+
+def _email_body_from_eml(src_path: str) -> Dict[str, Any]:
+    """Extract a structured certified email record from an EML file."""
+    from email import policy
+    from email.parser import BytesParser
+
+    with open(src_path, "rb") as fh:
+        msg = BytesParser(policy=policy.default).parse(fh)
+
+    body_plain: List[str] = []
+    body_html: List[str] = []
+    attachments: List[str] = []
+
+    if msg.is_multipart():
+        for part in msg.walk():
+            disp = str(part.get_content_disposition() or "")
+            ctype = str(part.get_content_type() or "").lower()
+            filename = part.get_filename()
+            if filename:
+                attachments.append(_email_header_value(filename))
+            if disp == "attachment":
+                continue
+            try:
+                content = part.get_content()
+            except Exception:
+                payload = part.get_payload(decode=True) or b""
+                charset = part.get_content_charset() or "utf-8"
+                content = payload.decode(charset, errors="replace")
+            if ctype == "text/plain" and content:
+                body_plain.append(_decode_email_value(content))
+            elif ctype == "text/html" and content:
+                body_html.append(_decode_email_value(content))
+    else:
+        try:
+            content = msg.get_content()
+        except Exception:
+            content = (msg.get_payload(decode=True) or b"").decode(msg.get_content_charset() or "utf-8", errors="replace")
+        if str(msg.get_content_type() or "").lower() == "text/html":
+            body_html.append(_decode_email_value(content))
+        else:
+            body_plain.append(_decode_email_value(content))
+
+    body_p = "\n\n".join(x for x in body_plain if x).strip()
+    body_h = "\n\n".join(x for x in body_html if x).strip()
+    body = body_p if body_p else body_h
+
+    return {
+        "kind": "EML",
+        "from": _email_header_value(msg.get("From", "")),
+        "to": _email_header_value(msg.get("To", "")),
+        "cc": _email_header_value(msg.get("Cc", "")),
+        "bcc": _email_header_value(msg.get("Bcc", "")),
+        "subject": _email_header_value(msg.get("Subject", "")),
+        "date": _email_header_value(msg.get("Date", "")),
+        "message_id": _email_header_value(msg.get("Message-ID", "")),
+        "attachments": [a for a in attachments if a],
+        "body": body,
+    }
+
+
+def _split_email_thread_sections(body: str) -> List[Tuple[str, str]]:
+    """Split email body into readable top message / thread history sections."""
+    import re
+    body = _decode_email_value(body)
+    if not body:
+        return [("Message Body", "[No readable email body was available.]")]
+
+    markers = [m.start() for m in re.finditer(r"(?im)^\s*(From:|-----Original Message-----|Sent:|On .+ wrote:)\s*", body)]
+    # Keep the first marker after some leading body text as thread boundary.
+    usable = [m for m in markers if m > 40]
+    if not usable:
+        return [("Message Body", body[:120000])]
+
+    first = usable[0]
+    sections: List[Tuple[str, str]] = []
+    lead = body[:first].strip()
+    if lead:
+        sections.append(("Most Recent Message", lead))
+    history = body[first:].strip()
+    if history:
+        # Do not over-split aggressively; preserving order is more important than perfect threading.
+        chunks = re.split(r"(?im)(?=^\s*From:\s+)", history)
+        idx = 1
+        for chunk in chunks:
+            chunk = chunk.strip()
+            if not chunk:
+                continue
+            sections.append((f"Thread History {idx}", chunk[:60000]))
+            idx += 1
+            if idx > 20:
+                sections.append(("Thread History Continued", "[VeriFYD note: email thread display truncated after 20 sections]"))
+                break
+    return sections or [("Message Body", body[:120000])]
+
+
+def _draw_email_wrapped_text(c: Any, text: str, x: float, y: float, max_w: float,
+                             bottom: float, page_w: float, page_h: float,
+                             page_num: int, title: str, cert_id: str) -> Tuple[float, int]:
+    """Draw wrapped email text and paginate."""
+    import re
+    font = "Helvetica"
+    size = 8.0
+    line_h = 10.2
+
+    def footer() -> None:
+        c.setFont("Helvetica", 6.4)
+        c.setFillGray(0.45)
+        c.drawString(42, 24, f"VeriFYD certified email rendering • Page {page_num}")
+        c.drawRightString(page_w - 42, 24, f"Certificate: {cert_id[:18]}")
+        _draw_verifyd_mark(c, page_w, y=24, x_right_pad=34)
+
+    def new_page() -> float:
+        nonlocal page_num
+        footer()
+        c.showPage()
+        page_num += 1
+        c.setFont("Helvetica-Bold", 11)
+        c.setFillGray(0.05)
+        c.drawString(42, page_h - 44, title)
+        return page_h - 66
+
+    for raw_para in str(text or "").splitlines():
+        para = re.sub(r"\s+", " ", raw_para).strip()
+        if not para:
+            y -= line_h * 0.65
+            if y < bottom:
+                y = new_page()
+            continue
+        words = para.split()
+        current = ""
+        for word in words:
+            trial = (current + " " + word).strip()
+            if c.stringWidth(trial, font, size) <= max_w:
+                current = trial
+            else:
+                if y < bottom:
+                    y = new_page()
+                c.setFont(font, size)
+                c.setFillGray(0.08)
+                c.drawString(x, y, current[:180])
+                y -= line_h
+                current = word
+        if current:
+            if y < bottom:
+                y = new_page()
+            c.setFont(font, size)
+            c.setFillGray(0.08)
+            c.drawString(x, y, current[:180])
+            y -= line_h
+    return y, page_num
+
+
+def _create_email_render_pdf(src_path: str, dest_path: str, cert_id: str, authenticity: int,
+                             label: str, filename: str, sha256: str = "") -> str:
+    """Create a clean certified PDF rendering for Outlook MSG and EML email files."""
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.pagesizes import letter
+
+    ext = os.path.splitext(src_path)[1].lower()
+    if ext == ".msg":
+        record = _email_body_from_msg(src_path)
+    else:
+        record = _email_body_from_eml(src_path)
+
+    width, height = letter
+    c = canvas.Canvas(dest_path, pagesize=letter)
+    c.setAuthor("VeriFYD")
+    c.setTitle(f"VeriFYD Certified Email Record {cert_id}")
+    c.setSubject(f"{label} | Authenticity {authenticity}% | {filename}")
+
+    margin_x = 42
+    y = height - 46
+    bottom = 48
+    max_w = width - (margin_x * 2)
+    page_num = 1
+    title = "VeriFYD Certified Email Record"
+
+    c.setFont("Helvetica-Bold", 17)
+    c.setFillGray(0.05)
+    c.drawString(margin_x, y, title)
+    y -= 18
+    c.setFont("Helvetica", 8)
+    c.setFillGray(0.35)
+    c.drawString(margin_x, y, f"File: {filename} • Status: {label} • Authenticity: {authenticity}%")
+    y -= 10
+    c.drawString(margin_x, y, f"Certificate ID: {cert_id}")
+    y -= 18
+
+    # Header box.
+    header_rows = [
+        ("From", record.get("from", "")),
+        ("To", record.get("to", "")),
+        ("Cc", record.get("cc", "")),
+        ("Subject", record.get("subject", "")),
+        ("Date", record.get("date", "")),
+        ("Message-ID", record.get("message_id", "")),
+    ]
+    attachments = list(record.get("attachments") or [])
+    if attachments:
+        header_rows.append(("Attachments", f"{len(attachments)} attachment(s): " + ", ".join(attachments[:8])))
+    else:
+        header_rows.append(("Attachments", "None detected"))
+
+    c.setStrokeGray(0.72)
+    c.setLineWidth(0.5)
+    box_top = y
+    row_h = 17
+    label_w = 76
+    for label_name, value in header_rows:
+        if y - row_h < bottom:
+            c.showPage(); page_num += 1; y = height - 46; box_top = y
+        c.setFillGray(0.93)
+        c.rect(margin_x, y - row_h + 3, label_w, row_h, fill=1, stroke=1)
+        c.setFillGray(1)
+        c.rect(margin_x + label_w, y - row_h + 3, max_w - label_w, row_h, fill=1, stroke=1)
+        c.setFont("Helvetica-Bold", 7.8)
+        c.setFillGray(0.08)
+        c.drawString(margin_x + 4, y - row_h + 8, label_name)
+        c.setFont("Helvetica", 7.5)
+        c.drawString(margin_x + label_w + 4, y - row_h + 8, _safe_text(value, 112))
+        y -= row_h
+    y -= 12
+
+    if sha256:
+        c.setFont("Helvetica", 6.7)
+        c.setFillGray(0.38)
+        c.drawString(margin_x, y, f"Original SHA-256: {sha256[:96]}")
+        y -= 14
+
+    sections = _split_email_thread_sections(str(record.get("body") or ""))
+    for section_title, section_text in sections:
+        if y < bottom + 28:
+            c.setFont("Helvetica", 6.4)
+            c.setFillGray(0.45)
+            c.drawString(42, 24, f"VeriFYD certified email rendering • Page {page_num}")
+            _draw_verifyd_mark(c, width, y=24, x_right_pad=34)
+            c.showPage(); page_num += 1; y = height - 46
+        c.setFont("Helvetica-Bold", 10.5)
+        c.setFillGray(0.05)
+        c.drawString(margin_x, y, section_title[:95])
+        y -= 13
+        y, page_num = _draw_email_wrapped_text(
+            c, section_text, margin_x, y, max_w, bottom, width, height, page_num, title, cert_id
+        )
+        y -= 8
+
+    c.setFont("Helvetica", 6.4)
+    c.setFillGray(0.45)
+    c.drawString(42, 24, f"VeriFYD certified email rendering • Page {page_num}")
+    c.drawRightString(width - 42, 24, f"Certificate: {cert_id[:18]}")
+    _draw_verifyd_mark(c, width, y=24, x_right_pad=34)
+    c.save()
+    return dest_path
+
 def _read_msg_for_render(src_path: str) -> str:
     """Render Outlook MSG headers/body into plain text for certified PDF output."""
     try:
@@ -3440,7 +3812,13 @@ def stamp_document(src_path: str, dest_path: str, cert_id: str,
         _create_pptx_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256)
         return _finalize_certified_pdf(dest_path, detail, cert_id, filename, sha256, authenticity, label)
 
-    if ext in (".docx", ".txt", ".md", ".csv", ".rtf", ".eml", ".msg", ".doc", ".ppt", ".xls", ".odt", ".ods", ".odp", ".html", ".htm", ".mhtml", ".mht", ".xml", ".json", ".svg", ".vsdx", ".yaml", ".yml", ".ini", ".log", ".sql", ".pst", ".ost", ".dwg", ".dxf"):
+    if ext in (".eml", ".msg"):
+        _create_email_render_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256)
+        # Preserve exact source email file for legal/forensic review.
+        _attach_original_file_to_pdf(dest_path, src_path, filename or os.path.basename(src_path))
+        return _finalize_certified_pdf(dest_path, detail, cert_id, filename, sha256, authenticity, label)
+
+    if ext in (".docx", ".txt", ".md", ".csv", ".rtf", ".doc", ".ppt", ".xls", ".odt", ".ods", ".odp", ".html", ".htm", ".mhtml", ".mht", ".xml", ".json", ".svg", ".vsdx", ".yaml", ".yml", ".ini", ".log", ".sql", ".pst", ".ost", ".dwg", ".dxf"):
         _create_text_render_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256)
         # Preserve exact source file for legal/forensic review, especially when
         # the certified PDF is a readable text rendering rather than a perfect
