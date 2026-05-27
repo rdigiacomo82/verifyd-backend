@@ -239,56 +239,312 @@ def _create_image_pdf(src_path: str, dest_path: str, cert_id: str, authenticity:
     return dest_path
 
 
-def _extract_xlsx_rows(src_path: str, max_columns: int = 12, max_rows_per_sheet: int = 500) -> List[Tuple[str, List[List[str]]]]:
-    """
-    Extract visible workbook cell values for certified rendering.
 
-    This is not intended to be a perfect Excel clone. It creates a readable,
-    certified PDF rendering of the workbook contents so the returned document
-    is useful instead of only showing a certificate summary page.
+def _xlsx_display_value(cell: Any) -> str:
+    """Return a clean Excel display value for certified XLSX PDF rendering."""
+    from datetime import date, datetime
+    try:
+        from openpyxl.styles.numbers import is_date_format
+    except Exception:
+        is_date_format = lambda _fmt: False
+
+    value = getattr(cell, "value", None)
+    if value is None:
+        return ""
+
+    number_format = str(getattr(cell, "number_format", "") or "")
+
+    if isinstance(value, datetime):
+        try:
+            return f"{value.month}/{value.day}/{value.year}"
+        except Exception:
+            return value.strftime("%Y-%m-%d")
+
+    if isinstance(value, date):
+        try:
+            return f"{value.month}/{value.day}/{value.year}"
+        except Exception:
+            return value.isoformat()
+
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        try:
+            if is_date_format(number_format):
+                from openpyxl.utils.datetime import from_excel
+                dt = from_excel(value)
+                return f"{dt.month}/{dt.day}/{dt.year}"
+        except Exception:
+            pass
+
+        is_currency = "$" in number_format or "[$" in number_format
+        is_percent = "%" in number_format
+
+        if is_percent:
+            return f"{float(value) * 100:.2f}%".replace(".00%", "%")
+
+        if is_currency:
+            return f"${float(value):,.2f}"
+
+        # Avoid ugly binary float artifacts such as 2476.7999999999997.
+        if isinstance(value, float):
+            if abs(value - round(value)) < 0.0000001:
+                return str(int(round(value)))
+            return f"{value:,.2f}".rstrip("0").rstrip(".")
+        return str(value)
+
+    text = str(value).replace(chr(13), " ").strip()
+    return text
+
+
+def _xlsx_cell_fill_hex(cell: Any) -> str:
+    """Best-effort background color for an Excel cell."""
+    try:
+        fill = getattr(cell, "fill", None)
+        if not fill or getattr(fill, "fill_type", None) != "solid":
+            return ""
+        color = getattr(fill, "fgColor", None)
+        if not color:
+            return ""
+        ctype = str(getattr(color, "type", "") or "").lower()
+        if ctype == "rgb":
+            rgb = str(getattr(color, "rgb", "") or "").upper()
+            if len(rgb) == 8:
+                rgb = rgb[2:]
+            if len(rgb) == 6 and rgb not in ("000000", "FFFFFF"):
+                return "#" + rgb
+        if ctype == "indexed":
+            indexed = getattr(color, "indexed", None)
+            palette = {22: "#C0D6E4", 23: "#808080", 24: "#9999FF", 25: "#993366", 48: "#969696", 49: "#003366"}
+            if indexed in palette:
+                return palette[indexed]
+        if ctype == "theme":
+            # Most business quote templates use theme fills for section bars.
+            return "#8EA0B5"
+    except Exception:
+        pass
+    return ""
+
+
+def _xlsx_cell_border_style(cell: Any) -> str:
+    """Return a simple border strength indicator."""
+    try:
+        border = getattr(cell, "border", None)
+        styles = [getattr(getattr(border, side, None), "style", None) for side in ("left", "right", "top", "bottom")]
+        if any(s in ("medium", "thick", "double") for s in styles):
+            return "strong"
+        if any(bool(s) for s in styles):
+            return "thin"
+    except Exception:
+        pass
+    return ""
+
+
+def _xlsx_cell_is_bold(cell: Any) -> bool:
+    try:
+        return bool(getattr(getattr(cell, "font", None), "bold", False))
+    except Exception:
+        return False
+
+
+def _xlsx_cell_alignment(cell: Any) -> str:
+    try:
+        align = str(getattr(getattr(cell, "alignment", None), "horizontal", "") or "").lower()
+        if align in ("center", "distributed", "centercontinuous"):
+            return "CENTER"
+        if align == "right":
+            return "RIGHT"
+    except Exception:
+        pass
+    return "LEFT"
+
+
+def _xlsx_trimmed_bounds(ws: Any, max_rows_per_sheet: int = 500) -> Tuple[int, int, int, int] | None:
+    """Find the meaningful visible range for a worksheet."""
+    nonempty_rows: List[int] = []
+    nonempty_cols: List[int] = []
+
+    max_r = min(int(getattr(ws, "max_row", 1) or 1), max_rows_per_sheet)
+    max_c = min(int(getattr(ws, "max_column", 1) or 1), 40)
+
+    for r in range(1, max_r + 1):
+        try:
+            if getattr(ws.row_dimensions.get(r), "hidden", False):
+                continue
+        except Exception:
+            pass
+        for c in range(1, max_c + 1):
+            try:
+                from openpyxl.utils import get_column_letter
+                if getattr(ws.column_dimensions.get(get_column_letter(c)), "hidden", False):
+                    continue
+            except Exception:
+                pass
+            try:
+                if _xlsx_display_value(ws.cell(r, c)).strip():
+                    nonempty_rows.append(r)
+                    nonempty_cols.append(c)
+            except Exception:
+                continue
+
+    if not nonempty_rows or not nonempty_cols:
+        return None
+
+    return min(nonempty_rows), max(nonempty_rows), min(nonempty_cols), max(nonempty_cols)
+
+
+def _extract_xlsx_rows(src_path: str, max_columns: int = 14, max_rows_per_sheet: int = 500) -> List[Dict[str, Any]]:
+    """
+    Extract visible workbook cells for the enhanced certified XLSX renderer.
+
+    Improvements over the old renderer:
+      - skips hidden sheets and empty sheets,
+      - trims to actual used visible range,
+      - preserves merged-cell spans where practical,
+      - keeps basic fill/bold/alignment/border hints,
+      - formats dates/currency/numbers cleanly.
     """
     try:
         from openpyxl import load_workbook
+        from openpyxl.utils import get_column_letter
     except Exception as e:
         raise RuntimeError("Missing dependency: openpyxl. Add openpyxl>=3.1.0 to requirements.txt") from e
 
-    wb = load_workbook(src_path, data_only=True, read_only=True)
-    rendered: List[Tuple[str, List[List[str]]]] = []
-
-    for ws in wb.worksheets:
-        rows: List[List[str]] = []
-        row_count = 0
-
-        for row in ws.iter_rows(values_only=True):
-            values = [_safe_text(v) for v in list(row)[:max_columns]]
-
-            while values and values[-1] == "":
-                values.pop()
-
-            if values:
-                rows.append(values)
-
-            row_count += 1
-            if row_count >= max_rows_per_sheet:
-                rows.append([f"[VeriFYD note: sheet truncated after {max_rows_per_sheet} scanned rows]"])
-                break
-
-        if not rows:
-            rows = [["[No visible cell values found on this sheet]"]]
-
-        rendered.append((ws.title or "Sheet", rows))
+    wb = load_workbook(src_path, data_only=True, read_only=False)
+    rendered: List[Dict[str, Any]] = []
+    skipped_hidden = 0
+    skipped_empty = 0
 
     try:
-        wb.close()
-    except Exception:
-        pass
+        for ws in wb.worksheets:
+            if str(getattr(ws, "sheet_state", "visible") or "visible").lower() != "visible":
+                skipped_hidden += 1
+                continue
+
+            bounds = _xlsx_trimmed_bounds(ws, max_rows_per_sheet=max_rows_per_sheet)
+            if not bounds:
+                skipped_empty += 1
+                continue
+
+            min_r, max_r, min_c, max_c = bounds
+            visible_cols: List[int] = []
+            for c in range(min_c, max_c + 1):
+                try:
+                    if getattr(ws.column_dimensions.get(get_column_letter(c)), "hidden", False):
+                        continue
+                except Exception:
+                    pass
+                visible_cols.append(c)
+                if len(visible_cols) >= max_columns:
+                    break
+
+            visible_rows: List[int] = []
+            for r in range(min_r, max_r + 1):
+                try:
+                    if getattr(ws.row_dimensions.get(r), "hidden", False):
+                        continue
+                except Exception:
+                    pass
+                visible_rows.append(r)
+
+            col_index = {c: idx for idx, c in enumerate(visible_cols)}
+            row_index = {r: idx for idx, r in enumerate(visible_rows)}
+
+            rows: List[List[Dict[str, Any]]] = []
+            for r in visible_rows:
+                row_cells: List[Dict[str, Any]] = []
+                for c in visible_cols:
+                    cell = ws.cell(r, c)
+                    row_cells.append({
+                        "text": _safe_text(_xlsx_display_value(cell), 400),
+                        "fill": _xlsx_cell_fill_hex(cell),
+                        "bold": _xlsx_cell_is_bold(cell),
+                        "align": _xlsx_cell_alignment(cell),
+                        "border": _xlsx_cell_border_style(cell),
+                    })
+                rows.append(row_cells)
+
+            spans: List[Tuple[int, int, int, int]] = []
+            try:
+                for merged in ws.merged_cells.ranges:
+                    r1, c1, r2, c2 = int(merged.min_row), int(merged.min_col), int(merged.max_row), int(merged.max_col)
+                    if r1 in row_index and r2 in row_index and c1 in col_index and c2 in col_index:
+                        if (r2 - r1) <= 2 and (c2 - c1) >= 1:
+                            spans.append((col_index[c1], row_index[r1], col_index[c2], row_index[r2]))
+                            tl = rows[row_index[r1]][col_index[c1]]
+                            for rr in range(row_index[r1], row_index[r2] + 1):
+                                for cc in range(col_index[c1], col_index[c2] + 1):
+                                    rows[rr][cc]["fill"] = rows[rr][cc].get("fill") or tl.get("fill") or ""
+                                    rows[rr][cc]["border"] = rows[rr][cc].get("border") or tl.get("border") or ""
+            except Exception:
+                spans = []
+
+            while rows and not any(cell.get("text") for cell in rows[0]):
+                rows.pop(0)
+                spans = [(c1, r1 - 1, c2, r2 - 1) for (c1, r1, c2, r2) in spans if r2 > 0]
+            while rows and not any(cell.get("text") for cell in rows[-1]):
+                rows.pop()
+
+            if not rows:
+                skipped_empty += 1
+                continue
+
+            raw_widths: List[float] = []
+            for c in visible_cols[:len(rows[0])]:
+                try:
+                    width = float(ws.column_dimensions[get_column_letter(c)].width or 10.0)
+                except Exception:
+                    width = 10.0
+                raw_widths.append(max(5.0, min(width, 60.0)))
+
+            rendered.append({
+                "title": ws.title or "Sheet",
+                "rows": rows,
+                "spans": spans,
+                "raw_widths": raw_widths,
+                "hidden_sheets_skipped": skipped_hidden,
+                "empty_sheets_skipped": skipped_empty,
+            })
+    finally:
+        try:
+            wb.close()
+        except Exception:
+            pass
 
     return rendered
 
 
+def _xlsx_sheet_looks_like_quote(sheet: Dict[str, Any]) -> bool:
+    sample = " ".join(str(cell.get("text", "")).lower() for row in sheet.get("rows", [])[:35] for cell in row)
+    return any(x in sample for x in ("quick quote", "bill to", "ship to", "school information", "item number", "salesperson"))
+
+
+def _xlsx_col_widths_for_pdf(sheet: Dict[str, Any], available_width: float) -> List[float]:
+    rows = sheet.get("rows") or []
+    max_cols = max((len(r) for r in rows), default=1)
+    raw = list(sheet.get("raw_widths") or [])[:max_cols]
+    if len(raw) < max_cols:
+        raw.extend([10.0] * (max_cols - len(raw)))
+
+    if _xlsx_sheet_looks_like_quote(sheet) and max_cols >= 6:
+        weights = [1.15, 3.95, 1.15, 0.95, 0.85, 1.25] + [0.7] * (max_cols - 6)
+    else:
+        weights = [max(0.65, min(3.2, w / 10.0)) for w in raw]
+
+    total = sum(weights) or 1.0
+    return [available_width * (w / total) for w in weights[:max_cols]]
+
+
+def _xlsx_make_paragraph(text: str, style: Any) -> Any:
+    import html
+    from reportlab.platypus import Paragraph
+    return Paragraph(html.escape(str(text or "")).replace(chr(10), "<br/>").replace(chr(13), " "), style)
+
+
 def _draw_table_page(c, width: float, height: float, title: str, subtitle: str,
                      rows: List[List[str]], page_num: int, total_hint: str = "") -> None:
-    """Draw one page of an XLSX worksheet table."""
+    """
+    Legacy canvas table drawer retained for compatibility.
+    The enhanced XLSX renderer now uses ReportLab Platypus tables in _create_xlsx_pdf.
+    """
     margin_x = 34
     top = height - 34
     bottom = 42
@@ -333,11 +589,9 @@ def _draw_table_page(c, width: float, height: float, title: str, subtitle: str,
         for cidx in range(max_cols):
             x = margin_x + (cidx * col_w)
             c.rect(x, y - 4, col_w, row_h, fill=0, stroke=1)
-
             value = row[cidx] if cidx < len(row) else ""
             c.setFillGray(0.08)
             c.setFont(font_name, 6.7)
-
             approx_chars = max(8, int(col_w / 4.0))
             display = _safe_text(value, approx_chars)
             c.drawString(x + 3, y + 2, display)
@@ -352,61 +606,142 @@ def _draw_table_page(c, width: float, height: float, title: str, subtitle: str,
 
 def _create_xlsx_pdf(src_path: str, dest_path: str, cert_id: str, authenticity: int,
                      label: str, filename: str, sha256: str = "") -> str:
-    """Render an XLSX workbook into a readable certified PDF with a small VeriFYD mark."""
-    from reportlab.pdfgen import canvas
+    """
+    Render an XLSX workbook into a readable certified PDF with an enhanced
+    quote/form-aware layout. This is the Python fallback used when LibreOffice is
+    unavailable in Render.
+    """
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
     from reportlab.lib.pagesizes import landscape, letter
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.enums import TA_CENTER, TA_RIGHT
+    from reportlab.lib.units import inch
+    from reportlab.lib import colors
 
-    width, height = landscape(letter)
-    c = canvas.Canvas(dest_path, pagesize=(width, height))
+    page_size = landscape(letter)
+    page_w, page_h = page_size
+    left_margin = 0.30 * inch
+    right_margin = 0.30 * inch
+    top_margin = 0.32 * inch
+    bottom_margin = 0.42 * inch
+    available_w = page_w - left_margin - right_margin
 
     sheets = _extract_xlsx_rows(src_path)
-    page_num = 1
 
-    c.setAuthor("VeriFYD")
-    c.setTitle(f"VeriFYD Certified Spreadsheet {cert_id}")
-    c.setSubject(f"{label} | Authenticity {authenticity}% | {filename}")
+    pdf = SimpleDocTemplate(
+        dest_path,
+        pagesize=page_size,
+        leftMargin=left_margin,
+        rightMargin=right_margin,
+        topMargin=top_margin,
+        bottomMargin=bottom_margin,
+        title=f"VeriFYD Certified Spreadsheet {cert_id}",
+        author="VeriFYD",
+        subject=f"{label} | Authenticity {authenticity}% | {filename}",
+    )
 
-    c.setFont("Helvetica-Bold", 20)
-    c.drawString(54, height - 72, "VeriFYD Certified Spreadsheet")
-    c.setFont("Helvetica", 10)
-    c.drawString(54, height - 105, f"Status: {label}")
-    c.drawString(54, height - 123, f"Authenticity Score: {authenticity}%")
-    c.drawString(54, height - 141, f"Certificate ID: {cert_id}")
-    c.drawString(54, height - 159, f"Original file: {filename}")
-    c.drawString(54, height - 177, f"Workbook sheets: {len(sheets)}")
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle("VeriFYD_XLSX_Title", parent=styles["Title"], fontName="Helvetica-Bold", fontSize=18, leading=21, spaceAfter=10)
+    meta_style = ParagraphStyle("VeriFYD_XLSX_Meta", parent=styles["Normal"], fontName="Helvetica", fontSize=8.5, leading=10.5, spaceAfter=3)
+    sheet_title_style = ParagraphStyle("VeriFYD_XLSX_Sheet_Title", parent=styles["Heading2"], fontName="Helvetica-Bold", fontSize=12, leading=14, spaceAfter=4)
+    small_style = ParagraphStyle("VeriFYD_XLSX_Small", parent=styles["Normal"], fontName="Helvetica", fontSize=6.0, leading=7.0, wordWrap="CJK")
+    small_bold = ParagraphStyle("VeriFYD_XLSX_Small_Bold", parent=small_style, fontName="Helvetica-Bold")
+    small_center = ParagraphStyle("VeriFYD_XLSX_Small_Center", parent=small_style, alignment=TA_CENTER)
+    small_right = ParagraphStyle("VeriFYD_XLSX_Small_Right", parent=small_style, alignment=TA_RIGHT)
+
+    story: List[Any] = []
+    story.append(Paragraph("VeriFYD Certified Spreadsheet", title_style))
+    story.append(Paragraph(f"Status: <b>{label}</b> &nbsp;&nbsp; Authenticity Score: <b>{authenticity}%</b>", meta_style))
+    story.append(Paragraph(f"Certificate ID: {cert_id}", meta_style))
+    story.append(Paragraph(f"Original file: {filename}", meta_style))
+    story.append(Paragraph(f"Visible workbook sheets rendered: {len(sheets)}", meta_style))
     if sha256:
-        c.drawString(54, height - 198, "SHA-256:")
-        c.setFont("Helvetica", 7.5)
-        c.drawString(54, height - 212, sha256[:120])
-    c.setFont("Helvetica-Oblique", 8)
-    c.setFillGray(0.35)
-    c.drawString(54, 42, "The following pages are a VeriFYD-rendered PDF view of the uploaded XLSX workbook.")
-    _draw_verifyd_mark(c, width, y=24, x_right_pad=34)
-    c.showPage()
-    page_num += 1
+        story.append(Paragraph(f"SHA-256: {sha256}", meta_style))
+    story.append(Spacer(1, 10))
+    story.append(Paragraph("The following pages are a VeriFYD-rendered PDF view of visible, non-empty workbook sheets. Hidden or empty sheets are skipped in the visible preview, while the exact original XLSX remains embedded in the certified package.", meta_style))
+    story.append(PageBreak())
 
-    rows_per_page = 28
-    for sheet_name, rows in sheets:
-        chunks = list(_chunked_rows(rows, rows_per_page))
-        for idx, chunk in enumerate(chunks, start=1):
-            subtitle = f"File: {filename} • Sheet: {sheet_name}"
-            total_hint = f"Sheet page {idx}/{len(chunks)}"
-            _draw_table_page(
-                c,
-                width,
-                height,
-                title=f"Worksheet: {sheet_name}",
-                subtitle=subtitle,
-                rows=chunk,
-                page_num=page_num,
-                total_hint=total_hint,
-            )
-            c.showPage()
-            page_num += 1
+    if not sheets:
+        story.append(Paragraph("No visible worksheet cell values were found for rendering.", meta_style))
+    else:
+        for sheet_index, sheet in enumerate(sheets, start=1):
+            sheet_name = str(sheet.get("title") or "Sheet")
+            story.append(Paragraph(f"Worksheet: {sheet_name}", sheet_title_style))
+            story.append(Paragraph(f"File: {filename} • Sheet {sheet_index}/{len(sheets)}", meta_style))
+            rows = sheet.get("rows") or []
+            max_cols = max((len(r) for r in rows), default=1)
+            col_widths = _xlsx_col_widths_for_pdf(sheet, available_w)
 
-    c.save()
+            table_data: List[List[Any]] = []
+            for ridx, row in enumerate(rows):
+                out_row: List[Any] = []
+                for cidx in range(max_cols):
+                    cell = row[cidx] if cidx < len(row) else {"text": ""}
+                    text = str(cell.get("text", "") or "")
+                    align = str(cell.get("align", "LEFT") or "LEFT")
+                    if cell.get("bold"):
+                        style = small_bold
+                    elif align == "CENTER":
+                        style = small_center
+                    elif align == "RIGHT":
+                        style = small_right
+                    else:
+                        style = small_style
+                    out_row.append(_xlsx_make_paragraph(text, style))
+                table_data.append(out_row)
+
+            table = Table(table_data, colWidths=col_widths, repeatRows=0, splitByRow=1)
+            style_cmds: List[Tuple[Any, ...]] = [
+                ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#C9C9C9")),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 2.0),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 2.0),
+                ("TOPPADDING", (0, 0), (-1, -1), 1.4),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 1.4),
+            ]
+
+            for ridx, row in enumerate(rows):
+                nonempty_texts = [str(c.get("text", "") or "").strip() for c in row]
+                joined = " ".join(t.lower() for t in nonempty_texts if t)
+                row_has_section_fill = any(x in joined for x in ("bill to", "ship to", "school information", "salesperson", "item number", "sow", "special instructions"))
+
+                for cidx, cell in enumerate(row):
+                    fill = str(cell.get("fill", "") or "")
+                    if row_has_section_fill and not fill:
+                        fill = "#8EA0B5"
+                    if fill:
+                        try:
+                            style_cmds.append(("BACKGROUND", (cidx, ridx), (cidx, ridx), colors.HexColor(fill)))
+                            if fill.upper() in ("#8EA0B5", "#8799AE", "#808080", "#003366"):
+                                style_cmds.append(("TEXTCOLOR", (cidx, ridx), (cidx, ridx), colors.white))
+                        except Exception:
+                            pass
+                    if cell.get("border") == "strong":
+                        style_cmds.append(("BOX", (cidx, ridx), (cidx, ridx), 0.65, colors.black))
+
+            for c1, r1, c2, r2 in sheet.get("spans", []) or []:
+                if 0 <= r1 < len(rows) and 0 <= r2 < len(rows) and 0 <= c1 < max_cols and 0 <= c2 < max_cols:
+                    style_cmds.append(("SPAN", (c1, r1), (c2, r2)))
+
+            table.setStyle(TableStyle(style_cmds))
+            story.append(table)
+
+            if sheet_index < len(sheets):
+                story.append(PageBreak())
+
+    def _on_page(c, _doc):
+        c.saveState()
+        try:
+            c.setFont("Helvetica", 6.2)
+            c.setFillGray(0.40)
+            c.drawString(left_margin, 16, f"VeriFYD certified workbook rendering • {filename[:90]}")
+            c.drawRightString(page_w - right_margin, 16, f"Certificate: {cert_id[:18]}")
+            _draw_verifyd_mark(c, page_w, y=24, x_right_pad=34)
+        finally:
+            c.restoreState()
+
+    pdf.build(story, onFirstPage=_on_page, onLaterPages=_on_page)
     return dest_path
-
 
 
 
