@@ -18,92 +18,124 @@ install_libreoffice_if_needed() {
     echo "Checking LibreOffice/soffice availability..."
 
     # Make sure common locations are included for build-time checks.
-    export PATH="/usr/lib/libreoffice/program:/opt/libreoffice/program:$PATH"
+    export PATH="/opt/render/project/src/.venv/bin:/usr/lib/libreoffice/program:/usr/lib64/libreoffice/program:/opt/libreoffice/program:$PATH"
 
     local office_bin=""
-    if command -v soffice >/dev/null 2>&1; then
-        office_bin="$(command -v soffice)"
-    elif command -v libreoffice >/dev/null 2>&1; then
-        office_bin="$(command -v libreoffice)"
-    elif [ -x "/usr/lib/libreoffice/program/soffice" ]; then
-        office_bin="/usr/lib/libreoffice/program/soffice"
-    elif [ -x "/usr/lib64/libreoffice/program/soffice" ]; then
-        office_bin="/usr/lib64/libreoffice/program/soffice"
-    elif [ -x "/opt/libreoffice/program/soffice" ]; then
-        office_bin="/opt/libreoffice/program/soffice"
-    fi
+
+    detect_office_bin() {
+        if command -v soffice >/dev/null 2>&1; then
+            command -v soffice
+        elif command -v libreoffice >/dev/null 2>&1; then
+            command -v libreoffice
+        elif [ -x "/usr/lib/libreoffice/program/soffice" ]; then
+            echo "/usr/lib/libreoffice/program/soffice"
+        elif [ -x "/usr/lib64/libreoffice/program/soffice" ]; then
+            echo "/usr/lib64/libreoffice/program/soffice"
+        elif [ -x "/opt/libreoffice/program/soffice" ]; then
+            echo "/opt/libreoffice/program/soffice"
+        else
+            true
+        fi
+    }
+
+    office_bin="$(detect_office_bin || true)"
 
     if [ -z "$office_bin" ]; then
         echo "LibreOffice not found before install attempt."
 
         if command -v apt-get >/dev/null 2>&1; then
+            echo "apt-get found. Attempting non-fatal LibreOffice install..."
+
+            # Render native services may not allow apt-get during build.
+            # This section must never break production deploys unless explicitly required.
+            set +e
+            export DEBIAN_FRONTEND=noninteractive
+
             if [ "$(id -u)" = "0" ]; then
-                echo "Attempting apt-get install of LibreOffice packages as root..."
-                export DEBIAN_FRONTEND=noninteractive
+                echo "Running apt-get directly as root..."
                 apt-get update
-                apt-get install -y --no-install-recommends \
-                    libreoffice \
-                    libreoffice-writer \
-                    libreoffice-calc \
-                    libreoffice-impress \
-                    fontconfig \
-                    fonts-dejavu \
-                    libxinerama1 \
-                    libxrandr2 \
-                    libxrender1 \
-                    libxtst6 \
-                    libxi6 \
-                    libcups2 \
-                    default-jre-headless || true
-                rm -rf /var/lib/apt/lists/* || true
+                APT_UPDATE_EXIT=$?
+
+                if [ "$APT_UPDATE_EXIT" -eq 0 ]; then
+                    apt-get install -y --no-install-recommends \
+                        libreoffice \
+                        libreoffice-writer \
+                        libreoffice-calc \
+                        libreoffice-impress \
+                        fontconfig \
+                        fonts-dejavu \
+                        fonts-liberation \
+                        libxinerama1 \
+                        libxrandr2 \
+                        libxrender1 \
+                        libxtst6 \
+                        libxi6 \
+                        libcups2 \
+                        default-jre-headless
+                    APT_INSTALL_EXIT=$?
+                    rm -rf /var/lib/apt/lists/*
+                else
+                    echo "WARNING: apt-get update failed with exit code $APT_UPDATE_EXIT."
+                    APT_INSTALL_EXIT=1
+                fi
+
             elif command -v sudo >/dev/null 2>&1; then
-                echo "Attempting apt-get install of LibreOffice packages with sudo..."
-                export DEBIAN_FRONTEND=noninteractive
+                echo "Running apt-get with sudo..."
                 sudo apt-get update
-                sudo apt-get install -y --no-install-recommends \
-                    libreoffice \
-                    libreoffice-writer \
-                    libreoffice-calc \
-                    libreoffice-impress \
-                    fontconfig \
-                    fonts-dejavu \
-                    libxinerama1 \
-                    libxrandr2 \
-                    libxrender1 \
-                    libxtst6 \
-                    libxi6 \
-                    libcups2 \
-                    default-jre-headless || true
-                sudo rm -rf /var/lib/apt/lists/* || true
+                APT_UPDATE_EXIT=$?
+
+                if [ "$APT_UPDATE_EXIT" -eq 0 ]; then
+                    sudo apt-get install -y --no-install-recommends \
+                        libreoffice \
+                        libreoffice-writer \
+                        libreoffice-calc \
+                        libreoffice-impress \
+                        fontconfig \
+                        fonts-dejavu \
+                        fonts-liberation \
+                        libxinerama1 \
+                        libxrandr2 \
+                        libxrender1 \
+                        libxtst6 \
+                        libxi6 \
+                        libcups2 \
+                        default-jre-headless
+                    APT_INSTALL_EXIT=$?
+                    sudo rm -rf /var/lib/apt/lists/*
+                else
+                    echo "WARNING: sudo apt-get update failed with exit code $APT_UPDATE_EXIT."
+                    APT_INSTALL_EXIT=1
+                fi
+
             else
                 echo "WARNING: apt-get exists, but build user is not root and sudo is unavailable."
-                echo "WARNING: Render must install LibreOffice via apt.txt or Dockerfile for DOCX layout preservation."
+                echo "WARNING: Use Render apt.txt, Docker, or a vendor LibreOffice package if this install path is blocked."
+                APT_INSTALL_EXIT=1
+            fi
+
+            set -e
+
+            if [ "${APT_INSTALL_EXIT:-1}" -eq 0 ]; then
+                echo "LibreOffice apt-get install completed."
+            else
+                echo "WARNING: LibreOffice apt-get install did not complete. Continuing build without failing."
             fi
         else
             echo "WARNING: apt-get not available in this build environment."
-            echo "WARNING: Render must install LibreOffice via apt.txt or Dockerfile for DOCX layout preservation."
+            echo "WARNING: Use Render apt.txt, Docker, or a vendor LibreOffice package if LibreOffice is required."
         fi
 
         # Re-detect after install attempt.
-        if command -v soffice >/dev/null 2>&1; then
-            office_bin="$(command -v soffice)"
-        elif command -v libreoffice >/dev/null 2>&1; then
-            office_bin="$(command -v libreoffice)"
-        elif [ -x "/usr/lib/libreoffice/program/soffice" ]; then
-            office_bin="/usr/lib/libreoffice/program/soffice"
-        elif [ -x "/usr/lib64/libreoffice/program/soffice" ]; then
-            office_bin="/usr/lib64/libreoffice/program/soffice"
-        elif [ -x "/opt/libreoffice/program/soffice" ]; then
-            office_bin="/opt/libreoffice/program/soffice"
-        fi
+        office_bin="$(detect_office_bin || true)"
     fi
 
     if [ -n "$office_bin" ]; then
         echo "LibreOffice detected at: $office_bin"
         "$office_bin" --version || true
 
-        # The Render worker PATH in logs starts with /opt/render/project/src/.venv/bin.
-        # Put wrapper scripts there so shutil.which('soffice') can find them at runtime.
+        # The Render worker PATH in your logs starts with /opt/render/project/src/.venv/bin.
+        # Put wrapper scripts there so shutil.which('soffice') and shutil.which('libreoffice')
+        # can find them at runtime even if /usr/lib/libreoffice/program is not in the Start Command PATH.
         local venv_bin="/opt/render/project/src/.venv/bin"
         mkdir -p "$venv_bin"
 
@@ -122,17 +154,17 @@ EOF
         echo "LibreOffice wrappers installed:"
         ls -l "$venv_bin/soffice" "$venv_bin/libreoffice" || true
 
-        export PATH="$venv_bin:/usr/lib/libreoffice/program:/opt/libreoffice/program:$PATH"
+        export PATH="$venv_bin:/usr/lib/libreoffice/program:/usr/lib64/libreoffice/program:/opt/libreoffice/program:$PATH"
 
-        if command -v soffice >/dev/null 2>&1; then
-            echo "soffice OK on PATH: $(command -v soffice)"
-            soffice --version || true
-        else
-            echo "WARNING: wrapper creation completed, but soffice is still not on PATH."
-        fi
+        echo "LibreOffice PATH check after wrapper creation:"
+        echo "  soffice: $(command -v soffice || true)"
+        echo "  libreoffice: $(command -v libreoffice || true)"
+        soffice --version || libreoffice --version || true
     else
         echo "WARNING: LibreOffice/soffice was not found after install attempt."
-        echo "WARNING: DOCX/DOC/ODT/XLSX/PPTX files will fall back to text rendering until the worker image includes LibreOffice."
+        echo "WARNING: DOCX/DOC/ODT/XLSX/PPTX files will fall back to text/evidence rendering until the worker runtime includes LibreOffice."
+        echo "WARNING: This is non-fatal by default so existing production deploys do not break."
+
         if [ "${VERIFYD_REQUIRE_LIBREOFFICE:-0}" = "1" ]; then
             echo "ERROR: VERIFYD_REQUIRE_LIBREOFFICE=1 and LibreOffice is unavailable. Failing build."
             exit 1
