@@ -61,19 +61,28 @@ RUN chmod +x build.sh \
 # Put wrappers in .venv/bin because the existing worker logs show .venv/bin is
 # first on PATH at runtime. This makes shutil.which("soffice") resolve cleanly.
 RUN set -eux; \
+    VENV_BIN="/opt/render/project/src/.venv/bin"; \
     OFFICE_BIN=""; \
-    if command -v soffice >/dev/null 2>&1; then OFFICE_BIN="$(command -v soffice)"; \
-    elif command -v libreoffice >/dev/null 2>&1; then OFFICE_BIN="$(command -v libreoffice)"; \
+    # Important: build.sh may already create wrappers in .venv/bin. Do not use \
+    # command -v soffice first, because PATH may resolve back to that wrapper and \
+    # create a self-referencing loop. Prefer real system LibreOffice binaries. \
+    if [ -x "/usr/bin/soffice" ]; then OFFICE_BIN="/usr/bin/soffice"; \
+    elif [ -x "/usr/bin/libreoffice" ]; then OFFICE_BIN="/usr/bin/libreoffice"; \
     elif [ -x "/usr/lib/libreoffice/program/soffice" ]; then OFFICE_BIN="/usr/lib/libreoffice/program/soffice"; \
     elif [ -x "/usr/lib64/libreoffice/program/soffice" ]; then OFFICE_BIN="/usr/lib64/libreoffice/program/soffice"; \
     elif [ -x "/opt/libreoffice/program/soffice" ]; then OFFICE_BIN="/opt/libreoffice/program/soffice"; \
+    else \
+        CANDIDATE="$(command -v soffice || true)"; \
+        if [ -n "$CANDIDATE" ] && [ "$CANDIDATE" != "$VENV_BIN/soffice" ]; then OFFICE_BIN="$CANDIDATE"; fi; \
     fi; \
     test -n "$OFFICE_BIN"; \
-    printf '#!/usr/bin/env bash\nexec "%s" "$@"\n' "$OFFICE_BIN" > /opt/render/project/src/.venv/bin/soffice; \
-    printf '#!/usr/bin/env bash\nexec "%s" "$@"\n' "$OFFICE_BIN" > /opt/render/project/src/.venv/bin/libreoffice; \
-    chmod +x /opt/render/project/src/.venv/bin/soffice /opt/render/project/src/.venv/bin/libreoffice; \
-    echo "LibreOffice selected at: $OFFICE_BIN"; \
-    /opt/render/project/src/.venv/bin/soffice --version; \
+    rm -f "$VENV_BIN/soffice" "$VENV_BIN/libreoffice"; \
+    printf '#!/usr/bin/env bash\nexec "%s" "$@"\n' "$OFFICE_BIN" > "$VENV_BIN/soffice"; \
+    printf '#!/usr/bin/env bash\nexec "%s" "$@"\n' "$OFFICE_BIN" > "$VENV_BIN/libreoffice"; \
+    chmod +x "$VENV_BIN/soffice" "$VENV_BIN/libreoffice"; \
+    echo "LibreOffice real binary selected at: $OFFICE_BIN"; \
+    "$OFFICE_BIN" --version; \
+    "$VENV_BIN/soffice" --version; \
     command -v ffmpeg; \
     ffmpeg -version | head -1; \
     python --version
@@ -82,5 +91,6 @@ RUN set -eux; \
 # already uses this Dockerfile for the API. For the Render Background Worker,
 # override the Docker command in Render with the worker command shown below:
 #
-# bash -lc 'echo "=== VeriFYD Worker Runtime Diagnostics ==="; python --version; echo "PATH=$PATH"; echo "soffice=$(command -v soffice || true)"; soffice --version || true; echo "libreoffice=$(command -v libreoffice || true)"; libreoffice --version || true; echo "ffmpeg=$(command -v ffmpeg || true)"; ffmpeg -version | head -1 || true; /opt/render/project/src/.venv/bin/rq worker verifyd --worker-class rq.worker.SimpleWorker --url "$REDIS_URL" & /opt/render/project/src/.venv/bin/rq worker verifyd --worker-class rq.worker.SimpleWorker --url "$REDIS_URL" & wait'
+# bash -lc 'echo "=== VeriFYD Worker Runtime Diagnostics ==="; python --version; echo "PATH=$PATH"; echo "soffice=$(command -v soffice || true)"; soffice --version || true; echo "libreoffice=$(command -v libreoffice || true)"; libreoffice --version || true; echo "ffmpeg=$(command -v ffmpeg || true)"; ffmpeg -version | head -1 || true; /opt/render/project/src/.venv/bin/rq worker verifyd --worker-class rq.worker.SimpleWorker --url "$REDIS_URL"'
 CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-10000} --timeout-keep-alive 120"]
+
