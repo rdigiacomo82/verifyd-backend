@@ -2924,6 +2924,307 @@ def _read_dxf_for_render(src_path: str) -> str:
     return "\n".join(x for x in lines if x)
 
 
+# ─────────────────────────────────────────────
+# CAD/drawing certified evidence fallback rendering
+# ─────────────────────────────────────────────
+
+DRAWING_RENDER_EXTENSIONS = {
+    ".dwg", ".dxf", ".dwt", ".dwf", ".dwfx", ".dgn", ".step", ".stp", ".iges", ".igs",
+}
+
+
+def _drawing_read_bytes(src_path: str, max_bytes: int = 2_500_000) -> Tuple[bytes, bool]:
+    # Read drawing/CAD file bytes safely for certified evidence rendering.
+    with open(src_path, "rb") as fh:
+        data = fh.read(max_bytes + 1)
+    truncated = len(data) > max_bytes
+    return data[:max_bytes], truncated
+
+
+def _drawing_ascii_strings(data: bytes, limit: int = 120) -> List[str]:
+    # Extract readable ASCII/UTF-ish strings from binary CAD files.
+    import re
+    try:
+        text = data.decode("latin-1", errors="ignore")
+    except Exception:
+        text = ""
+    strings: List[str] = []
+    seen = set()
+    for match in re.finditer(r"[ -~]{4,}", text):
+        s = match.group(0).strip()
+        if not s:
+            continue
+        low = s.lower()
+        if low in seen:
+            continue
+        seen.add(low)
+        strings.append(s[:180])
+        if len(strings) >= limit:
+            break
+    return strings
+
+
+def _drawing_kind(ext: str, header: bytes) -> str:
+    # Return a human-readable drawing/CAD file type label.
+    ext = (ext or "").lower()
+    if ext in (".dwg", ".dwt"):
+        version = header[:6].decode("latin-1", errors="ignore").strip()
+        if version.startswith("AC"):
+            return f"AutoCAD DWG/DWT Drawing ({version})"
+        return "AutoCAD DWG/DWT Drawing"
+    if ext == ".dxf":
+        return "AutoCAD DXF Drawing"
+    if ext in (".dwf", ".dwfx"):
+        return "Autodesk Design Web Format Drawing"
+    if ext == ".dgn":
+        return "Bentley MicroStation DGN Drawing"
+    if ext in (".step", ".stp"):
+        return "STEP CAD Exchange File"
+    if ext in (".iges", ".igs"):
+        return "IGES CAD Exchange File"
+    return "CAD/Drawing File"
+
+
+def _dxf_decode_text(data: bytes) -> str:
+    # Decode DXF text safely.
+    for enc in ("utf-8", "cp1252", "latin-1"):
+        try:
+            return data.decode(enc, errors="replace")
+        except Exception:
+            continue
+    return data.decode("latin-1", errors="replace")
+
+
+def _dxf_parse_entities(data: bytes) -> Dict[str, Any]:
+    # Parse a small DXF entity/layer/text summary from group-code pairs.
+    import re
+    text = _dxf_decode_text(data)
+    raw_lines = [ln.rstrip("\r") for ln in text.replace("\r\n", "\n").replace("\r", "\n").split("\n")]
+    pairs: List[Tuple[str, str]] = []
+    i = 0
+    while i + 1 < len(raw_lines):
+        code = raw_lines[i].strip()
+        value = raw_lines[i + 1].strip()
+        if code:
+            pairs.append((code, value))
+        i += 2
+        if len(pairs) >= 250000:
+            break
+
+    entity_counts: Dict[str, int] = {}
+    layers: Dict[str, int] = {}
+    text_values: List[str] = []
+    xs: List[float] = []
+    ys: List[float] = []
+    current_entity = ""
+
+    def maybe_float(value: str) -> Any:
+        try:
+            return float(value)
+        except Exception:
+            return None
+
+    for code, value in pairs:
+        if code == "0":
+            upper = value.upper()
+            current_entity = upper
+            if upper not in ("SECTION", "ENDSEC", "EOF", "TABLE", "ENDTAB", "BLOCK", "ENDBLK"):
+                entity_counts[upper] = entity_counts.get(upper, 0) + 1
+        elif code == "8" and value:
+            layers[value] = layers.get(value, 0) + 1
+        elif code in ("1", "3") and value and current_entity in ("TEXT", "MTEXT", "ATTRIB", "ATTDEF"):
+            cleaned = re.sub(r"\\[A-Za-z0-9]+", " ", value)
+            cleaned = re.sub(r"\s+", " ", cleaned).strip()
+            if cleaned and cleaned not in text_values:
+                text_values.append(cleaned[:220])
+                if len(text_values) >= 80:
+                    break
+        elif code in ("10", "11", "12", "13"):
+            n = maybe_float(value)
+            if isinstance(n, float):
+                xs.append(n)
+        elif code in ("20", "21", "22", "23"):
+            n = maybe_float(value)
+            if isinstance(n, float):
+                ys.append(n)
+
+    bounds = {}
+    if xs and ys:
+        bounds = {"min_x": min(xs), "max_x": max(xs), "min_y": min(ys), "max_y": max(ys)}
+
+    return {
+        "entity_counts": entity_counts,
+        "layers": layers,
+        "text_values": text_values,
+        "bounds": bounds,
+        "pair_count": len(pairs),
+    }
+
+
+def _drawing_binary_summary(src_path: str, ext: str, filename: str = "") -> Dict[str, Any]:
+    # Build a lightweight drawing evidence summary without executing file content.
+    data, truncated = _drawing_read_bytes(src_path)
+    size = os.path.getsize(src_path) if os.path.exists(src_path) else len(data)
+    header = data[:64]
+    strings = _drawing_ascii_strings(data)
+    return {
+        "kind": _drawing_kind(ext, header),
+        "size": size,
+        "truncated": truncated,
+        "header_hex": header[:48].hex(),
+        "magic": header[:16].decode("latin-1", errors="replace"),
+        "strings": strings,
+        "dxf": _dxf_parse_entities(data) if ext == ".dxf" else {},
+    }
+
+
+def _drawing_draw_footer(c: Any, page_w: float, page_num: int, filename: str, cert_id: str) -> None:
+    c.setFont("Helvetica", 6.4)
+    c.setFillGray(0.45)
+    c.drawString(36, 24, f"VeriFYD certified CAD/drawing evidence rendering • Page {page_num} • {filename[:70]}")
+    c.drawRightString(page_w - 36, 24, f"Certificate: {cert_id[:18]}")
+    _draw_verifyd_mark(c, page_w, y=24, x_right_pad=34)
+
+
+def _drawing_wrapped_lines(text: str, width_chars: int = 118) -> List[str]:
+    import textwrap
+    out: List[str] = []
+    for raw in str(text or "").splitlines() or [""]:
+        if not raw.strip():
+            out.append("")
+            continue
+        out.extend(textwrap.wrap(raw, width=width_chars, replace_whitespace=False) or [""])
+    return out
+
+
+def _create_drawing_render_pdf(src_path: str, dest_path: str, cert_id: str, authenticity: int,
+                               label: str, filename: str, sha256: str = "") -> str:
+    # Create a certified evidence/preview PDF for CAD and drawing files.
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.pagesizes import landscape, letter
+
+    ext = os.path.splitext(filename or src_path)[1].lower() or os.path.splitext(src_path)[1].lower()
+    summary = _drawing_binary_summary(src_path, ext, filename)
+
+    page_w, page_h = landscape(letter)
+    c = canvas.Canvas(dest_path, pagesize=(page_w, page_h))
+    c.setAuthor("VeriFYD")
+    c.setTitle(f"VeriFYD Certified Drawing Evidence {cert_id}")
+    c.setSubject(f"{label} | Authenticity {authenticity}% | {filename}")
+
+    margin_x = 36
+    top = page_h - 36
+    bottom = 44
+    page_num = 1
+
+    def header(title_suffix: str = "") -> float:
+        c.setFont("Helvetica-Bold", 15)
+        c.setFillGray(0.05)
+        title = f"VeriFYD Certified {summary.get('kind')}"
+        if title_suffix:
+            title += f" • {title_suffix}"
+        c.drawString(margin_x, top, title[:125])
+        c.setFont("Helvetica", 7.2)
+        c.setFillGray(0.34)
+        c.drawString(margin_x, top - 13, f"File: {filename} • Status: {label} • Authenticity: {authenticity}% • Certificate: {cert_id}")
+        if sha256:
+            c.drawString(margin_x, top - 24, f"Original SHA-256: {sha256}")
+            return top - 43
+        return top - 33
+
+    y = header("Evidence Summary")
+
+    c.setFillGray(0.965)
+    c.setStrokeGray(0.75)
+    c.roundRect(margin_x, y - 96, page_w - 2 * margin_x, 90, 5, fill=1, stroke=1)
+    c.setFont("Helvetica-Bold", 9)
+    c.setFillGray(0.07)
+    c.drawString(margin_x + 10, y - 18, "Drawing / CAD Preview Details")
+    c.setFont("Helvetica", 8)
+    c.setFillGray(0.16)
+    c.drawString(margin_x + 10, y - 34, f"Type: {summary.get('kind')}  •  Extension: {ext or 'unknown'}  •  File size: {summary.get('size')} bytes")
+    c.drawString(margin_x + 10, y - 49, f"Header / magic: {str(summary.get('magic') or '').replace(chr(10), ' ')[:90]}")
+    c.drawString(margin_x + 10, y - 64, f"Header hex: {summary.get('header_hex')}")
+    mode_note = "Native CAD geometry rendering is not enabled; this PDF is an evidence preview. The exact source drawing is preserved in the certified package."
+    c.drawString(margin_x + 10, y - 79, mode_note[:150])
+    y -= 116
+
+    dxf = dict(summary.get("dxf") or {})
+    if dxf:
+        c.setFont("Helvetica-Bold", 10)
+        c.setFillGray(0.06)
+        c.drawString(margin_x, y, "DXF Entity Summary")
+        y -= 15
+        entity_counts = dict(dxf.get("entity_counts") or {})
+        layers = dict(dxf.get("layers") or {})
+        bounds = dict(dxf.get("bounds") or {})
+        c.setFont("Helvetica", 8)
+        c.setFillGray(0.12)
+        c.drawString(margin_x, y, f"Group-code pairs scanned: {dxf.get('pair_count', 0)}")
+        y -= 12
+        if bounds:
+            c.drawString(margin_x, y, f"Approximate extents: X {bounds.get('min_x'):.3f} to {bounds.get('max_x'):.3f} • Y {bounds.get('min_y'):.3f} to {bounds.get('max_y'):.3f}")
+            y -= 12
+        if entity_counts:
+            top_entities = ", ".join(f"{k}: {v}" for k, v in sorted(entity_counts.items(), key=lambda kv: (-kv[1], kv[0]))[:16])
+            c.drawString(margin_x, y, f"Entities: {top_entities[:150]}")
+            y -= 12
+        if layers:
+            top_layers = ", ".join(f"{k}: {v}" for k, v in sorted(layers.items(), key=lambda kv: (-kv[1], kv[0]))[:16])
+            c.drawString(margin_x, y, f"Layers: {top_layers[:150]}")
+            y -= 16
+
+    strings = list(summary.get("strings") or [])
+    title = "Readable Strings / Metadata Samples"
+    if dxf and dxf.get("text_values"):
+        title = "DXF Text Values and Readable Metadata Samples"
+        strings = list(dxf.get("text_values") or []) + strings
+
+    c.setFont("Helvetica-Bold", 10)
+    c.setFillGray(0.06)
+    c.drawString(margin_x, y, title)
+    y -= 14
+
+    if not strings:
+        strings = ["[No readable string samples were found in this drawing file preview.]"]
+
+    c.setFont("Courier", 7.2)
+    line_h = 9.5
+    line_idx = 1
+    seen = set()
+    for value in strings[:220]:
+        key = str(value).lower()[:200]
+        if key in seen:
+            continue
+        seen.add(key)
+        for draw_line in _drawing_wrapped_lines(str(value), 130):
+            if y < bottom + line_h:
+                _drawing_draw_footer(c, page_w, page_num, filename, cert_id)
+                c.showPage()
+                page_num += 1
+                y = header("Continued")
+                c.setFont("Courier", 7.2)
+            c.setFillGray(0.45)
+            c.drawRightString(margin_x + 28, y, str(line_idx))
+            c.setFillGray(0.08)
+            c.drawString(margin_x + 38, y, draw_line[:150])
+            y -= line_h
+        line_idx += 1
+
+    if summary.get("truncated"):
+        if y < bottom + 16:
+            _drawing_draw_footer(c, page_w, page_num, filename, cert_id)
+            c.showPage()
+            page_num += 1
+            y = header("Continued")
+        c.setFont("Helvetica-Oblique", 7)
+        c.setFillGray(0.35)
+        c.drawString(margin_x, y, "VeriFYD note: drawing preview was truncated after 2.5 MB; exact original file is preserved in the certified package.")
+
+    _drawing_draw_footer(c, page_w, page_num, filename, cert_id)
+    c.save()
+    return dest_path
+
 def _read_binary_evidence_for_render(src_path: str, ext: str) -> str:
     """Create a readable evidence record for PST/OST/DWG binary files."""
     import re
@@ -4825,6 +5126,12 @@ def stamp_document(src_path: str, dest_path: str, cert_id: str,
     if ext == ".rtf":
         _create_rtf_form_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256)
         # Preserve exact source RTF file for legal/forensic review.
+        _attach_original_file_to_pdf(dest_path, src_path, filename or os.path.basename(src_path))
+        return _finalize_certified_pdf(dest_path, detail, cert_id, filename, sha256, authenticity, label)
+
+    if ext in DRAWING_RENDER_EXTENSIONS:
+        _create_drawing_render_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256)
+        # Preserve exact source drawing/CAD file for legal/forensic review.
         _attach_original_file_to_pdf(dest_path, src_path, filename or os.path.basename(src_path))
         return _finalize_certified_pdf(dest_path, detail, cert_id, filename, sha256, authenticity, label)
 
