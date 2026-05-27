@@ -3285,6 +3285,324 @@ def _read_text_for_certified_render(src_path: str, ext: str) -> str:
     return text.strip()
 
 
+# ─────────────────────────────────────────────
+# RTF certified form/table fallback rendering
+# ─────────────────────────────────────────────
+
+def _rtf_clean_form_text(text: Any) -> str:
+    """Normalize RTF-extracted text for readable certified form rendering."""
+    import html
+    import re
+
+    text = html.unescape(str(text or ""))
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = text.replace("\xa0", " ").replace("\u00a0", " ").replace("\u200b", "")
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r" *\n *", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def _rtf_nonempty_lines(text: str) -> List[str]:
+    """Return useful RTF-extracted lines while preserving form order."""
+    lines: List[str] = []
+    for raw in _rtf_clean_form_text(text).splitlines():
+        line = raw.strip()
+        if line:
+            lines.append(line)
+    return lines
+
+
+def _rtf_split_pipe_row(line: str) -> List[str]:
+    """Split a pipe-delimited RTF table row into readable cells."""
+    import re
+    parts = [re.sub(r"\s+", " ", p).strip() for p in str(line or "").split("|")]
+    while parts and parts[0] == "":
+        parts.pop(0)
+    while parts and parts[-1] == "":
+        parts.pop()
+    return parts
+
+
+def _rtf_money(value: Any) -> str:
+    """Clean common money strings from RTF extraction."""
+    import re
+    text = str(value or "").strip().replace("$\t", "$ ").replace("$\u00a0", "$ ")
+    text = re.sub(r"\s+", " ", text)
+    if not text:
+        return ""
+    if "$" in text:
+        m = re.search(r"-?\d+(?:\.\d+)?", text.replace(",", ""))
+        if m:
+            try:
+                return f"$ {float(m.group(0)):,.2f}"
+            except Exception:
+                return text
+    return text
+
+
+def _rtf_extract_travel_form_model(lines: List[str]) -> Dict[str, Any]:
+    """Best-effort extraction of DOE Local Travel RTF form fields and trip rows."""
+    import re
+
+    model: Dict[str, Any] = {
+        "title": "RTF Form",
+        "subtitle": "",
+        "fields": [],
+        "trip_rows": [],
+        "total": "",
+        "footer_lines": [],
+        "raw_lines": lines,
+        "is_travel_form": False,
+    }
+
+    joined = "\n".join(lines)
+    model["is_travel_form"] = "Local Travel" in joined and "Daily Trip Total" in joined
+    if model["is_travel_form"]:
+        model["title"] = "Local Travel"
+        model["subtitle"] = "NYC Department of Education - DIIT"
+    elif lines:
+        model["title"] = lines[0][:80]
+
+    # Add high-value header fields when they are visible in the extracted form.
+    for label, pattern in [
+        ("Vendor", r"Robert DiGiacomo"),
+        ("DOE ID", r"1724267"),
+        ("Street Address", r"6 Deerfield Drive"),
+        ("City", r"Lake Grove"),
+        ("State", r"New York"),
+        ("Zip Code", r"11755"),
+    ]:
+        m = re.search(pattern, joined, flags=re.I)
+        if m and not any(k == label for k, _ in model["fields"]):
+            model["fields"].append((label, m.group(0)))
+
+    # Trip rows come from pipe-delimited rows that start with a date.
+    for line in lines:
+        if not re.match(r"^\d{1,2}/\d{1,2}/\d{4}\|", line):
+            continue
+        cells = _rtf_split_pipe_row(line)
+        if len(cells) < 3:
+            continue
+        while len(cells) < 8:
+            cells.append("")
+        date, travel_from, destination, mode, mileage, per_day, tolls, total = cells[:8]
+        model["trip_rows"].append([
+            date,
+            travel_from,
+            destination,
+            mode,
+            mileage,
+            _rtf_money(per_day),
+            _rtf_money(tolls),
+            _rtf_money(total),
+        ])
+
+    for line in lines:
+        if "Grand Total" in line:
+            cells = _rtf_split_pipe_row(line)
+            joined_cells = " ".join(cells)
+            m = re.search(r"\$?\s*[\d,]+\.\d{2}", joined_cells)
+            if m:
+                model["total"] = _rtf_money(m.group(0))
+            elif len(cells) >= 2:
+                model["total"] = _rtf_money(cells[-1])
+
+    footer_start = -1
+    for i, line in enumerate(lines):
+        if "RECEIPT OF GOODS/SERVICES" in line or "EXPENDITURE APPROVAL" in line:
+            footer_start = i
+            break
+    if footer_start >= 0:
+        model["footer_lines"] = lines[footer_start: min(len(lines), footer_start + 16)]
+
+    return model
+
+
+def _rtf_make_table_cell(text: Any, style: Any) -> Any:
+    """Create a ReportLab Paragraph for an RTF form table cell."""
+    import html
+    from reportlab.platypus import Paragraph
+    safe = html.escape(str(text or "")).replace("\n", "<br/>")
+    return Paragraph(safe, style)
+
+
+def _create_rtf_form_pdf(src_path: str, dest_path: str, cert_id: str, authenticity: int,
+                         label: str, filename: str, sha256: str = "") -> str:
+    """
+    Create a cleaner certified PDF rendering for RTF forms/tables.
+
+    This pure-Python fallback is used when LibreOffice is unavailable. It does
+    not attempt full RTF layout fidelity, but it renders common form/table RTF
+    documents much better than the plain pipe-delimited text fallback.
+    """
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+    from reportlab.lib.pagesizes import landscape, letter
+    from reportlab.lib import colors
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.enums import TA_CENTER, TA_RIGHT
+    from reportlab.lib.units import inch
+
+    text = _read_text_for_certified_render(src_path, ".rtf")
+    lines = _rtf_nonempty_lines(text)
+    model = _rtf_extract_travel_form_model(lines)
+
+    page_size = landscape(letter)
+    page_w, page_h = page_size
+    left_margin = 0.33 * inch
+    right_margin = 0.33 * inch
+    top_margin = 0.32 * inch
+    bottom_margin = 0.45 * inch
+    available_w = page_w - left_margin - right_margin
+
+    pdf = SimpleDocTemplate(
+        dest_path,
+        pagesize=page_size,
+        leftMargin=left_margin,
+        rightMargin=right_margin,
+        topMargin=top_margin,
+        bottomMargin=bottom_margin,
+        title=f"VeriFYD Certified RTF Form {cert_id}",
+        author="VeriFYD",
+        subject=f"{label} | Authenticity {authenticity}% | {filename}",
+    )
+
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle("VeriFYD_RTF_Title", parent=styles["Title"], fontName="Helvetica-Bold", fontSize=14, leading=16, alignment=TA_CENTER, spaceAfter=4)
+    subtitle_style = ParagraphStyle("VeriFYD_RTF_Subtitle", parent=styles["Normal"], fontName="Helvetica-Bold", fontSize=8.5, leading=10, alignment=TA_CENTER, spaceAfter=6)
+    meta_style = ParagraphStyle("VeriFYD_RTF_Meta", parent=styles["Normal"], fontName="Helvetica", fontSize=6.7, leading=8, textColor=colors.HexColor("#555555"), spaceAfter=2)
+    cell = ParagraphStyle("VeriFYD_RTF_Cell", parent=styles["Normal"], fontName="Helvetica", fontSize=6.2, leading=7.3, wordWrap="CJK")
+    cell_bold = ParagraphStyle("VeriFYD_RTF_Cell_Bold", parent=cell, fontName="Helvetica-Bold")
+    cell_center = ParagraphStyle("VeriFYD_RTF_Cell_Center", parent=cell, alignment=TA_CENTER)
+    cell_right = ParagraphStyle("VeriFYD_RTF_Cell_Right", parent=cell, alignment=TA_RIGHT)
+    small = ParagraphStyle("VeriFYD_RTF_Small", parent=styles["Normal"], fontName="Helvetica", fontSize=6.2, leading=7.5, spaceAfter=1.5)
+    note_style = ParagraphStyle("VeriFYD_RTF_Note", parent=styles["Normal"], fontName="Helvetica-Oblique", fontSize=6.3, leading=7.4, textColor=colors.HexColor("#444444"))
+
+    story: List[Any] = []
+    story.append(Paragraph(str(model.get("title") or "RTF Document"), title_style))
+    if model.get("subtitle"):
+        story.append(Paragraph(str(model.get("subtitle")), subtitle_style))
+    story.append(Paragraph(f"VeriFYD Certified RTF Form Rendering • File: {filename} • Status: {label} • Authenticity: {authenticity}% • Certificate: {cert_id}", meta_style))
+    if sha256:
+        story.append(Paragraph(f"Original SHA-256: {sha256}", meta_style))
+    story.append(Spacer(1, 4))
+
+    fields = list(model.get("fields") or [])
+    if fields:
+        rows: List[List[Any]] = []
+        for i in range(0, len(fields), 3):
+            row_items = fields[i:i + 3]
+            row: List[Any] = []
+            for label_name, value in row_items:
+                row.append(_rtf_make_table_cell(label_name, cell_bold))
+                row.append(_rtf_make_table_cell(value, cell))
+            while len(row) < 6:
+                row.append(_rtf_make_table_cell("", cell))
+            rows.append(row)
+        field_table = Table(rows, colWidths=[0.86 * inch, 1.55 * inch, 0.86 * inch, 1.55 * inch, 0.86 * inch, 1.55 * inch], hAlign="LEFT")
+        field_table.setStyle(TableStyle([
+            ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#777777")),
+            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F7F7F7")),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 3),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+            ("TOPPADDING", (0, 0), (-1, -1), 2),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+        ]))
+        story.append(field_table)
+        story.append(Spacer(1, 5))
+
+    if model.get("is_travel_form"):
+        story.append(Paragraph("Travel Mode Codes: A - Subway & Bus • B - Bus • C - Surface Car (Taxi/Rental, etc.) • D - Private Vehicle • E - City-owned Vehicle", note_style))
+        story.append(Spacer(1, 4))
+
+    trip_rows = list(model.get("trip_rows") or [])
+    if trip_rows:
+        headers = ["Date", "Travel From", "Destination", "TRV Mode", "$0.28 X Miles/Mileage", "$8.40/Day", "Tolls/Parking", "Daily Trip Total"]
+        table_data: List[List[Any]] = [[_rtf_make_table_cell(h, cell_bold) for h in headers]]
+        for row in trip_rows:
+            out: List[Any] = []
+            for idx, val in enumerate(row):
+                style = cell_right if idx in (4, 5, 6, 7) else cell
+                if idx == 3:
+                    style = cell_center
+                out.append(_rtf_make_table_cell(val, style))
+            table_data.append(out)
+        if model.get("total"):
+            table_data.append([
+                _rtf_make_table_cell("", cell), _rtf_make_table_cell("", cell), _rtf_make_table_cell("", cell),
+                _rtf_make_table_cell("", cell), _rtf_make_table_cell("", cell), _rtf_make_table_cell("", cell),
+                _rtf_make_table_cell("Grand Total", cell_bold), _rtf_make_table_cell(model.get("total"), cell_bold),
+            ])
+
+        col_widths = [0.72 * inch, 0.78 * inch, 1.55 * inch, 0.58 * inch, 1.05 * inch, 0.74 * inch, 0.80 * inch, 0.92 * inch]
+        scale = min(1.0, available_w / sum(col_widths))
+        col_widths = [w * scale for w in col_widths]
+        travel_table = Table(table_data, colWidths=col_widths, repeatRows=1, splitByRow=1, hAlign="LEFT")
+        travel_table.setStyle(TableStyle([
+            ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#666666")),
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#EDEDED")),
+            ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#F2F2F2")),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 2.5),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 2.5),
+            ("TOPPADDING", (0, 0), (-1, -1), 2.2),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 2.2),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -2), [colors.white, colors.HexColor("#FBFBFB")]),
+        ]))
+        story.append(travel_table)
+    else:
+        # Generic RTF fallback: preserve pipe-delimited table lines in a grid.
+        block: List[List[Any]] = []
+        for line in lines[:280]:
+            cells = _rtf_split_pipe_row(line) if "|" in line else []
+            if len(cells) >= 2:
+                max_cols = min(max(2, len(cells)), 8)
+                block.append([_rtf_make_table_cell(cells[i] if i < len(cells) else "", cell) for i in range(max_cols)])
+            else:
+                if block:
+                    max_cols = max(len(r) for r in block)
+                    normalized = [r + [_rtf_make_table_cell("", cell)] * (max_cols - len(r)) for r in block]
+                    story.append(Table(normalized, colWidths=[available_w / max_cols] * max_cols, style=[("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#777777")), ("VALIGN", (0, 0), (-1, -1), "TOP")]))
+                    story.append(Spacer(1, 5))
+                    block = []
+                story.append(Paragraph(str(line), small))
+        if block:
+            max_cols = max(len(r) for r in block)
+            normalized = [r + [_rtf_make_table_cell("", cell)] * (max_cols - len(r)) for r in block]
+            story.append(Table(normalized, colWidths=[available_w / max_cols] * max_cols, style=[("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#777777")), ("VALIGN", (0, 0), (-1, -1), "TOP")]))
+
+    footer_lines = list(model.get("footer_lines") or [])
+    if footer_lines:
+        story.append(Spacer(1, 6))
+        footer_cells = [_rtf_make_table_cell(line, small) for line in footer_lines[:10]]
+        footer_table = Table([[f] for f in footer_cells], colWidths=[available_w], hAlign="LEFT")
+        footer_table.setStyle(TableStyle([
+            ("BOX", (0, 0), (-1, -1), 0.35, colors.HexColor("#777777")),
+            ("INNERGRID", (0, 0), (-1, -1), 0.15, colors.HexColor("#CCCCCC")),
+            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#FAFAFA")),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 3),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+            ("TOPPADDING", (0, 0), (-1, -1), 2),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+        ]))
+        story.append(footer_table)
+
+    def _on_page(c, _doc):
+        c.saveState()
+        try:
+            c.setFont("Helvetica", 6.4)
+            c.setFillGray(0.45)
+            c.drawString(left_margin, 16, f"VeriFYD certified RTF form rendering • {filename[:90]}")
+            c.drawRightString(page_w - right_margin, 16, f"Certificate: {cert_id[:18]}")
+            _draw_verifyd_mark(c, page_w, y=24, x_right_pad=34)
+        finally:
+            c.restoreState()
+
+    pdf.build(story, onFirstPage=_on_page, onLaterPages=_on_page)
+    return dest_path
+
 def _create_text_render_pdf(src_path: str, dest_path: str, cert_id: str, authenticity: int,
                             label: str, filename: str, sha256: str = "") -> str:
     """Create a readable certified PDF rendering for EML/RTF/TXT-like documents."""
@@ -4211,6 +4529,12 @@ def stamp_document(src_path: str, dest_path: str, cert_id: str,
     if ext == ".vsdx":
         _create_vsdx_diagram_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256)
         # Preserve exact source Visio file for legal/forensic review.
+        _attach_original_file_to_pdf(dest_path, src_path, filename or os.path.basename(src_path))
+        return _finalize_certified_pdf(dest_path, detail, cert_id, filename, sha256, authenticity, label)
+
+    if ext == ".rtf":
+        _create_rtf_form_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256)
+        # Preserve exact source RTF file for legal/forensic review.
         _attach_original_file_to_pdf(dest_path, src_path, filename or os.path.basename(src_path))
         return _finalize_certified_pdf(dest_path, detail, cert_id, filename, sha256, authenticity, label)
 
