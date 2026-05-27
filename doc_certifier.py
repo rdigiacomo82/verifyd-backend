@@ -5381,6 +5381,85 @@ def _create_zip_pdf(src_path: str, dest_path: str, cert_id: str, authenticity: i
     _attach_original_file_to_pdf(dest_path, src_path, filename or os.path.basename(src_path))
     return dest_path
 
+
+
+def _create_dxf_cad_preview_pdf(src_path: str, dest_path: str, cert_id: str, authenticity: int,
+                                label: str, filename: str, sha256: str = "") -> str:
+    """
+    Create a certified PDF containing a rendered DXF visual preview.
+
+    Uses free/open-source ezdxf + matplotlib through cad_preview.py. If DXF
+    rendering fails, this helper raises so stamp_document can fall back to the
+    existing drawing/CAD evidence renderer without failing certification.
+    """
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.pagesizes import landscape, letter
+    from reportlab.lib.utils import ImageReader
+
+    from cad_preview import render_dxf_preview
+
+    preview = render_dxf_preview(src_path)
+    if not getattr(preview, "success", False) or not getattr(preview, "preview_path", ""):
+        raise RuntimeError(getattr(preview, "message", "DXF preview rendering failed."))
+
+    page_w, page_h = landscape(letter)
+    c = canvas.Canvas(dest_path, pagesize=(page_w, page_h))
+    c.setAuthor("VeriFYD")
+    c.setTitle(f"VeriFYD Certified DXF Drawing {cert_id}")
+    c.setSubject(f"{label} | Authenticity {authenticity}% | {filename}")
+
+    margin = 34
+    header_h = 70
+    footer_h = 34
+
+    c.setFont("Helvetica-Bold", 16)
+    c.setFillGray(0.05)
+    c.drawString(margin, page_h - 34, "VeriFYD Certified CAD Drawing Preview")
+
+    c.setFont("Helvetica", 8.2)
+    c.setFillGray(0.28)
+    c.drawString(margin, page_h - 50, f"File: {filename} • Status: {label} • Authenticity: {authenticity}% • Certificate: {cert_id}")
+    if sha256:
+        c.drawString(margin, page_h - 63, f"Original SHA-256: {sha256[:110]}")
+
+    max_w = page_w - (margin * 2)
+    max_h = page_h - header_h - footer_h
+    try:
+        from PIL import Image
+        with Image.open(preview.preview_path) as img:
+            img_w, img_h = img.size
+    except Exception:
+        img_w, img_h = 1300, 850
+
+    scale = min(max_w / max(1, img_w), max_h / max(1, img_h))
+    draw_w = img_w * scale
+    draw_h = img_h * scale
+    x = (page_w - draw_w) / 2
+    y = footer_h + ((max_h - draw_h) / 2)
+
+    c.setFillColorRGB(1, 1, 1)
+    c.rect(margin, footer_h - 3, max_w, max_h + 6, fill=1, stroke=0)
+    c.setStrokeGray(0.75)
+    c.setLineWidth(0.6)
+    c.rect(margin, footer_h - 3, max_w, max_h + 6, fill=0, stroke=1)
+    c.drawImage(ImageReader(preview.preview_path), x, y, width=draw_w, height=draw_h, preserveAspectRatio=True, mask="auto")
+
+    c.setFont("Helvetica", 7.2)
+    c.setFillGray(0.42)
+    c.drawString(margin, 20, f"DXF visual preview rendered with open-source CAD renderer • entities={getattr(preview, 'entity_count', 0)} • layers={getattr(preview, 'layer_count', 0)}")
+    c.drawRightString(page_w - margin, 20, f"Certificate: {cert_id[:18]}")
+    _draw_verifyd_mark(c, page_w, y=22, x_right_pad=34)
+    c.save()
+
+    try:
+        if os.path.exists(preview.preview_path):
+            os.remove(preview.preview_path)
+    except Exception:
+        pass
+
+    return dest_path
+
+
 def stamp_document(src_path: str, dest_path: str, cert_id: str,
                    authenticity: int, label: str, filename: str,
                    sha256: str = "", detail: Dict[str, Any] | None = None) -> str:
@@ -5461,6 +5540,19 @@ def stamp_document(src_path: str, dest_path: str, cert_id: str,
         # Preserve exact source RTF file for legal/forensic review.
         _attach_original_file_to_pdf(dest_path, src_path, filename or os.path.basename(src_path))
         return _finalize_certified_pdf(dest_path, detail, cert_id, filename, sha256, authenticity, label)
+
+    if ext == ".dxf":
+        try:
+            _create_dxf_cad_preview_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256)
+            # Preserve exact source DXF for legal/forensic review.
+            _attach_original_file_to_pdf(dest_path, src_path, filename or os.path.basename(src_path))
+            return _finalize_certified_pdf(dest_path, detail, cert_id, filename, sha256, authenticity, label)
+        except Exception as e:
+            log.warning(
+                "doc_certifier: DXF CAD preview failed for file=%s; falling back to drawing evidence renderer: %s",
+                filename,
+                e,
+            )
 
     if ext in DRAWING_RENDER_EXTENSIONS:
         _create_full_drawing_visual_pdf(src_path, dest_path, cert_id, authenticity, label, filename, sha256)
