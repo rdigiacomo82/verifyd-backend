@@ -282,6 +282,7 @@ def process_upload_job(file_key: str, filename: str, email: str) -> dict:
             log.info("Worker: cleaned up temp file %s", tmp_path)
 
 
+
 def process_photo_upload_job(file_key: str, filename: str, email: str) -> dict:
     """Background job: retrieve photo from R2/Redis, analyze it, stamp if REAL, store result."""
     import os as _os
@@ -315,6 +316,7 @@ def process_photo_upload_job(file_key: str, filename: str, email: str) -> dict:
             download_video(r2_key, tmp_path)
             delete_video(r2_key)
             sha256 = _sha256_file(tmp_path)
+            log.info("Worker: retrieved photo from R2: job=%s key=%s size=%d bytes", job_id, r2_key, _os.path.getsize(tmp_path))
         else:
             file_bytes = r.get(file_key)
             if not file_bytes:
@@ -353,79 +355,114 @@ def process_photo_upload_job(file_key: str, filename: str, email: str) -> dict:
             "generator_guess": detail.get("generator_guess", "Unknown"),
             "media_type": "photo",
             "job_status": "complete",
+            "photo_ready": False,
         }
 
         if certify:
-            certified_path = _os.path.join(tempfile.gettempdir(), f"cert_{job_id}{ext}")
-            download_url = f"{BASE_URL}/download-photo/{job_id}"
-            try:
-                from video import stamp_photo
-                _stamp_src = tmp_path
-                _heic_converted = None
-
-                if ext in (".heic", ".heif"):
-                    import subprocess as _sp, tempfile as _tf
-                    _jpg_tmp = _tf.mktemp(suffix=".jpg")
-                    _converted_ok = False
-                    try:
-                        _r = _sp.run(["convert", tmp_path, _jpg_tmp], capture_output=True, timeout=30)
-                        _converted_ok = _r.returncode == 0 and _os.path.exists(_jpg_tmp) and _os.path.getsize(_jpg_tmp) > 1000
-                    except Exception:
-                        pass
-                    if not _converted_ok:
-                        try:
-                            _r2 = _sp.run(["ffmpeg", "-y", "-i", tmp_path, "-q:v", "2", _jpg_tmp], capture_output=True, timeout=30)
-                            _converted_ok = _r2.returncode == 0 and _os.path.exists(_jpg_tmp) and _os.path.getsize(_jpg_tmp) > 1000
-                        except Exception:
-                            pass
-                    if _converted_ok:
-                        _stamp_src = _jpg_tmp
-                        _heic_converted = _jpg_tmp
-                        certified_path = _os.path.join(tempfile.gettempdir(), f"cert_{job_id}.jpg")
-                        ext = ".jpg"
-                    else:
-                        _stamp_src = None
-
-                if _stamp_src:
-                    stamp_photo(_stamp_src, certified_path, job_id)
-                if _heic_converted and _os.path.exists(_heic_converted):
-                    _os.remove(_heic_converted)
-
-                if _os.path.exists(certified_path):
-                    try:
-                        _plan = _gus(email).get("plan", "free")
-                    except Exception:
-                        _plan = "free"
-
-                    _stored = False
-                    try:
-                        from storage import r2_available, upload_certified_photo
-                        if r2_available():
-                            upload_certified_photo(job_id, certified_path, _plan, ext)
-                            _os.remove(certified_path)
-                            _stored = True
-                    except Exception as _r2e:
-                        log.warning("R2 photo cert upload failed, falling back to Redis: %s", _r2e)
-
-                    if not _stored and _os.path.exists(certified_path):
-                        _cert_ttl = {"free": 86400, "creator": 259200, "pro": 604800, "enterprise": 2592000}.get(_plan, 86400)
-                        with open(certified_path, "rb") as pf:
-                            cert_bytes = pf.read()
-                        r.setex(f"cert:{job_id}", _cert_ttl, cert_bytes)
-                        _os.remove(certified_path)
-
-                result["certificate_id"] = job_id
-                result["download_url"] = download_url
-
-                if email and "@" in email:
-                    try:
-                        send_certification_email(email, job_id, authenticity, filename, download_url, is_photo=True)
-                    except Exception as em:
-                        log.warning("Worker: email failed for %s: %s", job_id, em)
-            except Exception as stamp_err:
-                log.error("Worker: photo stamp failed for %s: %s", job_id, stamp_err)
+            result["certificate_id"] = job_id
+            result["download_url"] = f"{BASE_URL}/download-photo/{job_id}"
+            result["certification_status"] = "processing"
 
         _store_result(r, job_id, result)
+
+        if not certify:
+            return result
+
+        certified_ext = ext
+        certified_path = _os.path.join(tempfile.gettempdir(), f"cert_{job_id}{certified_ext}")
+        download_url = f"{BASE_URL}/download-photo/{job_id}"
+        _heic_converted = None
+
+        try:
+            from video import stamp_photo
+
+            _stamp_src = tmp_path
+            if ext in (".heic", ".heif"):
+                import subprocess as _sp
+                import tempfile as _tf
+
+                _jpg_tmp = _tf.mktemp(suffix=".jpg")
+                _converted_ok = False
+
+                try:
+                    _r = _sp.run(["ffmpeg", "-y", "-i", tmp_path, "-q:v", "2", _jpg_tmp], capture_output=True, timeout=60)
+                    _converted_ok = _r.returncode == 0 and _os.path.exists(_jpg_tmp) and _os.path.getsize(_jpg_tmp) > 1000
+                except Exception:
+                    pass
+
+                if not _converted_ok:
+                    try:
+                        _r2 = _sp.run(["convert", tmp_path, _jpg_tmp], capture_output=True, timeout=60)
+                        _converted_ok = _r2.returncode == 0 and _os.path.exists(_jpg_tmp) and _os.path.getsize(_jpg_tmp) > 1000
+                    except Exception:
+                        pass
+
+                if not _converted_ok:
+                    raise RuntimeError("HEIC/HEIF photo conversion failed during certification stamping.")
+
+                _stamp_src = _jpg_tmp
+                _heic_converted = _jpg_tmp
+                certified_ext = ".jpg"
+                certified_path = _os.path.join(tempfile.gettempdir(), f"cert_{job_id}.jpg")
+
+            stamp_photo(_stamp_src, certified_path, job_id)
+
+            if _heic_converted and _os.path.exists(_heic_converted):
+                _os.remove(_heic_converted)
+                _heic_converted = None
+
+            if not _os.path.exists(certified_path) or _os.path.getsize(certified_path) < 1000:
+                raise RuntimeError("Certified photo was not created or was too small.")
+
+            try:
+                _plan = _gus(email).get("plan", "free")
+            except Exception:
+                _plan = "free"
+
+            _stored = False
+            try:
+                from storage import r2_available, upload_certified_photo
+                if r2_available():
+                    upload_certified_photo(job_id, certified_path, _plan, certified_ext)
+                    _os.remove(certified_path)
+                    _stored = True
+                    log.info("Worker: certified photo stored in R2: job=%s plan=%s ext=%s", job_id, _plan, certified_ext)
+            except Exception as _r2e:
+                log.warning("R2 photo cert upload failed, falling back to Redis: %s", _r2e)
+
+            if not _stored and _os.path.exists(certified_path):
+                _cert_ttl = {"free": 86400, "creator": 259200, "pro": 604800, "enterprise": 2592000}.get(_plan, 86400)
+                with open(certified_path, "rb") as pf:
+                    cert_bytes = pf.read()
+                r.setex(f"cert:{job_id}", _cert_ttl, cert_bytes)
+                _os.remove(certified_path)
+                log.info("Worker: certified photo stored in Redis fallback: job=%s ttl=%s", job_id, _cert_ttl)
+
+            if email and "@" in email:
+                try:
+                    sent = send_certification_email(email, job_id, authenticity, filename, download_url, is_photo=True)
+                    log.info("Worker: photo certification email sent=%s job=%s email=%s", sent, job_id, email)
+                except Exception as em:
+                    log.warning("Worker: photo certification email failed for %s: %s", job_id, em)
+
+            result["photo_ready"] = True
+            result["certification_status"] = "ready"
+            result["download_url"] = download_url
+            _store_result(r, job_id, result)
+
+        except Exception as stamp_err:
+            log.error("Worker: photo certification failed for %s: %s", job_id, stamp_err)
+            result["photo_ready"] = False
+            result["certification_status"] = "failed"
+            result["certification_error"] = "Certified photo generation failed, but analysis completed."
+            _store_result(r, job_id, result)
+        finally:
+            if _heic_converted and _os.path.exists(_heic_converted):
+                try:
+                    _os.remove(_heic_converted)
+                except Exception:
+                    pass
+
         return result
     except Exception as e:
         log.exception("Worker: photo job %s failed", job_id)
@@ -438,12 +475,14 @@ def process_photo_upload_job(file_key: str, filename: str, email: str) -> dict:
             log.info("Worker: cleaned up photo temp file %s", tmp_path)
 
 
+
 def process_photo_link_job(job_id: str, image_url: str, email: str) -> dict:
-    """Background job: download image from URL, analyze it, store result."""
+    """Background job: download image from URL, analyze it, certify if REAL, store result."""
     import os
     import tempfile
     import urllib.request
     import urllib.error
+    import hashlib as _hashlib
 
     r = _get_redis()
     tmp_path = os.path.join(tempfile.gettempdir(), f"{job_id}.jpg")
@@ -464,6 +503,7 @@ def process_photo_link_job(job_id: str, image_url: str, email: str) -> dict:
                 tmp_path = tmp_path.replace(".jpg", ext)
             with open(tmp_path, "wb") as fh:
                 fh.write(data)
+            sha256 = _hashlib.sha256(data).hexdigest()
         except urllib.error.HTTPError as e:
             result = {"job_status": "error", "error": f"Could not download image: HTTP {e.code}. The image may be private or require login."}
             _store_result(r, job_id, result)
@@ -480,16 +520,28 @@ def process_photo_link_job(job_id: str, image_url: str, email: str) -> dict:
             pass
 
         from photo_detection import run_photo_detection
-        from database import insert_certificate, increment_user_uses
+        from database import insert_certificate, increment_user_uses, get_user_status as _gus
+        from config import BASE_URL
+        from emailer import send_certification_email
+
         authenticity, label, detail = run_photo_detection(tmp_path)
         LABEL_UI = {
             "REAL": ("REAL PHOTO VERIFIED", "green", True),
             "UNDETERMINED": ("PHOTO UNDETERMINED", "blue", False),
             "AI": ("AI DETECTED", "red", False),
         }
-        ui_text, color, _ = LABEL_UI.get(label, ("PHOTO UNDETERMINED", "blue", False))
+        ui_text, color, certify = LABEL_UI.get(label, ("PHOTO UNDETERMINED", "blue", False))
         increment_user_uses(email)
-        insert_certificate(cert_id=job_id, email=email, original_file=image_url, label=label, authenticity=authenticity, ai_score=detail["ai_score"], sha256=None)
+        insert_certificate(
+            cert_id=job_id,
+            email=email,
+            original_file=image_url,
+            label=label,
+            authenticity=authenticity,
+            ai_score=detail["ai_score"],
+            sha256=sha256,
+        )
+
         result = {
             "status": ui_text,
             "authenticity_score": authenticity,
@@ -503,7 +555,68 @@ def process_photo_link_job(job_id: str, image_url: str, email: str) -> dict:
             "generator_guess": detail.get("generator_guess", "Unknown"),
             "media_type": "photo",
             "job_status": "complete",
+            "photo_ready": False,
         }
+
+        if certify:
+            result["certificate_id"] = job_id
+            result["download_url"] = f"{BASE_URL}/download-photo/{job_id}"
+            result["certification_status"] = "processing"
+
+        _store_result(r, job_id, result)
+
+        if certify:
+            certified_path = os.path.join(tempfile.gettempdir(), f"cert_{job_id}{ext}")
+            download_url = f"{BASE_URL}/download-photo/{job_id}"
+            try:
+                from video import stamp_photo
+                stamp_photo(tmp_path, certified_path, job_id)
+
+                if not os.path.exists(certified_path) or os.path.getsize(certified_path) < 1000:
+                    raise RuntimeError("Certified linked photo was not created or was too small.")
+
+                try:
+                    _plan = _gus(email).get("plan", "free")
+                except Exception:
+                    _plan = "free"
+
+                _stored = False
+                try:
+                    from storage import r2_available, upload_certified_photo
+                    if r2_available():
+                        upload_certified_photo(job_id, certified_path, _plan, ext)
+                        os.remove(certified_path)
+                        _stored = True
+                        log.info("Worker: certified linked photo stored in R2: job=%s plan=%s ext=%s", job_id, _plan, ext)
+                except Exception as _r2e:
+                    log.warning("R2 linked photo cert upload failed, falling back to Redis: %s", _r2e)
+
+                if not _stored and os.path.exists(certified_path):
+                    _cert_ttl = {"free": 86400, "creator": 259200, "pro": 604800, "enterprise": 2592000}.get(_plan, 86400)
+                    with open(certified_path, "rb") as pf:
+                        cert_bytes = pf.read()
+                    r.setex(f"cert:{job_id}", _cert_ttl, cert_bytes)
+                    os.remove(certified_path)
+                    log.info("Worker: certified linked photo stored in Redis fallback: job=%s ttl=%s", job_id, _cert_ttl)
+
+                if email and "@" in email:
+                    try:
+                        sent = send_certification_email(email, job_id, authenticity, image_url, download_url, is_photo=True)
+                        log.info("Worker: linked photo certification email sent=%s job=%s email=%s", sent, job_id, email)
+                    except Exception as em:
+                        log.warning("Worker: linked photo certification email failed for %s: %s", job_id, em)
+
+                result["photo_ready"] = True
+                result["certification_status"] = "ready"
+                result["download_url"] = download_url
+                _store_result(r, job_id, result)
+            except Exception as stamp_err:
+                log.error("Worker: linked photo certification failed for %s: %s", job_id, stamp_err)
+                result["photo_ready"] = False
+                result["certification_status"] = "failed"
+                result["certification_error"] = "Certified linked photo generation failed, but analysis completed."
+                _store_result(r, job_id, result)
+
         try:
             import hashlib as _hl, json as _jc
             _key = "urlcache:photo:v1:" + _hl.md5(image_url.strip().encode()).hexdigest()
@@ -511,7 +624,7 @@ def process_photo_link_job(job_id: str, image_url: str, email: str) -> dict:
             r.setex(_key, 3600, _jc.dumps(_cache))
         except Exception:
             pass
-        _store_result(r, job_id, result)
+
         return result
     except Exception as e:
         log.exception("Worker: photo link job %s failed", job_id)
@@ -519,8 +632,11 @@ def process_photo_link_job(job_id: str, image_url: str, email: str) -> dict:
         _store_result(r, job_id, result)
         return result
     finally:
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
 
 
 def process_link_job(job_id: str, video_url: str, email: str, double_count: bool = False) -> dict:
