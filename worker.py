@@ -712,6 +712,178 @@ def process_link_job(job_id: str, video_url: str, email: str, double_count: bool
             os.remove(tmp_path)
 
 
+# ─────────────────────────────────────────────────────────────
+#  Pro/Enterprise ZIP expanded-content certification helpers
+# ─────────────────────────────────────────────────────────────
+ZIP_EXPANDED_CERT_EXTENSIONS = {
+    ".pdf", ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt",
+    ".odt", ".ods", ".odp",
+    ".txt", ".md", ".csv", ".rtf", ".eml", ".msg",
+    ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tif", ".tiff", ".webp", ".heic", ".heif",
+    ".html", ".htm", ".mhtml", ".mht", ".xml", ".json", ".svg", ".vsdx",
+    ".yaml", ".yml", ".ini", ".log", ".sql",
+    ".dwg", ".dxf",
+}
+
+ZIP_EXPANDED_CERT_MAX_FILES = int(os.environ.get("VERIFYD_ZIP_CHILD_CERT_MAX_FILES", "75"))
+ZIP_EXPANDED_CERT_MAX_TOTAL_BYTES = int(os.environ.get("VERIFYD_ZIP_CHILD_CERT_MAX_TOTAL_BYTES", str(150 * 1024 * 1024)))
+
+
+def _zip_safe_member_name(name: str) -> str:
+    import posixpath
+    raw = str(name or "").replace("\\", "/").strip()
+    if not raw or raw.endswith("/"):
+        return ""
+    norm = posixpath.normpath(raw).lstrip("/")
+    if not norm or norm.startswith("../") or "/../" in norm or norm in (".", ".."):
+        return ""
+    return norm[:240]
+
+
+def _zip_child_safe_arc_part(value: str, fallback: str = "file") -> str:
+    import re
+    base = str(value or "").replace("\\", "/").split("/")[-1].strip() or fallback
+    base = re.sub(r"[^A-Za-z0-9._ -]+", "_", base)
+    base = base.strip(" ._") or fallback
+    return base[:120]
+
+
+def _create_zip_child_certified_artifacts(zip_path: str, *, parent_cert_id: str, label: str,
+                                          authenticity: int, certified_to: str,
+                                          detail: dict | None = None) -> list[dict]:
+    import hashlib
+    import os as _os
+    import shutil
+    import tempfile
+    import zipfile
+
+    artifacts: list[dict] = []
+    detail = dict(detail or {})
+
+    if not zipfile.is_zipfile(zip_path):
+        return artifacts
+
+    from doc_certifier import stamp_document
+
+    work_dir = tempfile.mkdtemp(prefix=f"verifyd_zip_children_{parent_cert_id[:8]}_")
+    total_selected = 0
+    selected_count = 0
+
+    try:
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            infos = []
+            for info in zf.infolist():
+                safe_name = _zip_safe_member_name(info.filename)
+                if not safe_name:
+                    continue
+                ext = _os.path.splitext(safe_name)[1].lower()
+                if ext not in ZIP_EXPANDED_CERT_EXTENSIONS:
+                    continue
+                if ext == ".zip":
+                    continue
+                if selected_count >= ZIP_EXPANDED_CERT_MAX_FILES:
+                    break
+                if info.file_size < 0:
+                    continue
+                if total_selected + int(info.file_size or 0) > ZIP_EXPANDED_CERT_MAX_TOTAL_BYTES:
+                    break
+                infos.append((info, safe_name, ext))
+                total_selected += int(info.file_size or 0)
+                selected_count += 1
+
+            log.info(
+                "Worker: ZIP expanded certification selected %d file(s) from %s total_bytes=%d",
+                len(infos), zip_path, total_selected
+            )
+
+            for idx, (info, safe_name, ext) in enumerate(infos, start=1):
+                child_id = f"{parent_cert_id}-{idx:03d}"
+                safe_base = _zip_child_safe_arc_part(safe_name, fallback=f"file_{idx:03d}{ext}")
+                extract_path = _os.path.join(work_dir, f"child_{idx:03d}_{safe_base}")
+                cert_path = _os.path.join(work_dir, f"child_cert_{idx:03d}.pdf")
+
+                with zf.open(info, "r") as src, open(extract_path, "wb") as dst:
+                    shutil.copyfileobj(src, dst, length=1024 * 1024)
+
+                h = hashlib.sha256()
+                with open(extract_path, "rb") as fh:
+                    for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                        h.update(chunk)
+                child_sha = h.hexdigest()
+
+                child_detail = dict(detail)
+                child_detail["parent_zip_certificate_id"] = parent_cert_id
+                child_detail["parent_zip_member"] = safe_name
+                child_detail["sha256"] = child_sha
+
+                try:
+                    stamp_document(
+                        src_path=extract_path,
+                        dest_path=cert_path,
+                        cert_id=child_id,
+                        authenticity=authenticity,
+                        label=label,
+                        filename=safe_name,
+                        sha256=child_sha,
+                        detail=child_detail,
+                    )
+                    if _os.path.exists(cert_path) and _os.path.getsize(cert_path) > 1000:
+                        folder = f"{idx:03d}_{_zip_child_safe_arc_part(_os.path.splitext(safe_base)[0], fallback='file')}"
+                        artifacts.append({
+                            "path": cert_path,
+                            "arcname": f"zip_contents_certified/{folder}/VeriFYD_Certified_Report_{child_id}.pdf",
+                            "kind": "zip_child_certified_report",
+                            "source_member": safe_name,
+                            "child_certificate_id": child_id,
+                        })
+                        artifacts.append({
+                            "path": extract_path,
+                            "arcname": f"zip_contents_original/{folder}/{safe_base}",
+                            "kind": "zip_child_original_file",
+                            "source_member": safe_name,
+                            "child_certificate_id": child_id,
+                        })
+                        log.info("Worker: ZIP child certified report created parent=%s child=%s member=%s", parent_cert_id, child_id, safe_name)
+                    else:
+                        log.warning("Worker: ZIP child certified report missing/small parent=%s member=%s", parent_cert_id, safe_name)
+                except Exception as child_err:
+                    log.warning("Worker: ZIP child certification failed parent=%s member=%s error=%s", parent_cert_id, safe_name, child_err)
+
+        if artifacts:
+            manifest = {
+                "parent_certificate_id": parent_cert_id,
+                "certified_to": certified_to or "",
+                "mode": "pro_expanded_zip_certification",
+                "selected_file_limit": ZIP_EXPANDED_CERT_MAX_FILES,
+                "selected_total_bytes_limit": ZIP_EXPANDED_CERT_MAX_TOTAL_BYTES,
+                "artifact_count": len(artifacts),
+                "child_reports": [
+                    {
+                        "child_certificate_id": a.get("child_certificate_id"),
+                        "source_member": a.get("source_member"),
+                        "package_path": a.get("arcname"),
+                        "kind": a.get("kind"),
+                    }
+                    for a in artifacts
+                ],
+            }
+            manifest_path = _os.path.join(work_dir, "zip_child_manifest.json")
+            import json
+            with open(manifest_path, "w", encoding="utf-8") as mf:
+                json.dump(manifest, mf, indent=2, sort_keys=True)
+            artifacts.append({
+                "path": manifest_path,
+                "arcname": "verifyd/zip_child_certification_manifest.json",
+                "kind": "zip_child_manifest",
+                "source_member": "",
+                "child_certificate_id": "",
+            })
+
+        return artifacts
+    except Exception as e:
+        log.warning("Worker: ZIP expanded certification failed parent=%s error=%s", parent_cert_id, e)
+        return artifacts
+
 def process_document_upload_job(file_key: str, filename: str, email: str) -> dict:
     """
     Background job: retrieve document from R2/Redis, analyze it, store result,
@@ -873,6 +1045,26 @@ def process_document_upload_job(file_key: str, filename: str, email: str) -> dic
                     # Phase 9A-1: create universal certified-file package BEFORE the
                     # certified PDF is uploaded/removed. The package includes both the
                     # exact original source file and exact issued certified PDF report.
+                    #
+                    # Pro/Enterprise ZIP expansion: when the uploaded source is a ZIP,
+                    # create child certified reports for supported internal files and
+                    # embed them in the same universal certified package.
+                    zip_child_artifacts = []
+                    if ext == ".zip" and str(_plan).lower() in ("pro", "enterprise"):
+                        zip_child_artifacts = _create_zip_child_certified_artifacts(
+                            tmp_path,
+                            parent_cert_id=job_id,
+                            label=label,
+                            authenticity=authenticity,
+                            certified_to=email,
+                            detail=detail,
+                        )
+                        if zip_child_artifacts:
+                            result["zip_child_certification"] = "created"
+                            result["zip_child_artifact_count"] = len(zip_child_artifacts)
+                        else:
+                            result["zip_child_certification"] = "none_created"
+
                     try:
                         from universal_certifier import create_universal_certified_package
                         create_universal_certified_package(
@@ -887,6 +1079,7 @@ def process_document_upload_job(file_key: str, filename: str, email: str) -> dic
                             ai_score=detail.get("ai_score", ""),
                             original_sha256=sha256,
                             detail=detail,
+                            extra_artifacts=zip_child_artifacts,
                         )
                         result["universal_certified_file"] = "created"
                         result["certified_file_package"] = "present"

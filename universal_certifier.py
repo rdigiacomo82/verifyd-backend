@@ -17,7 +17,7 @@ import json
 import os
 import zipfile
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, Tuple
+from typing import Any, Dict, Iterable, Tuple, List
 
 PACKAGE_VERSION = 1
 PACKAGE_TYPE = "VERIFYD_UNIVERSAL_CERTIFIED_FILE"
@@ -84,6 +84,7 @@ def create_universal_certified_package(
     ai_score: int | str = "",
     original_sha256: str = "",
     detail: Dict[str, Any] | None = None,
+    extra_artifacts: Iterable[Dict[str, Any]] | None = None,
 ) -> str:
     """
     Create a universal VeriFYD certified file package.
@@ -121,6 +122,35 @@ def create_universal_certified_package(
             "size_bytes": certified_pdf_size,
         },
     }
+
+    # Optional Pro/Enterprise expanded ZIP child certification artifacts.
+    # Each artifact is included in the package and covered by the signed hash manifest.
+    normalized_extra_artifacts: List[Dict[str, Any]] = []
+    for idx, artifact in enumerate(list(extra_artifacts or []), start=1):
+        try:
+            apath = str(artifact.get("path") or "")
+            arcname = str(artifact.get("arcname") or "").replace("\", "/").lstrip("/")
+            if not apath or not arcname or not os.path.exists(apath) or os.path.isdir(apath):
+                continue
+            if arcname.startswith("../") or "/../" in arcname:
+                continue
+            ahash = _sha256_file(apath)
+            asize = os.path.getsize(apath)
+            entry = {
+                "path": arcname,
+                "filename": os.path.basename(arcname),
+                "sha256": ahash,
+                "size_bytes": asize,
+                "kind": artifact.get("kind", "extra_artifact"),
+                "source_member": artifact.get("source_member", ""),
+                "child_certificate_id": artifact.get("child_certificate_id", ""),
+            }
+            normalized_extra_artifacts.append({"source_path": apath, "arcname": arcname, "hash_entry": entry})
+        except Exception:
+            continue
+
+    if normalized_extra_artifacts:
+        hashes["extra_artifacts"] = [x["hash_entry"] for x in normalized_extra_artifacts]
 
     certificate = {
         "certificate_id": cert_id,
@@ -169,9 +199,11 @@ Original File: {original_name}
 Certified To: {certified_to or ''}
 
 This package contains:
-- original/      The exact uploaded source file bytes.
-- certified/     The VeriFYD certified PDF report/rendering with secure seal.
-- verifyd/       Signed certificate metadata, hashes, seal, and signature.
+- original/                 The exact uploaded source file bytes.
+- certified/                The VeriFYD certified PDF report/rendering with secure seal.
+- verifyd/                  Signed certificate metadata, hashes, seal, and signature.
+- zip_contents_original/    Pro/Enterprise only: extracted original child files from a ZIP evidence package, if applicable.
+- zip_contents_certified/   Pro/Enterprise only: certified child reports for supported files inside a ZIP evidence package, if applicable.
 
 The package seal is signed with {SIGNATURE_ALGORITHM}. Verification should compare
 all SHA-256 hashes and verify the HMAC signature before trusting the package.
@@ -185,6 +217,8 @@ all SHA-256 hashes and verify the HMAC signature before trusting the package.
     with zipfile.ZipFile(tmp_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
         zf.write(original_path, f"original/{original_name}")
         zf.write(certified_pdf_path, f"certified/{report_name}")
+        for extra in normalized_extra_artifacts:
+            zf.write(extra["source_path"], extra["arcname"])
         zf.writestr("verifyd/certificate.json", json.dumps(certificate, indent=2, sort_keys=True, ensure_ascii=False))
         zf.writestr("verifyd/hashes.json", json.dumps(hashes, indent=2, sort_keys=True, ensure_ascii=False))
         zf.writestr("verifyd/seal.json", json.dumps(seal, indent=2, sort_keys=True, ensure_ascii=False))
