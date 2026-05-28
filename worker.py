@@ -1015,6 +1015,7 @@ def process_document_upload_job(file_key: str, filename: str, email: str) -> dic
             certified_path = _os.path.join(_tempfile.gettempdir(), f"cert_doc_{job_id}.pdf")
             package_path = _os.path.join(_tempfile.gettempdir(), f"verifyd_certified_file_{job_id}.zip")
             download_url = f"{BASE_URL}/download-document/{job_id}"
+            certified_file_package_url = f"{BASE_URL}/download-certified-file/{job_id}"
             try:
                 _log_worker_runtime_dependencies("before_stamp_document", force=True)
                 from doc_certifier import stamp_document
@@ -1132,13 +1133,33 @@ def process_document_upload_job(file_key: str, filename: str, email: str) -> dic
 
                     result["document_ready"] = True
                     result["certification_status"] = "ready"
-                    result["download_url"] = download_url
+                    result["summary_pdf_url"] = download_url
                     result["secure_seal"] = "present"
+
+                    # Default document behavior returns the certified PDF. For Pro/Enterprise
+                    # ZIPs with child reports, make the primary returned download the full
+                    # universal package so the user receives every certified internal file.
+                    email_download_url = download_url
+                    if ext == ".zip" and result.get("zip_child_certification") == "created":
+                        result["download_url"] = certified_file_package_url
+                        result["download_type"] = "certified_file_package_zip"
+                        result["certified_file_package_url"] = certified_file_package_url
+                        result["download_all_certified_files_url"] = certified_file_package_url
+                        result["zip_child_certification_message"] = (
+                            "Pro ZIP certification completed. Download the full certified package "
+                            "to access the individually certified internal files."
+                        )
+                        email_download_url = certified_file_package_url
+                    else:
+                        result["download_url"] = download_url
+                        if result.get("universal_certified_file") in ("created", "stored"):
+                            result["certified_file_package_url"] = certified_file_package_url
+
                     _store_result(r, job_id, result)
 
                     if email and "@" in email:
                         try:
-                            _sent = send_certification_email(email, job_id, authenticity, filename, download_url, is_document=True)
+                            _sent = send_certification_email(email, job_id, authenticity, filename, email_download_url, is_document=True)
                             log.info("Worker: document certification email sent=%s job=%s email=%s", _sent, job_id, email)
                         except Exception as _em:
                             log.warning("Worker: document certification email failed for %s: %s", job_id, _em)

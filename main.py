@@ -1006,6 +1006,65 @@ async def download_document(cid: str):
     return JSONResponse({"error": "Certified document not found or expired."}, status_code=404)
 
 
+@app.get("/download-certified-file/{cid}")
+async def download_certified_file_package(cid: str):
+    """
+    Serve the universal certified file package ZIP.
+
+    For Pro/Enterprise ZIP evidence uploads, this package contains the parent
+    summary PDF plus individually certified reports for supported internal files.
+    """
+    from fastapi.responses import RedirectResponse, Response
+
+    fname = f"VeriFYD_Certified_File_Package_{cid[:8]}.zip"
+
+    try:
+        from storage import _get_client, BUCKET, PUBLIC_URL, CERT_URL_TTL, r2_available
+
+        if r2_available():
+            client = _get_client()
+            for plan in ("pro", "creator", "enterprise", "free"):
+                key = f"certified-files/{plan}/{cid}.zip"
+                try:
+                    client.head_object(Bucket=BUCKET, Key=key)
+
+                    if PUBLIC_URL:
+                        url = f"{PUBLIC_URL.rstrip('/')}/{key}"
+                    else:
+                        url = client.generate_presigned_url(
+                            "get_object",
+                            Params={"Bucket": BUCKET, "Key": key},
+                            ExpiresIn=CERT_URL_TTL,
+                        )
+
+                    log.info("download-certified-file: R2 hit job=%s key=%s", cid, key)
+                    return RedirectResponse(url=url, status_code=302)
+                except Exception:
+                    continue
+
+            log.warning("download-certified-file: R2 object not found in any plan folder for %s", cid)
+
+    except Exception as e:
+        log.warning("R2 certified file package lookup failed for %s: %s", cid, e)
+
+    try:
+        r = _get_redis()
+        data = r.get(f"filecert:{cid}")
+        if data:
+            log.info("download-certified-file: Redis fallback hit job=%s size=%d", cid, len(data))
+            return Response(
+                content=data,
+                media_type="application/zip",
+                headers={
+                    "Content-Disposition": f'attachment; filename="{fname}"',
+                    "Cache-Control": "private, max-age=3600",
+                },
+            )
+    except Exception as e:
+        log.warning("Redis certified file package lookup failed for %s: %s", cid, e)
+
+    return JSONResponse({"error": "Certified file package not found or expired."}, status_code=404)
+
 @app.post("/verify-document-seal/")
 async def verify_document_seal(file: UploadFile = File(...)):
     """

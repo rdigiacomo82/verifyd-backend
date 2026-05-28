@@ -149,6 +149,16 @@ def send_certification_email(
             "VeriFYD analyzed your document for metadata, content, and authenticity indicators. "
             "Your certified document includes a small VeriFYD mark and a server-side certificate record."
         )
+        if "/download-certified-file/" in str(download_url):
+            _dl_label = "Download All Certified Files"
+            _share_label = "Share Certified File Package"
+            _share_desc = "Share this link with authorized recipients to download the certified file package:"
+            _share_tap = "Tap the link above to download the full certified ZIP package, including individually certified internal files when available."
+            _what_body = (
+                "VeriFYD certified your ZIP evidence package and, for eligible Pro/Enterprise accounts, "
+                "created certified reports for supported files inside the ZIP. Download the full certified "
+                "package to access the parent report, child certified reports, original source files, and signed manifest."
+            )
     elif is_photo:
         _media = "photo"
         _Media = "Photo"
