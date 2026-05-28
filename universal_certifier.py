@@ -129,7 +129,7 @@ def create_universal_certified_package(
     for idx, artifact in enumerate(list(extra_artifacts or []), start=1):
         try:
             apath = str(artifact.get("path") or "")
-            arcname = str(artifact.get("arcname") or "").replace("\", "/").lstrip("/")
+            arcname = str(artifact.get("arcname") or "").replace("\\", "/").lstrip("/")
             if not apath or not arcname or not os.path.exists(apath) or os.path.isdir(apath):
                 continue
             if arcname.startswith("../") or "/../" in arcname:
