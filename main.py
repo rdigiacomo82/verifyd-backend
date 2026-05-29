@@ -765,7 +765,7 @@ DOCUMENT_ALLOWED_EXTENSIONS = {
     ".txt", ".md", ".csv", ".rtf", ".eml", ".msg",
     ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tif", ".tiff", ".webp", ".heic", ".heif",
     ".html", ".htm", ".mhtml", ".mht", ".xml", ".json", ".svg", ".vsdx",
-    ".yaml", ".yml", ".ini", ".log", ".sql",
+    ".yaml", ".yml", ".toml", ".env", ".ini", ".properties", ".conf", ".cfg", ".config", ".cnf", ".log", ".sql",
     ".pst", ".ost", ".dwg", ".dxf",
     ".zip",
 }
@@ -805,7 +805,7 @@ def _uploaded_pdf_has_verifyd_seal(path: str) -> tuple[bool, str]:
 async def upload_document(file: UploadFile = File(...), email: str = Form(...)):
     """
     Document upload endpoint for VeriFYD Docs MVP.
-    Accepts PDF, DOCX/DOC, XLSX/XLS, PPTX/PPT, ODT/ODS/ODP, TXT/MD/CSV/RTF/EML/MSG, HTML/MHTML/XML/JSON/VSDX, JPG/JPEG/PNG/TIF/TIFF/WEBP/HEIC, and ZIP evidence packages and returns a job_id for polling
+    Accepts PDF, DOCX/DOC, XLSX/XLS, PPTX/PPT, ODT/ODS/ODP, TXT/MD/CSV/RTF/EML/MSG, HTML/MHTML/XML/JSON/SVG/VSDX, YAML/TOML/ENV/INI/PROPERTIES/CONF/CFG/CONFIG/CNF/LOG/SQL config files, JPG/JPEG/PNG/GIF/BMP/TIF/TIFF/WEBP/HEIC/HEIF images, PST/OST, DWG/DXF, and ZIP evidence packages and returns a job_id for polling
     through /job-status/{job_id}, matching video/photo behavior.
     """
     if not is_valid_email(email):
@@ -825,7 +825,7 @@ async def upload_document(file: UploadFile = File(...), email: str = Form(...)):
     if ext not in DOCUMENT_ALLOWED_EXTENSIONS:
         return JSONResponse({
             "error":   "unsupported_format",
-            "message": "Unsupported document format. Accepted formats: PDF, DOC, DOCX, XLS, XLSX, PPT, PPTX, ODT, ODS, ODP, TXT, MD, CSV, RTF, EML, MSG, HTML, HTM, MHTML, MHT, XML, JSON, VSDX, JPG, JPEG, PNG, TIF, TIFF, WEBP, HEIC, ZIP.",
+            "message": "Unsupported document format. Accepted formats: PDF, DOC, DOCX, XLS, XLSX, PPT, PPTX, ODT, ODS, ODP, TXT, MD, CSV, RTF, EML, MSG, HTML, HTM, MHTML, MHT, XML, JSON, SVG, VSDX, YAML, YML, TOML, ENV, INI, PROPERTIES, CONF, CFG, CONFIG, CNF, LOG, SQL, JPG, JPEG, PNG, GIF, BMP, TIF, TIFF, WEBP, HEIC, HEIF, PST, OST, DWG, DXF, ZIP.",
         }, status_code=415)
 
     try:
