@@ -71,7 +71,9 @@ install_libreoffice_if_needed() {
                         libxtst6 \
                         libxi6 \
                         libcups2 \
-                        default-jre-headless
+                        default-jre-headless \
+                        pst-utils \
+                        pst-utils
                     APT_INSTALL_EXIT=$?
                     rm -rf /var/lib/apt/lists/*
                 else
@@ -283,6 +285,7 @@ yt-dlp --version && echo "yt-dlp OK" || { echo "ERROR: yt-dlp not found"; exit 1
 
 # Final runtime-path hints for Render logs.
 echo "=== VeriFYD Build Runtime Checks ==="
+echo "readpst=$(command -v readpst || true)"
 echo "PATH=$PATH"
 echo "soffice=$(command -v soffice || true)"
 echo "libreoffice=$(command -v libreoffice || true)"

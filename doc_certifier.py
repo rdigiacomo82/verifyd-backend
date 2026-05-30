@@ -3608,6 +3608,253 @@ def _read_binary_evidence_for_render(src_path: str, ext: str) -> str:
     return "\n".join(lines)
 
 
+# ─────────────────────────────────────────────
+# PST/OST native mailbox extraction using libpst/readpst when available
+# ─────────────────────────────────────────────
+
+def _pst_find_readpst_binary() -> str:
+    # Return readpst binary path when libpst/pst-utils is installed.
+    import shutil
+    for name in ("readpst",):
+        path = shutil.which(name)
+        if path:
+            return path
+    for path in ("/usr/bin/readpst", "/usr/local/bin/readpst"):
+        if os.path.exists(path) and os.access(path, os.X_OK):
+            return path
+    return ""
+
+
+def _pst_compact_text(value: Any, max_len: int = 2400) -> str:
+    import re
+    text = str(value or "")
+    text = text.replace("\x00", " ")
+    text = re.sub(r"\r\n|\r", "\n", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = text.strip()
+    if len(text) > max_len:
+        return text[: max_len - 1] + "…"
+    return text
+
+
+def _pst_parse_eml_file(path: str) -> Dict[str, str]:
+    # Parse an extracted .eml message into safe display fields.
+    from email import policy
+    from email.parser import BytesParser
+
+    out: Dict[str, str] = {
+        "from": "",
+        "to": "",
+        "cc": "",
+        "subject": "",
+        "date": "",
+        "message_id": "",
+        "body": "",
+    }
+
+    try:
+        with open(path, "rb") as fh:
+            msg = BytesParser(policy=policy.default).parse(fh)
+
+        out["from"] = _pst_compact_text(msg.get("From", ""), 400)
+        out["to"] = _pst_compact_text(msg.get("To", ""), 400)
+        out["cc"] = _pst_compact_text(msg.get("Cc", ""), 400)
+        out["subject"] = _pst_compact_text(msg.get("Subject", ""), 400)
+        out["date"] = _pst_compact_text(msg.get("Date", ""), 160)
+        out["message_id"] = _pst_compact_text(msg.get("Message-ID", ""), 240)
+
+        body_parts: List[str] = []
+        if msg.is_multipart():
+            for part in msg.walk():
+                ctype = part.get_content_type()
+                disp = str(part.get_content_disposition() or "")
+                if disp == "attachment":
+                    continue
+                if ctype == "text/plain":
+                    try:
+                        body_parts.append(str(part.get_content()))
+                    except Exception:
+                        pass
+                elif ctype == "text/html" and not body_parts:
+                    try:
+                        import re
+                        body_parts.append(re.sub(r"<[^>]+>", " ", str(part.get_content())))
+                    except Exception:
+                        pass
+        else:
+            try:
+                body_parts.append(str(msg.get_content()))
+            except Exception:
+                pass
+
+        out["body"] = _pst_compact_text("\n\n".join(p for p in body_parts if p), 2500)
+    except Exception:
+        try:
+            raw = open(path, "rb").read(2500)
+            out["body"] = _pst_compact_text(raw.decode("utf-8", errors="replace"), 2500)
+        except Exception:
+            pass
+
+    return out
+
+
+def _pst_extract_message_records(extract_dir: str, max_messages: int = 80) -> List[Dict[str, str]]:
+    # Collect message-like files extracted by readpst and parse safe summaries.
+    records: List[Dict[str, str]] = []
+
+    candidates: List[str] = []
+    for root, _dirs, files in os.walk(extract_dir):
+        for name in files:
+            low = name.lower()
+            path = os.path.join(root, name)
+            if low.endswith((".eml", ".txt", ".mbox")) or "." not in low:
+                try:
+                    if os.path.getsize(path) > 0:
+                        candidates.append(path)
+                except Exception:
+                    pass
+        if len(candidates) >= max_messages * 3:
+            break
+
+    candidates.sort(key=lambda p: (0 if p.lower().endswith(".eml") else 1, len(p), p))
+
+    seen_keys = set()
+    for path in candidates:
+        if len(records) >= max_messages:
+            break
+        rec = _pst_parse_eml_file(path)
+        key = "|".join([rec.get("subject", ""), rec.get("from", ""), rec.get("date", ""), rec.get("body", "")[:120]]).lower()
+        if not key.strip() or key in seen_keys:
+            continue
+        seen_keys.add(key)
+        rec["source_path"] = os.path.relpath(path, extract_dir)
+        records.append(rec)
+
+    return records
+
+
+def _read_pst_ost_with_libpst_for_render(src_path: str, ext: str) -> str:
+    # Use libpst/readpst to extract mailbox message summaries for PST/OST files.
+    # Falls back to binary evidence certification when readpst is unavailable or cannot parse.
+    import subprocess
+    import tempfile
+    import shutil
+
+    readpst = _pst_find_readpst_binary()
+    type_label = {
+        ".pst": "Outlook PST mailbox database",
+        ".ost": "Outlook OST offline mailbox database",
+    }.get(ext, "Outlook mailbox database")
+
+    if not readpst:
+        fallback = _read_binary_evidence_for_render(src_path, ext)
+        return (
+            f"VeriFYD {type_label} Evidence Record\n"
+            "Mailbox extraction engine: not available in this runtime. Install libpst/pst-utils for native message extraction.\n\n"
+            + fallback
+        )
+
+    extract_dir = tempfile.mkdtemp(prefix="verifyd_readpst_")
+    try:
+        attempts = [
+            [readpst, "-r", "-o", extract_dir, src_path],
+            [readpst, "-o", extract_dir, src_path],
+        ]
+
+        last_err = ""
+        ok = False
+        for cmd in attempts:
+            try:
+                res = subprocess.run(cmd, capture_output=True, timeout=180)
+                stdout = res.stdout.decode("utf-8", errors="replace")
+                stderr = res.stderr.decode("utf-8", errors="replace")
+                last_err = (stdout + "\n" + stderr).strip()[-1200:]
+                if res.returncode == 0:
+                    ok = True
+                    break
+            except Exception as e:
+                last_err = str(e)[:1200]
+
+        size = os.path.getsize(src_path) if os.path.exists(src_path) else 0
+        lines: List[str] = [
+            f"VeriFYD {type_label} Extracted Mailbox Evidence Record",
+            f"File size: {size} bytes",
+            f"Mailbox parser: libpst/readpst ({readpst})",
+            "Analysis mode: mailbox message extraction summary plus certified preservation of the exact original source file.",
+            "",
+        ]
+
+        if not ok:
+            lines.extend([
+                "Mailbox extraction status: FAILED",
+                f"readpst output: {_pst_compact_text(last_err, 1200)}",
+                "",
+                "Fallback evidence summary:",
+                _read_binary_evidence_for_render(src_path, ext),
+            ])
+            return "\n".join(lines)
+
+        records = _pst_extract_message_records(extract_dir, max_messages=80)
+        file_count = 0
+        dir_count = 0
+        for _root, dirs, files in os.walk(extract_dir):
+            dir_count += len(dirs)
+            file_count += len(files)
+
+        lines.extend([
+            "Mailbox extraction status: SUCCESS",
+            f"Extracted filesystem items: {file_count} files across {dir_count} folders",
+            f"Message records summarized: {len(records)}",
+            "",
+        ])
+
+        if not records:
+            lines.extend([
+                "No message records could be summarized from the extracted mailbox output.",
+                "The exact original PST/OST file is still preserved in the certified evidence package.",
+                "",
+                "Fallback evidence summary:",
+                _read_binary_evidence_for_render(src_path, ext),
+            ])
+            return "\n".join(lines)
+
+        for idx, rec in enumerate(records, start=1):
+            lines.append(f"--- Message {idx} ---")
+            lines.append(f"Extracted Path: {rec.get('source_path', '')}")
+            if rec.get("date"):
+                lines.append(f"Date: {rec.get('date')}")
+            if rec.get("from"):
+                lines.append(f"From: {rec.get('from')}")
+            if rec.get("to"):
+                lines.append(f"To: {rec.get('to')}")
+            if rec.get("cc"):
+                lines.append(f"Cc: {rec.get('cc')}")
+            if rec.get("subject"):
+                lines.append(f"Subject: {rec.get('subject')}")
+            if rec.get("message_id"):
+                lines.append(f"Message-ID: {rec.get('message_id')}")
+            if rec.get("body"):
+                lines.append("")
+                lines.append("Body Preview:")
+                lines.append(rec.get("body", ""))
+            lines.append("")
+
+        lines.append("VeriFYD note: message extraction is a review aid. The exact original mailbox database remains preserved and hash-certified in the universal evidence package.")
+        return "\n".join(lines)
+
+    except Exception as e:
+        return (
+            f"VeriFYD {type_label} Evidence Record\n"
+            f"Mailbox extraction failed: {str(e)[:300]}\n\n"
+            + _read_binary_evidence_for_render(src_path, ext)
+        )
+    finally:
+        try:
+            shutil.rmtree(extract_dir, ignore_errors=True)
+        except Exception:
+            pass
+
 
 
 # ─────────────────────────────────────────────
@@ -4143,7 +4390,10 @@ def _read_text_for_certified_render(src_path: str, ext: str) -> str:
     if ext == ".dxf":
         return _read_dxf_for_render(src_path)
 
-    if ext in (".pst", ".ost", ".dwg"):
+    if ext in (".pst", ".ost"):
+        return _read_pst_ost_with_libpst_for_render(src_path, ext)
+
+    if ext == ".dwg":
         return _read_binary_evidence_for_render(src_path, ext)
 
     if ext == ".eml":
