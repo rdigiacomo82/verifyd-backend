@@ -72,7 +72,6 @@ install_libreoffice_if_needed() {
                         libxi6 \
                         libcups2 \
                         default-jre-headless \
-                        pst-utils \
                         pst-utils
                     APT_INSTALL_EXIT=$?
                     rm -rf /var/lib/apt/lists/*
@@ -175,6 +174,90 @@ EOF
 }
 
 install_libreoffice_if_needed
+
+# ── libpst / Outlook PST-OST mailbox extraction support ─────────
+# PST/OST message extraction requires the readpst command from pst-utils.
+# This must run independently of the LibreOffice installer because once
+# LibreOffice is already present, that installer skips its apt-get block.
+install_pst_utils_if_needed() {
+    echo "Checking libpst/readpst availability..."
+
+    if command -v readpst >/dev/null 2>&1; then
+        echo "readpst detected at: $(command -v readpst)"
+        readpst -V 2>/dev/null || readpst --version 2>/dev/null || true
+        return 0
+    fi
+
+    echo "readpst not found before install attempt."
+
+    if command -v apt-get >/dev/null 2>&1; then
+        echo "apt-get found. Attempting non-fatal pst-utils install..."
+
+        set +e
+        export DEBIAN_FRONTEND=noninteractive
+
+        if [ "$(id -u)" = "0" ]; then
+            echo "Running apt-get install pst-utils directly as root..."
+            apt-get update
+            APT_UPDATE_EXIT=$?
+
+            if [ "$APT_UPDATE_EXIT" -eq 0 ]; then
+                apt-get install -y --no-install-recommends pst-utils
+                APT_INSTALL_EXIT=$?
+                rm -rf /var/lib/apt/lists/*
+            else
+                echo "WARNING: apt-get update failed with exit code $APT_UPDATE_EXIT."
+                APT_INSTALL_EXIT=1
+            fi
+
+        elif command -v sudo >/dev/null 2>&1; then
+            echo "Running apt-get install pst-utils with sudo..."
+            sudo apt-get update
+            APT_UPDATE_EXIT=$?
+
+            if [ "$APT_UPDATE_EXIT" -eq 0 ]; then
+                sudo apt-get install -y --no-install-recommends pst-utils
+                APT_INSTALL_EXIT=$?
+                sudo rm -rf /var/lib/apt/lists/*
+            else
+                echo "WARNING: sudo apt-get update failed with exit code $APT_UPDATE_EXIT."
+                APT_INSTALL_EXIT=1
+            fi
+
+        else
+            echo "WARNING: apt-get exists, but build user is not root and sudo is unavailable."
+            echo "WARNING: readpst/libpst extraction will remain unavailable unless pst-utils is installed by the runtime image."
+            APT_INSTALL_EXIT=1
+        fi
+
+        set -e
+
+        if [ "${APT_INSTALL_EXIT:-1}" -eq 0 ]; then
+            echo "pst-utils apt-get install completed."
+        else
+            echo "WARNING: pst-utils apt-get install did not complete. Continuing build without failing."
+        fi
+    else
+        echo "WARNING: apt-get not available in this build environment."
+        echo "WARNING: PST/OST files will fall back to evidence-package certification without mailbox extraction."
+    fi
+
+    if command -v readpst >/dev/null 2>&1; then
+        echo "readpst detected after install at: $(command -v readpst)"
+        readpst -V 2>/dev/null || readpst --version 2>/dev/null || true
+    else
+        echo "WARNING: readpst still unavailable after install attempt."
+        echo "WARNING: PST/OST certification will still work, but native mailbox extraction will fall back to evidence summary."
+
+        if [ "${VERIFYD_REQUIRE_READPST:-0}" = "1" ]; then
+            echo "ERROR: VERIFYD_REQUIRE_READPST=1 and readpst is unavailable. Failing build."
+            exit 1
+        fi
+    fi
+}
+
+install_pst_utils_if_needed
+
 
 # ── ffmpeg static binary ──────────────────────────────────────
 # Using BtbN pinned GitHub release — more reliable than johnvansickle.com
