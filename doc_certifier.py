@@ -3734,12 +3734,225 @@ def _pst_extract_message_records(extract_dir: str, max_messages: int = 80) -> Li
     return records
 
 
+
+def _ost_find_pffexport_binary() -> str:
+    # Return pffexport path when libpff/pff-tools is installed.
+    import shutil
+    for name in ("pffexport",):
+        path = shutil.which(name)
+        if path:
+            return path
+    for path in ("/usr/bin/pffexport", "/usr/local/bin/pffexport"):
+        if os.path.exists(path) and os.access(path, os.X_OK):
+            return path
+    return ""
+
+
+def _ost_parse_exported_text_file(path: str) -> Dict[str, str]:
+    # Parse a libpff-exported text-like item into a compact message-ish record.
+    data = b""
+    try:
+        with open(path, "rb") as fh:
+            data = fh.read(350000)
+    except Exception:
+        pass
+
+    text = ""
+    for enc in ("utf-8", "utf-16", "latin-1"):
+        try:
+            text = data.decode(enc, errors="replace")
+            break
+        except Exception:
+            continue
+
+    text = _pst_compact_text(text, 4500)
+    rec: Dict[str, str] = {
+        "from": "",
+        "to": "",
+        "cc": "",
+        "subject": "",
+        "date": "",
+        "message_id": "",
+        "body": "",
+    }
+
+    import re
+    header_map = {
+        "from": r"(?im)^\s*From\s*:\s*(.+)$",
+        "to": r"(?im)^\s*To\s*:\s*(.+)$",
+        "cc": r"(?im)^\s*Cc\s*:\s*(.+)$",
+        "subject": r"(?im)^\s*Subject\s*:\s*(.+)$",
+        "date": r"(?im)^\s*(?:Date|Delivery time|Client submit time)\s*:\s*(.+)$",
+        "message_id": r"(?im)^\s*Message-ID\s*:\s*(.+)$",
+    }
+    for key, pattern in header_map.items():
+        try:
+            m = re.search(pattern, text)
+            if m:
+                rec[key] = _pst_compact_text(m.group(1), 400)
+        except Exception:
+            pass
+
+    body = re.sub(r"(?im)^\s*(From|To|Cc|Subject|Date|Message-ID|Delivery time|Client submit time)\s*:.+$", "", text)
+    rec["body"] = _pst_compact_text(body, 2600)
+    return rec
+
+
+def _ost_extract_message_records_from_pff(export_dir: str, max_messages: int = 80) -> List[Dict[str, str]]:
+    # Collect files produced by pffexport and build readable message summaries.
+    candidates: List[str] = []
+    for root, _dirs, files in os.walk(export_dir):
+        for name in files:
+            low = name.lower()
+            path = os.path.join(root, name)
+            if low.endswith((".txt", ".eml", ".html", ".htm", ".msg", ".message")) or "." not in low:
+                try:
+                    size = os.path.getsize(path)
+                    if 0 < size <= 15_000_000:
+                        candidates.append(path)
+                except Exception:
+                    pass
+        if len(candidates) >= max_messages * 5:
+            break
+
+    candidates.sort(key=lambda p: (0 if p.lower().endswith((".txt", ".eml")) else 1, len(p), p))
+
+    records: List[Dict[str, str]] = []
+    seen = set()
+    for path in candidates:
+        if len(records) >= max_messages:
+            break
+        if path.lower().endswith(".eml"):
+            rec = _pst_parse_eml_file(path)
+        else:
+            rec = _ost_parse_exported_text_file(path)
+
+        key = "|".join([rec.get("subject", ""), rec.get("from", ""), rec.get("date", ""), rec.get("body", "")[:160]]).lower()
+        if not key.strip() or key in seen:
+            continue
+        seen.add(key)
+        rec["source_path"] = os.path.relpath(path, export_dir)
+        records.append(rec)
+    return records
+
+
+def _read_ost_with_pffexport_for_render(src_path: str) -> str:
+    # Use libpff/pffexport as the first native OST extraction attempt.
+    import subprocess
+    import tempfile
+    import shutil
+
+    pffexport = _ost_find_pffexport_binary()
+    type_label = "Outlook OST offline mailbox database"
+
+    if not pffexport:
+        return ""
+
+    export_dir = tempfile.mkdtemp(prefix="verifyd_pffexport_")
+    try:
+        attempts = [
+            [pffexport, "-f", "text", "-t", export_dir, src_path],
+            [pffexport, "-t", export_dir, src_path],
+            [pffexport, src_path],
+        ]
+
+        ok = False
+        last_err = ""
+        for cmd in attempts:
+            try:
+                res = subprocess.run(cmd, capture_output=True, timeout=240, cwd=export_dir)
+                stdout = res.stdout.decode("utf-8", errors="replace")
+                stderr = res.stderr.decode("utf-8", errors="replace")
+                last_err = (stdout + "\n" + stderr).strip()[-1600:]
+                created = any(files for _root, _dirs, files in os.walk(export_dir))
+                if res.returncode == 0 or created:
+                    ok = True
+                    break
+            except Exception as e:
+                last_err = str(e)[:1600]
+
+        size = os.path.getsize(src_path) if os.path.exists(src_path) else 0
+        lines: List[str] = [
+            f"VeriFYD {type_label} Extracted Mailbox Evidence Record",
+            f"File size: {size} bytes",
+            f"Mailbox parser: libpff/pffexport ({pffexport})",
+            "Analysis mode: OST mailbox extraction summary plus certified preservation of the exact original source file.",
+            "",
+        ]
+
+        if not ok:
+            lines.extend([
+                "OST mailbox extraction status: FAILED",
+                f"pffexport output: {_pst_compact_text(last_err, 1600)}",
+            ])
+            return "\n".join(lines)
+
+        records = _ost_extract_message_records_from_pff(export_dir, max_messages=80)
+        file_count = 0
+        dir_count = 0
+        for _root, dirs, files in os.walk(export_dir):
+            dir_count += len(dirs)
+            file_count += len(files)
+
+        lines.extend([
+            "OST mailbox extraction status: SUCCESS",
+            f"Extracted filesystem items: {file_count} files across {dir_count} folders",
+            f"Message records summarized: {len(records)}",
+            "",
+        ])
+
+        if not records:
+            lines.extend([
+                "No message records could be summarized from the extracted OST output.",
+                "The exact original OST file is still preserved in the certified evidence package.",
+            ])
+            return "\n".join(lines)
+
+        for idx, rec in enumerate(records, start=1):
+            lines.append(f"--- Message {idx} ---")
+            lines.append(f"Extracted Path: {rec.get('source_path', '')}")
+            if rec.get("date"):
+                lines.append(f"Date: {rec.get('date')}")
+            if rec.get("from"):
+                lines.append(f"From: {rec.get('from')}")
+            if rec.get("to"):
+                lines.append(f"To: {rec.get('to')}")
+            if rec.get("cc"):
+                lines.append(f"Cc: {rec.get('cc')}")
+            if rec.get("subject"):
+                lines.append(f"Subject: {rec.get('subject')}")
+            if rec.get("message_id"):
+                lines.append(f"Message-ID: {rec.get('message_id')}")
+            if rec.get("body"):
+                lines.append("")
+                lines.append("Body Preview:")
+                lines.append(rec.get("body", ""))
+            lines.append("")
+
+        lines.append("VeriFYD note: OST extraction is a review aid. The exact original OST database remains preserved and hash-certified in the universal evidence package.")
+        return "\n".join(lines)
+    except Exception as e:
+        return (
+            f"VeriFYD {type_label} Evidence Record\n"
+            f"OST mailbox extraction failed: {str(e)[:300]}\n"
+        )
+    finally:
+        try:
+            shutil.rmtree(export_dir, ignore_errors=True)
+        except Exception:
+            pass
+
 def _read_pst_ost_with_libpst_for_render(src_path: str, ext: str) -> str:
     # Use libpst/readpst to extract mailbox message summaries for PST/OST files.
     # Falls back to binary evidence certification when readpst is unavailable or cannot parse.
     import subprocess
     import tempfile
     import shutil
+
+    if ext == ".ost":
+        pff_text = _read_ost_with_pffexport_for_render(src_path)
+        if pff_text and "OST mailbox extraction status: SUCCESS" in pff_text:
+            return pff_text
 
     readpst = _pst_find_readpst_binary()
     type_label = {
@@ -3789,6 +4002,9 @@ def _read_pst_ost_with_libpst_for_render(src_path: str, ext: str) -> str:
             lines.extend([
                 "Mailbox extraction status: FAILED",
                 f"readpst output: {_pst_compact_text(last_err, 1200)}",
+                "",
+                "OST pffexport pre-check:",
+                pff_text if ext == ".ost" and "pff_text" in locals() and pff_text else "[pffexport not available or not attempted]",
                 "",
                 "Fallback evidence summary:",
                 _read_binary_evidence_for_render(src_path, ext),

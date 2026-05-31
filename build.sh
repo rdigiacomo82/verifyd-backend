@@ -258,6 +258,89 @@ install_pst_utils_if_needed() {
 
 install_pst_utils_if_needed
 
+# ── libpff / Outlook OST mailbox extraction support ─────────────
+# Many OST files are not readable by readpst. libpff's pffexport is a
+# better first attempt for OST evidence extraction when available.
+install_pff_tools_if_needed() {
+    echo "Checking libpff/pffexport availability..."
+
+    if command -v pffexport >/dev/null 2>&1; then
+        echo "pffexport detected at: $(command -v pffexport)"
+        pffexport -V 2>/dev/null || pffexport --version 2>/dev/null || true
+        return 0
+    fi
+
+    echo "pffexport not found before install attempt."
+
+    if command -v apt-get >/dev/null 2>&1; then
+        echo "apt-get found. Attempting non-fatal pff-tools install..."
+
+        set +e
+        export DEBIAN_FRONTEND=noninteractive
+
+        if [ "$(id -u)" = "0" ]; then
+            echo "Running apt-get install pff-tools directly as root..."
+            apt-get update
+            APT_UPDATE_EXIT=$?
+
+            if [ "$APT_UPDATE_EXIT" -eq 0 ]; then
+                apt-get install -y --no-install-recommends pff-tools
+                APT_INSTALL_EXIT=$?
+                rm -rf /var/lib/apt/lists/*
+            else
+                echo "WARNING: apt-get update failed with exit code $APT_UPDATE_EXIT."
+                APT_INSTALL_EXIT=1
+            fi
+
+        elif command -v sudo >/dev/null 2>&1; then
+            echo "Running apt-get install pff-tools with sudo..."
+            sudo apt-get update
+            APT_UPDATE_EXIT=$?
+
+            if [ "$APT_UPDATE_EXIT" -eq 0 ]; then
+                sudo apt-get install -y --no-install-recommends pff-tools
+                APT_INSTALL_EXIT=$?
+                sudo rm -rf /var/lib/apt/lists/*
+            else
+                echo "WARNING: sudo apt-get update failed with exit code $APT_UPDATE_EXIT."
+                APT_INSTALL_EXIT=1
+            fi
+
+        else
+            echo "WARNING: apt-get exists, but build user is not root and sudo is unavailable."
+            echo "WARNING: pffexport/libpff extraction will remain unavailable unless pff-tools is installed by the runtime image."
+            APT_INSTALL_EXIT=1
+        fi
+
+        set -e
+
+        if [ "${APT_INSTALL_EXIT:-1}" -eq 0 ]; then
+            echo "pff-tools apt-get install completed."
+        else
+            echo "WARNING: pff-tools apt-get install did not complete. Continuing build without failing."
+        fi
+    else
+        echo "WARNING: apt-get not available in this build environment."
+        echo "WARNING: OST files will fall back to readpst/evidence-package certification without libpff extraction."
+    fi
+
+    if command -v pffexport >/dev/null 2>&1; then
+        echo "pffexport detected after install at: $(command -v pffexport)"
+        pffexport -V 2>/dev/null || pffexport --version 2>/dev/null || true
+    else
+        echo "WARNING: pffexport still unavailable after install attempt."
+        echo "WARNING: OST certification will still work, but native OST mailbox extraction may fall back to evidence summary."
+
+        if [ "${VERIFYD_REQUIRE_PFFEXPORT:-0}" = "1" ]; then
+            echo "ERROR: VERIFYD_REQUIRE_PFFEXPORT=1 and pffexport is unavailable. Failing build."
+            exit 1
+        fi
+    fi
+}
+
+install_pff_tools_if_needed
+
+
 
 # ── ffmpeg static binary ──────────────────────────────────────
 # Using BtbN pinned GitHub release — more reliable than johnvansickle.com
@@ -368,6 +451,7 @@ yt-dlp --version && echo "yt-dlp OK" || { echo "ERROR: yt-dlp not found"; exit 1
 
 # Final runtime-path hints for Render logs.
 echo "=== VeriFYD Build Runtime Checks ==="
+echo "pffexport=$(command -v pffexport || true)"
 echo "readpst=$(command -v readpst || true)"
 echo "PATH=$PATH"
 echo "soffice=$(command -v soffice || true)"
