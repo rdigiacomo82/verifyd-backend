@@ -25,11 +25,16 @@ def _send(payload: dict) -> bool:
     try:
         import resend
         resend.api_key = RESEND_API_KEY
+        log.info(
+            "Sending email via Resend: from=%s to=%s subject=%s has_html=%s has_text=%s",
+            payload.get("from"), payload.get("to"), payload.get("subject"),
+            bool(payload.get("html")), bool(payload.get("text")),
+        )
         result = resend.Emails.send(payload)
-        log.info("Email sent to %s — id: %s", payload.get("to"), result.get("id"))
+        log.info("Email sent to %s — id: %s result=%s", payload.get("to"), result.get("id"), result)
         return True
     except Exception as e:
-        log.error("Failed to send email: %s", e)
+        log.exception("Failed to send email via Resend: %s", e)
         return False
 
 
@@ -199,7 +204,9 @@ def send_certification_email(
             f"your {_media} and found no significant indicators of AI generation. Your certified "
             f"{_media} includes the VeriFYD watermark as proof of authenticity."
         )
-    _subject      = f"&#10003; Your {_media} has been certified — VeriFYD #{short_id}"
+    # Keep subject plain ASCII for best deliverability across Gmail/Outlook.
+    # Older versions used an HTML entity in the subject; subjects are not HTML.
+    _subject      = f"VeriFYD Certification Ready - {_Media} #{short_id}"
 
     # Score color — green for high, yellow for moderate
     score_color = "#22c55e" if authenticity >= 75 else "#f59e0b"
@@ -328,11 +335,23 @@ def send_certification_email(
 </body>
 </html>"""
 
+    text = (
+        f"VeriFYD Certification Ready\n\n"
+        f"Your {_media} has been certified as REAL.\n"
+        f"File: {safe_filename}\n"
+        f"Authenticity Score: {authenticity}%\n"
+        f"Certificate ID: {certificate_id}\n\n"
+        f"Download: {download_url}\n"
+        f"Certificate: {cert_url}\n\n"
+        f"This email was sent after VeriFYD created and stored the certified {_media} artifact.\n"
+    )
+
     return _send({
         "from":    f"{FROM_NAME} <{FROM_ADDRESS}>",
         "to":      [to_email],
-        "subject": f"&#10003; Your {_media} has been certified — VeriFYD #{short_id}",
+        "subject": _subject,
         "html":    html,
+        "text":    text,
     })
 
 
