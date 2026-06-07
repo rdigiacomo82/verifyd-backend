@@ -228,6 +228,23 @@ def enqueue_photo_link(job_id: str, image_url: str, email: str):
 
 
 # ─────────────────────────────────────────────────────────────
+#  Audio helpers
+# ─────────────────────────────────────────────────────────────
+def enqueue_audio_upload(job_id: str, raw_path: str, filename: str, email: str):
+    """Store uploaded standalone audio and enqueue audio analysis."""
+    from worker import process_audio_upload_job
+
+    return _enqueue_file_job(
+        job_id=job_id,
+        raw_path=raw_path,
+        filename=filename,
+        email=email,
+        worker_func=process_audio_upload_job,
+        job_timeout=600,
+    )
+
+
+# ─────────────────────────────────────────────────────────────
 #  Document helpers — VeriFYD Docs MVP
 # ─────────────────────────────────────────────────────────────
 def enqueue_document_upload(job_id: str, raw_path: str, filename: str, email: str):

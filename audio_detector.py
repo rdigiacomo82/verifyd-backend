@@ -1,7 +1,7 @@
 # ============================================================
 #  VeriFYD — audio_detector.py  v2
 #
-#  Audio-domain AI / synthetic-media detector for VeriFYD video.
+#  Audio-domain AI / synthetic-media detector for VeriFYD video and standalone audio files.
 #
 #  Design goals:
 #    - Additive only: does not replace the existing pixel/GPT engines.
@@ -23,7 +23,7 @@
 #    9. Low-frequency ambience / room tone
 #
 #  Returns:
-#    analyze_audio(video_path) -> dict
+#    analyze_audio(media_path) -> dict
 #    get_audio_contribution(score, confidence, context) -> signed int delta
 # ============================================================
 
@@ -50,7 +50,7 @@ MIN_AUDIO_SECONDS = 1.0
 
 def analyze_audio(video_path: str) -> dict:
     """
-    Analyze the audio track of a video for synthetic-audio indicators.
+    Analyze the audio track of a video or a standalone audio file for synthetic-audio indicators.
 
     The returned audio_ai_score is 0-100, where higher means more AI-like.
     This score should be blended through get_audio_contribution(), not used
@@ -67,6 +67,7 @@ def analyze_audio(video_path: str) -> dict:
 
     audio_duration = float(media.get("audio_duration") or 0.0)
     video_duration = float(media.get("video_duration") or 0.0)
+    has_video = bool(media.get("has_video"))
     has_audio = bool(media.get("has_audio")) and audio_duration >= MIN_AUDIO_SECONDS
 
     if not has_audio:
@@ -78,6 +79,7 @@ def analyze_audio(video_path: str) -> dict:
             "confidence": "no_audio",
             "available": True,
             "has_audio": False,
+            "has_video": has_video,
             "video_duration": round(video_duration, 3),
             "audio_duration": round(audio_duration, 3),
             "duration_mismatch": 0.0,
@@ -91,6 +93,7 @@ def analyze_audio(video_path: str) -> dict:
             "confidence": "low",
             "available": False,
             "has_audio": True,
+            "has_video": has_video,
             "video_duration": round(video_duration, 3),
             "audio_duration": round(audio_duration, 3),
         }
@@ -117,14 +120,14 @@ def analyze_audio(video_path: str) -> dict:
                     f"Natural stereo variation detected ({stereo_corr:.3f})"
                 )
 
-        duration_mismatch = abs(audio_duration - video_duration) if video_duration > 0 else 0.0
+        duration_mismatch = abs(audio_duration - video_duration) if (has_video and video_duration > 0) else 0.0
         result["duration_mismatch"] = round(duration_mismatch, 4)
-        if video_duration >= 2.0 and duration_mismatch > 0.20:
+        if has_video and video_duration >= 2.0 and duration_mismatch > 0.20:
             result["audio_ai_score"] = min(100, result["audio_ai_score"] + 8)
             result["evidence"].append(
                 f"Audio/video duration mismatch ({duration_mismatch:.3f}s); suggests separately assembled media"
             )
-        elif video_duration >= 2.0 and duration_mismatch > 0.08:
+        elif has_video and video_duration >= 2.0 and duration_mismatch > 0.08:
             result["audio_ai_score"] = min(100, result["audio_ai_score"] + 4)
             result["evidence"].append(
                 f"Small audio/video duration mismatch ({duration_mismatch:.3f}s)"
@@ -134,6 +137,7 @@ def analyze_audio(video_path: str) -> dict:
         result["video_duration"] = round(video_duration, 3)
         result["audio_duration"] = round(audio_duration, 3)
         result["has_audio"] = True
+        result["has_video"] = has_video
         result["available"] = True
         return result
     finally:
@@ -349,20 +353,33 @@ def _get_media_info(video_path: str) -> dict:
             return {"available": False}
         data = json.loads(proc.stdout.decode("utf-8", errors="replace") or "{}")
         fmt = data.get("format", {}) or {}
-        video_duration = _safe_float(fmt.get("duration"), 0.0)
+        format_duration = _safe_float(fmt.get("duration"), 0.0)
+        video_duration = 0.0
         audio_duration = 0.0
+        has_video = False
         has_audio = False
         for stream in data.get("streams", []) or []:
-            if stream.get("codec_type") == "video" and not video_duration:
-                video_duration = _safe_float(stream.get("duration"), 0.0)
+            if stream.get("codec_type") == "video":
+                has_video = True
+                video_duration = max(video_duration, _safe_float(stream.get("duration"), 0.0))
             elif stream.get("codec_type") == "audio":
                 has_audio = True
                 audio_duration = max(audio_duration, _safe_float(stream.get("duration"), 0.0))
+
+        # Many MP3/M4A/OGG files expose duration only at the container level.
+        # For audio-only uploads, treat the container duration as audio duration.
+        if has_audio and not audio_duration and format_duration:
+            audio_duration = format_duration
+        if has_video and not video_duration and format_duration:
+            video_duration = format_duration
+
         return {
             "available": True,
+            "has_video": has_video,
             "has_audio": has_audio,
             "video_duration": video_duration,
             "audio_duration": audio_duration,
+            "format_name": fmt.get("format_name", ""),
         }
     except Exception as e:
         log.debug("audio_detector: ffprobe failed: %s", e)
