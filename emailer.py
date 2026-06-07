@@ -126,11 +126,12 @@ def send_certification_email(
     download_url: str,
     is_photo: bool = False,
     is_document: bool = False,
+    is_audio: bool = False,
 ) -> bool:
     """
-    Send post-certification email when a video, photo, or document is certified REAL.
+    Send post-certification email when a video, photo, document, or audio file is certified REAL.
     Includes download link, certificate link, and score.
-    Pass is_photo=True or is_document=True for correct language.
+    Pass is_photo=True, is_document=True, or is_audio=True for correct language.
     """
     cert_url      = f"{SITE_URL}/v/{certificate_id}"
     short_id      = certificate_id[:8].upper()
@@ -159,6 +160,19 @@ def send_certification_email(
                 "created certified reports for supported files inside the ZIP. Download the full certified "
                 "package to access the parent report, child certified reports, original source files, and signed manifest."
             )
+    elif is_audio:
+        _media = "audio"
+        _Media = "Audio"
+        _verified_lbl = "Real Audio Verified"
+        _dl_label = "Download Certified Audio"
+        _share_label = "Share Your Certified Audio"
+        _share_desc = "Share this link with authorized recipients to download your certified audio:"
+        _share_tap = "Tap the link above to open or download your certified audio directly."
+        _what_body = (
+            "VeriFYD analyzed your audio for synthetic-generation indicators, metadata concerns, "
+            "spectral consistency, noise-floor behavior, dynamic range, and audio-forensic authenticity signals. "
+            "Your certified audio preserves the audible content and includes a server-side certificate record."
+        )
     elif is_photo:
         _media = "photo"
         _Media = "Photo"

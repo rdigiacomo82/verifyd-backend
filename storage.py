@@ -244,6 +244,73 @@ def get_document_download_url(job_id: str, expires: int = CERT_URL_TTL) -> str:
     )
 
 
+
+# ─────────────────────────────────────────────
+# Certified audio storage
+# ─────────────────────────────────────────────
+
+def upload_certified_audio(job_id: str, cert_path: str, plan: str = "free", ext: str = ".mp3") -> str:
+    """Upload a certified audio file to R2 without changing the audible content."""
+    ext = (ext or ".mp3").lower()
+    content_types = {
+        ".mp3": "audio/mpeg",
+        ".wav": "audio/wav",
+        ".m4a": "audio/mp4",
+        ".aac": "audio/aac",
+        ".flac": "audio/flac",
+        ".ogg": "audio/ogg",
+        ".oga": "audio/ogg",
+        ".opus": "audio/opus",
+        ".webm": "audio/webm",
+    }
+    key = f"certified-audio/{plan}/{job_id}{ext}"
+    client = _get_client()
+    client.upload_file(
+        cert_path,
+        BUCKET,
+        key,
+        ExtraArgs={
+            "ContentType": content_types.get(ext, "application/octet-stream"),
+            "Metadata": {"plan": plan, "job_id": job_id, "type": "audio", "ext": ext.lstrip(".")},
+        },
+    )
+    log.info("storage: uploaded certified audio → r2://%s/%s (plan=%s)", BUCKET, key, plan)
+    return key
+
+def certified_audio_exists(job_id: str) -> bool:
+    client = _get_client()
+    for plan in _PLAN_ORDER:
+        for ext in (".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".oga", ".opus", ".webm"):
+            try:
+                client.head_object(Bucket=BUCKET, Key=f"certified-audio/{plan}/{job_id}{ext}")
+                return True
+            except Exception:
+                continue
+    return False
+
+def get_certified_audio_key(job_id: str) -> str:
+    client = _get_client()
+    for plan in _PLAN_ORDER:
+        for ext in (".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".oga", ".opus", ".webm"):
+            key = f"certified-audio/{plan}/{job_id}{ext}"
+            try:
+                client.head_object(Bucket=BUCKET, Key=key)
+                return key
+            except Exception:
+                continue
+    return f"certified-audio/free/{job_id}.mp3"
+
+def get_audio_download_url(job_id: str, expires: int = CERT_URL_TTL) -> str:
+    key = get_certified_audio_key(job_id)
+    if PUBLIC_URL:
+        return f"{PUBLIC_URL.rstrip('/')}/{key}"
+    client = _get_client()
+    return client.generate_presigned_url(
+        "get_object",
+        Params={"Bucket": BUCKET, "Key": key},
+        ExpiresIn=expires,
+    )
+
 # ─────────────────────────────────────────────
 # Phase 9A — Universal Certified File Package
 # ─────────────────────────────────────────────
@@ -314,6 +381,5 @@ def get_certified_file_package_download_url(job_id: str, expires: int = CERT_URL
 # ── Convenience: is R2 available? ────────────────────────────
 def r2_available() -> bool:
     return _is_configured()
-
 
 
