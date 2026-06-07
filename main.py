@@ -461,14 +461,20 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
                         "color": color, "gpt_reasoning": detail.get("gpt_reasoning",""),
                         "gpt_flags": detail.get("gpt_flags",[]),
                         "signal_score": detail.get("signal_ai_score",0),
-                        "gpt_score": detail.get("gpt_ai_score",0)}
+                        "gpt_score": detail.get("gpt_ai_score",0),
+                        "audio_score": detail.get("audio_ai_score",50),
+                        "audio_confidence": detail.get("audio_confidence","unavailable"),
+                        "audio_contribution": detail.get("audio_contribution",0)}
             if os.path.exists(clip_path):
                 os.remove(clip_path)
             return {"status": ui_text, "authenticity_score": authenticity, "color": color,
                     "gpt_reasoning": detail.get("gpt_reasoning",""),
                     "gpt_flags": detail.get("gpt_flags",[]),
                     "signal_score": detail.get("signal_ai_score",0),
-                    "gpt_score": detail.get("gpt_ai_score",0)}
+                    "gpt_score": detail.get("gpt_ai_score",0),
+                    "audio_score": detail.get("audio_ai_score",50),
+                    "audio_confidence": detail.get("audio_confidence","unavailable"),
+                    "audio_contribution": detail.get("audio_contribution",0)}
         except Exception as e2:
             log.exception("Sync fallback also failed for %s", raw_path)
             return JSONResponse({"error": str(e2)}, status_code=500)
@@ -2154,6 +2160,9 @@ def analyze_link(request: Request, video_url: str, email: str = ""):
                 "gpt_flags":          detail.get("gpt_flags", []),
                 "signal_score":       detail.get("signal_ai_score", 0),
                 "gpt_score":          detail.get("gpt_ai_score", 0),
+                "audio_score":        detail.get("audio_ai_score", 50),
+                "audio_confidence":   detail.get("audio_confidence", "unavailable"),
+                "audio_contribution": detail.get("audio_contribution", 0),
             })
 
         html = f"""

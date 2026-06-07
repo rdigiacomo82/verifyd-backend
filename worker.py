@@ -211,6 +211,10 @@ def process_upload_job(file_key: str, filename: str, email: str) -> dict:
             "gpt_flags": detail.get("gpt_flags", []),
             "signal_score": detail.get("signal_ai_score", 0),
             "gpt_score": detail.get("gpt_ai_score", 0),
+            "audio_score": detail.get("audio_ai_score", 50),
+            "audio_confidence": detail.get("audio_confidence", "unavailable"),
+            "audio_contribution": detail.get("audio_contribution", 0),
+            "audio_evidence": detail.get("audio_evidence", []),
             "job_status": "complete",
             "video_ready": False,
         }
@@ -676,6 +680,10 @@ def process_link_job(job_id: str, video_url: str, email: str, double_count: bool
             "gpt_flags": detail.get("gpt_flags", []),
             "signal_score": detail.get("signal_ai_score", 0),
             "gpt_score": detail.get("gpt_ai_score", 0),
+            "audio_score": detail.get("audio_ai_score", 50),
+            "audio_confidence": detail.get("audio_confidence", "unavailable"),
+            "audio_contribution": detail.get("audio_contribution", 0),
+            "audio_evidence": detail.get("audio_evidence", []),
             "job_status": "complete",
         }
         _store_result(r, job_id, result)
@@ -1202,7 +1210,6 @@ def keepalive_ping():
     _ts = _time.strftime("%Y-%m-%d %H:%M:%S UTC", _time.gmtime())
     log.info("Keepalive ping: worker alive at %s — models cached in memory", _ts)
     return {"status": "alive", "ts": _ts}
-
 
 
 

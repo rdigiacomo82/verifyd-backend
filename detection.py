@@ -54,6 +54,15 @@ def _get_deepfake_analyzer():
     except Exception:
         return None, None
 
+def _get_audio_analyzer():
+    """Lazy-load the audio detector so deployments without optional audio deps still run."""
+    try:
+        from audio_detector import analyze_audio, get_audio_contribution
+        return analyze_audio, get_audio_contribution
+    except Exception as e:
+        log.debug("Audio detector unavailable: %s", e)
+        return None, None
+
 THRESHOLD_REAL         = 55
 THRESHOLD_UNDETERMINED = 40
 
@@ -226,6 +235,35 @@ def run_detection(video_path: str) -> tuple:
     log.info("Signal detector ai_score: %d  content_type: %s",
              signal_ai_score, signal_context.get("content_type", "unknown"))
 
+    # ── Engine 1B: Audio detector (additive, conservative) ───
+    audio_result = {"available": False, "audio_ai_score": 50, "confidence": "unavailable", "evidence": []}
+    audio_contribution = 0
+    try:
+        analyze_audio, get_audio_contribution = _get_audio_analyzer()
+        if analyze_audio and get_audio_contribution:
+            audio_result = analyze_audio(video_path)
+            audio_contribution = get_audio_contribution(
+                audio_result.get("audio_ai_score", 50),
+                audio_result.get("confidence", "low"),
+                signal_context,
+            )
+            signal_context["audio_score"] = audio_result.get("audio_ai_score", 50)
+            signal_context["audio_confidence"] = audio_result.get("confidence", "low")
+            signal_context["audio_evidence"] = audio_result.get("evidence", [])[:5]
+            signal_context["audio_contribution"] = audio_contribution
+            if "stereo_corr" in audio_result:
+                signal_context["audio_stereo_corr"] = audio_result.get("stereo_corr", 0)
+            if "duration_mismatch" in audio_result:
+                signal_context["audio_duration_mismatch"] = audio_result.get("duration_mismatch", 0)
+            if audio_contribution:
+                old_signal = signal_ai_score
+                signal_ai_score = int(round(min(100, max(0, signal_ai_score + audio_contribution))))
+                log.info("Audio detector: score=%s conf=%s contribution=%+d signal %d→%d",
+                         audio_result.get("audio_ai_score"), audio_result.get("confidence"),
+                         audio_contribution, old_signal, signal_ai_score)
+    except Exception as e:
+        log.debug("Audio analysis skipped: %s", e)
+
     # ── Engine 2: GPT-4o ──────────────────────────────────────
     frames_b64      = extract_key_frames(video_path)
     gpt_result      = gpt_vision_score_with_context(frames_b64, signal_context)
@@ -328,6 +366,10 @@ def run_detection(video_path: str) -> tuple:
         "label":           label,
         "signal_ai_score": signal_ai_score,
         "gpt_ai_score":    gpt_ai_score,
+        "audio_ai_score":  audio_result.get("audio_ai_score", 50),
+        "audio_confidence": audio_result.get("confidence", "unavailable"),
+        "audio_contribution": audio_contribution,
+        "audio_evidence":  audio_result.get("evidence", [])[:8],
         "gpt_available":   gpt_available,
         "gpt_reasoning":   gpt_result.get("reasoning", ""),
         "gpt_flags":       gpt_result.get("flags", []),
@@ -846,6 +888,39 @@ def run_detection_multiclip(video_path: str) -> tuple:
     signal_ai_score = int(round(sum(
         s * w for s, w in zip(signal_scores, norm_weights)
     )))
+
+    # ── Full-file audio detector (runs once per video) ───────
+    # Audio is analyzed on the original full file, not each silent detection clip,
+    # so it can detect TTS/stock-audio/clean-room artifacts without slowing every clip.
+    audio_result = {"available": False, "audio_ai_score": 50, "confidence": "unavailable", "evidence": []}
+    audio_contribution = 0
+    try:
+        analyze_audio, get_audio_contribution = _get_audio_analyzer()
+        if analyze_audio and get_audio_contribution:
+            _tmp_content_context = (valid[0][1] if valid and len(valid[0]) > 1 else {})
+            audio_result = analyze_audio(video_path)
+            audio_contribution = get_audio_contribution(
+                audio_result.get("audio_ai_score", 50),
+                audio_result.get("confidence", "low"),
+                _tmp_content_context,
+            )
+            if audio_contribution:
+                old_signal = signal_ai_score
+                signal_ai_score = int(round(min(100, max(0, signal_ai_score + audio_contribution))))
+                log.info("Audio detector full-file: score=%s conf=%s contribution=%+d signal %d→%d",
+                         audio_result.get("audio_ai_score"), audio_result.get("confidence"),
+                         audio_contribution, old_signal, signal_ai_score)
+            for _ctx in all_signal_contexts:
+                _ctx["audio_score"] = audio_result.get("audio_ai_score", 50)
+                _ctx["audio_confidence"] = audio_result.get("confidence", "low")
+                _ctx["audio_evidence"] = audio_result.get("evidence", [])[:5]
+                _ctx["audio_contribution"] = audio_contribution
+                if "stereo_corr" in audio_result:
+                    _ctx["audio_stereo_corr"] = audio_result.get("stereo_corr", 0)
+                if "duration_mismatch" in audio_result:
+                    _ctx["audio_duration_mismatch"] = audio_result.get("duration_mismatch", 0)
+    except Exception as e:
+        log.debug("Audio analysis skipped for full file: %s", e)
 
     # Use context from highest-noise clip (most data-rich)
     best_ctx_idx = noise_weights.index(max(noise_weights))
@@ -1787,8 +1862,9 @@ def run_detection_multiclip(video_path: str) -> tuple:
     for _sc in all_signal_contexts:
         if not _sc:
             continue
-        for _k in ("audio_stereo_corr", "hf_kurtosis", "chan_corr",
-                   "omni_flow_entropy", "shadow_drift", "edge_cov_var", "flat_noise"):
+        for _k in ("audio_stereo_corr", "audio_score", "audio_duration_mismatch",
+                   "hf_kurtosis", "chan_corr", "omni_flow_entropy",
+                   "shadow_drift", "edge_cov_var", "flat_noise"):
             _v = _sc.get(_k)
             if _v is not None:
                 # Keep the most extreme (highest AI-indicating) value
@@ -1830,6 +1906,11 @@ def run_detection_multiclip(video_path: str) -> tuple:
         "ai_score":           int(round(combined_ai_score)),
         "signal_ai_score":    signal_ai_score,
         "gpt_ai_score":       gpt_ai_score,
+        "audio_ai_score":     audio_result.get("audio_ai_score", 50),
+        "audio_confidence":   audio_result.get("confidence", "unavailable"),
+        "audio_contribution": audio_contribution,
+        "audio_evidence":     audio_result.get("evidence", [])[:8],
+        "audio_signals":      {k: audio_result.get(k) for k in ("duration_mismatch", "stereo_corr", "noise_floor", "rms_cv", "mean_bandwidth", "zcr_cv", "low_freq_ratio") if k in audio_result},
         "gpt_available":      gpt_available,
         "gpt_reasoning":      user_reasoning,
         "gpt_flags":          gpt_flags,
