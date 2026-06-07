@@ -21,6 +21,7 @@ from contextlib import asynccontextmanager
 from detection import run_detection   # returns (authenticity, label, detail)
 from queue_helper import (enqueue_upload, enqueue_link,
                           enqueue_photo_upload, enqueue_photo_link,
+                          enqueue_audio_upload,
                           enqueue_document_upload,
                           get_job_result)
 from config import (                  # single source of truth for all settings
@@ -760,6 +761,224 @@ async def download_photo(cid: str):
     return JSONResponse({"error": "Certified photo not found or expired."}, status_code=404)
 
 
+
+
+# ─────────────────────────────────────────────
+#  Audio upload endpoint
+# ─────────────────────────────────────────────
+AUDIO_ALLOWED_EXTENSIONS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".oga", ".opus", ".webm"}
+AUDIO_SIZE_LIMITS = {
+    "free":        25 * 1024 * 1024,    # 25MB
+    "creator":     75 * 1024 * 1024,    # 75MB
+    "pro":        150 * 1024 * 1024,    # 150MB
+    "enterprise": 500 * 1024 * 1024,    # 500MB
+}
+
+
+@app.post("/upload-audio/")
+async def upload_audio(file: UploadFile = File(...), email: str = Form(...)):
+    """
+    Standalone audio upload endpoint.
+    Accepts MP3, WAV, M4A, AAC, FLAC, OGG/OGA, OPUS, and audio-only WebM.
+    Returns a job_id for the same /job-status/{job_id} polling flow used by video uploads.
+    """
+    if not is_valid_email(email):
+        return JSONResponse({"error": "Invalid email address."}, status_code=400)
+
+    is_deliverable, reason = _verify_email_deliverable(email)
+    if not is_deliverable:
+        return JSONResponse({"error": reason}, status_code=400)
+
+    if not is_email_verified(email):
+        return JSONResponse({
+            "error":   "email_not_verified",
+            "message": "Please verify your email address before uploading.",
+        }, status_code=403)
+
+    ext = os.path.splitext(file.filename or "")[1].lower()
+    if ext not in AUDIO_ALLOWED_EXTENSIONS:
+        return JSONResponse({
+            "error":   "unsupported_format",
+            "message": "Unsupported audio format. Accepted formats: MP3, WAV, M4A, AAC, FLAC, OGG, OGA, OPUS, and WebM audio.",
+        }, status_code=415)
+
+    try:
+        _cleanup_old_files(max_age_hours=2.0)
+    except Exception:
+        pass
+
+    status = get_user_status(email)
+    if not status["allowed"]:
+        return JSONResponse({
+            "error":     "limit_reached",
+            "plan":      status["plan"],
+            "uses_left": 0,
+            "limit":     status["limit"],
+        }, status_code=402)
+
+    user_plan = status["plan"]
+    max_bytes = AUDIO_SIZE_LIMITS.get(user_plan, AUDIO_SIZE_LIMITS["free"])
+    max_mb = max_bytes // (1024 * 1024)
+    plan_label = {"free": "Free", "creator": "Creator", "pro": "Pro", "enterprise": "Enterprise"}.get(user_plan, user_plan.title())
+
+    if file.size and file.size > max_bytes:
+        return JSONResponse({
+            "error":   "file_too_large",
+            "message": f"Audio file exceeds the {max_mb}MB limit for your {plan_label} plan.",
+            "max_mb":  max_mb,
+            "plan":    user_plan,
+        }, status_code=413)
+
+    job_id = str(uuid.uuid4())
+    safe_name = os.path.basename(file.filename or f"audio{ext}")
+    raw_path = f"{UPLOAD_DIR}/{job_id}_{safe_name}"
+
+    bytes_written = 0
+    with open(raw_path, "wb") as f_out:
+        while chunk := await file.read(1024 * 1024):
+            bytes_written += len(chunk)
+            if bytes_written > max_bytes:
+                try:
+                    os.remove(raw_path)
+                except Exception:
+                    pass
+                return JSONResponse({
+                    "error":   "file_too_large",
+                    "message": f"Audio file exceeds the {max_mb}MB limit for your {plan_label} plan.",
+                    "max_mb":  max_mb,
+                    "plan":    user_plan,
+                }, status_code=413)
+            f_out.write(chunk)
+
+    log.info("audio_upload: saved %dKB for %s (plan=%s file=%s)", bytes_written // 1024, email, user_plan, safe_name)
+
+    try:
+        enqueue_audio_upload(job_id, raw_path, safe_name, email)
+        log.info("audio_upload: queued job %s for %s file=%s", job_id, email, safe_name)
+    except Exception as e:
+        log.warning("Audio queue unavailable (%s) — falling back to sync", e)
+        try:
+            from audio_detector import analyze_audio
+            detail = analyze_audio(raw_path)
+            audio_score = int(detail.get("audio_ai_score", 50))
+            authenticity = max(0, min(100, 100 - audio_score))
+            label = "REAL" if authenticity >= 55 else "UNDETERMINED" if authenticity >= 40 else "AI"
+            AUDIO_LABEL_UI = {
+                "REAL": ("REAL AUDIO VERIFIED", "green"),
+                "UNDETERMINED": ("AUDIO UNDETERMINED", "blue"),
+                "AI": ("AI AUDIO DETECTED", "red"),
+            }
+            ui_text, color = AUDIO_LABEL_UI.get(label, ("AUDIO UNDETERMINED", "blue"))
+            increment_user_uses(email)
+            sha256 = _sha256(raw_path)
+            insert_certificate(
+                cert_id=job_id,
+                email=email,
+                original_file=safe_name,
+                label=label,
+                authenticity=authenticity,
+                ai_score=audio_score,
+                sha256=sha256,
+            )
+            return JSONResponse({
+                "status": ui_text,
+                "authenticity_score": authenticity,
+                "color": color,
+                "label": label,
+                "media_type": "audio",
+                "job_status": "complete",
+                "audio_ready": True,
+                "audio_score": audio_score,
+                "audio_confidence": detail.get("confidence", "low"),
+                "audio_evidence": detail.get("evidence", []),
+                "audio_duration": detail.get("audio_duration", 0),
+                "duration_mismatch": detail.get("duration_mismatch", 0),
+                "stereo_corr": detail.get("stereo_corr"),
+                "signal_score": audio_score,
+                "gpt_score": 0,
+                "gpt_reasoning": "; ".join(str(x) for x in detail.get("evidence", [])[:3]) or "Audio forensic analysis complete.",
+                "gpt_flags": detail.get("evidence", [])[:5],
+                "certificate_id": job_id,
+                "sha256": sha256,
+            })
+        except Exception as sync_e:
+            log.exception("Audio sync fallback failed")
+            return JSONResponse({"error": str(sync_e)[:200]}, status_code=500)
+        finally:
+            if os.path.exists(raw_path):
+                os.remove(raw_path)
+
+    return JSONResponse({"job_id": job_id, "status": "queued", "media_type": "audio"})
+
+
+
+@app.get("/download-audio/{cid}")
+async def download_audio(cid: str):
+    """Serve certified audio — checks R2 first, falls back to Redis."""
+    from fastapi.responses import RedirectResponse, Response
+
+    audio_exts = (".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".oga", ".opus", ".webm")
+    content_types = {
+        ".mp3": "audio/mpeg",
+        ".wav": "audio/wav",
+        ".m4a": "audio/mp4",
+        ".aac": "audio/aac",
+        ".flac": "audio/flac",
+        ".ogg": "audio/ogg",
+        ".oga": "audio/ogg",
+        ".opus": "audio/opus",
+        ".webm": "audio/webm",
+    }
+
+    # R2 first. Look directly across plan folders and extensions.
+    try:
+        from storage import _get_client, BUCKET, PUBLIC_URL, CERT_URL_TTL, r2_available
+
+        if r2_available():
+            client = _get_client()
+            for plan in ("pro", "creator", "enterprise", "free"):
+                for ext in audio_exts:
+                    key = f"certified-audio/{plan}/{cid}{ext}"
+                    try:
+                        client.head_object(Bucket=BUCKET, Key=key)
+                        if PUBLIC_URL:
+                            url = f"{PUBLIC_URL.rstrip('/')}/{key}"
+                        else:
+                            url = client.generate_presigned_url(
+                                "get_object",
+                                Params={"Bucket": BUCKET, "Key": key},
+                                ExpiresIn=CERT_URL_TTL,
+                            )
+                        log.info("download-audio: R2 hit job=%s key=%s", cid, key)
+                        return RedirectResponse(url=url, status_code=302)
+                    except Exception:
+                        continue
+    except Exception as e:
+        log.warning("R2 audio download lookup failed for %s: %s", cid, e)
+
+    # Redis fallback.
+    try:
+        r = _get_redis()
+        data = r.get(f"audiocert:{cid}")
+        ext_raw = r.get(f"audiocert:{cid}:ext")
+        ext = ".mp3"
+        if ext_raw:
+            ext = ext_raw.decode("utf-8", errors="replace") if isinstance(ext_raw, bytes) else str(ext_raw)
+            if not ext.startswith("."):
+                ext = "." + ext
+        if data:
+            return Response(
+                content=data,
+                media_type=content_types.get(ext.lower(), "application/octet-stream"),
+                headers={
+                    "Content-Disposition": f'attachment; filename="VeriFYD_Certified_Audio_{cid[:8]}{ext}"',
+                    "Cache-Control": "private, max-age=3600",
+                },
+            )
+    except Exception as e:
+        log.warning("Redis audio download lookup failed for %s: %s", cid, e)
+
+    return JSONResponse({"error": "Certified audio not found or expired."}, status_code=404)
 
 
 # ─────────────────────────────────────────────
