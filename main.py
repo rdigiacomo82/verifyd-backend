@@ -1980,19 +1980,27 @@ def verify_certificate_by_id(cid: str):
 
 @app.get("/job-status/{job_id}")
 def job_status(job_id: str):
-    """Poll endpoint for direct async frontends."""
+    """Poll endpoint for direct async frontends.
+
+    Preserve the user-facing verdict text in ``status`` (for example
+    ``REAL AUDIO VERIFIED`` / ``REAL VIDEO VERIFIED``) and expose the queue
+    lifecycle separately as ``job_state``.  Older frontend code can still read
+    ``job_status``.
+    """
     result = get_job_result(job_id)
     if not result or result.get("job_status") == "not_found":
-        return JSONResponse({"status": "not_found"}, status_code=404)
-    # Normalize job_status → status so frontend can use data.status consistently
-    job_st = result.get("job_status", "")
-    result_copy = {k: v for k, v in result.items() if k != "job_status"}
-    if job_st == "complete":
-        result_copy["status"] = "complete"
-    elif job_st == "error":
-        result_copy["status"] = "error"
-    else:
-        result_copy["status"] = job_st or "processing"
+        return JSONResponse({"status": "not_found", "job_state": "not_found", "job_status": "not_found"}, status_code=404)
+
+    job_st = result.get("job_status") or result.get("job_state") or "processing"
+    result_copy = dict(result)
+    result_copy["job_state"] = job_st
+    result_copy["job_status"] = job_st
+
+    # Do not overwrite display status like REAL AUDIO VERIFIED with generic
+    # "complete".  Only fill status when the worker did not provide one.
+    if not result_copy.get("status"):
+        result_copy["status"] = "error" if job_st == "error" else job_st
+
     return JSONResponse(result_copy)
 
 

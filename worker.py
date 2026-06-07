@@ -207,6 +207,8 @@ def process_upload_job(file_key: str, filename: str, email: str) -> dict:
             "authenticity_score": authenticity,
             "color": color,
             "label": label,
+            "media_type": "video",
+            "download_type": "certified_video" if certify else "",
             "gpt_reasoning": detail.get("gpt_reasoning", ""),
             "gpt_flags": detail.get("gpt_flags", []),
             "signal_score": detail.get("signal_ai_score", 0),
@@ -222,6 +224,8 @@ def process_upload_job(file_key: str, filename: str, email: str) -> dict:
         if certify:
             result["certificate_id"] = job_id
             result["download_url"] = f"{BASE_URL}/download/{job_id}"
+            result["share_url"] = result["download_url"]
+            result["download_type"] = "certified_video"
             result["certification_status"] = "processing"
         _store_result(r, job_id, result)
 
@@ -261,10 +265,15 @@ def process_upload_job(file_key: str, filename: str, email: str) -> dict:
 
                 if email and "@" in email:
                     try:
-                        send_certification_email(email, job_id, authenticity, filename, download_url)
+                        sent = send_certification_email(email, job_id, authenticity, filename, download_url)
+                        log.info("Worker: video certification email sent=%s job=%s email=%s", sent, job_id, email)
                     except Exception as e:
-                        log.warning("Worker: email failed for %s: %s", job_id, e)
+                        log.warning("Worker: video certification email failed for %s: %s", job_id, e)
 
+                result["media_type"] = "video"
+                result["download_type"] = "certified_video"
+                result["download_url"] = download_url
+                result["share_url"] = download_url
                 result["video_ready"] = True
                 result["certification_status"] = "ready"
                 _store_result(r, job_id, result)
