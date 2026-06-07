@@ -1980,26 +1980,105 @@ def verify_certificate_by_id(cid: str):
 
 @app.get("/job-status/{job_id}")
 def job_status(job_id: str):
-    """Poll endpoint for direct async frontends.
+    """Poll endpoint for async frontends.
 
-    Preserve the user-facing verdict text in ``status`` (for example
-    ``REAL AUDIO VERIFIED`` / ``REAL VIDEO VERIFIED``) and expose the queue
-    lifecycle separately as ``job_state``.  Older frontend code can still read
-    ``job_status``.
+    Backward-compatible response:
+    - status / job_status / job_state = lifecycle state used for polling
+    - result_status / display_status / verdict_status = visible result-card title
     """
     result = get_job_result(job_id)
+
     if not result or result.get("job_status") == "not_found":
-        return JSONResponse({"status": "not_found", "job_state": "not_found", "job_status": "not_found"}, status_code=404)
+        return JSONResponse({
+            "status": "not_found",
+            "job_status": "not_found",
+            "job_state": "not_found",
+        }, status_code=404)
 
-    job_st = result.get("job_status") or result.get("job_state") or "processing"
     result_copy = dict(result)
-    result_copy["job_state"] = job_st
-    result_copy["job_status"] = job_st
 
-    # Do not overwrite display status like REAL AUDIO VERIFIED with generic
-    # "complete".  Only fill status when the worker did not provide one.
-    if not result_copy.get("status"):
-        result_copy["status"] = "error" if job_st == "error" else job_st
+    raw_status = str(result.get("status") or "").strip()
+    raw_status_lc = raw_status.lower()
+    lifecycle_values = {"queued", "processing", "complete", "error", "not_found"}
+
+    job_st = (
+        result.get("job_status")
+        or result.get("job_state")
+        or ("error" if raw_status_lc == "error" else "")
+        or "processing"
+    )
+
+    # Preserve the visible verdict/title separately.
+    if raw_status and raw_status_lc not in lifecycle_values:
+        display_status = raw_status
+    else:
+        label = str(result.get("label") or "").upper()
+        media_type = str(result.get("media_type") or "").lower()
+        download_type = str(result.get("download_type") or "").lower()
+
+        if media_type == "audio" or download_type == "certified_audio":
+            display_status = (
+                "REAL AUDIO VERIFIED" if label == "REAL" else
+                "AUDIO UNDETERMINED" if label == "UNDETERMINED" else
+                "AI AUDIO DETECTED" if label == "AI" else
+                "AUDIO ANALYSIS COMPLETE"
+            )
+        elif media_type == "video" or result.get("video_ready") is not None:
+            display_status = (
+                "REAL VIDEO VERIFIED" if label == "REAL" else
+                "VIDEO UNDETERMINED" if label == "UNDETERMINED" else
+                "AI DETECTED" if label == "AI" else
+                "VIDEO ANALYSIS COMPLETE"
+            )
+        elif media_type == "photo":
+            display_status = (
+                "REAL PHOTO VERIFIED" if label == "REAL" else
+                "PHOTO UNDETERMINED" if label == "UNDETERMINED" else
+                "AI DETECTED" if label == "AI" else
+                "PHOTO ANALYSIS COMPLETE"
+            )
+        elif media_type == "document":
+            display_status = (
+                "REAL DOCUMENT VERIFIED" if label == "REAL" else
+                "DOCUMENT UNDETERMINED" if label == "UNDETERMINED" else
+                "AI / TAMPERING DETECTED" if label == "AI" else
+                "DOCUMENT ANALYSIS COMPLETE"
+            )
+        else:
+            display_status = raw_status if raw_status and raw_status_lc not in lifecycle_values else "ANALYSIS COMPLETE"
+
+    result_copy["result_status"] = display_status
+    result_copy["display_status"] = display_status
+    result_copy["verdict_status"] = display_status
+
+    # Keep lifecycle state explicit and backward-compatible.
+    result_copy["job_status"] = job_st
+    result_copy["job_state"] = job_st
+
+    # Important: keep status as lifecycle so older frontend polling stops spinning.
+    result_copy["status"] = job_st
+
+    # Backend safety normalization for media download routing.
+    cid = result_copy.get("certificate_id") or job_id
+    media_type = str(result_copy.get("media_type") or "").lower()
+    download_type = str(result_copy.get("download_type") or "").lower()
+
+    if media_type == "audio" or download_type == "certified_audio":
+        result_copy["media_type"] = "audio"
+        result_copy["download_type"] = "certified_audio"
+        if not result_copy.get("download_url"):
+            result_copy["download_url"] = f"{BASE_URL}/download-audio/{cid}"
+        if not result_copy.get("share_url"):
+            result_copy["share_url"] = result_copy.get("download_url")
+
+    elif media_type == "video" or result_copy.get("video_ready") is not None:
+        result_copy["media_type"] = "video"
+        if result_copy.get("label") == "REAL":
+            result_copy["download_type"] = result_copy.get("download_type") or "certified_video"
+            if not result_copy.get("download_url"):
+                result_copy["download_url"] = f"{BASE_URL}/download/{cid}"
+            if not result_copy.get("share_url"):
+                result_copy["share_url"] = result_copy.get("download_url")
 
     return JSONResponse(result_copy)
 
