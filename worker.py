@@ -363,6 +363,7 @@ def process_audio_upload_job(file_key: str, filename: str, email: str) -> dict:
             "media_type": "audio",
             "job_status": "complete",
             "audio_ready": False,
+            "certified_audio_ready": False,
             "audio_score": audio_score,
             "base_audio_score": detail.get("base_audio_ai_score", audio_score),
             "audio_confidence": detail.get("confidence", "low"),
@@ -385,8 +386,10 @@ def process_audio_upload_job(file_key: str, filename: str, email: str) -> dict:
 
         if certify:
             result["download_url"] = f"{BASE_URL}/download-audio/{job_id}"
+            result["share_url"] = result["download_url"]
             result["download_type"] = "certified_audio"
             result["certification_status"] = "processing"
+            result["certified_audio_ready"] = False
 
         _store_result(r, job_id, result)
 
@@ -394,6 +397,10 @@ def process_audio_upload_job(file_key: str, filename: str, email: str) -> dict:
             certified_path = _os.path.join(tempfile.gettempdir(), f"cert_audio_{job_id}{ext}")
             download_url = f"{BASE_URL}/download-audio/{job_id}"
             try:
+                log.info(
+                    "Worker: creating certified audio: job=%s src=%s dest=%s label=%s auth=%s",
+                    job_id, tmp_path, certified_path, label, authenticity,
+                )
                 _create_certified_audio_copy(
                     src_path=tmp_path,
                     dest_path=certified_path,
@@ -402,7 +409,13 @@ def process_audio_upload_job(file_key: str, filename: str, email: str) -> dict:
                     sha256=sha256,
                     filename=filename,
                 )
-                if not _os.path.exists(certified_path) or _os.path.getsize(certified_path) < 256:
+                _cert_exists = _os.path.exists(certified_path)
+                _cert_size = _os.path.getsize(certified_path) if _cert_exists else 0
+                log.info(
+                    "Worker: certified audio created: job=%s exists=%s size=%d path=%s",
+                    job_id, _cert_exists, _cert_size, certified_path,
+                )
+                if not _cert_exists or _cert_size < 256:
                     raise RuntimeError("Certified audio output missing or too small")
 
                 try:
@@ -414,6 +427,10 @@ def process_audio_upload_job(file_key: str, filename: str, email: str) -> dict:
                 try:
                     from storage import r2_available, upload_certified_audio
                     if r2_available():
+                        log.info(
+                            "Worker: uploading certified audio to R2: job=%s path=%s size=%d plan=%s",
+                            job_id, certified_path, _os.path.getsize(certified_path), _plan,
+                        )
                         upload_certified_audio(job_id, certified_path, _plan, ext)
                         _os.remove(certified_path)
                         _stored = True
@@ -438,13 +455,16 @@ def process_audio_upload_job(file_key: str, filename: str, email: str) -> dict:
                         log.warning("Worker: audio certification email failed for %s: %s", job_id, em)
 
                 result["audio_ready"] = True
+                result["certified_audio_ready"] = True
                 result["certification_status"] = "ready"
                 result["download_url"] = download_url
+                result["share_url"] = download_url
                 result["download_type"] = "certified_audio"
                 _store_result(r, job_id, result)
             except Exception as cert_err:
                 log.error("Worker: audio certification failed for %s: %s", job_id, cert_err)
                 result["audio_ready"] = False
+                result["certified_audio_ready"] = False
                 result["certification_status"] = "failed"
                 result["certification_error"] = "Certified audio generation failed, but analysis completed."
                 _store_result(r, job_id, result)
@@ -470,6 +490,7 @@ def _create_certified_audio_copy(src_path: str, dest_path: str, cert_id: str, au
     Preferred path uses ffmpeg stream-copy with metadata tags, preserving the
     original audio frames where the container supports it. Fallback is byte copy.
     """
+    import os as _os
     import shutil
     import subprocess
 

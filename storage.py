@@ -301,13 +301,33 @@ def get_certified_audio_key(job_id: str) -> str:
     return f"certified-audio/free/{job_id}.mp3"
 
 def get_audio_download_url(job_id: str, expires: int = CERT_URL_TTL) -> str:
+    """Generate a presigned certified-audio URL with download headers when possible."""
     key = get_certified_audio_key(job_id)
+    ext = os.path.splitext(key)[1].lower() or ".mp3"
+    content_types = {
+        ".mp3": "audio/mpeg",
+        ".wav": "audio/wav",
+        ".m4a": "audio/mp4",
+        ".aac": "audio/aac",
+        ".flac": "audio/flac",
+        ".ogg": "audio/ogg",
+        ".oga": "audio/ogg",
+        ".opus": "audio/opus",
+        ".webm": "audio/webm",
+    }
     if PUBLIC_URL:
+        # PUBLIC_URL cannot force Content-Disposition; main.py /download-audio/{cid}
+        # proxies R2 objects to guarantee attachment downloads.
         return f"{PUBLIC_URL.rstrip('/')}/{key}"
     client = _get_client()
     return client.generate_presigned_url(
         "get_object",
-        Params={"Bucket": BUCKET, "Key": key},
+        Params={
+            "Bucket": BUCKET,
+            "Key": key,
+            "ResponseContentDisposition": f'attachment; filename="VeriFYD_Certified_Audio_{job_id[:8]}{ext}"',
+            "ResponseContentType": content_types.get(ext, "application/octet-stream"),
+        },
         ExpiresIn=expires,
     )
 

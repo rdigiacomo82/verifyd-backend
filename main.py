@@ -880,27 +880,106 @@ async def upload_audio(file: UploadFile = File(...), email: str = Form(...)):
                 ai_score=audio_score,
                 sha256=sha256,
             )
-            return JSONResponse({
+            result = {
                 "status": ui_text,
                 "authenticity_score": authenticity,
                 "color": color,
                 "label": label,
                 "media_type": "audio",
                 "job_status": "complete",
-                "audio_ready": True,
+                "audio_ready": False,
+                "certified_audio_ready": False,
                 "audio_score": audio_score,
+                "base_audio_score": detail.get("base_audio_ai_score", audio_score),
                 "audio_confidence": detail.get("confidence", "low"),
                 "audio_evidence": detail.get("evidence", []),
                 "audio_duration": detail.get("audio_duration", 0),
                 "duration_mismatch": detail.get("duration_mismatch", 0),
                 "stereo_corr": detail.get("stereo_corr"),
+                "gpt_audio_score": detail.get("gpt_audio_score", 0),
+                "gpt_audio_available": detail.get("gpt_audio_available", False),
+                "gpt_audio_adjustment": detail.get("gpt_audio_adjustment", 0),
+                "gpt_audio_reasoning": detail.get("gpt_audio_reasoning", ""),
+                "gpt_audio_flags": detail.get("gpt_audio_flags", []),
                 "signal_score": audio_score,
-                "gpt_score": 0,
+                "gpt_score": detail.get("gpt_audio_score", 0),
                 "gpt_reasoning": "; ".join(str(x) for x in detail.get("evidence", [])[:3]) or "Audio forensic analysis complete.",
                 "gpt_flags": detail.get("evidence", [])[:5],
                 "certificate_id": job_id,
                 "sha256": sha256,
-            })
+            }
+
+            if label == "REAL":
+                import shutil as _shutil
+                cert_audio_path = os.path.join(tempfile.gettempdir(), f"cert_audio_{job_id}{ext}")
+                download_url = f"{BASE_URL}/download-audio/{job_id}"
+                try:
+                    log.info(
+                        "audio_upload sync: creating certified audio: job=%s src=%s dest=%s label=%s auth=%s",
+                        job_id, raw_path, cert_audio_path, label, authenticity,
+                    )
+                    _shutil.copyfile(raw_path, cert_audio_path)
+                    cert_exists = os.path.exists(cert_audio_path)
+                    cert_size = os.path.getsize(cert_audio_path) if cert_exists else 0
+                    log.info(
+                        "audio_upload sync: certified audio created: job=%s exists=%s size=%d path=%s",
+                        job_id, cert_exists, cert_size, cert_audio_path,
+                    )
+                    if not cert_exists or cert_size < 256:
+                        raise RuntimeError("Certified audio output missing or too small")
+
+                    stored = False
+                    try:
+                        from storage import r2_available, upload_certified_audio
+                        if r2_available():
+                            log.info(
+                                "audio_upload sync: uploading certified audio to R2: job=%s path=%s size=%d plan=%s",
+                                job_id, cert_audio_path, os.path.getsize(cert_audio_path), user_plan,
+                            )
+                            upload_certified_audio(job_id, cert_audio_path, user_plan, ext)
+                            stored = True
+                            log.info("audio_upload sync: certified audio stored in R2: job=%s plan=%s", job_id, user_plan)
+                    except Exception as r2e:
+                        log.warning("audio_upload sync: R2 audio upload failed, falling back to Redis: %s", r2e)
+
+                    if not stored:
+                        cert_ttl = {"free": 86400, "creator": 259200, "pro": 604800, "enterprise": 2592000}.get(user_plan, 86400)
+                        with open(cert_audio_path, "rb") as af:
+                            cert_bytes = af.read()
+                        rr = _get_redis()
+                        rr.setex(f"audiocert:{job_id}", cert_ttl, cert_bytes)
+                        rr.setex(f"audiocert:{job_id}:ext", cert_ttl, ext)
+                        log.info("audio_upload sync: certified audio stored in Redis: job=%s ttl=%s", job_id, cert_ttl)
+
+                    if email and "@" in email:
+                        try:
+                            sent = send_certification_email(email, job_id, authenticity, safe_name, download_url, is_audio=True)
+                            log.info("audio_upload sync: audio certification email sent=%s job=%s email=%s", sent, job_id, email)
+                        except Exception as em:
+                            log.warning("audio_upload sync: audio certification email failed for %s: %s", job_id, em)
+
+                    result["audio_ready"] = True
+                    result["certified_audio_ready"] = True
+                    result["certification_status"] = "ready"
+                    result["download_url"] = download_url
+                    result["share_url"] = download_url
+                    result["download_type"] = "certified_audio"
+                except Exception as cert_e:
+                    log.warning("audio_upload sync: certified audio generation failed for %s: %s", job_id, cert_e)
+                    result["audio_ready"] = False
+                    result["certified_audio_ready"] = False
+                    result["certification_status"] = "failed"
+                    result["certification_error"] = "Certified audio generation failed, but analysis completed."
+                finally:
+                    try:
+                        if os.path.exists(cert_audio_path):
+                            os.remove(cert_audio_path)
+                    except Exception:
+                        pass
+            else:
+                result["audio_ready"] = True
+
+            return JSONResponse(result)
         except Exception as sync_e:
             log.exception("Audio sync fallback failed")
             return JSONResponse({"error": str(sync_e)[:200]}, status_code=500)
@@ -915,7 +994,7 @@ async def upload_audio(file: UploadFile = File(...), email: str = Form(...)):
 @app.get("/download-audio/{cid}")
 async def download_audio(cid: str):
     """Serve certified audio — checks R2 first, falls back to Redis."""
-    from fastapi.responses import RedirectResponse, Response
+    from fastapi.responses import Response, StreamingResponse
 
     audio_exts = (".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".oga", ".opus", ".webm")
     content_types = {
@@ -941,16 +1020,22 @@ async def download_audio(cid: str):
                     key = f"certified-audio/{plan}/{cid}{ext}"
                     try:
                         client.head_object(Bucket=BUCKET, Key=key)
-                        if PUBLIC_URL:
-                            url = f"{PUBLIC_URL.rstrip('/')}/{key}"
-                        else:
-                            url = client.generate_presigned_url(
-                                "get_object",
-                                Params={"Bucket": BUCKET, "Key": key},
-                                ExpiresIn=CERT_URL_TTL,
-                            )
+                        # Proxy the object through FastAPI so browsers download it
+                        # instead of opening an inline audio player. This also works
+                        # when PUBLIC_URL is configured and cannot carry response
+                        # header overrides.
+                        obj = client.get_object(Bucket=BUCKET, Key=key)
+                        media_type = content_types.get(ext.lower(), "application/octet-stream")
+                        filename = f"VeriFYD_Certified_Audio_{cid[:8]}{ext}"
                         log.info("download-audio: R2 hit job=%s key=%s", cid, key)
-                        return RedirectResponse(url=url, status_code=302)
+                        return StreamingResponse(
+                            obj["Body"].iter_chunks(chunk_size=1024 * 1024),
+                            media_type=media_type,
+                            headers={
+                                "Content-Disposition": f'attachment; filename="{filename}"',
+                                "Cache-Control": "private, max-age=3600",
+                            },
+                        )
                     except Exception:
                         continue
     except Exception as e:
@@ -1176,7 +1261,7 @@ async def download_document(cid: str):
     That makes large certified PDFs, such as HEIC-generated document
     certificates, more reliable immediately after upload.
     """
-    from fastapi.responses import RedirectResponse, Response
+    from fastapi.responses import Response, StreamingResponse
 
     fname = f"VeriFYD_Certified_Document_{cid[:8]}.pdf"
 
@@ -1239,7 +1324,7 @@ async def download_certified_file_package(cid: str):
     For Pro/Enterprise ZIP evidence uploads, this package contains the parent
     summary PDF plus individually certified reports for supported internal files.
     """
-    from fastapi.responses import RedirectResponse, Response
+    from fastapi.responses import Response, StreamingResponse
 
     fname = f"VeriFYD_Certified_File_Package_{cid[:8]}.zip"
 
