@@ -32,7 +32,7 @@ from emailer import send_otp_email, send_enterprise_welcome_email
 from notification_helper import send_certification_email_outbox_compat as send_certification_email
 from database import (init_db, insert_certificate, increment_downloads,
                       get_or_create_user, get_user_status, increment_user_uses,
-                      is_valid_email, FREE_USES, get_certificate,
+                      is_valid_email, normalize_email, FREE_USES, get_certificate,
                       is_email_verified, create_otp, verify_otp,
                       create_api_key, get_api_key, increment_api_key_uses,
                       revoke_api_key, list_api_keys, update_api_key_branding)
@@ -350,6 +350,7 @@ def _verify_email_deliverable(email: str) -> tuple:
 # ─────────────────────────────────────────────
 @app.post("/upload/")
 async def upload(file: UploadFile = File(...), email: str = Form(...)):
+    email = normalize_email(email)
     # ── Email format validation ───────────────────────────────
     if not is_valid_email(email):
         return JSONResponse({"error": "Invalid email address."}, status_code=400)
@@ -523,6 +524,7 @@ PHOTO_LABEL_UI = {
 
 @app.post("/upload-photo/")
 async def upload_photo(file: UploadFile = File(...), email: str = Form(...)):
+    email = normalize_email(email)
     """
     Photo upload endpoint. Mirrors /upload/ but for still images.
     Accepts: JPEG, PNG, WebP, HEIC/HEIF.
@@ -778,6 +780,7 @@ AUDIO_SIZE_LIMITS = {
 
 @app.post("/upload-audio/")
 async def upload_audio(file: UploadFile = File(...), email: str = Form(...)):
+    email = normalize_email(email)
     """
     Standalone audio upload endpoint.
     Accepts MP3, WAV, M4A, AAC, FLAC, OGG/OGA, OPUS, and audio-only WebM.
@@ -1114,6 +1117,7 @@ def _uploaded_pdf_has_verifyd_seal(path: str) -> tuple[bool, str]:
 
 @app.post("/upload-document/")
 async def upload_document(file: UploadFile = File(...), email: str = Form(...)):
+    email = normalize_email(email)
     """
     Document upload endpoint for VeriFYD Docs MVP.
     Accepts PDF, DOCX/DOC, XLSX/XLS, PPTX/PPT, ODT/ODS/ODP, TXT/MD/CSV/RTF/EML/MSG, HTML/MHTML/XML/JSON/SVG/VSDX, YAML/TOML/ENV/INI/PROPERTIES/CONF/CFG/CONFIG/CNF/LOG/SQL config files, JPG/JPEG/PNG/GIF/BMP/TIF/TIFF/WEBP/HEIC/HEIF images, PST/OST, DWG/DXF, and ZIP evidence packages and returns a job_id for polling
@@ -2193,6 +2197,7 @@ def admin_cert_email_status(cid: str, key: str = ""):
 
 @app.get("/upload-limits/")
 def upload_limits(email: str = ""):
+    email = normalize_email(email) if email else ""
     """
     Return the file size limit for a given email's plan.
     Frontend calls this on load to show correct size messaging.
@@ -2528,7 +2533,7 @@ async def register_email(request: Request):
     """
     try:
         body = await request.json()
-        email = body.get("email", "").strip()
+        email = normalize_email(body.get("email", ""))
     except Exception:
         return JSONResponse({"error": "invalid body"}, status_code=400)
 
@@ -2557,6 +2562,7 @@ async def register_email(request: Request):
 
 @app.get("/user-status/")
 def user_status(email: str = ""):
+    email = normalize_email(email) if email else ""
     """
     Check a user's current usage status.
     Used by the frontend to show remaining analyses.
@@ -3225,6 +3231,7 @@ def admin_update_apikey(
 
 @app.get("/admin-delete-user/")
 def admin_delete_user(email: str = "", key: str = ""):
+    email = normalize_email(email) if email else ""
     """
     Permanently delete a user from the database.
     Used for testing — removes all traces of the user so they can re-register fresh.
@@ -3475,6 +3482,7 @@ def admin_disk_usage(key: str = ""):
 
 @app.get("/admin-reset-user/")
 def admin_reset_user(email: str = "", key: str = ""):
+    email = normalize_email(email) if email else ""
     """Reset a user's period_uses to 0 for testing."""
     if not _is_admin(key):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
@@ -3489,6 +3497,7 @@ def admin_reset_user(email: str = "", key: str = ""):
 
 @app.get("/admin-upgrade-user/")
 def admin_upgrade_user(email: str = "", plan: str = "enterprise", key: str = ""):
+    email = normalize_email(email) if email else ""
     """Upgrade a user to a paid plan. Admin only."""
     if not _is_admin(key):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
@@ -3617,6 +3626,7 @@ def test_email(email: str = "", key: str = ""):
 # ─────────────────────────────────────────────
 @app.post("/send-otp/")
 async def send_otp(email: str = Form(...)):
+    email = normalize_email(email)
     """Send a 6-digit OTP to the given email for verification."""
     if not is_valid_email(email):
         return JSONResponse({"error": "Invalid email address."}, status_code=400)
@@ -3646,6 +3656,7 @@ async def send_otp(email: str = Form(...)):
 
 @app.post("/verify-otp/")
 async def verify_otp_route(email: str = Form(...), code: str = Form(...)):
+    email = normalize_email(email)
     """Verify the OTP code submitted by the user."""
     if not is_valid_email(email):
         return JSONResponse({"error": "Invalid email address."}, status_code=400)

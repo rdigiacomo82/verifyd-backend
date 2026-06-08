@@ -131,9 +131,26 @@ def init_db() -> None:
 #  Email validation
 # ─────────────────────────────────────────────────────────────
 
+
+def normalize_email(email: str) -> str:
+    """
+    Canonicalize user emails before storing or looking them up.
+
+    This intentionally only repairs VeriFYD's own internal domain typo:
+      @vfvid.co -> @vfvid.com
+
+    It does not rewrite general .co addresses because .co is a valid TLD.
+    """
+    value = (email or "").strip().lower()
+
+    if value.endswith("@vfvid.co"):
+        value = value[:-len("@vfvid.co")] + "@vfvid.com"
+
+    return value
+
 def is_valid_email(email: str) -> bool:
     pattern = r'^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$'
-    return bool(re.match(pattern, email.strip()))
+    return bool(re.match(pattern, normalize_email(email)))
 
 
 # ─────────────────────────────────────────────────────────────
@@ -141,7 +158,7 @@ def is_valid_email(email: str) -> bool:
 # ─────────────────────────────────────────────────────────────
 
 def get_or_create_user(email: str) -> dict:
-    email_lower = email.strip().lower()
+    email_lower = normalize_email(email)
     now = datetime.now(timezone.utc).isoformat()
 
     with get_db() as conn:
@@ -163,14 +180,14 @@ def get_or_create_user(email: str) -> dict:
         cur.execute(
             """
             INSERT INTO users
-                (email, email_lower, plan, total_uses, period_uses,
+                (email_lower, email_lower, plan, total_uses, period_uses,
                  period_start, created_at, last_seen, email_verified)
             VALUES (%s, %s, 'free', 0, 0, %s, %s, %s, 0)
             """,
-            (email.strip(), email_lower, now, now, now)
+            (normalize_email(email), email_lower, now, now, now)
         )
         return {
-            "email":          email.strip(),
+            "email":          email_lower,
             "email_lower":    email_lower,
             "plan":           "free",
             "total_uses":     0,
@@ -215,7 +232,7 @@ def get_user_status(email: str) -> dict:
 
 
 def increment_user_uses(email: str) -> dict:
-    email_lower = email.strip().lower()
+    email_lower = normalize_email(email)
     now = datetime.now(timezone.utc).isoformat()
 
     with get_db() as conn:
@@ -235,7 +252,7 @@ def increment_user_uses(email: str) -> dict:
 
 
 def upgrade_user_plan(email: str, plan: str, paypal_sub_id: str = None) -> None:
-    email_lower = email.strip().lower()
+    email_lower = normalize_email(email)
     now = datetime.now(timezone.utc).isoformat()
 
     with get_db() as conn:
@@ -256,7 +273,7 @@ def upgrade_user_plan(email: str, plan: str, paypal_sub_id: str = None) -> None:
 
 
 def reset_period_uses(email: str) -> None:
-    email_lower = email.strip().lower()
+    email_lower = normalize_email(email)
     now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cur = conn.cursor()
@@ -348,14 +365,14 @@ def is_email_verified(email: str) -> bool:
         cur = conn.cursor()
         cur.execute(
             "SELECT email_verified FROM users WHERE email_lower = %s",
-            (email.lower().strip(),)
+            (normalize_email(email),)
         )
         row = cur.fetchone()
         return bool(row and row["email_verified"])
 
 
 def create_otp(email: str) -> str:
-    email_lower = email.lower().strip()
+    email_lower = normalize_email(email)
     code        = "".join(random.choices(string.digits, k=6))
     now         = datetime.now(timezone.utc)
     expires     = now + timedelta(minutes=OTP_EXPIRY_MINUTES)
@@ -374,7 +391,7 @@ def create_otp(email: str) -> str:
 
 
 def verify_otp(email: str, code: str) -> tuple:
-    email_lower = email.lower().strip()
+    email_lower = normalize_email(email)
     now         = datetime.now(timezone.utc)
 
     with get_db() as conn:
@@ -417,11 +434,11 @@ def verify_otp(email: str, code: str) -> tuple:
         # Create verified user if they don't exist yet
         cur.execute(
             """INSERT INTO users
-               (email, email_lower, plan, total_uses, period_uses,
+               (email_lower, email_lower, plan, total_uses, period_uses,
                 period_start, created_at, last_seen, email_verified)
                VALUES (%s, %s, 'free', 0, 0, %s, %s, %s, 1)
                ON CONFLICT (email_lower) DO NOTHING""",
-            (email, email_lower, now.isoformat(), now.isoformat(), now.isoformat())
+            (email_lower, email_lower, now.isoformat(), now.isoformat(), now.isoformat())
         )
 
     log.info("Email verified successfully: %s", email_lower)
