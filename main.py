@@ -1935,11 +1935,7 @@ async def verify_certificate_upload(file: UploadFile = File(...)):
 
 @app.get("/verify-certificate/{cid}")
 def verify_certificate_by_id(cid: str):
-    """Verify a certificate ID and expose certified artifact availability.
-
-    For documents, check both stamped PDF and universal evidence-package ZIP
-    across R2 and Redis fallback before returning download metadata.
-    """
+    """Verify a certificate ID against the VeriFYD certificate database and certified artifacts."""
     cid = (cid or "").strip()
     if not cid:
         return JSONResponse({"verified": False, "status": "missing_certificate_id"}, status_code=400)
@@ -1953,10 +1949,21 @@ def verify_certificate_by_id(cid: str):
             "verification_status": "CERTIFICATE_NOT_FOUND",
         }, status_code=404)
 
+    original_file = str(cert.get("original_file", "") or "")
+    original_file_lower = original_file.lower()
+    is_document_like = original_file_lower.endswith((
+        ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+        ".odt", ".ods", ".odp", ".txt", ".md", ".csv", ".rtf",
+        ".eml", ".msg", ".html", ".htm", ".mhtml", ".mht", ".xml",
+        ".json", ".svg", ".vsdx", ".yaml", ".yml", ".toml", ".env",
+        ".ini", ".properties", ".conf", ".cfg", ".config", ".cnf", ".log",
+        ".sql", ".pst", ".ost", ".dwg", ".dxf", ".zip"
+    ))
+    is_zip_evidence = original_file_lower.endswith(".zip")
+
     certified_document_available = False
     certified_file_package_available = False
 
-    # R2 checks.
     try:
         from storage import r2_available, certified_document_exists, certified_file_package_exists
         if r2_available():
@@ -1968,38 +1975,38 @@ def verify_certificate_by_id(cid: str):
                 certified_file_package_available = bool(certified_file_package_exists(cid))
             except Exception:
                 certified_file_package_available = False
-    except Exception as e:
-        log.warning("verify-certificate: R2 artifact checks failed for %s: %s", cid, e)
+    except Exception:
+        certified_document_available = False
+        certified_file_package_available = False
 
-    # Redis fallback checks for local/dev or legacy fallback jobs.
     try:
         r = _get_redis()
         if not certified_document_available:
             certified_document_available = bool(r.exists(f"doccert:{cid}"))
         if not certified_file_package_available:
             certified_file_package_available = bool(r.exists(f"filecert:{cid}"))
-    except Exception as e:
-        log.warning("verify-certificate: Redis artifact checks failed for %s: %s", cid, e)
+    except Exception:
+        pass
 
-    original_file = cert.get("original_file", "") or ""
-    original_file_lc = original_file.lower()
-    is_document_like = bool(re.search(r"\.(pdf|doc|docx|xls|xlsx|ppt|pptx|txt|rtf|odt|csv|zip)$", original_file_lc))
+    document_url = f"{BASE_URL}/download-document/{cid}" if certified_document_available else ""
+    package_url = f"{BASE_URL}/download-certified-file/{cid}" if certified_file_package_available else ""
+
+    # Primary download rule:
+    # - normal single-file documents use the certified PDF as primary
+    # - ZIP evidence packages use the ZIP package as primary only when the original upload was .zip
+    download_url = ""
+    download_type = ""
+    if is_zip_evidence and certified_file_package_available:
+        download_url = package_url
+        download_type = "certified_file_package_zip"
+    elif certified_document_available:
+        download_url = document_url
+        download_type = "certified_document"
+    elif certified_file_package_available:
+        download_url = package_url
+        download_type = "certified_file_package"
 
     media_type = cert.get("media_type") or ("document" if is_document_like or certified_document_available or certified_file_package_available else "")
-
-    download_type = ""
-    download_url = ""
-    certified_file_package_url = ""
-
-    if certified_file_package_available:
-        download_type = "certified_file_package"
-        download_url = f"{BASE_URL}/download-certified-file/{cid}"
-        certified_file_package_url = download_url
-    elif certified_document_available:
-        download_type = "certified_document"
-        download_url = f"{BASE_URL}/download-document/{cid}"
-    elif media_type == "document":
-        download_type = "document_unavailable"
 
     return JSONResponse({
         "verified": True,
@@ -2012,17 +2019,17 @@ def verify_certificate_by_id(cid: str):
         "original_file": original_file,
         "upload_time": cert.get("upload_time", ""),
         "download_count": cert.get("download_count", 0),
-        "verified_by": cert.get("verified_by", "VeriFYD"),
         "certified_to": cert.get("email", ""),
         "email": cert.get("email", ""),
         "media_type": media_type,
         "download_type": download_type,
         "download_url": download_url,
-        "share_url": download_url,
         "document_ready": bool(certified_document_available or certified_file_package_available),
+        "certification_status": "ready" if (certified_document_available or certified_file_package_available) else "record_only",
         "certified_document_available": bool(certified_document_available),
+        "certified_document_url": document_url,
         "certified_file_package_available": bool(certified_file_package_available),
-        "certified_file_package_url": certified_file_package_url,
+        "certified_file_package_url": package_url,
         "verification_report": {
             "title": "VeriFYD Certificate Verification Report",
             "status": "FOUND",
@@ -2031,14 +2038,9 @@ def verify_certificate_by_id(cid: str):
             "certified_document_available": "YES" if certified_document_available else "NO",
             "certified_file_package_available": "YES" if certified_file_package_available else "NO",
             "trust_level": "CERTIFIED ARTIFACT FOUND" if (certified_document_available or certified_file_package_available) else "DATABASE RECORD FOUND",
-            "message": (
-                "This certificate ID exists and a certified downloadable document/package is available."
-                if (certified_document_available or certified_file_package_available)
-                else "This certificate ID exists, but the certified downloadable artifact is not currently available."
-            ),
+            "message": "This certificate ID exists in the VeriFYD certificate database.",
         },
     })
-
 
 @app.get("/job-status/{job_id}")
 def job_status(job_id: str):

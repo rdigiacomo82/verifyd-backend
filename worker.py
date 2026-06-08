@@ -1359,18 +1359,36 @@ def process_document_upload_job(file_key: str, filename: str, email: str) -> dic
                         result["certified_file_package_error"] = str(pkg_e)[:200]
                         log.warning("Worker: universal certified package creation failed for %s: %s", job_id, pkg_e)
 
+                    _cert_ttl = {"free": 86400, "creator": 259200, "pro": 604800, "enterprise": 2592000}.get(_plan, 86400)
                     _stored_in_r2 = False
                     _package_stored_in_r2 = False
                     try:
                         from storage import upload_certified_document, upload_certified_file_package, r2_available
                         if r2_available():
                             log.info("Worker: uploading STAMPED certified document to R2: job=%s path=%s size=%d plan=%s", job_id, certified_path, _os.path.getsize(certified_path), _plan)
+                            # Mirror the certified PDF in Redis even when R2 succeeds.
+                            # This protects downloads if the web service cannot HEAD the R2 object immediately.
+                            try:
+                                if _os.path.exists(certified_path):
+                                    with open(certified_path, "rb") as df:
+                                        r.setex(f"doccert:{job_id}", _cert_ttl, df.read())
+                            except Exception as _mirror_e:
+                                log.warning("Worker: certified document Redis mirror failed for %s: %s", job_id, _mirror_e)
+
                             upload_certified_document(job_id, certified_path, _plan)
                             _os.remove(certified_path)
                             _stored_in_r2 = True
                             log.info("Worker: certified document stored in R2: job=%s plan=%s", job_id, _plan)
 
                             if _os.path.exists(package_path):
+                                # Mirror the universal package in Redis as a fallback, but do not make it primary for normal PDFs.
+                                try:
+                                    if _os.path.exists(package_path):
+                                        with open(package_path, "rb") as pf:
+                                            r.setex(f"filecert:{job_id}", _cert_ttl, pf.read())
+                                except Exception as _pkg_mirror_e:
+                                    log.warning("Worker: certified file package Redis mirror failed for %s: %s", job_id, _pkg_mirror_e)
+
                                 package_key = upload_certified_file_package(job_id, package_path, _plan)
                                 _os.remove(package_path)
                                 _package_stored_in_r2 = True
@@ -1380,8 +1398,6 @@ def process_document_upload_job(file_key: str, filename: str, email: str) -> dic
                                 log.info("Worker: universal certified file package stored in R2: job=%s plan=%s key=%s", job_id, _plan, package_key)
                     except Exception as _r2e:
                         log.warning("R2 document/package upload failed, falling back to Redis where needed: %s", _r2e)
-
-                    _cert_ttl = {"free": 86400, "creator": 259200, "pro": 604800, "enterprise": 2592000}.get(_plan, 86400)
 
                     if not _stored_in_r2 and _os.path.exists(certified_path):
                         with open(certified_path, "rb") as df:
@@ -1421,6 +1437,8 @@ def process_document_upload_job(file_key: str, filename: str, email: str) -> dic
                         email_download_url = certified_file_package_url
                     else:
                         result["download_url"] = download_url
+                        result["download_type"] = "certified_document"
+                        result["primary_download_type"] = "certified_document"
                         if result.get("universal_certified_file") in ("created", "stored"):
                             result["certified_file_package_url"] = certified_file_package_url
 
