@@ -1931,7 +1931,11 @@ async def verify_certificate_upload(file: UploadFile = File(...)):
 
 @app.get("/verify-certificate/{cid}")
 def verify_certificate_by_id(cid: str):
-    """Verify a certificate ID against the VeriFYD certificate database and R2 storage."""
+    """Verify a certificate ID and expose certified artifact availability.
+
+    For documents, check both stamped PDF and universal evidence-package ZIP
+    across R2 and Redis fallback before returning download metadata.
+    """
     cid = (cid or "").strip()
     if not cid:
         return JSONResponse({"verified": False, "status": "missing_certificate_id"}, status_code=400)
@@ -1945,13 +1949,53 @@ def verify_certificate_by_id(cid: str):
             "verification_status": "CERTIFICATE_NOT_FOUND",
         }, status_code=404)
 
-    document_available = False
+    certified_document_available = False
+    certified_file_package_available = False
+
+    # R2 checks.
     try:
-        from storage import r2_available, certified_document_exists
+        from storage import r2_available, certified_document_exists, certified_file_package_exists
         if r2_available():
-            document_available = bool(certified_document_exists(cid))
-    except Exception:
-        document_available = False
+            try:
+                certified_document_available = bool(certified_document_exists(cid))
+            except Exception:
+                certified_document_available = False
+            try:
+                certified_file_package_available = bool(certified_file_package_exists(cid))
+            except Exception:
+                certified_file_package_available = False
+    except Exception as e:
+        log.warning("verify-certificate: R2 artifact checks failed for %s: %s", cid, e)
+
+    # Redis fallback checks for local/dev or legacy fallback jobs.
+    try:
+        r = _get_redis()
+        if not certified_document_available:
+            certified_document_available = bool(r.exists(f"doccert:{cid}"))
+        if not certified_file_package_available:
+            certified_file_package_available = bool(r.exists(f"filecert:{cid}"))
+    except Exception as e:
+        log.warning("verify-certificate: Redis artifact checks failed for %s: %s", cid, e)
+
+    original_file = cert.get("original_file", "") or ""
+    original_file_lc = original_file.lower()
+    is_document_like = bool(re.search(r"\.(pdf|doc|docx|xls|xlsx|ppt|pptx|txt|rtf|odt|csv|zip)$", original_file_lc))
+
+    media_type = cert.get("media_type") or ("document" if is_document_like or certified_document_available or certified_file_package_available else "")
+
+    download_type = ""
+    download_url = ""
+    certified_file_package_url = ""
+
+    if certified_file_package_available:
+        download_type = "certified_file_package"
+        download_url = f"{BASE_URL}/download-certified-file/{cid}"
+        certified_file_package_url = download_url
+    elif certified_document_available:
+        download_type = "certified_document"
+        download_url = f"{BASE_URL}/download-document/{cid}"
+    elif media_type == "document":
+        download_type = "document_unavailable"
 
     return JSONResponse({
         "verified": True,
@@ -1961,20 +2005,33 @@ def verify_certificate_by_id(cid: str):
         "label": cert.get("label", ""),
         "authenticity": cert.get("authenticity", ""),
         "ai_score": cert.get("ai_score", ""),
-        "original_file": cert.get("original_file", ""),
+        "original_file": original_file,
         "upload_time": cert.get("upload_time", ""),
         "download_count": cert.get("download_count", 0),
+        "verified_by": cert.get("verified_by", "VeriFYD"),
         "certified_to": cert.get("email", ""),
-        "certified_document_available": document_available,
-        "download_url": f"{BASE_URL}/download-document/{cid}" if document_available else "",
+        "email": cert.get("email", ""),
+        "media_type": media_type,
+        "download_type": download_type,
+        "download_url": download_url,
+        "share_url": download_url,
+        "document_ready": bool(certified_document_available or certified_file_package_available),
+        "certified_document_available": bool(certified_document_available),
+        "certified_file_package_available": bool(certified_file_package_available),
+        "certified_file_package_url": certified_file_package_url,
         "verification_report": {
             "title": "VeriFYD Certificate Verification Report",
             "status": "FOUND",
             "certificate_id": cid,
             "database_match": "YES",
-            "certified_document_available": "YES" if document_available else "UNKNOWN",
-            "trust_level": "DATABASE RECORD FOUND",
-            "message": "This certificate ID exists in the VeriFYD certificate database. Upload the certified PDF to verify the hidden secure seal and hash payload.",
+            "certified_document_available": "YES" if certified_document_available else "NO",
+            "certified_file_package_available": "YES" if certified_file_package_available else "NO",
+            "trust_level": "CERTIFIED ARTIFACT FOUND" if (certified_document_available or certified_file_package_available) else "DATABASE RECORD FOUND",
+            "message": (
+                "This certificate ID exists and a certified downloadable document/package is available."
+                if (certified_document_available or certified_file_package_available)
+                else "This certificate ID exists, but the certified downloadable artifact is not currently available."
+            ),
         },
     })
 
@@ -1983,8 +2040,13 @@ def verify_certificate_by_id(cid: str):
 def job_status(job_id: str):
     """Poll endpoint for async frontends.
 
-    Backward-compatible response:
-    - status / job_status / job_state = lifecycle state used for polling
+    Important lifecycle rule:
+    If a REAL media/document job has stored an early result as job_status=complete
+    but certification_status is still processing, keep lifecycle status as processing
+    so the frontend continues polling until the certified artifact is ready or failed.
+
+    Backward-compatible fields:
+    - status / job_status / job_state = polling lifecycle state
     - result_status / display_status / verdict_status = visible result-card title
     """
     result = get_job_result(job_id)
@@ -2002,14 +2064,33 @@ def job_status(job_id: str):
     raw_status_lc = raw_status.lower()
     lifecycle_values = {"queued", "processing", "complete", "error", "not_found"}
 
-    job_st = (
-        result.get("job_status")
-        or result.get("job_state")
-        or ("error" if raw_status_lc == "error" else "")
-        or "processing"
-    )
+    cert_status = str(result.get("certification_status") or "").strip().lower()
 
-    # Preserve the visible verdict/title separately.
+    ready_flags = [
+        bool(result.get("video_ready") is True),
+        bool(result.get("audio_ready") is True),
+        bool(result.get("certified_audio_ready") is True),
+        bool(result.get("photo_ready") is True),
+        bool(result.get("document_ready") is True),
+        bool(result.get("certified_file_package_ready") is True),
+        bool(result.get("file_package_ready") is True),
+    ]
+
+    # If certification is still processing, never tell the frontend the job is complete yet.
+    # This prevents document/video/audio pages from stopping polling on early results.
+    if cert_status == "processing" and not any(ready_flags):
+        job_st = "processing"
+    elif cert_status == "failed":
+        job_st = "complete"
+    else:
+        job_st = (
+            result.get("job_status")
+            or result.get("job_state")
+            or ("error" if raw_status_lc == "error" else "")
+            or "processing"
+        )
+
+    # Preserve the visible verdict/title separately from polling lifecycle.
     if raw_status and raw_status_lc not in lifecycle_values:
         display_status = raw_status
     else:
@@ -2024,26 +2105,26 @@ def job_status(job_id: str):
                 "AI AUDIO DETECTED" if label == "AI" else
                 "AUDIO ANALYSIS COMPLETE"
             )
-        elif media_type == "video" or result.get("video_ready") is not None:
+        elif media_type == "document" or result.get("document_ready") is not None:
             display_status = (
-                "REAL VIDEO VERIFIED" if label == "REAL" else
-                "VIDEO UNDETERMINED" if label == "UNDETERMINED" else
-                "AI DETECTED" if label == "AI" else
-                "VIDEO ANALYSIS COMPLETE"
+                "REAL DOCUMENT VERIFIED" if label == "REAL" else
+                "DOCUMENT UNDETERMINED" if label == "UNDETERMINED" else
+                "AI / TAMPERING DETECTED" if label == "AI" else
+                "DOCUMENT ANALYSIS COMPLETE"
             )
-        elif media_type == "photo":
+        elif media_type == "photo" or result.get("photo_ready") is not None:
             display_status = (
                 "REAL PHOTO VERIFIED" if label == "REAL" else
                 "PHOTO UNDETERMINED" if label == "UNDETERMINED" else
                 "AI DETECTED" if label == "AI" else
                 "PHOTO ANALYSIS COMPLETE"
             )
-        elif media_type == "document":
+        elif media_type == "video" or result.get("video_ready") is not None:
             display_status = (
-                "REAL DOCUMENT VERIFIED" if label == "REAL" else
-                "DOCUMENT UNDETERMINED" if label == "UNDETERMINED" else
-                "AI / TAMPERING DETECTED" if label == "AI" else
-                "DOCUMENT ANALYSIS COMPLETE"
+                "REAL VIDEO VERIFIED" if label == "REAL" else
+                "VIDEO UNDETERMINED" if label == "UNDETERMINED" else
+                "AI DETECTED" if label == "AI" else
+                "VIDEO ANALYSIS COMPLETE"
             )
         else:
             display_status = raw_status if raw_status and raw_status_lc not in lifecycle_values else "ANALYSIS COMPLETE"
@@ -2052,37 +2133,11 @@ def job_status(job_id: str):
     result_copy["display_status"] = display_status
     result_copy["verdict_status"] = display_status
 
-    # Keep lifecycle state explicit and backward-compatible.
+    result_copy["status"] = job_st
     result_copy["job_status"] = job_st
     result_copy["job_state"] = job_st
 
-    # Important: keep status as lifecycle so older frontend polling stops spinning.
-    result_copy["status"] = job_st
-
-    # Backend safety normalization for media download routing.
-    cid = result_copy.get("certificate_id") or job_id
-    media_type = str(result_copy.get("media_type") or "").lower()
-    download_type = str(result_copy.get("download_type") or "").lower()
-
-    if media_type == "audio" or download_type == "certified_audio":
-        result_copy["media_type"] = "audio"
-        result_copy["download_type"] = "certified_audio"
-        if not result_copy.get("download_url"):
-            result_copy["download_url"] = f"{BASE_URL}/download-audio/{cid}"
-        if not result_copy.get("share_url"):
-            result_copy["share_url"] = result_copy.get("download_url")
-
-    elif media_type == "video" or result_copy.get("video_ready") is not None:
-        result_copy["media_type"] = "video"
-        if result_copy.get("label") == "REAL":
-            result_copy["download_type"] = result_copy.get("download_type") or "certified_video"
-            if not result_copy.get("download_url"):
-                result_copy["download_url"] = f"{BASE_URL}/download/{cid}"
-            if not result_copy.get("share_url"):
-                result_copy["share_url"] = result_copy.get("download_url")
-
     return JSONResponse(result_copy)
-
 
 
 @app.post("/admin/resend-certification-email/{cid}")
