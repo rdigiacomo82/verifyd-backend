@@ -11,10 +11,10 @@ import logging
 log = logging.getLogger("verifyd.emailer")
 
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
-FROM_ADDRESS   = "noreply@vfvid.com"
-FROM_NAME      = "VeriFYD"
-SITE_URL       = "https://vfvid.com"
-BACKEND_URL    = "https://verifyd-backend.onrender.com"
+FROM_ADDRESS   = os.environ.get("FROM_ADDRESS", "verify@vfvid.com")
+FROM_NAME      = os.environ.get("FROM_NAME", "VeriFYD")
+SITE_URL       = os.environ.get("SITE_URL", "https://vfvid.com").rstrip("/")
+BACKEND_URL    = os.environ.get("BACKEND_URL", "https://verifyd-backend.onrender.com").rstrip("/")
 
 
 
@@ -128,11 +128,19 @@ def send_otp_email(to_email: str, code: str) -> bool:
 </body>
 </html>"""
 
+    text = (
+        f"Your VeriFYD verification code is: {code}\n\n"
+        "This code expires shortly. If you did not request this code, you can ignore this email.\n\n"
+        "VeriFYD\n"
+        f"{SITE_URL}"
+    )
+
     return _send({
         "from":    f"{FROM_NAME} <{FROM_ADDRESS}>",
         "to":      [to_email],
-        "subject": f"{code} is your VeriFYD verification code",
+        "subject": "Your VeriFYD verification code",
         "html":    html,
+        "text":    text,
     })
 
 
@@ -151,7 +159,7 @@ def send_certification_email(
     Includes download link, certificate link, and score.
     Pass is_photo=True, is_document=True, or is_audio=True for correct language.
     """
-    cert_url      = f"{SITE_URL}/v/{certificate_id}"
+    cert_url      = f"{SITE_URL}/verify-certificate/{certificate_id}"
     short_id      = certificate_id[:8].upper()
     safe_filename = original_filename[:40] + ("..." if len(original_filename) > 40 else "")
 
@@ -287,7 +295,7 @@ def send_certification_email(
           <tr>
             <td style="padding:0 32px 32px;">
               <!-- Download — primary action -->
-              <a href="{download_url}"
+              <a href="{cert_url}"
                  style="display:block;background:#22c55e;color:#000000;text-decoration:none;
                         text-align:center;padding:16px;border-radius:10px;
                         font-size:15px;font-weight:700;margin-bottom:12px;">
@@ -313,11 +321,11 @@ def send_certification_email(
                 <p style="margin:0 0 12px;color:#888;font-size:12px;line-height:1.6;">
                   {_share_desc}
                 </p>
-                <a href="{download_url}"
+                <a href="{cert_url}"
                    style="display:block;background:#1a1a1a;border:1px solid #7c3aed;border-radius:8px;
                           font-size:13px;color:#c4b5fd;font-family:'Courier New',monospace;
                           word-break:break-all;text-decoration:none;padding:12px;">
-                  {download_url}
+                  {cert_url}
                 </a>
                 <p style="margin:10px 0 0;color:#555;font-size:11px;">
                   {_share_tap}
