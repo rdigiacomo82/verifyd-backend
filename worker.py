@@ -147,7 +147,7 @@ def process_upload_job(file_key: str, filename: str, email: str) -> dict:
     from video import clip_first_6_seconds, stamp_video
     from database import insert_certificate, increment_user_uses
     from config import BASE_URL
-    from emailer import send_certification_email
+    from notification_helper import send_certification_email_outbox_compat as send_certification_email
 
     rq_job = get_current_job()
     job_id = rq_job.id if rq_job else file_key.replace("file:", "")
@@ -305,7 +305,7 @@ def process_audio_upload_job(file_key: str, filename: str, email: str) -> dict:
     from audio_detector import analyze_audio
     from database import insert_certificate, increment_user_uses, get_user_status as _gus
     from config import BASE_URL
-    from emailer import send_certification_email
+    from notification_helper import send_certification_email_outbox_compat as send_certification_email
 
     rq_job = get_current_job()
     job_id = rq_job.id if rq_job else file_key.replace("file:", "")
@@ -557,7 +557,7 @@ def process_photo_upload_job(file_key: str, filename: str, email: str) -> dict:
     from photo_detection import run_photo_detection
     from database import insert_certificate, increment_user_uses, get_user_status as _gus
     from config import BASE_URL
-    from emailer import send_certification_email
+    from notification_helper import send_certification_email_outbox_compat as send_certification_email
 
     rq_job = get_current_job()
     job_id = rq_job.id if rq_job else file_key.replace("file:", "")
@@ -787,7 +787,7 @@ def process_photo_link_job(job_id: str, image_url: str, email: str) -> dict:
         from photo_detection import run_photo_detection
         from database import insert_certificate, increment_user_uses, get_user_status as _gus
         from config import BASE_URL
-        from emailer import send_certification_email
+        from notification_helper import send_certification_email_outbox_compat as send_certification_email
 
         authenticity, label, detail = run_photo_detection(tmp_path)
         LABEL_UI = {
@@ -1165,7 +1165,7 @@ def process_document_upload_job(file_key: str, filename: str, email: str) -> dic
     from document_detection import run_document_detection
     from database import insert_certificate, increment_user_uses, get_user_status as _gus
     from config import BASE_URL
-    from emailer import send_certification_email
+    from notification_helper import send_certification_email_outbox_compat as send_certification_email
 
     rq_job = get_current_job()
     job_id = rq_job.id if rq_job else file_key.replace("file:", "")

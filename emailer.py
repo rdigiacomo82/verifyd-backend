@@ -17,12 +17,15 @@ SITE_URL       = "https://vfvid.com"
 BACKEND_URL    = "https://verifyd-backend.onrender.com"
 
 
+
+LAST_RESEND_RESULT = {}
 def _send(payload: dict) -> bool:
     """Internal helper — sends email via Resend SDK."""
     if not RESEND_API_KEY:
         log.error("RESEND_API_KEY not set — cannot send email")
         return False
     try:
+        global LAST_RESEND_RESULT
         import resend
         resend.api_key = RESEND_API_KEY
         log.info(
@@ -31,11 +34,21 @@ def _send(payload: dict) -> bool:
             bool(payload.get("html")), bool(payload.get("text")),
         )
         result = resend.Emails.send(payload)
+        try:
+            LAST_RESEND_RESULT = dict(result or {})
+        except Exception:
+            LAST_RESEND_RESULT = {"raw": str(result)}
         log.info("Email sent to %s — id: %s result=%s", payload.get("to"), result.get("id"), result)
         return True
     except Exception as e:
         log.exception("Failed to send email via Resend: %s", e)
         return False
+
+
+
+def get_last_resend_result() -> dict:
+    """Return last Resend SDK response for diagnostics/outbox status."""
+    return dict(LAST_RESEND_RESULT or {})
 
 
 def _header_html() -> str:

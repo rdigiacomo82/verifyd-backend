@@ -28,7 +28,8 @@ from config import (                  # single source of truth for all settings
     BASE_URL,
     UPLOAD_DIR, CERT_DIR, TMP_DIR,
 )
-from emailer  import send_otp_email, send_certification_email, send_enterprise_welcome_email
+from emailer import send_otp_email, send_enterprise_welcome_email
+from notification_helper import send_certification_email_outbox_compat as send_certification_email
 from database import (init_db, insert_certificate, increment_downloads,
                       get_or_create_user, get_user_status, increment_user_uses,
                       is_valid_email, FREE_USES, get_certificate,
@@ -2082,6 +2083,58 @@ def job_status(job_id: str):
 
     return JSONResponse(result_copy)
 
+
+
+@app.post("/admin/resend-certification-email/{cid}")
+def admin_resend_certification_email(cid: str, key: str = ""):
+    """Admin: manually resend a certification email with artifact verification."""
+    if not _is_admin(key):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    try:
+        from notification_helper import retry_certification_email_job, get_certification_email_status
+        result = retry_certification_email_job(cid)
+        status = get_certification_email_status(cid)
+        return JSONResponse({
+            "sent": bool(result.get("sent")),
+            "cert_id": cid,
+            "email": result.get("email") or status.get("email"),
+            "media_type": result.get("media_type") or status.get("media_type"),
+            "download_url": result.get("download_url") or status.get("download_url"),
+            "attempts": result.get("attempts") or status.get("attempts"),
+            "last_error": result.get("last_error") or status.get("last_error"),
+            "artifact_confirmed": result.get("artifact_confirmed") or status.get("artifact_confirmed"),
+            "resend_id": result.get("resend_id") or status.get("resend_id"),
+            "resend_response": result.get("resend_response") or status.get("resend_response"),
+            "status": result.get("status") or status.get("status"),
+        })
+    except Exception as e:
+        log.exception("admin resend certification email failed for %s", cid)
+        return JSONResponse({"sent": False, "cert_id": cid, "error": str(e)[:500]}, status_code=500)
+
+
+@app.get("/admin/cert-email-status/{cid}")
+def admin_cert_email_status(cid: str, key: str = ""):
+    """Admin: inspect Redis certification-email outbox status."""
+    if not _is_admin(key):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    try:
+        from notification_helper import get_certification_email_status
+        status = get_certification_email_status(cid)
+        cert = None
+        try:
+            cert = get_certificate(cid)
+        except Exception:
+            cert = None
+        status["certificate_record_exists"] = bool(cert)
+        if cert:
+            status["certificate_email"] = cert.get("email", "")
+            status["certificate_label"] = cert.get("label", "")
+            status["certificate_authenticity"] = cert.get("authenticity", "")
+            status["certificate_original_file"] = cert.get("original_file", "")
+        return JSONResponse(status)
+    except Exception as e:
+        log.exception("admin cert email status failed for %s", cid)
+        return JSONResponse({"cert_id": cid, "error": str(e)[:500]}, status_code=500)
 
 @app.get("/upload-limits/")
 def upload_limits(email: str = ""):
