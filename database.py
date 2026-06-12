@@ -72,31 +72,26 @@ def init_db() -> None:
                 ai_score        INTEGER,
                 sha256          TEXT,
                 original_sha256 TEXT,
-                original_hash   TEXT,
                 certified_document_sha256 TEXT,
-                certified_pdf_sha256 TEXT,
-                certified_file_hash TEXT,
                 certified_file_package_sha256 TEXT,
-                certified_package_sha256 TEXT,
-                hash_status TEXT,
+                certified_file_hash TEXT,
+                original_hash TEXT,
                 download_count  INTEGER DEFAULT 0
             )
         """)
 
-        # Existing deployments may already have certificates table without the
-        # newer preservation/hash columns. Add them idempotently so old databases
-        # keep working and new certifications can store evidence-grade hashes.
-        for column_name, column_type in (
-            ("original_sha256", "TEXT"),
-            ("original_hash", "TEXT"),
-            ("certified_document_sha256", "TEXT"),
-            ("certified_pdf_sha256", "TEXT"),
-            ("certified_file_hash", "TEXT"),
-            ("certified_file_package_sha256", "TEXT"),
-            ("certified_package_sha256", "TEXT"),
-            ("hash_status", "TEXT"),
+        # ── Certificate hash columns (safe for existing Postgres DBs) ─────────
+        for _column_name in (
+            "original_sha256",
+            "certified_document_sha256",
+            "certified_file_package_sha256",
+            "certified_file_hash",
+            "original_hash",
         ):
-            cur.execute(f"ALTER TABLE certificates ADD COLUMN IF NOT EXISTS {column_name} {column_type}")
+            try:
+                cur.execute(f"ALTER TABLE certificates ADD COLUMN IF NOT EXISTS {_column_name} TEXT")
+            except Exception as e:
+                log.warning("Could not ensure certificates.%s column: %s", _column_name, e)
 
         # ── Users ────────────────────────────────────────────
         cur.execute("""
@@ -305,7 +300,7 @@ def insert_certificate(
     certified_document_sha256: Optional[str] = None,
     certified_file_package_sha256: Optional[str] = None,
     certified_file_hash: Optional[str] = None,
-    hash_status: Optional[str] = None,
+    original_hash: Optional[str] = None,
 ) -> None:
     with get_db() as conn:
         cur = conn.cursor()
@@ -314,25 +309,21 @@ def insert_certificate(
             INSERT INTO certificates
                 (cert_id, email, original_file, upload_time,
                  label, authenticity, ai_score, sha256,
-                 original_sha256, original_hash,
-                 certified_document_sha256, certified_pdf_sha256, certified_file_hash,
-                 certified_file_package_sha256, certified_package_sha256, hash_status)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 original_sha256, certified_document_sha256,
+                 certified_file_package_sha256, certified_file_hash, original_hash)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (cert_id) DO UPDATE SET
                 email = EXCLUDED.email,
-                original_file = COALESCE(EXCLUDED.original_file, certificates.original_file),
+                original_file = EXCLUDED.original_file,
                 label = EXCLUDED.label,
                 authenticity = EXCLUDED.authenticity,
                 ai_score = EXCLUDED.ai_score,
-                sha256 = COALESCE(EXCLUDED.sha256, certificates.sha256),
-                original_sha256 = COALESCE(EXCLUDED.original_sha256, certificates.original_sha256),
-                original_hash = COALESCE(EXCLUDED.original_hash, certificates.original_hash),
-                certified_document_sha256 = COALESCE(EXCLUDED.certified_document_sha256, certificates.certified_document_sha256),
-                certified_pdf_sha256 = COALESCE(EXCLUDED.certified_pdf_sha256, certificates.certified_pdf_sha256),
-                certified_file_hash = COALESCE(EXCLUDED.certified_file_hash, certificates.certified_file_hash),
-                certified_file_package_sha256 = COALESCE(EXCLUDED.certified_file_package_sha256, certificates.certified_file_package_sha256),
-                certified_package_sha256 = COALESCE(EXCLUDED.certified_package_sha256, certificates.certified_package_sha256),
-                hash_status = COALESCE(EXCLUDED.hash_status, certificates.hash_status)
+                sha256 = COALESCE(NULLIF(EXCLUDED.sha256, ''), certificates.sha256),
+                original_sha256 = COALESCE(NULLIF(EXCLUDED.original_sha256, ''), certificates.original_sha256),
+                certified_document_sha256 = COALESCE(NULLIF(EXCLUDED.certified_document_sha256, ''), certificates.certified_document_sha256),
+                certified_file_package_sha256 = COALESCE(NULLIF(EXCLUDED.certified_file_package_sha256, ''), certificates.certified_file_package_sha256),
+                certified_file_hash = COALESCE(NULLIF(EXCLUDED.certified_file_hash, ''), certificates.certified_file_hash),
+                original_hash = COALESCE(NULLIF(EXCLUDED.original_hash, ''), certificates.original_hash)
             """,
             (
                 cert_id,
@@ -344,16 +335,63 @@ def insert_certificate(
                 ai_score,
                 sha256,
                 original_sha256 or sha256,
-                original_sha256 or sha256,
                 certified_document_sha256,
-                certified_document_sha256,
+                certified_file_package_sha256,
                 certified_file_hash or certified_document_sha256,
-                certified_file_package_sha256,
-                certified_file_package_sha256,
-                hash_status or ("original_hash_stored" if (original_sha256 or sha256) else None),
+                original_hash or original_sha256 or sha256,
             ),
         )
     log.info("Stored certificate %s  label=%s  authenticity=%d", cert_id, label, authenticity)
+
+
+def update_certificate_hashes(
+    cert_id: str,
+    original_sha256: Optional[str] = None,
+    certified_document_sha256: Optional[str] = None,
+    certified_file_package_sha256: Optional[str] = None,
+    certified_file_hash: Optional[str] = None,
+    original_hash: Optional[str] = None,
+) -> None:
+    """Persist artifact hashes after certified PDF/ZIP artifacts are created.
+
+    This function is intentionally additive: blank/None inputs do not wipe
+    existing stored hashes. It is safe to call more than once for a cert_id.
+    """
+    updates = []
+    values = []
+
+    def add(column: str, value: Optional[str]):
+        if value is not None and str(value).strip():
+            updates.append(f"{column} = %s")
+            values.append(str(value).strip().lower())
+
+    add("original_sha256", original_sha256)
+    add("certified_document_sha256", certified_document_sha256)
+    add("certified_file_package_sha256", certified_file_package_sha256)
+    add("certified_file_hash", certified_file_hash or certified_document_sha256)
+    add("original_hash", original_hash or original_sha256)
+
+    if original_sha256:
+        updates.append("sha256 = COALESCE(NULLIF(sha256, ''), %s)")
+        values.append(str(original_sha256).strip().lower())
+
+    if not updates:
+        return
+
+    values.append(cert_id)
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            f"UPDATE certificates SET {', '.join(updates)} WHERE cert_id = %s",
+            tuple(values),
+        )
+    log.info(
+        "Updated certificate hashes cert_id=%s original=%s document=%s package=%s",
+        cert_id,
+        bool(original_sha256),
+        bool(certified_document_sha256),
+        bool(certified_file_package_sha256),
+    )
 
 
 def get_certificate(cert_id: str) -> Optional[dict]:
@@ -365,57 +403,6 @@ def get_certificate(cert_id: str) -> Optional[dict]:
         )
         row = cur.fetchone()
         return dict(row) if row else None
-
-
-def update_certificate_hashes(
-    cert_id: str,
-    original_sha256: Optional[str] = None,
-    certified_document_sha256: Optional[str] = None,
-    certified_file_package_sha256: Optional[str] = None,
-    certified_file_hash: Optional[str] = None,
-    hash_status: Optional[str] = None,
-) -> None:
-    """Persist preservation hashes after certified artifacts are generated.
-
-    Safe to call repeatedly; non-empty incoming values update matching aliases.
-    """
-    if not cert_id:
-        return
-
-    with get_db() as conn:
-        cur = conn.cursor()
-        cur.execute(
-            """
-            UPDATE certificates
-            SET
-                sha256 = COALESCE(%s, sha256),
-                original_sha256 = COALESCE(%s, original_sha256),
-                original_hash = COALESCE(%s, original_hash),
-                certified_document_sha256 = COALESCE(%s, certified_document_sha256),
-                certified_pdf_sha256 = COALESCE(%s, certified_pdf_sha256),
-                certified_file_hash = COALESCE(%s, certified_file_hash),
-                certified_file_package_sha256 = COALESCE(%s, certified_file_package_sha256),
-                certified_package_sha256 = COALESCE(%s, certified_package_sha256),
-                hash_status = COALESCE(%s, hash_status)
-            WHERE cert_id = %s
-            """,
-            (
-                original_sha256,
-                original_sha256,
-                original_sha256,
-                certified_document_sha256,
-                certified_document_sha256,
-                certified_file_hash or certified_document_sha256,
-                certified_file_package_sha256,
-                certified_file_package_sha256,
-                hash_status,
-                cert_id,
-            ),
-        )
-    log.info(
-        "Updated certificate hashes cert=%s original=%s certified_doc=%s package=%s",
-        cert_id, bool(original_sha256), bool(certified_document_sha256), bool(certified_file_package_sha256)
-    )
 
 
 def increment_downloads(cert_id: str) -> None:

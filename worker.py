@@ -200,8 +200,6 @@ def process_upload_job(file_key: str, filename: str, email: str) -> dict:
             authenticity=authenticity,
             ai_score=detail["ai_score"],
             sha256=sha256,
-            original_sha256=sha256,
-            hash_status="original_hash_stored",
         )
 
         result = {
@@ -292,7 +290,7 @@ def process_photo_upload_job(file_key: str, filename: str, email: str) -> dict:
     import hashlib
     from rq import get_current_job
     from photo_detection import run_photo_detection
-    from database import insert_certificate, increment_user_uses, get_user_status as _gus, update_certificate_hashes
+    from database import insert_certificate, increment_user_uses, get_user_status as _gus
     from config import BASE_URL
     from emailer import send_certification_email
 
@@ -896,7 +894,7 @@ def process_document_upload_job(file_key: str, filename: str, email: str) -> dic
     import hashlib as _hashlib
     from rq import get_current_job
     from document_detection import run_document_detection
-    from database import insert_certificate, increment_user_uses, get_user_status as _gus
+    from database import insert_certificate, increment_user_uses, get_user_status as _gus, update_certificate_hashes
     from config import BASE_URL
     from emailer import send_certification_email
 
@@ -975,6 +973,8 @@ def process_document_upload_job(file_key: str, filename: str, email: str) -> dic
             authenticity=authenticity,
             ai_score=detail["ai_score"],
             sha256=sha256,
+            original_sha256=sha256,
+            original_hash=sha256,
         )
 
         risk_report = detail.get("document_risk_report") or detail.get("risk_report", {})
@@ -1016,6 +1016,8 @@ def process_document_upload_job(file_key: str, filename: str, email: str) -> dic
         if certify:
             certified_path = _os.path.join(_tempfile.gettempdir(), f"cert_doc_{job_id}.pdf")
             package_path = _os.path.join(_tempfile.gettempdir(), f"verifyd_certified_file_{job_id}.zip")
+            certified_document_sha256 = ""
+            certified_file_package_sha256 = ""
             download_url = f"{BASE_URL}/download-document/{job_id}"
             certified_file_package_url = f"{BASE_URL}/download-certified-file/{job_id}"
             try:
@@ -1037,18 +1039,21 @@ def process_document_upload_job(file_key: str, filename: str, email: str) -> dic
                 _cert_exists = _os.path.exists(certified_path)
                 _cert_size = _os.path.getsize(certified_path) if _cert_exists else 0
                 _src_size = _os.path.getsize(tmp_path) if _os.path.exists(tmp_path) else 0
-                certified_document_sha256 = _sha256_file(certified_path) if _cert_exists and _cert_size > 0 else ""
-                result["original_sha256"] = sha256
-                result["sha256"] = sha256
-                if certified_document_sha256:
-                    result["certified_document_sha256"] = certified_document_sha256
-                    result["certified_pdf_sha256"] = certified_document_sha256
-                    result["certified_file_hash"] = certified_document_sha256
-                    result["certified_document_hash_match"] = True
-                    result["certified_pdf_hash_match"] = True
-                log.info("Worker: stamped certified document created: job=%s exists=%s size=%d original_size=%d path=%s hash=%s", job_id, _cert_exists, _cert_size, _src_size, certified_path, certified_document_sha256[:12] if certified_document_sha256 else "")
+                log.info("Worker: stamped certified document created: job=%s exists=%s size=%d original_size=%d path=%s", job_id, _cert_exists, _cert_size, _src_size, certified_path)
 
                 if _cert_exists and _cert_size > 1000:
+                    certified_document_sha256 = _sha256_file(certified_path)
+                    result["certified_document_sha256"] = certified_document_sha256
+                    result["certified_file_hash"] = certified_document_sha256
+                    log.info("Worker: certified document sha256 calculated job=%s hash=%s", job_id, certified_document_sha256)
+
+                    update_certificate_hashes(
+                        cert_id=job_id,
+                        original_sha256=sha256,
+                        certified_document_sha256=certified_document_sha256,
+                        certified_file_hash=certified_document_sha256,
+                        original_hash=sha256,
+                    )
                     try:
                         _plan = _gus(email).get("plan", "free")
                     except Exception:
@@ -1095,11 +1100,17 @@ def process_document_upload_job(file_key: str, filename: str, email: str) -> dic
                         )
                         result["universal_certified_file"] = "created"
                         result["certified_file_package"] = "present"
-                        certified_file_package_sha256 = _sha256_file(package_path) if _os.path.exists(package_path) else ""
-                        if certified_file_package_sha256:
-                            result["certified_file_package_sha256"] = certified_file_package_sha256
-                            result["certified_package_sha256"] = certified_file_package_sha256
-                        log.info("Worker: universal certified file package created: job=%s path=%s size=%d hash=%s", job_id, package_path, _os.path.getsize(package_path), certified_file_package_sha256[:12] if certified_file_package_sha256 else "")
+                        certified_file_package_sha256 = _sha256_file(package_path)
+                        result["certified_file_package_sha256"] = certified_file_package_sha256
+                        log.info("Worker: universal certified file package created: job=%s path=%s size=%d hash=%s", job_id, package_path, _os.path.getsize(package_path), certified_file_package_sha256)
+                        update_certificate_hashes(
+                            cert_id=job_id,
+                            original_sha256=sha256,
+                            certified_document_sha256=certified_document_sha256,
+                            certified_file_package_sha256=certified_file_package_sha256,
+                            certified_file_hash=certified_document_sha256,
+                            original_hash=sha256,
+                        )
                     except Exception as pkg_e:
                         result["universal_certified_file"] = "failed"
                         result["certified_file_package_error"] = str(pkg_e)[:200]
@@ -1146,22 +1157,22 @@ def process_document_upload_job(file_key: str, filename: str, email: str) -> dic
                         result["certified_file_key"] = f"filecert:{job_id}"
                         log.info("Worker: universal certified file package stored in Redis: job=%s size=%d bytes plan=%s ttl=%dh", job_id, len(pkg_bytes), _plan, _cert_ttl // 3600)
 
-                    try:
-                        update_certificate_hashes(
-                            cert_id=job_id,
-                            original_sha256=sha256,
-                            certified_document_sha256=result.get("certified_document_sha256") or result.get("certified_pdf_sha256"),
-                            certified_file_package_sha256=result.get("certified_file_package_sha256") or result.get("certified_package_sha256"),
-                            certified_file_hash=result.get("certified_file_hash") or result.get("certified_document_sha256"),
-                            hash_status="artifact_hashes_stored",
-                        )
-                    except Exception as hash_db_e:
-                        log.warning("Worker: failed to persist certificate hashes job=%s error=%s", job_id, hash_db_e)
-
                     result["document_ready"] = True
                     result["certification_status"] = "ready"
                     result["summary_pdf_url"] = download_url
                     result["secure_seal"] = "present"
+                    result["original_sha256"] = sha256
+                    result["database_original_hash_match"] = True
+                    if certified_document_sha256:
+                        result["certified_document_hash_match"] = True
+                    if certified_file_package_sha256:
+                        result["certified_file_package_hash_match"] = True
+                    if certified_document_sha256 and certified_file_package_sha256:
+                        result["hash_status"] = "all_hashes_available"
+                    elif certified_document_sha256:
+                        result["hash_status"] = "certified_document_hash_available"
+                    else:
+                        result["hash_status"] = "original_hash_stored"
 
                     # Default document behavior returns the certified PDF. For Pro/Enterprise
                     # ZIPs with child reports, make the primary returned download the full

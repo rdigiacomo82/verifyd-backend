@@ -1620,7 +1620,7 @@ async def verify_certificate_upload(file: UploadFile = File(...)):
 
 @app.get("/verify-certificate/{cid}")
 def verify_certificate_by_id(cid: str):
-    """Verify a certificate ID against the VeriFYD certificate database and R2 storage."""
+    """Verify a certificate ID against the VeriFYD certificate database and artifact storage."""
     cid = (cid or "").strip()
     if not cid:
         return JSONResponse({"verified": False, "status": "missing_certificate_id"}, status_code=400)
@@ -1636,14 +1636,26 @@ def verify_certificate_by_id(cid: str):
 
     document_available = False
     package_available = False
+
     try:
         from storage import r2_available, certified_document_exists, certified_file_package_exists
         if r2_available():
             document_available = bool(certified_document_exists(cid))
             package_available = bool(certified_file_package_exists(cid))
-    except Exception:
+    except Exception as e:
+        log.warning("verify-certificate: R2 artifact lookup failed for %s: %s", cid, e)
         document_available = False
         package_available = False
+
+    # Redis fallback for local/dev or older fallback jobs.
+    try:
+        r = _get_redis()
+        if not document_available:
+            document_available = bool(r.get(f"doccert:{cid}"))
+        if not package_available:
+            package_available = bool(r.get(f"filecert:{cid}"))
+    except Exception:
+        pass
 
     original_sha256 = (
         cert.get("original_sha256")
@@ -1664,9 +1676,48 @@ def verify_certificate_by_id(cid: str):
     )
 
     database_original_hash_match = True if original_sha256 else None
-    certified_document_hash_match = True if (certified_document_sha256 and document_available) else None
-    certified_file_package_hash_match = True if (certified_file_package_sha256 and package_available) else None
-    hash_status = cert.get("hash_status") or ("artifact_hashes_available" if (original_sha256 or certified_document_sha256 or certified_file_package_sha256) else "hash_not_available")
+    certified_document_hash_match = True if certified_document_sha256 and document_available else None
+    certified_file_package_hash_match = True if certified_file_package_sha256 and package_available else None
+
+    if original_sha256 and certified_document_sha256 and certified_file_package_sha256:
+        hash_status = "all_hashes_available"
+    elif original_sha256 and certified_document_sha256:
+        hash_status = "certified_document_hash_available"
+    elif original_sha256:
+        hash_status = "original_hash_stored"
+    else:
+        hash_status = "hash_not_available"
+
+    download_url = ""
+    if document_available:
+        download_url = f"{BASE_URL}/download-document/{cid}"
+    elif package_available:
+        download_url = f"{BASE_URL}/download-certified-file/{cid}"
+
+    certified_file_package_url = f"{BASE_URL}/download-certified-file/{cid}" if package_available else ""
+
+    database_record = {
+        "certificate_id": cert.get("cert_id", cid),
+        "label": cert.get("label", ""),
+        "authenticity": cert.get("authenticity", ""),
+        "ai_score": cert.get("ai_score", ""),
+        "original_file": cert.get("original_file", ""),
+        "upload_time": cert.get("upload_time", ""),
+        "download_count": cert.get("download_count", 0),
+        "certified_to": cert.get("email", ""),
+        "sha256": cert.get("sha256", ""),
+        "original_sha256": original_sha256,
+        "original_hash": cert.get("original_hash") or original_sha256,
+        "certified_document_sha256": certified_document_sha256,
+        "certified_file_hash": cert.get("certified_file_hash") or certified_document_sha256,
+        "certified_file_package_sha256": certified_file_package_sha256,
+        "certified_document_available": document_available,
+        "certified_file_package_available": package_available,
+        "database_original_hash_match": database_original_hash_match,
+        "certified_document_hash_match": certified_document_hash_match,
+        "certified_file_package_hash_match": certified_file_package_hash_match,
+        "hash_status": hash_status,
+    }
 
     return JSONResponse({
         "verified": True,
@@ -1680,34 +1731,30 @@ def verify_certificate_by_id(cid: str):
         "upload_time": cert.get("upload_time", ""),
         "download_count": cert.get("download_count", 0),
         "certified_to": cert.get("email", ""),
-        "email": cert.get("email", ""),
-        "media_type": cert.get("media_type") or "document",
+        "media_type": "document",
         "sha256": original_sha256,
-        "file_sha256": original_sha256,
         "original_sha256": original_sha256,
-        "original_hash": original_sha256,
+        "original_hash": cert.get("original_hash") or original_sha256,
         "certified_document_sha256": certified_document_sha256,
-        "certified_pdf_sha256": certified_document_sha256,
-        "certified_file_hash": certified_document_sha256,
+        "certified_file_hash": cert.get("certified_file_hash") or certified_document_sha256,
         "certified_file_package_sha256": certified_file_package_sha256,
-        "certified_package_sha256": certified_file_package_sha256,
         "database_original_hash_match": database_original_hash_match,
         "certified_document_hash_match": certified_document_hash_match,
-        "certified_pdf_hash_match": certified_document_hash_match,
         "certified_file_package_hash_match": certified_file_package_hash_match,
         "hash_status": hash_status,
         "certified_document_available": document_available,
         "certified_file_package_available": package_available,
-        "download_url": f"{BASE_URL}/download-document/{cid}" if document_available else "",
-        "certified_file_package_url": f"{BASE_URL}/download-certified-file/{cid}" if package_available else "",
-        "download_all_certified_files_url": f"{BASE_URL}/download-certified-file/{cid}" if package_available else "",
+        "certified_file_package_url": certified_file_package_url,
+        "download_url": download_url,
+        "database_record": database_record,
+        "record_match_source": "database_record",
         "verification_report": {
             "title": "VeriFYD Certificate Verification Report",
             "status": "FOUND",
             "certificate_id": cid,
             "database_match": "YES",
-            "certified_document_available": "YES" if document_available else "UNKNOWN",
-            "certified_file_package_available": "YES" if package_available else "UNKNOWN",
+            "certified_document_available": "YES" if document_available else "NO",
+            "certified_file_package_available": "YES" if package_available else "NO",
             "original_sha256_available": "YES" if original_sha256 else "NO",
             "certified_document_sha256_available": "YES" if certified_document_sha256 else "NO",
             "certified_file_package_sha256_available": "YES" if certified_file_package_sha256 else "NO",
@@ -1719,7 +1766,6 @@ def verify_certificate_by_id(cid: str):
             "message": "This certificate ID exists in the VeriFYD certificate database and any stored hash metadata has been returned.",
         },
     })
-
 
 @app.get("/job-status/{job_id}")
 def job_status(job_id: str):
