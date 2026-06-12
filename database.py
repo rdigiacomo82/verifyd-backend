@@ -71,9 +71,32 @@ def init_db() -> None:
                 authenticity    INTEGER,
                 ai_score        INTEGER,
                 sha256          TEXT,
+                original_sha256 TEXT,
+                original_hash   TEXT,
+                certified_document_sha256 TEXT,
+                certified_pdf_sha256 TEXT,
+                certified_file_hash TEXT,
+                certified_file_package_sha256 TEXT,
+                certified_package_sha256 TEXT,
+                hash_status TEXT,
                 download_count  INTEGER DEFAULT 0
             )
         """)
+
+        # Existing deployments may already have certificates table without the
+        # newer preservation/hash columns. Add them idempotently so old databases
+        # keep working and new certifications can store evidence-grade hashes.
+        for column_name, column_type in (
+            ("original_sha256", "TEXT"),
+            ("original_hash", "TEXT"),
+            ("certified_document_sha256", "TEXT"),
+            ("certified_pdf_sha256", "TEXT"),
+            ("certified_file_hash", "TEXT"),
+            ("certified_file_package_sha256", "TEXT"),
+            ("certified_package_sha256", "TEXT"),
+            ("hash_status", "TEXT"),
+        ):
+            cur.execute(f"ALTER TABLE certificates ADD COLUMN IF NOT EXISTS {column_name} {column_type}")
 
         # ── Users ────────────────────────────────────────────
         cur.execute("""
@@ -131,26 +154,9 @@ def init_db() -> None:
 #  Email validation
 # ─────────────────────────────────────────────────────────────
 
-
-def normalize_email(email: str) -> str:
-    """
-    Canonicalize user emails before storing or looking them up.
-
-    This intentionally only repairs VeriFYD's own internal domain typo:
-      @vfvid.co -> @vfvid.com
-
-    It does not rewrite general .co addresses because .co is a valid TLD.
-    """
-    value = (email or "").strip().lower()
-
-    if value.endswith("@vfvid.co"):
-        value = value[:-len("@vfvid.co")] + "@vfvid.com"
-
-    return value
-
 def is_valid_email(email: str) -> bool:
     pattern = r'^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$'
-    return bool(re.match(pattern, normalize_email(email)))
+    return bool(re.match(pattern, email.strip()))
 
 
 # ─────────────────────────────────────────────────────────────
@@ -158,7 +164,7 @@ def is_valid_email(email: str) -> bool:
 # ─────────────────────────────────────────────────────────────
 
 def get_or_create_user(email: str) -> dict:
-    email_lower = normalize_email(email)
+    email_lower = email.strip().lower()
     now = datetime.now(timezone.utc).isoformat()
 
     with get_db() as conn:
@@ -180,14 +186,14 @@ def get_or_create_user(email: str) -> dict:
         cur.execute(
             """
             INSERT INTO users
-                (email_lower, email_lower, plan, total_uses, period_uses,
+                (email, email_lower, plan, total_uses, period_uses,
                  period_start, created_at, last_seen, email_verified)
             VALUES (%s, %s, 'free', 0, 0, %s, %s, %s, 0)
             """,
-            (normalize_email(email), email_lower, now, now, now)
+            (email.strip(), email_lower, now, now, now)
         )
         return {
-            "email":          email_lower,
+            "email":          email.strip(),
             "email_lower":    email_lower,
             "plan":           "free",
             "total_uses":     0,
@@ -232,7 +238,7 @@ def get_user_status(email: str) -> dict:
 
 
 def increment_user_uses(email: str) -> dict:
-    email_lower = normalize_email(email)
+    email_lower = email.strip().lower()
     now = datetime.now(timezone.utc).isoformat()
 
     with get_db() as conn:
@@ -252,7 +258,7 @@ def increment_user_uses(email: str) -> dict:
 
 
 def upgrade_user_plan(email: str, plan: str, paypal_sub_id: str = None) -> None:
-    email_lower = normalize_email(email)
+    email_lower = email.strip().lower()
     now = datetime.now(timezone.utc).isoformat()
 
     with get_db() as conn:
@@ -273,7 +279,7 @@ def upgrade_user_plan(email: str, plan: str, paypal_sub_id: str = None) -> None:
 
 
 def reset_period_uses(email: str) -> None:
-    email_lower = normalize_email(email)
+    email_lower = email.strip().lower()
     now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cur = conn.cursor()
@@ -295,6 +301,11 @@ def insert_certificate(
     authenticity:  int,
     ai_score:      int,
     sha256:        Optional[str] = None,
+    original_sha256: Optional[str] = None,
+    certified_document_sha256: Optional[str] = None,
+    certified_file_package_sha256: Optional[str] = None,
+    certified_file_hash: Optional[str] = None,
+    hash_status: Optional[str] = None,
 ) -> None:
     with get_db() as conn:
         cur = conn.cursor()
@@ -302,9 +313,26 @@ def insert_certificate(
             """
             INSERT INTO certificates
                 (cert_id, email, original_file, upload_time,
-                 label, authenticity, ai_score, sha256)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (cert_id) DO NOTHING
+                 label, authenticity, ai_score, sha256,
+                 original_sha256, original_hash,
+                 certified_document_sha256, certified_pdf_sha256, certified_file_hash,
+                 certified_file_package_sha256, certified_package_sha256, hash_status)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (cert_id) DO UPDATE SET
+                email = EXCLUDED.email,
+                original_file = COALESCE(EXCLUDED.original_file, certificates.original_file),
+                label = EXCLUDED.label,
+                authenticity = EXCLUDED.authenticity,
+                ai_score = EXCLUDED.ai_score,
+                sha256 = COALESCE(EXCLUDED.sha256, certificates.sha256),
+                original_sha256 = COALESCE(EXCLUDED.original_sha256, certificates.original_sha256),
+                original_hash = COALESCE(EXCLUDED.original_hash, certificates.original_hash),
+                certified_document_sha256 = COALESCE(EXCLUDED.certified_document_sha256, certificates.certified_document_sha256),
+                certified_pdf_sha256 = COALESCE(EXCLUDED.certified_pdf_sha256, certificates.certified_pdf_sha256),
+                certified_file_hash = COALESCE(EXCLUDED.certified_file_hash, certificates.certified_file_hash),
+                certified_file_package_sha256 = COALESCE(EXCLUDED.certified_file_package_sha256, certificates.certified_file_package_sha256),
+                certified_package_sha256 = COALESCE(EXCLUDED.certified_package_sha256, certificates.certified_package_sha256),
+                hash_status = COALESCE(EXCLUDED.hash_status, certificates.hash_status)
             """,
             (
                 cert_id,
@@ -315,6 +343,14 @@ def insert_certificate(
                 authenticity,
                 ai_score,
                 sha256,
+                original_sha256 or sha256,
+                original_sha256 or sha256,
+                certified_document_sha256,
+                certified_document_sha256,
+                certified_file_hash or certified_document_sha256,
+                certified_file_package_sha256,
+                certified_file_package_sha256,
+                hash_status or ("original_hash_stored" if (original_sha256 or sha256) else None),
             ),
         )
     log.info("Stored certificate %s  label=%s  authenticity=%d", cert_id, label, authenticity)
@@ -329,6 +365,57 @@ def get_certificate(cert_id: str) -> Optional[dict]:
         )
         row = cur.fetchone()
         return dict(row) if row else None
+
+
+def update_certificate_hashes(
+    cert_id: str,
+    original_sha256: Optional[str] = None,
+    certified_document_sha256: Optional[str] = None,
+    certified_file_package_sha256: Optional[str] = None,
+    certified_file_hash: Optional[str] = None,
+    hash_status: Optional[str] = None,
+) -> None:
+    """Persist preservation hashes after certified artifacts are generated.
+
+    Safe to call repeatedly; non-empty incoming values update matching aliases.
+    """
+    if not cert_id:
+        return
+
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            UPDATE certificates
+            SET
+                sha256 = COALESCE(%s, sha256),
+                original_sha256 = COALESCE(%s, original_sha256),
+                original_hash = COALESCE(%s, original_hash),
+                certified_document_sha256 = COALESCE(%s, certified_document_sha256),
+                certified_pdf_sha256 = COALESCE(%s, certified_pdf_sha256),
+                certified_file_hash = COALESCE(%s, certified_file_hash),
+                certified_file_package_sha256 = COALESCE(%s, certified_file_package_sha256),
+                certified_package_sha256 = COALESCE(%s, certified_package_sha256),
+                hash_status = COALESCE(%s, hash_status)
+            WHERE cert_id = %s
+            """,
+            (
+                original_sha256,
+                original_sha256,
+                original_sha256,
+                certified_document_sha256,
+                certified_document_sha256,
+                certified_file_hash or certified_document_sha256,
+                certified_file_package_sha256,
+                certified_file_package_sha256,
+                hash_status,
+                cert_id,
+            ),
+        )
+    log.info(
+        "Updated certificate hashes cert=%s original=%s certified_doc=%s package=%s",
+        cert_id, bool(original_sha256), bool(certified_document_sha256), bool(certified_file_package_sha256)
+    )
 
 
 def increment_downloads(cert_id: str) -> None:
@@ -365,14 +452,14 @@ def is_email_verified(email: str) -> bool:
         cur = conn.cursor()
         cur.execute(
             "SELECT email_verified FROM users WHERE email_lower = %s",
-            (normalize_email(email),)
+            (email.lower().strip(),)
         )
         row = cur.fetchone()
         return bool(row and row["email_verified"])
 
 
 def create_otp(email: str) -> str:
-    email_lower = normalize_email(email)
+    email_lower = email.lower().strip()
     code        = "".join(random.choices(string.digits, k=6))
     now         = datetime.now(timezone.utc)
     expires     = now + timedelta(minutes=OTP_EXPIRY_MINUTES)
@@ -391,7 +478,7 @@ def create_otp(email: str) -> str:
 
 
 def verify_otp(email: str, code: str) -> tuple:
-    email_lower = normalize_email(email)
+    email_lower = email.lower().strip()
     now         = datetime.now(timezone.utc)
 
     with get_db() as conn:
@@ -434,11 +521,11 @@ def verify_otp(email: str, code: str) -> tuple:
         # Create verified user if they don't exist yet
         cur.execute(
             """INSERT INTO users
-               (email_lower, email_lower, plan, total_uses, period_uses,
+               (email, email_lower, plan, total_uses, period_uses,
                 period_start, created_at, last_seen, email_verified)
                VALUES (%s, %s, 'free', 0, 0, %s, %s, %s, 1)
                ON CONFLICT (email_lower) DO NOTHING""",
-            (email_lower, email_lower, now.isoformat(), now.isoformat(), now.isoformat())
+            (email, email_lower, now.isoformat(), now.isoformat(), now.isoformat())
         )
 
     log.info("Email verified successfully: %s", email_lower)

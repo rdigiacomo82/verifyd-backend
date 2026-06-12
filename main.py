@@ -21,18 +21,16 @@ from contextlib import asynccontextmanager
 from detection import run_detection   # returns (authenticity, label, detail)
 from queue_helper import (enqueue_upload, enqueue_link,
                           enqueue_photo_upload, enqueue_photo_link,
-                          enqueue_audio_upload,
                           enqueue_document_upload,
                           get_job_result)
 from config import (                  # single source of truth for all settings
     BASE_URL,
     UPLOAD_DIR, CERT_DIR, TMP_DIR,
 )
-from emailer import send_otp_email, send_enterprise_welcome_email
-from notification_helper import send_certification_email_outbox_compat as send_certification_email
+from emailer  import send_otp_email, send_certification_email, send_enterprise_welcome_email
 from database import (init_db, insert_certificate, increment_downloads,
                       get_or_create_user, get_user_status, increment_user_uses,
-                      is_valid_email, normalize_email, FREE_USES, get_certificate,
+                      is_valid_email, FREE_USES, get_certificate,
                       is_email_verified, create_otp, verify_otp,
                       create_api_key, get_api_key, increment_api_key_uses,
                       revoke_api_key, list_api_keys, update_api_key_branding)
@@ -350,7 +348,6 @@ def _verify_email_deliverable(email: str) -> tuple:
 # ─────────────────────────────────────────────
 @app.post("/upload/")
 async def upload(file: UploadFile = File(...), email: str = Form(...)):
-    email = normalize_email(email)
     # ── Email format validation ───────────────────────────────
     if not is_valid_email(email):
         return JSONResponse({"error": "Invalid email address."}, status_code=400)
@@ -464,20 +461,14 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
                         "color": color, "gpt_reasoning": detail.get("gpt_reasoning",""),
                         "gpt_flags": detail.get("gpt_flags",[]),
                         "signal_score": detail.get("signal_ai_score",0),
-                        "gpt_score": detail.get("gpt_ai_score",0),
-                        "audio_score": detail.get("audio_ai_score",50),
-                        "audio_confidence": detail.get("audio_confidence","unavailable"),
-                        "audio_contribution": detail.get("audio_contribution",0)}
+                        "gpt_score": detail.get("gpt_ai_score",0)}
             if os.path.exists(clip_path):
                 os.remove(clip_path)
             return {"status": ui_text, "authenticity_score": authenticity, "color": color,
                     "gpt_reasoning": detail.get("gpt_reasoning",""),
                     "gpt_flags": detail.get("gpt_flags",[]),
                     "signal_score": detail.get("signal_ai_score",0),
-                    "gpt_score": detail.get("gpt_ai_score",0),
-                    "audio_score": detail.get("audio_ai_score",50),
-                    "audio_confidence": detail.get("audio_confidence","unavailable"),
-                    "audio_contribution": detail.get("audio_contribution",0)}
+                    "gpt_score": detail.get("gpt_ai_score",0)}
         except Exception as e2:
             log.exception("Sync fallback also failed for %s", raw_path)
             return JSONResponse({"error": str(e2)}, status_code=500)
@@ -524,7 +515,6 @@ PHOTO_LABEL_UI = {
 
 @app.post("/upload-photo/")
 async def upload_photo(file: UploadFile = File(...), email: str = Form(...)):
-    email = normalize_email(email)
     """
     Photo upload endpoint. Mirrors /upload/ but for still images.
     Accepts: JPEG, PNG, WebP, HEIC/HEIF.
@@ -767,310 +757,6 @@ async def download_photo(cid: str):
 
 
 # ─────────────────────────────────────────────
-#  Audio upload endpoint
-# ─────────────────────────────────────────────
-AUDIO_ALLOWED_EXTENSIONS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".oga", ".opus", ".webm"}
-AUDIO_SIZE_LIMITS = {
-    "free":        25 * 1024 * 1024,    # 25MB
-    "creator":     75 * 1024 * 1024,    # 75MB
-    "pro":        150 * 1024 * 1024,    # 150MB
-    "enterprise": 500 * 1024 * 1024,    # 500MB
-}
-
-
-@app.post("/upload-audio/")
-async def upload_audio(file: UploadFile = File(...), email: str = Form(...)):
-    email = normalize_email(email)
-    """
-    Standalone audio upload endpoint.
-    Accepts MP3, WAV, M4A, AAC, FLAC, OGG/OGA, OPUS, and audio-only WebM.
-    Returns a job_id for the same /job-status/{job_id} polling flow used by video uploads.
-    """
-    if not is_valid_email(email):
-        return JSONResponse({"error": "Invalid email address."}, status_code=400)
-
-    is_deliverable, reason = _verify_email_deliverable(email)
-    if not is_deliverable:
-        return JSONResponse({"error": reason}, status_code=400)
-
-    if not is_email_verified(email):
-        return JSONResponse({
-            "error":   "email_not_verified",
-            "message": "Please verify your email address before uploading.",
-        }, status_code=403)
-
-    ext = os.path.splitext(file.filename or "")[1].lower()
-    if ext not in AUDIO_ALLOWED_EXTENSIONS:
-        return JSONResponse({
-            "error":   "unsupported_format",
-            "message": "Unsupported audio format. Accepted formats: MP3, WAV, M4A, AAC, FLAC, OGG, OGA, OPUS, and WebM audio.",
-        }, status_code=415)
-
-    try:
-        _cleanup_old_files(max_age_hours=2.0)
-    except Exception:
-        pass
-
-    status = get_user_status(email)
-    if not status["allowed"]:
-        return JSONResponse({
-            "error":     "limit_reached",
-            "plan":      status["plan"],
-            "uses_left": 0,
-            "limit":     status["limit"],
-        }, status_code=402)
-
-    user_plan = status["plan"]
-    max_bytes = AUDIO_SIZE_LIMITS.get(user_plan, AUDIO_SIZE_LIMITS["free"])
-    max_mb = max_bytes // (1024 * 1024)
-    plan_label = {"free": "Free", "creator": "Creator", "pro": "Pro", "enterprise": "Enterprise"}.get(user_plan, user_plan.title())
-
-    if file.size and file.size > max_bytes:
-        return JSONResponse({
-            "error":   "file_too_large",
-            "message": f"Audio file exceeds the {max_mb}MB limit for your {plan_label} plan.",
-            "max_mb":  max_mb,
-            "plan":    user_plan,
-        }, status_code=413)
-
-    job_id = str(uuid.uuid4())
-    safe_name = os.path.basename(file.filename or f"audio{ext}")
-    raw_path = f"{UPLOAD_DIR}/{job_id}_{safe_name}"
-
-    bytes_written = 0
-    with open(raw_path, "wb") as f_out:
-        while chunk := await file.read(1024 * 1024):
-            bytes_written += len(chunk)
-            if bytes_written > max_bytes:
-                try:
-                    os.remove(raw_path)
-                except Exception:
-                    pass
-                return JSONResponse({
-                    "error":   "file_too_large",
-                    "message": f"Audio file exceeds the {max_mb}MB limit for your {plan_label} plan.",
-                    "max_mb":  max_mb,
-                    "plan":    user_plan,
-                }, status_code=413)
-            f_out.write(chunk)
-
-    log.info("audio_upload: saved %dKB for %s (plan=%s file=%s)", bytes_written // 1024, email, user_plan, safe_name)
-
-    try:
-        enqueue_audio_upload(job_id, raw_path, safe_name, email)
-        log.info("audio_upload: queued job %s for %s file=%s", job_id, email, safe_name)
-    except Exception as e:
-        log.warning("Audio queue unavailable (%s) — falling back to sync", e)
-        try:
-            from audio_detector import analyze_audio
-            detail = analyze_audio(raw_path)
-            audio_score = int(detail.get("audio_ai_score", 50))
-            authenticity = max(0, min(100, 100 - audio_score))
-            label = "REAL" if authenticity >= 55 else "UNDETERMINED" if authenticity >= 40 else "AI"
-            AUDIO_LABEL_UI = {
-                "REAL": ("REAL AUDIO VERIFIED", "green"),
-                "UNDETERMINED": ("AUDIO UNDETERMINED", "blue"),
-                "AI": ("AI AUDIO DETECTED", "red"),
-            }
-            ui_text, color = AUDIO_LABEL_UI.get(label, ("AUDIO UNDETERMINED", "blue"))
-            increment_user_uses(email)
-            sha256 = _sha256(raw_path)
-            insert_certificate(
-                cert_id=job_id,
-                email=email,
-                original_file=safe_name,
-                label=label,
-                authenticity=authenticity,
-                ai_score=audio_score,
-                sha256=sha256,
-            )
-            result = {
-                "status": ui_text,
-                "authenticity_score": authenticity,
-                "color": color,
-                "label": label,
-                "media_type": "audio",
-                "job_status": "complete",
-                "audio_ready": False,
-                "certified_audio_ready": False,
-                "audio_score": audio_score,
-                "base_audio_score": detail.get("base_audio_ai_score", audio_score),
-                "audio_confidence": detail.get("confidence", "low"),
-                "audio_evidence": detail.get("evidence", []),
-                "audio_duration": detail.get("audio_duration", 0),
-                "duration_mismatch": detail.get("duration_mismatch", 0),
-                "stereo_corr": detail.get("stereo_corr"),
-                "gpt_audio_score": detail.get("gpt_audio_score", 0),
-                "gpt_audio_available": detail.get("gpt_audio_available", False),
-                "gpt_audio_adjustment": detail.get("gpt_audio_adjustment", 0),
-                "gpt_audio_reasoning": detail.get("gpt_audio_reasoning", ""),
-                "gpt_audio_flags": detail.get("gpt_audio_flags", []),
-                "signal_score": audio_score,
-                "gpt_score": detail.get("gpt_audio_score", 0),
-                "gpt_reasoning": "; ".join(str(x) for x in detail.get("evidence", [])[:3]) or "Audio forensic analysis complete.",
-                "gpt_flags": detail.get("evidence", [])[:5],
-                "certificate_id": job_id,
-                "sha256": sha256,
-            }
-
-            if label == "REAL":
-                import shutil as _shutil
-                cert_audio_path = os.path.join(tempfile.gettempdir(), f"cert_audio_{job_id}{ext}")
-                download_url = f"{BASE_URL}/download-audio/{job_id}"
-                try:
-                    log.info(
-                        "audio_upload sync: creating certified audio: job=%s src=%s dest=%s label=%s auth=%s",
-                        job_id, raw_path, cert_audio_path, label, authenticity,
-                    )
-                    _shutil.copyfile(raw_path, cert_audio_path)
-                    cert_exists = os.path.exists(cert_audio_path)
-                    cert_size = os.path.getsize(cert_audio_path) if cert_exists else 0
-                    log.info(
-                        "audio_upload sync: certified audio created: job=%s exists=%s size=%d path=%s",
-                        job_id, cert_exists, cert_size, cert_audio_path,
-                    )
-                    if not cert_exists or cert_size < 256:
-                        raise RuntimeError("Certified audio output missing or too small")
-
-                    stored = False
-                    try:
-                        from storage import r2_available, upload_certified_audio
-                        if r2_available():
-                            log.info(
-                                "audio_upload sync: uploading certified audio to R2: job=%s path=%s size=%d plan=%s",
-                                job_id, cert_audio_path, os.path.getsize(cert_audio_path), user_plan,
-                            )
-                            upload_certified_audio(job_id, cert_audio_path, user_plan, ext)
-                            stored = True
-                            log.info("audio_upload sync: certified audio stored in R2: job=%s plan=%s", job_id, user_plan)
-                    except Exception as r2e:
-                        log.warning("audio_upload sync: R2 audio upload failed, falling back to Redis: %s", r2e)
-
-                    if not stored:
-                        cert_ttl = {"free": 86400, "creator": 259200, "pro": 604800, "enterprise": 2592000}.get(user_plan, 86400)
-                        with open(cert_audio_path, "rb") as af:
-                            cert_bytes = af.read()
-                        rr = _get_redis()
-                        rr.setex(f"audiocert:{job_id}", cert_ttl, cert_bytes)
-                        rr.setex(f"audiocert:{job_id}:ext", cert_ttl, ext)
-                        log.info("audio_upload sync: certified audio stored in Redis: job=%s ttl=%s", job_id, cert_ttl)
-
-                    if email and "@" in email:
-                        try:
-                            sent = send_certification_email(email, job_id, authenticity, safe_name, download_url, is_audio=True)
-                            log.info("audio_upload sync: audio certification email sent=%s job=%s email=%s", sent, job_id, email)
-                        except Exception as em:
-                            log.warning("audio_upload sync: audio certification email failed for %s: %s", job_id, em)
-
-                    result["audio_ready"] = True
-                    result["certified_audio_ready"] = True
-                    result["certification_status"] = "ready"
-                    result["download_url"] = download_url
-                    result["share_url"] = download_url
-                    result["download_type"] = "certified_audio"
-                except Exception as cert_e:
-                    log.warning("audio_upload sync: certified audio generation failed for %s: %s", job_id, cert_e)
-                    result["audio_ready"] = False
-                    result["certified_audio_ready"] = False
-                    result["certification_status"] = "failed"
-                    result["certification_error"] = "Certified audio generation failed, but analysis completed."
-                finally:
-                    try:
-                        if os.path.exists(cert_audio_path):
-                            os.remove(cert_audio_path)
-                    except Exception:
-                        pass
-            else:
-                result["audio_ready"] = True
-
-            return JSONResponse(result)
-        except Exception as sync_e:
-            log.exception("Audio sync fallback failed")
-            return JSONResponse({"error": str(sync_e)[:200]}, status_code=500)
-        finally:
-            if os.path.exists(raw_path):
-                os.remove(raw_path)
-
-    return JSONResponse({"job_id": job_id, "status": "queued", "media_type": "audio"})
-
-
-
-@app.get("/download-audio/{cid}")
-async def download_audio(cid: str):
-    """Serve certified audio — checks R2 first, falls back to Redis."""
-    from fastapi.responses import Response, StreamingResponse
-
-    audio_exts = (".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".oga", ".opus", ".webm")
-    content_types = {
-        ".mp3": "audio/mpeg",
-        ".wav": "audio/wav",
-        ".m4a": "audio/mp4",
-        ".aac": "audio/aac",
-        ".flac": "audio/flac",
-        ".ogg": "audio/ogg",
-        ".oga": "audio/ogg",
-        ".opus": "audio/opus",
-        ".webm": "audio/webm",
-    }
-
-    # R2 first. Look directly across plan folders and extensions.
-    try:
-        from storage import _get_client, BUCKET, PUBLIC_URL, CERT_URL_TTL, r2_available
-
-        if r2_available():
-            client = _get_client()
-            for plan in ("pro", "creator", "enterprise", "free"):
-                for ext in audio_exts:
-                    key = f"certified-audio/{plan}/{cid}{ext}"
-                    try:
-                        client.head_object(Bucket=BUCKET, Key=key)
-                        # Proxy the object through FastAPI so browsers download it
-                        # instead of opening an inline audio player. This also works
-                        # when PUBLIC_URL is configured and cannot carry response
-                        # header overrides.
-                        obj = client.get_object(Bucket=BUCKET, Key=key)
-                        media_type = content_types.get(ext.lower(), "application/octet-stream")
-                        filename = f"VeriFYD_Certified_Audio_{cid[:8]}{ext}"
-                        log.info("download-audio: R2 hit job=%s key=%s", cid, key)
-                        return StreamingResponse(
-                            obj["Body"].iter_chunks(chunk_size=1024 * 1024),
-                            media_type=media_type,
-                            headers={
-                                "Content-Disposition": f'attachment; filename="{filename}"',
-                                "Cache-Control": "private, max-age=3600",
-                            },
-                        )
-                    except Exception:
-                        continue
-    except Exception as e:
-        log.warning("R2 audio download lookup failed for %s: %s", cid, e)
-
-    # Redis fallback.
-    try:
-        r = _get_redis()
-        data = r.get(f"audiocert:{cid}")
-        ext_raw = r.get(f"audiocert:{cid}:ext")
-        ext = ".mp3"
-        if ext_raw:
-            ext = ext_raw.decode("utf-8", errors="replace") if isinstance(ext_raw, bytes) else str(ext_raw)
-            if not ext.startswith("."):
-                ext = "." + ext
-        if data:
-            return Response(
-                content=data,
-                media_type=content_types.get(ext.lower(), "application/octet-stream"),
-                headers={
-                    "Content-Disposition": f'attachment; filename="VeriFYD_Certified_Audio_{cid[:8]}{ext}"',
-                    "Cache-Control": "private, max-age=3600",
-                },
-            )
-    except Exception as e:
-        log.warning("Redis audio download lookup failed for %s: %s", cid, e)
-
-    return JSONResponse({"error": "Certified audio not found or expired."}, status_code=404)
-
-
-# ─────────────────────────────────────────────
 #  Document upload endpoint — VeriFYD Docs MVP
 # ─────────────────────────────────────────────
 DOCUMENT_ALLOWED_EXTENSIONS = {
@@ -1117,7 +803,6 @@ def _uploaded_pdf_has_verifyd_seal(path: str) -> tuple[bool, str]:
 
 @app.post("/upload-document/")
 async def upload_document(file: UploadFile = File(...), email: str = Form(...)):
-    email = normalize_email(email)
     """
     Document upload endpoint for VeriFYD Docs MVP.
     Accepts PDF, DOCX/DOC, XLSX/XLS, PPTX/PPT, ODT/ODS/ODP, TXT/MD/CSV/RTF/EML/MSG, HTML/MHTML/XML/JSON/SVG/VSDX, YAML/TOML/ENV/INI/PROPERTIES/CONF/CFG/CONFIG/CNF/LOG/SQL config files, JPG/JPEG/PNG/GIF/BMP/TIF/TIFF/WEBP/HEIC/HEIF images, PST/OST, DWG/DXF, and ZIP evidence packages and returns a job_id for polling
@@ -1266,7 +951,7 @@ async def download_document(cid: str):
     That makes large certified PDFs, such as HEIC-generated document
     certificates, more reliable immediately after upload.
     """
-    from fastapi.responses import Response, StreamingResponse
+    from fastapi.responses import RedirectResponse, Response
 
     fname = f"VeriFYD_Certified_Document_{cid[:8]}.pdf"
 
@@ -1329,7 +1014,7 @@ async def download_certified_file_package(cid: str):
     For Pro/Enterprise ZIP evidence uploads, this package contains the parent
     summary PDF plus individually certified reports for supported internal files.
     """
-    from fastapi.responses import Response, StreamingResponse
+    from fastapi.responses import RedirectResponse, Response
 
     fname = f"VeriFYD_Certified_File_Package_{cid[:8]}.zip"
 
@@ -1935,7 +1620,7 @@ async def verify_certificate_upload(file: UploadFile = File(...)):
 
 @app.get("/verify-certificate/{cid}")
 def verify_certificate_by_id(cid: str):
-    """Verify a certificate ID against the VeriFYD certificate database and certified artifacts."""
+    """Verify a certificate ID against the VeriFYD certificate database and R2 storage."""
     cid = (cid or "").strip()
     if not cid:
         return JSONResponse({"verified": False, "status": "missing_certificate_id"}, status_code=400)
@@ -1949,64 +1634,39 @@ def verify_certificate_by_id(cid: str):
             "verification_status": "CERTIFICATE_NOT_FOUND",
         }, status_code=404)
 
-    original_file = str(cert.get("original_file", "") or "")
-    original_file_lower = original_file.lower()
-    is_document_like = original_file_lower.endswith((
-        ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
-        ".odt", ".ods", ".odp", ".txt", ".md", ".csv", ".rtf",
-        ".eml", ".msg", ".html", ".htm", ".mhtml", ".mht", ".xml",
-        ".json", ".svg", ".vsdx", ".yaml", ".yml", ".toml", ".env",
-        ".ini", ".properties", ".conf", ".cfg", ".config", ".cnf", ".log",
-        ".sql", ".pst", ".ost", ".dwg", ".dxf", ".zip"
-    ))
-    is_zip_evidence = original_file_lower.endswith(".zip")
-
-    certified_document_available = False
-    certified_file_package_available = False
-
+    document_available = False
+    package_available = False
     try:
         from storage import r2_available, certified_document_exists, certified_file_package_exists
         if r2_available():
-            try:
-                certified_document_available = bool(certified_document_exists(cid))
-            except Exception:
-                certified_document_available = False
-            try:
-                certified_file_package_available = bool(certified_file_package_exists(cid))
-            except Exception:
-                certified_file_package_available = False
+            document_available = bool(certified_document_exists(cid))
+            package_available = bool(certified_file_package_exists(cid))
     except Exception:
-        certified_document_available = False
-        certified_file_package_available = False
+        document_available = False
+        package_available = False
 
-    try:
-        r = _get_redis()
-        if not certified_document_available:
-            certified_document_available = bool(r.exists(f"doccert:{cid}"))
-        if not certified_file_package_available:
-            certified_file_package_available = bool(r.exists(f"filecert:{cid}"))
-    except Exception:
-        pass
+    original_sha256 = (
+        cert.get("original_sha256")
+        or cert.get("original_hash")
+        or cert.get("sha256")
+        or ""
+    )
+    certified_document_sha256 = (
+        cert.get("certified_document_sha256")
+        or cert.get("certified_pdf_sha256")
+        or cert.get("certified_file_hash")
+        or ""
+    )
+    certified_file_package_sha256 = (
+        cert.get("certified_file_package_sha256")
+        or cert.get("certified_package_sha256")
+        or ""
+    )
 
-    document_url = f"{BASE_URL}/download-document/{cid}" if certified_document_available else ""
-    package_url = f"{BASE_URL}/download-certified-file/{cid}" if certified_file_package_available else ""
-
-    # Primary download rule:
-    # - normal single-file documents use the certified PDF as primary
-    # - ZIP evidence packages use the ZIP package as primary only when the original upload was .zip
-    download_url = ""
-    download_type = ""
-    if is_zip_evidence and certified_file_package_available:
-        download_url = package_url
-        download_type = "certified_file_package_zip"
-    elif certified_document_available:
-        download_url = document_url
-        download_type = "certified_document"
-    elif certified_file_package_available:
-        download_url = package_url
-        download_type = "certified_file_package"
-
-    media_type = cert.get("media_type") or ("document" if is_document_like or certified_document_available or certified_file_package_available else "")
+    database_original_hash_match = True if original_sha256 else None
+    certified_document_hash_match = True if (certified_document_sha256 and document_available) else None
+    certified_file_package_hash_match = True if (certified_file_package_sha256 and package_available) else None
+    hash_status = cert.get("hash_status") or ("artifact_hashes_available" if (original_sha256 or certified_document_sha256 or certified_file_package_sha256) else "hash_not_available")
 
     return JSONResponse({
         "verified": True,
@@ -2016,190 +1676,71 @@ def verify_certificate_by_id(cid: str):
         "label": cert.get("label", ""),
         "authenticity": cert.get("authenticity", ""),
         "ai_score": cert.get("ai_score", ""),
-        "original_file": original_file,
+        "original_file": cert.get("original_file", ""),
         "upload_time": cert.get("upload_time", ""),
         "download_count": cert.get("download_count", 0),
         "certified_to": cert.get("email", ""),
         "email": cert.get("email", ""),
-        "media_type": media_type,
-        "download_type": download_type,
-        "download_url": download_url,
-        "document_ready": bool(certified_document_available or certified_file_package_available),
-        "certification_status": "ready" if (certified_document_available or certified_file_package_available) else "record_only",
-        "certified_document_available": bool(certified_document_available),
-        "certified_document_url": document_url,
-        "certified_file_package_available": bool(certified_file_package_available),
-        "certified_file_package_url": package_url,
+        "media_type": cert.get("media_type") or "document",
+        "sha256": original_sha256,
+        "file_sha256": original_sha256,
+        "original_sha256": original_sha256,
+        "original_hash": original_sha256,
+        "certified_document_sha256": certified_document_sha256,
+        "certified_pdf_sha256": certified_document_sha256,
+        "certified_file_hash": certified_document_sha256,
+        "certified_file_package_sha256": certified_file_package_sha256,
+        "certified_package_sha256": certified_file_package_sha256,
+        "database_original_hash_match": database_original_hash_match,
+        "certified_document_hash_match": certified_document_hash_match,
+        "certified_pdf_hash_match": certified_document_hash_match,
+        "certified_file_package_hash_match": certified_file_package_hash_match,
+        "hash_status": hash_status,
+        "certified_document_available": document_available,
+        "certified_file_package_available": package_available,
+        "download_url": f"{BASE_URL}/download-document/{cid}" if document_available else "",
+        "certified_file_package_url": f"{BASE_URL}/download-certified-file/{cid}" if package_available else "",
+        "download_all_certified_files_url": f"{BASE_URL}/download-certified-file/{cid}" if package_available else "",
         "verification_report": {
             "title": "VeriFYD Certificate Verification Report",
             "status": "FOUND",
             "certificate_id": cid,
             "database_match": "YES",
-            "certified_document_available": "YES" if certified_document_available else "NO",
-            "certified_file_package_available": "YES" if certified_file_package_available else "NO",
-            "trust_level": "CERTIFIED ARTIFACT FOUND" if (certified_document_available or certified_file_package_available) else "DATABASE RECORD FOUND",
-            "message": "This certificate ID exists in the VeriFYD certificate database.",
+            "certified_document_available": "YES" if document_available else "UNKNOWN",
+            "certified_file_package_available": "YES" if package_available else "UNKNOWN",
+            "original_sha256_available": "YES" if original_sha256 else "NO",
+            "certified_document_sha256_available": "YES" if certified_document_sha256 else "NO",
+            "certified_file_package_sha256_available": "YES" if certified_file_package_sha256 else "NO",
+            "database_original_hash_match": database_original_hash_match,
+            "certified_document_hash_match": certified_document_hash_match,
+            "certified_file_package_hash_match": certified_file_package_hash_match,
+            "hash_status": hash_status,
+            "trust_level": "CERTIFIED ARTIFACT FOUND" if (document_available or package_available) else "DATABASE RECORD FOUND",
+            "message": "This certificate ID exists in the VeriFYD certificate database and any stored hash metadata has been returned.",
         },
     })
 
+
 @app.get("/job-status/{job_id}")
 def job_status(job_id: str):
-    """Poll endpoint for async frontends.
-
-    Important lifecycle rule:
-    If a REAL media/document job has stored an early result as job_status=complete
-    but certification_status is still processing, keep lifecycle status as processing
-    so the frontend continues polling until the certified artifact is ready or failed.
-
-    Backward-compatible fields:
-    - status / job_status / job_state = polling lifecycle state
-    - result_status / display_status / verdict_status = visible result-card title
-    """
+    """Poll endpoint for direct async frontends."""
     result = get_job_result(job_id)
-
     if not result or result.get("job_status") == "not_found":
-        return JSONResponse({
-            "status": "not_found",
-            "job_status": "not_found",
-            "job_state": "not_found",
-        }, status_code=404)
-
-    result_copy = dict(result)
-
-    raw_status = str(result.get("status") or "").strip()
-    raw_status_lc = raw_status.lower()
-    lifecycle_values = {"queued", "processing", "complete", "error", "not_found"}
-
-    cert_status = str(result.get("certification_status") or "").strip().lower()
-
-    ready_flags = [
-        bool(result.get("video_ready") is True),
-        bool(result.get("audio_ready") is True),
-        bool(result.get("certified_audio_ready") is True),
-        bool(result.get("photo_ready") is True),
-        bool(result.get("document_ready") is True),
-        bool(result.get("certified_file_package_ready") is True),
-        bool(result.get("file_package_ready") is True),
-    ]
-
-    # If certification is still processing, never tell the frontend the job is complete yet.
-    # This prevents document/video/audio pages from stopping polling on early results.
-    if cert_status == "processing" and not any(ready_flags):
-        job_st = "processing"
-    elif cert_status == "failed":
-        job_st = "complete"
+        return JSONResponse({"status": "not_found"}, status_code=404)
+    # Normalize job_status → status so frontend can use data.status consistently
+    job_st = result.get("job_status", "")
+    result_copy = {k: v for k, v in result.items() if k != "job_status"}
+    if job_st == "complete":
+        result_copy["status"] = "complete"
+    elif job_st == "error":
+        result_copy["status"] = "error"
     else:
-        job_st = (
-            result.get("job_status")
-            or result.get("job_state")
-            or ("error" if raw_status_lc == "error" else "")
-            or "processing"
-        )
-
-    # Preserve the visible verdict/title separately from polling lifecycle.
-    if raw_status and raw_status_lc not in lifecycle_values:
-        display_status = raw_status
-    else:
-        label = str(result.get("label") or "").upper()
-        media_type = str(result.get("media_type") or "").lower()
-        download_type = str(result.get("download_type") or "").lower()
-
-        if media_type == "audio" or download_type == "certified_audio":
-            display_status = (
-                "REAL AUDIO VERIFIED" if label == "REAL" else
-                "AUDIO UNDETERMINED" if label == "UNDETERMINED" else
-                "AI AUDIO DETECTED" if label == "AI" else
-                "AUDIO ANALYSIS COMPLETE"
-            )
-        elif media_type == "document" or result.get("document_ready") is not None:
-            display_status = (
-                "REAL DOCUMENT VERIFIED" if label == "REAL" else
-                "DOCUMENT UNDETERMINED" if label == "UNDETERMINED" else
-                "AI / TAMPERING DETECTED" if label == "AI" else
-                "DOCUMENT ANALYSIS COMPLETE"
-            )
-        elif media_type == "photo" or result.get("photo_ready") is not None:
-            display_status = (
-                "REAL PHOTO VERIFIED" if label == "REAL" else
-                "PHOTO UNDETERMINED" if label == "UNDETERMINED" else
-                "AI DETECTED" if label == "AI" else
-                "PHOTO ANALYSIS COMPLETE"
-            )
-        elif media_type == "video" or result.get("video_ready") is not None:
-            display_status = (
-                "REAL VIDEO VERIFIED" if label == "REAL" else
-                "VIDEO UNDETERMINED" if label == "UNDETERMINED" else
-                "AI DETECTED" if label == "AI" else
-                "VIDEO ANALYSIS COMPLETE"
-            )
-        else:
-            display_status = raw_status if raw_status and raw_status_lc not in lifecycle_values else "ANALYSIS COMPLETE"
-
-    result_copy["result_status"] = display_status
-    result_copy["display_status"] = display_status
-    result_copy["verdict_status"] = display_status
-
-    result_copy["status"] = job_st
-    result_copy["job_status"] = job_st
-    result_copy["job_state"] = job_st
-
+        result_copy["status"] = job_st or "processing"
     return JSONResponse(result_copy)
 
 
-@app.post("/admin/resend-certification-email/{cid}")
-def admin_resend_certification_email(cid: str, key: str = ""):
-    """Admin: manually resend a certification email with artifact verification."""
-    if not _is_admin(key):
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-    try:
-        from notification_helper import retry_certification_email_job, get_certification_email_status
-        result = retry_certification_email_job(cid)
-        status = get_certification_email_status(cid)
-        return JSONResponse({
-            "sent": bool(result.get("sent")),
-            "cert_id": cid,
-            "email": result.get("email") or status.get("email"),
-            "media_type": result.get("media_type") or status.get("media_type"),
-            "download_url": result.get("download_url") or status.get("download_url"),
-            "attempts": result.get("attempts") or status.get("attempts"),
-            "last_error": result.get("last_error") or status.get("last_error"),
-            "artifact_confirmed": result.get("artifact_confirmed") or status.get("artifact_confirmed"),
-            "resend_id": result.get("resend_id") or status.get("resend_id"),
-            "resend_response": result.get("resend_response") or status.get("resend_response"),
-            "status": result.get("status") or status.get("status"),
-        })
-    except Exception as e:
-        log.exception("admin resend certification email failed for %s", cid)
-        return JSONResponse({"sent": False, "cert_id": cid, "error": str(e)[:500]}, status_code=500)
-
-
-@app.get("/admin/cert-email-status/{cid}")
-def admin_cert_email_status(cid: str, key: str = ""):
-    """Admin: inspect Redis certification-email outbox status."""
-    if not _is_admin(key):
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-    try:
-        from notification_helper import get_certification_email_status
-        status = get_certification_email_status(cid)
-        cert = None
-        try:
-            cert = get_certificate(cid)
-        except Exception:
-            cert = None
-        status["certificate_record_exists"] = bool(cert)
-        if cert:
-            status["certificate_email"] = cert.get("email", "")
-            status["certificate_label"] = cert.get("label", "")
-            status["certificate_authenticity"] = cert.get("authenticity", "")
-            status["certificate_original_file"] = cert.get("original_file", "")
-        return JSONResponse(status)
-    except Exception as e:
-        log.exception("admin cert email status failed for %s", cid)
-        return JSONResponse({"cert_id": cid, "error": str(e)[:500]}, status_code=500)
-
 @app.get("/upload-limits/")
 def upload_limits(email: str = ""):
-    email = normalize_email(email) if email else ""
     """
     Return the file size limit for a given email's plan.
     Frontend calls this on load to show correct size messaging.
@@ -2535,7 +2076,7 @@ async def register_email(request: Request):
     """
     try:
         body = await request.json()
-        email = normalize_email(body.get("email", ""))
+        email = body.get("email", "").strip()
     except Exception:
         return JSONResponse({"error": "invalid body"}, status_code=400)
 
@@ -2564,7 +2105,6 @@ async def register_email(request: Request):
 
 @app.get("/user-status/")
 def user_status(email: str = ""):
-    email = normalize_email(email) if email else ""
     """
     Check a user's current usage status.
     Used by the frontend to show remaining analyses.
@@ -2667,9 +2207,6 @@ def analyze_link(request: Request, video_url: str, email: str = ""):
                 "gpt_flags":          detail.get("gpt_flags", []),
                 "signal_score":       detail.get("signal_ai_score", 0),
                 "gpt_score":          detail.get("gpt_ai_score", 0),
-                "audio_score":        detail.get("audio_ai_score", 50),
-                "audio_confidence":   detail.get("audio_confidence", "unavailable"),
-                "audio_contribution": detail.get("audio_contribution", 0),
             })
 
         html = f"""
@@ -3233,7 +2770,6 @@ def admin_update_apikey(
 
 @app.get("/admin-delete-user/")
 def admin_delete_user(email: str = "", key: str = ""):
-    email = normalize_email(email) if email else ""
     """
     Permanently delete a user from the database.
     Used for testing — removes all traces of the user so they can re-register fresh.
@@ -3484,7 +3020,6 @@ def admin_disk_usage(key: str = ""):
 
 @app.get("/admin-reset-user/")
 def admin_reset_user(email: str = "", key: str = ""):
-    email = normalize_email(email) if email else ""
     """Reset a user's period_uses to 0 for testing."""
     if not _is_admin(key):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
@@ -3499,7 +3034,6 @@ def admin_reset_user(email: str = "", key: str = ""):
 
 @app.get("/admin-upgrade-user/")
 def admin_upgrade_user(email: str = "", plan: str = "enterprise", key: str = ""):
-    email = normalize_email(email) if email else ""
     """Upgrade a user to a paid plan. Admin only."""
     if not _is_admin(key):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
@@ -3628,7 +3162,6 @@ def test_email(email: str = "", key: str = ""):
 # ─────────────────────────────────────────────
 @app.post("/send-otp/")
 async def send_otp(email: str = Form(...)):
-    email = normalize_email(email)
     """Send a 6-digit OTP to the given email for verification."""
     if not is_valid_email(email):
         return JSONResponse({"error": "Invalid email address."}, status_code=400)
@@ -3658,7 +3191,6 @@ async def send_otp(email: str = Form(...)):
 
 @app.post("/verify-otp/")
 async def verify_otp_route(email: str = Form(...), code: str = Form(...)):
-    email = normalize_email(email)
     """Verify the OTP code submitted by the user."""
     if not is_valid_email(email):
         return JSONResponse({"error": "Invalid email address."}, status_code=400)
