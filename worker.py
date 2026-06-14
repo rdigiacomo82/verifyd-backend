@@ -630,7 +630,7 @@ def process_photo_upload_job(file_key: str, filename: str, email: str) -> dict:
         try:
             update_certificate_hashes(job_id, original_sha256=sha256)
         except Exception as hash_e:
-            log.warning("Worker: audio original hash persistence failed for %s: %s", job_id, hash_e)
+            log.warning("Worker: photo original hash persistence failed for %s: %s", job_id, hash_e)
 
         result = {
             "status": ui_text,
@@ -703,6 +703,13 @@ def process_photo_upload_job(file_key: str, filename: str, email: str) -> dict:
 
             if not _os.path.exists(certified_path) or _os.path.getsize(certified_path) < 1000:
                 raise RuntimeError("Certified photo was not created or was too small.")
+
+            certified_photo_sha256 = _sha256_file(certified_path)
+            log.info("Worker: certified photo sha256 calculated job=%s hash=%s", job_id, certified_photo_sha256)
+            try:
+                update_certificate_hashes(job_id, original_sha256=sha256, certified_photo_sha256=certified_photo_sha256)
+            except Exception as hash_e:
+                log.warning("Worker: certified photo hash persistence failed for %s: %s", job_id, hash_e)
 
             try:
                 _plan = _gus(email).get("plan", "free")
@@ -835,7 +842,7 @@ def process_photo_link_job(job_id: str, image_url: str, email: str) -> dict:
         try:
             update_certificate_hashes(job_id, original_sha256=sha256)
         except Exception as hash_e:
-            log.warning("Worker: audio original hash persistence failed for %s: %s", job_id, hash_e)
+            log.warning("Worker: photo original hash persistence failed for %s: %s", job_id, hash_e)
 
         result = {
             "status": ui_text,
@@ -869,6 +876,13 @@ def process_photo_link_job(job_id: str, image_url: str, email: str) -> dict:
 
                 if not os.path.exists(certified_path) or os.path.getsize(certified_path) < 1000:
                     raise RuntimeError("Certified linked photo was not created or was too small.")
+
+                certified_photo_sha256 = _sha256_file(certified_path)
+                log.info("Worker: certified linked photo sha256 calculated job=%s hash=%s", job_id, certified_photo_sha256)
+                try:
+                    update_certificate_hashes(job_id, original_sha256=sha256, certified_photo_sha256=certified_photo_sha256)
+                except Exception as hash_e:
+                    log.warning("Worker: certified linked photo hash persistence failed for %s: %s", job_id, hash_e)
 
                 try:
                     _plan = _gus(email).get("plan", "free")

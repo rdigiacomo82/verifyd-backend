@@ -2043,20 +2043,22 @@ def verify_certificate_by_id(cid: str):
     certified_document_sha256 = _clean_hash(cert.get("certified_document_sha256"))
     certified_package_sha256 = _clean_hash(cert.get("certified_file_package_sha256"))
     certified_audio_sha256 = _clean_hash(cert.get("certified_audio_sha256") or (cert.get("certified_file_hash") if media_type == "audio" else ""))
+    certified_photo_sha256 = _clean_hash(cert.get("certified_photo_sha256") or (cert.get("certified_file_hash") if media_type == "photo" else ""))
 
     database_original_hash_match = True if original_sha256 else None
     certified_document_hash_match = True if certified_document_sha256 else None
     certified_package_hash_match = True if certified_package_sha256 else None
     certified_audio_hash_match = True if certified_audio_sha256 else None
+    certified_photo_hash_match = True if certified_photo_sha256 else None
 
     if media_type == "audio":
         hash_status = "audio_hashes_available" if original_sha256 and certified_audio_sha256 else ("original_hash_stored" if original_sha256 else "hashes_not_available")
         headline = "AUDIO CERTIFICATE VERIFIED"
         report_message = "This certificate ID exists in the VeriFYD certificate database. The certified audio file is available for download and verification." if audio_available else "This certificate ID exists in the VeriFYD certificate database."
     elif media_type == "photo":
-        hash_status = "original_hash_stored" if original_sha256 else "hashes_not_available"
+        hash_status = "photo_hashes_available" if original_sha256 and certified_photo_sha256 else ("original_hash_stored" if original_sha256 else "hashes_not_available")
         headline = "PHOTO CERTIFICATE VERIFIED"
-        report_message = "This certificate ID exists in the VeriFYD certificate database. The certified photo is available when stored."
+        report_message = "This certificate ID exists in the VeriFYD certificate database. The certified photo is available for download and verification." if photo_available else "This certificate ID exists in the VeriFYD certificate database."
     elif media_type == "video":
         hash_status = "original_hash_stored" if original_sha256 else "hashes_not_available"
         headline = "VIDEO CERTIFICATE VERIFIED"
@@ -2100,11 +2102,13 @@ def verify_certificate_by_id(cid: str):
         "certified_document_sha256": certified_document_sha256,
         "certified_file_package_sha256": certified_package_sha256,
         "certified_audio_sha256": certified_audio_sha256,
-        "certified_file_hash": certified_audio_sha256 if media_type == "audio" else _clean_hash(cert.get("certified_file_hash")),
+        "certified_photo_sha256": certified_photo_sha256,
+        "certified_file_hash": certified_audio_sha256 if media_type == "audio" else (certified_photo_sha256 if media_type == "photo" else _clean_hash(cert.get("certified_file_hash"))),
         "database_original_hash_match": database_original_hash_match,
         "certified_document_hash_match": certified_document_hash_match,
         "certified_file_package_hash_match": certified_package_hash_match,
         "certified_audio_hash_match": certified_audio_hash_match,
+        "certified_photo_hash_match": certified_photo_hash_match,
         "hash_status": hash_status,
         "certified_document_available": document_available,
         "certified_file_package_available": file_package_available,
@@ -2114,6 +2118,7 @@ def verify_certificate_by_id(cid: str):
         "video_available": video_available,
         "download_url": download_url,
         "audio_download_url": f"{BASE_URL}/download-audio/{cid}" if audio_available else "",
+        "photo_download_url": f"{BASE_URL}/download-photo/{cid}" if photo_available else "",
         "document_download_url": f"{BASE_URL}/download-document/{cid}" if document_available else "",
         "certified_file_package_url": f"{BASE_URL}/download-certified-file/{cid}" if file_package_available else "",
         "record_match_source": "database_record",
@@ -2127,14 +2132,17 @@ def verify_certificate_by_id(cid: str):
             "certified_document_available": _bool_to_yes_no(document_available),
             "certified_file_package_available": _bool_to_yes_no(file_package_available),
             "certified_audio_available": _bool_to_yes_no(audio_available),
+            "certified_photo_available": _bool_to_yes_no(photo_available),
             "original_sha256_available": "YES" if original_sha256 else "NO",
             "certified_document_sha256_available": "YES" if certified_document_sha256 else "NO",
             "certified_file_package_sha256_available": "YES" if certified_package_sha256 else "NO",
             "certified_audio_sha256_available": "YES" if certified_audio_sha256 else "NO",
+            "certified_photo_sha256_available": "YES" if certified_photo_sha256 else "NO",
             "database_original_hash_match": database_original_hash_match,
             "certified_document_hash_match": certified_document_hash_match,
             "certified_file_package_hash_match": certified_package_hash_match,
             "certified_audio_hash_match": certified_audio_hash_match,
+            "certified_photo_hash_match": certified_photo_hash_match,
             "hash_status": hash_status,
             "trust_level": "CERTIFIED ARTIFACT FOUND" if (document_available or file_package_available or audio_available or photo_available or video_available) else "DATABASE RECORD FOUND",
             "message": report_message,
