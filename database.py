@@ -74,6 +74,7 @@ def init_db() -> None:
                 original_sha256 TEXT,
                 certified_document_sha256 TEXT,
                 certified_file_package_sha256 TEXT,
+                certified_audio_sha256 TEXT,
                 certified_file_hash TEXT,
                 original_hash TEXT,
                 download_count  INTEGER DEFAULT 0
@@ -85,6 +86,7 @@ def init_db() -> None:
             "original_sha256",
             "certified_document_sha256",
             "certified_file_package_sha256",
+            "certified_audio_sha256",
             "certified_file_hash",
             "original_hash",
         ):
@@ -299,6 +301,7 @@ def insert_certificate(
     original_sha256: Optional[str] = None,
     certified_document_sha256: Optional[str] = None,
     certified_file_package_sha256: Optional[str] = None,
+    certified_audio_sha256: Optional[str] = None,
     certified_file_hash: Optional[str] = None,
     original_hash: Optional[str] = None,
 ) -> None:
@@ -310,8 +313,8 @@ def insert_certificate(
                 (cert_id, email, original_file, upload_time,
                  label, authenticity, ai_score, sha256,
                  original_sha256, certified_document_sha256,
-                 certified_file_package_sha256, certified_file_hash, original_hash)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 certified_file_package_sha256, certified_audio_sha256, certified_file_hash, original_hash)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (cert_id) DO UPDATE SET
                 email = EXCLUDED.email,
                 original_file = EXCLUDED.original_file,
@@ -322,6 +325,7 @@ def insert_certificate(
                 original_sha256 = COALESCE(NULLIF(EXCLUDED.original_sha256, ''), certificates.original_sha256),
                 certified_document_sha256 = COALESCE(NULLIF(EXCLUDED.certified_document_sha256, ''), certificates.certified_document_sha256),
                 certified_file_package_sha256 = COALESCE(NULLIF(EXCLUDED.certified_file_package_sha256, ''), certificates.certified_file_package_sha256),
+                certified_audio_sha256 = COALESCE(NULLIF(EXCLUDED.certified_audio_sha256, ''), certificates.certified_audio_sha256),
                 certified_file_hash = COALESCE(NULLIF(EXCLUDED.certified_file_hash, ''), certificates.certified_file_hash),
                 original_hash = COALESCE(NULLIF(EXCLUDED.original_hash, ''), certificates.original_hash)
             """,
@@ -337,7 +341,8 @@ def insert_certificate(
                 original_sha256 or sha256,
                 certified_document_sha256,
                 certified_file_package_sha256,
-                certified_file_hash or certified_document_sha256,
+                certified_audio_sha256,
+                certified_file_hash or certified_document_sha256 or certified_audio_sha256,
                 original_hash or original_sha256 or sha256,
             ),
         )
@@ -349,6 +354,7 @@ def update_certificate_hashes(
     original_sha256: Optional[str] = None,
     certified_document_sha256: Optional[str] = None,
     certified_file_package_sha256: Optional[str] = None,
+    certified_audio_sha256: Optional[str] = None,
     certified_file_hash: Optional[str] = None,
     original_hash: Optional[str] = None,
 ) -> None:
@@ -368,7 +374,8 @@ def update_certificate_hashes(
     add("original_sha256", original_sha256)
     add("certified_document_sha256", certified_document_sha256)
     add("certified_file_package_sha256", certified_file_package_sha256)
-    add("certified_file_hash", certified_file_hash or certified_document_sha256)
+    add("certified_audio_sha256", certified_audio_sha256)
+    add("certified_file_hash", certified_file_hash or certified_document_sha256 or certified_audio_sha256)
     add("original_hash", original_hash or original_sha256)
 
     if original_sha256:

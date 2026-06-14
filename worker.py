@@ -202,6 +202,11 @@ def process_upload_job(file_key: str, filename: str, email: str) -> dict:
             sha256=sha256,
         )
 
+        try:
+            update_certificate_hashes(job_id, original_sha256=sha256)
+        except Exception as hash_e:
+            log.warning("Worker: audio original hash persistence failed for %s: %s", job_id, hash_e)
+
         result = {
             "status": ui_text,
             "authenticity_score": authenticity,
@@ -294,7 +299,7 @@ def process_audio_upload_job(file_key: str, filename: str, email: str) -> dict:
     import hashlib
     from rq import get_current_job
     from audio_detector import analyze_audio
-    from database import insert_certificate, increment_user_uses, get_user_status as _gus
+    from database import insert_certificate, increment_user_uses, get_user_status as _gus, update_certificate_hashes
     from config import BASE_URL
     from emailer import send_certification_email
 
@@ -304,7 +309,7 @@ def process_audio_upload_job(file_key: str, filename: str, email: str) -> dict:
 
     AUDIO_LABEL_UI = {
         "REAL": ("REAL AUDIO VERIFIED", "green", True),
-        "UNDETERMINED": ("AUDIO UNDETERMINED", "blue", False),
+        "UNDETERMINED": ("AUDIO REVIEW RECOMMENDED", "blue", True),
         "AI": ("AI AUDIO DETECTED", "red", False),
     }
 
@@ -335,9 +340,11 @@ def process_audio_upload_job(file_key: str, filename: str, email: str) -> dict:
         detail = analyze_audio(tmp_path)
         audio_score = int(detail.get("audio_ai_score", 50))
         authenticity = max(0, min(100, 100 - audio_score))
-        if authenticity >= 55:
+        # Keep audio scoring aligned with the public VeriFYD score bands:
+        # 80–100 = Verified / Low Risk, 50–79 = Review Recommended, 0–49 = AI/Tampering Detected.
+        if authenticity >= 80:
             label = "REAL"
-        elif authenticity >= 40:
+        elif authenticity >= 50:
             label = "UNDETERMINED"
         else:
             label = "AI"
@@ -353,7 +360,13 @@ def process_audio_upload_job(file_key: str, filename: str, email: str) -> dict:
             authenticity=authenticity,
             ai_score=audio_score,
             sha256=sha256,
+            original_sha256=sha256,
         )
+
+        try:
+            update_certificate_hashes(job_id, original_sha256=sha256)
+        except Exception as hash_e:
+            log.warning("Worker: audio original hash persistence failed for %s: %s", job_id, hash_e)
 
         result = {
             "status": ui_text,
@@ -417,6 +430,20 @@ def process_audio_upload_job(file_key: str, filename: str, email: str) -> dict:
                 )
                 if not _cert_exists or _cert_size < 256:
                     raise RuntimeError("Certified audio output missing or too small")
+
+                certified_audio_sha256 = _sha256_file(certified_path)
+                result["certified_audio_sha256"] = certified_audio_sha256
+                result["certified_file_hash"] = certified_audio_sha256
+                try:
+                    update_certificate_hashes(
+                        job_id,
+                        original_sha256=sha256,
+                        certified_audio_sha256=certified_audio_sha256,
+                        certified_file_hash=certified_audio_sha256,
+                    )
+                    log.info("Worker: certified audio sha256 calculated job=%s hash=%s", job_id, certified_audio_sha256)
+                except Exception as hash_e:
+                    log.warning("Worker: certified audio hash persistence failed for %s: %s", job_id, hash_e)
 
                 try:
                     _plan = _gus(email).get("plan", "free")
@@ -548,7 +575,7 @@ def process_photo_upload_job(file_key: str, filename: str, email: str) -> dict:
     import hashlib
     from rq import get_current_job
     from photo_detection import run_photo_detection
-    from database import insert_certificate, increment_user_uses, get_user_status as _gus
+    from database import insert_certificate, increment_user_uses, get_user_status as _gus, update_certificate_hashes
     from config import BASE_URL
     from emailer import send_certification_email
 
@@ -599,6 +626,11 @@ def process_photo_upload_job(file_key: str, filename: str, email: str) -> dict:
             ai_score=detail["ai_score"],
             sha256=sha256,
         )
+
+        try:
+            update_certificate_hashes(job_id, original_sha256=sha256)
+        except Exception as hash_e:
+            log.warning("Worker: audio original hash persistence failed for %s: %s", job_id, hash_e)
 
         result = {
             "status": ui_text,
@@ -778,7 +810,7 @@ def process_photo_link_job(job_id: str, image_url: str, email: str) -> dict:
             pass
 
         from photo_detection import run_photo_detection
-        from database import insert_certificate, increment_user_uses, get_user_status as _gus
+        from database import insert_certificate, increment_user_uses, get_user_status as _gus, update_certificate_hashes
         from config import BASE_URL
         from emailer import send_certification_email
 
@@ -799,6 +831,11 @@ def process_photo_link_job(job_id: str, image_url: str, email: str) -> dict:
             ai_score=detail["ai_score"],
             sha256=sha256,
         )
+
+        try:
+            update_certificate_hashes(job_id, original_sha256=sha256)
+        except Exception as hash_e:
+            log.warning("Worker: audio original hash persistence failed for %s: %s", job_id, hash_e)
 
         result = {
             "status": ui_text,
@@ -925,6 +962,11 @@ def process_link_job(job_id: str, video_url: str, email: str, double_count: bool
         for _ in range(uses):
             increment_user_uses(email)
         insert_certificate(cert_id=job_id, email=email, original_file=video_url, label=label, authenticity=authenticity, ai_score=detail["ai_score"], sha256=None)
+        try:
+            update_certificate_hashes(job_id, original_sha256=sha256)
+        except Exception as hash_e:
+            log.warning("Worker: audio original hash persistence failed for %s: %s", job_id, hash_e)
+
         result = {
             "status": ui_text,
             "authenticity_score": authenticity,
@@ -1156,7 +1198,7 @@ def process_document_upload_job(file_key: str, filename: str, email: str) -> dic
     import hashlib as _hashlib
     from rq import get_current_job
     from document_detection import run_document_detection
-    from database import insert_certificate, increment_user_uses, get_user_status as _gus
+    from database import insert_certificate, increment_user_uses, get_user_status as _gus, update_certificate_hashes
     from config import BASE_URL
     from emailer import send_certification_email
 
@@ -1238,6 +1280,11 @@ def process_document_upload_job(file_key: str, filename: str, email: str) -> dic
         )
 
         risk_report = detail.get("document_risk_report") or detail.get("risk_report", {})
+        try:
+            update_certificate_hashes(job_id, original_sha256=sha256)
+        except Exception as hash_e:
+            log.warning("Worker: audio original hash persistence failed for %s: %s", job_id, hash_e)
+
         result = {
             "status": ui_text,
             "authenticity_score": authenticity,
@@ -1300,6 +1347,20 @@ def process_document_upload_job(file_key: str, filename: str, email: str) -> dic
                 log.info("Worker: stamped certified document created: job=%s exists=%s size=%d original_size=%d path=%s", job_id, _cert_exists, _cert_size, _src_size, certified_path)
 
                 if _cert_exists and _cert_size > 1000:
+                    certified_document_sha256 = _sha256_file(certified_path)
+                    result["certified_document_sha256"] = certified_document_sha256
+                    result["certified_file_hash"] = certified_document_sha256
+                    log.info("Worker: certified document sha256 calculated job=%s hash=%s", job_id, certified_document_sha256)
+                    try:
+                        update_certificate_hashes(
+                            cert_id=job_id,
+                            original_sha256=sha256,
+                            certified_document_sha256=certified_document_sha256,
+                            certified_file_hash=certified_document_sha256,
+                        )
+                    except Exception as hash_e:
+                        log.warning("Worker: certified document hash persistence failed for %s: %s", job_id, hash_e)
+
                     try:
                         _plan = _gus(email).get("plan", "free")
                     except Exception:
@@ -1346,7 +1407,18 @@ def process_document_upload_job(file_key: str, filename: str, email: str) -> dic
                         )
                         result["universal_certified_file"] = "created"
                         result["certified_file_package"] = "present"
-                        log.info("Worker: universal certified file package created: job=%s path=%s size=%d", job_id, package_path, _os.path.getsize(package_path))
+                        certified_file_package_sha256 = _sha256_file(package_path)
+                        result["certified_file_package_sha256"] = certified_file_package_sha256
+                        log.info("Worker: universal certified file package created: job=%s path=%s size=%d hash=%s", job_id, package_path, _os.path.getsize(package_path), certified_file_package_sha256)
+                        try:
+                            update_certificate_hashes(
+                                cert_id=job_id,
+                                original_sha256=sha256,
+                                certified_document_sha256=result.get("certified_document_sha256"),
+                                certified_file_package_sha256=certified_file_package_sha256,
+                            )
+                        except Exception as hash_e:
+                            log.warning("Worker: certified file package hash persistence failed for %s: %s", job_id, hash_e)
                     except Exception as pkg_e:
                         result["universal_certified_file"] = "failed"
                         result["certified_file_package_error"] = str(pkg_e)[:200]

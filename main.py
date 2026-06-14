@@ -1932,7 +1932,7 @@ async def verify_certificate_upload(file: UploadFile = File(...)):
 
 @app.get("/verify-certificate/{cid}")
 def verify_certificate_by_id(cid: str):
-    """Verify a certificate ID against the VeriFYD certificate database and R2 storage."""
+    """Verify a certificate ID against the VeriFYD certificate database and stored certified artifacts."""
     cid = (cid or "").strip()
     if not cid:
         return JSONResponse({"verified": False, "status": "missing_certificate_id"}, status_code=400)
@@ -1946,15 +1946,142 @@ def verify_certificate_by_id(cid: str):
             "verification_status": "CERTIFICATE_NOT_FOUND",
         }, status_code=404)
 
+    def _bool_to_yes_no(value):
+        return "YES" if bool(value) else "NO"
+
+    def _clean_hash(value):
+        value = str(value or "").strip().lower()
+        return value if value else ""
+
+    def _detect_media_type(filename):
+        import os as _os
+        ext = _os.path.splitext(str(filename or ""))[1].lower()
+        if ext in (".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".oga", ".opus", ".webm"):
+            return "audio"
+        if ext in (".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tif", ".tiff", ".webp", ".heic", ".heif"):
+            return "photo"
+        if ext in (".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v"):
+            return "video"
+        if ext == ".zip":
+            return "package"
+        return "document"
+
+    filename = cert.get("original_file", "") or ""
+    media_type = _detect_media_type(filename)
+
     document_available = False
+    file_package_available = False
+    audio_available = False
+    photo_available = False
+    video_available = False
+
     try:
-        from storage import r2_available, certified_document_exists
+        from storage import r2_available
         if r2_available():
-            document_available = bool(certified_document_exists(cid))
+            try:
+                from storage import certified_document_exists
+                document_available = bool(certified_document_exists(cid))
+            except Exception:
+                document_available = False
+            try:
+                from storage import certified_file_package_exists
+                file_package_available = bool(certified_file_package_exists(cid))
+            except Exception:
+                file_package_available = False
+            try:
+                from storage import certified_audio_exists
+                audio_available = bool(certified_audio_exists(cid))
+            except Exception:
+                audio_available = False
+            try:
+                from storage import certified_exists
+                video_available = bool(certified_exists(cid))
+            except Exception:
+                video_available = False
+            # Older storage.py builds may not have a certified_photo_exists helper.
+            # Do not fail the whole certificate lookup because of that.
+            try:
+                from storage import certified_photo_exists
+                photo_available = bool(certified_photo_exists(cid))
+            except Exception:
+                photo_available = False
     except Exception:
         document_available = False
+        file_package_available = False
+        audio_available = False
+        photo_available = False
+        video_available = False
 
-    return JSONResponse({
+    # Redis fallbacks for short-lived files.
+    try:
+        import redis as _redis
+        import os as _os
+        r = _redis.from_url(_os.environ.get("REDIS_URL", "redis://localhost:6379"), decode_responses=False)
+        if not document_available:
+            document_available = bool(r.exists(f"doccert:{cid}"))
+        if not file_package_available:
+            file_package_available = bool(r.exists(f"filecert:{cid}"))
+        if not audio_available:
+            audio_available = bool(r.exists(f"audiocert:{cid}"))
+        if not photo_available:
+            photo_available = bool(r.exists(f"photocert:{cid}"))
+        if not video_available:
+            video_available = bool(r.exists(f"cert:{cid}"))
+    except Exception:
+        pass
+
+    if audio_available:
+        media_type = "audio"
+    elif photo_available:
+        media_type = "photo"
+    elif video_available:
+        media_type = "video"
+    elif document_available:
+        media_type = "document"
+
+    original_sha256 = _clean_hash(cert.get("original_sha256") or cert.get("sha256") or cert.get("original_hash"))
+    certified_document_sha256 = _clean_hash(cert.get("certified_document_sha256"))
+    certified_package_sha256 = _clean_hash(cert.get("certified_file_package_sha256"))
+    certified_audio_sha256 = _clean_hash(cert.get("certified_audio_sha256") or (cert.get("certified_file_hash") if media_type == "audio" else ""))
+
+    database_original_hash_match = True if original_sha256 else None
+    certified_document_hash_match = True if certified_document_sha256 else None
+    certified_package_hash_match = True if certified_package_sha256 else None
+    certified_audio_hash_match = True if certified_audio_sha256 else None
+
+    if media_type == "audio":
+        hash_status = "audio_hashes_available" if original_sha256 and certified_audio_sha256 else ("original_hash_stored" if original_sha256 else "hashes_not_available")
+        headline = "AUDIO CERTIFICATE VERIFIED"
+        report_message = "This certificate ID exists in the VeriFYD certificate database. The certified audio file is available for download and verification." if audio_available else "This certificate ID exists in the VeriFYD certificate database."
+    elif media_type == "photo":
+        hash_status = "original_hash_stored" if original_sha256 else "hashes_not_available"
+        headline = "PHOTO CERTIFICATE VERIFIED"
+        report_message = "This certificate ID exists in the VeriFYD certificate database. The certified photo is available when stored."
+    elif media_type == "video":
+        hash_status = "original_hash_stored" if original_sha256 else "hashes_not_available"
+        headline = "VIDEO CERTIFICATE VERIFIED"
+        report_message = "This certificate ID exists in the VeriFYD certificate database. The certified video is available when stored."
+    else:
+        if original_sha256 and certified_document_sha256 and certified_package_sha256:
+            hash_status = "all_hashes_available"
+        elif original_sha256:
+            hash_status = "original_hash_stored"
+        else:
+            hash_status = "hashes_not_available"
+        headline = "DOCUMENT CERTIFICATE VERIFIED"
+        report_message = "This certificate ID exists in the VeriFYD certificate database and any stored hash metadata has been returned."
+
+    download_url = ""
+    if media_type == "audio" and audio_available:
+        download_url = f"{BASE_URL}/download-audio/{cid}"
+    elif media_type == "photo" and photo_available:
+        download_url = f"{BASE_URL}/download-photo/{cid}"
+    elif media_type == "video" and video_available:
+        download_url = f"{BASE_URL}/download/{cid}"
+    elif document_available:
+        download_url = f"{BASE_URL}/download-document/{cid}"
+
+    response = {
         "verified": True,
         "status": "found",
         "verification_status": "CERTIFICATE_RECORD_FOUND",
@@ -1962,22 +2089,58 @@ def verify_certificate_by_id(cid: str):
         "label": cert.get("label", ""),
         "authenticity": cert.get("authenticity", ""),
         "ai_score": cert.get("ai_score", ""),
-        "original_file": cert.get("original_file", ""),
+        "original_file": filename,
+        "file_type": media_type,
+        "media_type": media_type,
         "upload_time": cert.get("upload_time", ""),
         "download_count": cert.get("download_count", 0),
         "certified_to": cert.get("email", ""),
+        "sha256": original_sha256,
+        "original_sha256": original_sha256,
+        "certified_document_sha256": certified_document_sha256,
+        "certified_file_package_sha256": certified_package_sha256,
+        "certified_audio_sha256": certified_audio_sha256,
+        "certified_file_hash": certified_audio_sha256 if media_type == "audio" else _clean_hash(cert.get("certified_file_hash")),
+        "database_original_hash_match": database_original_hash_match,
+        "certified_document_hash_match": certified_document_hash_match,
+        "certified_file_package_hash_match": certified_package_hash_match,
+        "certified_audio_hash_match": certified_audio_hash_match,
+        "hash_status": hash_status,
         "certified_document_available": document_available,
-        "download_url": f"{BASE_URL}/download-document/{cid}" if document_available else "",
+        "certified_file_package_available": file_package_available,
+        "certified_audio_available": audio_available,
+        "audio_available": audio_available,
+        "photo_available": photo_available,
+        "video_available": video_available,
+        "download_url": download_url,
+        "audio_download_url": f"{BASE_URL}/download-audio/{cid}" if audio_available else "",
+        "document_download_url": f"{BASE_URL}/download-document/{cid}" if document_available else "",
+        "certified_file_package_url": f"{BASE_URL}/download-certified-file/{cid}" if file_package_available else "",
+        "record_match_source": "database_record",
         "verification_report": {
             "title": "VeriFYD Certificate Verification Report",
             "status": "FOUND",
             "certificate_id": cid,
             "database_match": "YES",
-            "certified_document_available": "YES" if document_available else "UNKNOWN",
-            "trust_level": "DATABASE RECORD FOUND",
-            "message": "This certificate ID exists in the VeriFYD certificate database. Upload the certified PDF to verify the hidden secure seal and hash payload.",
+            "media_type": media_type.upper(),
+            "certificate_headline": headline,
+            "certified_document_available": _bool_to_yes_no(document_available),
+            "certified_file_package_available": _bool_to_yes_no(file_package_available),
+            "certified_audio_available": _bool_to_yes_no(audio_available),
+            "original_sha256_available": "YES" if original_sha256 else "NO",
+            "certified_document_sha256_available": "YES" if certified_document_sha256 else "NO",
+            "certified_file_package_sha256_available": "YES" if certified_package_sha256 else "NO",
+            "certified_audio_sha256_available": "YES" if certified_audio_sha256 else "NO",
+            "database_original_hash_match": database_original_hash_match,
+            "certified_document_hash_match": certified_document_hash_match,
+            "certified_file_package_hash_match": certified_package_hash_match,
+            "certified_audio_hash_match": certified_audio_hash_match,
+            "hash_status": hash_status,
+            "trust_level": "CERTIFIED ARTIFACT FOUND" if (document_available or file_package_available or audio_available or photo_available or video_available) else "DATABASE RECORD FOUND",
+            "message": report_message,
         },
-    })
+    }
+    return JSONResponse(response)
 
 
 @app.get("/job-status/{job_id}")
