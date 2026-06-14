@@ -2051,18 +2051,70 @@ def verify_certificate_by_id(cid: str):
     certified_audio_hash_match = True if certified_audio_sha256 else None
     certified_photo_hash_match = True if certified_photo_sha256 else None
 
+    # Keep the certificate API aligned with the public scoring explanation.
+    # VeriFYD certifies/authenticity-supports results at 55+; 40-54 is mixed; below 40 is high risk.
+    def _safe_int(value, default=0):
+        try:
+            return int(round(float(value)))
+        except Exception:
+            return default
+
+    authenticity_score = _safe_int(cert.get("authenticity", 0), 0)
+    ai_score_value = _safe_int(cert.get("ai_score", max(0, 100 - authenticity_score)), max(0, 100 - authenticity_score))
+
+    def _media_display_name(kind):
+        kind = (kind or "document").lower()
+        if kind == "photo":
+            return "PHOTO"
+        if kind == "audio":
+            return "AUDIO"
+        if kind == "video":
+            return "VIDEO"
+        if kind == "package":
+            return "CERTIFIED FILE"
+        return "DOCUMENT"
+
+    def _score_category(score, kind):
+        media_name = _media_display_name(kind)
+        if score >= 55:
+            return {
+                "label": "REAL",
+                "display_label": "CERTIFIED",
+                "score_band": "certified_authenticity_supported",
+                "score_band_title": "Certified / Authenticity Supported",
+                "headline": f"{media_name} CERTIFICATE VERIFIED",
+                "risk_level": "LOW",
+            }
+        if score >= 40:
+            return {
+                "label": "UNDETERMINED",
+                "display_label": "UNDETERMINED",
+                "score_band": "review_recommended_mixed_signals",
+                "score_band_title": "Review Recommended / Mixed Signals",
+                "headline": f"{media_name} REVIEW RECOMMENDED",
+                "risk_level": "MEDIUM",
+            }
+        return {
+            "label": "AI_DETECTED",
+            "display_label": "HIGH RISK",
+            "score_band": "ai_or_tampering_detected",
+            "score_band_title": "AI or Tampering Detected",
+            "headline": "AI OR TAMPERING DETECTED",
+            "risk_level": "HIGH",
+        }
+
+    score_category = _score_category(authenticity_score, media_type)
+    headline = score_category["headline"]
+
     if media_type == "audio":
         hash_status = "audio_hashes_available" if original_sha256 and certified_audio_sha256 else ("original_hash_stored" if original_sha256 else "hashes_not_available")
-        headline = "AUDIO CERTIFICATE VERIFIED"
         report_message = "This certificate ID exists in the VeriFYD certificate database. The certified audio file is available for download and verification." if audio_available else "This certificate ID exists in the VeriFYD certificate database."
     elif media_type == "photo":
         hash_status = "photo_hashes_available" if original_sha256 and certified_photo_sha256 else ("original_hash_stored" if original_sha256 else "hashes_not_available")
-        headline = "PHOTO CERTIFICATE VERIFIED"
         report_message = "This certificate ID exists in the VeriFYD certificate database. The certified photo is available for download and verification." if photo_available else "This certificate ID exists in the VeriFYD certificate database."
     elif media_type == "video":
         hash_status = "original_hash_stored" if original_sha256 else "hashes_not_available"
-        headline = "VIDEO CERTIFICATE VERIFIED"
-        report_message = "This certificate ID exists in the VeriFYD certificate database. The certified video is available when stored."
+        report_message = "This certificate ID exists in the VeriFYD certificate database. The certified video is available for download and verification." if video_available else "This certificate ID exists in the VeriFYD certificate database."
     else:
         if original_sha256 and certified_document_sha256 and certified_package_sha256:
             hash_status = "all_hashes_available"
@@ -2070,7 +2122,6 @@ def verify_certificate_by_id(cid: str):
             hash_status = "original_hash_stored"
         else:
             hash_status = "hashes_not_available"
-        headline = "DOCUMENT CERTIFICATE VERIFIED"
         report_message = "This certificate ID exists in the VeriFYD certificate database and any stored hash metadata has been returned."
 
     download_url = ""
@@ -2088,9 +2139,14 @@ def verify_certificate_by_id(cid: str):
         "status": "found",
         "verification_status": "CERTIFICATE_RECORD_FOUND",
         "certificate_id": cid,
-        "label": cert.get("label", ""),
-        "authenticity": cert.get("authenticity", ""),
-        "ai_score": cert.get("ai_score", ""),
+        "label": score_category["label"],
+        "stored_label": cert.get("label", ""),
+        "display_label": score_category["display_label"],
+        "score_band": score_category["score_band"],
+        "score_band_title": score_category["score_band_title"],
+        "risk_level": score_category["risk_level"],
+        "authenticity": authenticity_score,
+        "ai_score": ai_score_value,
         "original_file": filename,
         "file_type": media_type,
         "media_type": media_type,
@@ -2129,6 +2185,16 @@ def verify_certificate_by_id(cid: str):
             "database_match": "YES",
             "media_type": media_type.upper(),
             "certificate_headline": headline,
+            "score_band": score_category["score_band"],
+            "score_band_title": score_category["score_band_title"],
+            "risk_level": score_category["risk_level"],
+            "display_label": score_category["display_label"],
+            "stored_label": cert.get("label", ""),
+            "thresholds": {
+                "certified_authenticity_supported": "55-100",
+                "review_recommended_mixed_signals": "40-54",
+                "ai_or_tampering_detected": "0-39",
+            },
             "certified_document_available": _bool_to_yes_no(document_available),
             "certified_file_package_available": _bool_to_yes_no(file_package_available),
             "certified_audio_available": _bool_to_yes_no(audio_available),
