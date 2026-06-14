@@ -145,7 +145,7 @@ def process_upload_job(file_key: str, filename: str, email: str) -> dict:
     from rq import get_current_job
     from detection import run_detection_multiclip
     from video import clip_first_6_seconds, stamp_video
-    from database import insert_certificate, increment_user_uses
+    from database import insert_certificate, increment_user_uses, update_certificate_hashes
     from config import BASE_URL
     from emailer import send_certification_email
 
@@ -205,7 +205,7 @@ def process_upload_job(file_key: str, filename: str, email: str) -> dict:
         try:
             update_certificate_hashes(job_id, original_sha256=sha256)
         except Exception as hash_e:
-            log.warning("Worker: audio original hash persistence failed for %s: %s", job_id, hash_e)
+            log.warning("Worker: original hash persistence failed for %s: %s", job_id, hash_e)
 
         result = {
             "status": ui_text,
@@ -340,11 +340,11 @@ def process_audio_upload_job(file_key: str, filename: str, email: str) -> dict:
         detail = analyze_audio(tmp_path)
         audio_score = int(detail.get("audio_ai_score", 50))
         authenticity = max(0, min(100, 100 - audio_score))
-        # Keep audio scoring aligned with the public VeriFYD score bands:
-        # 80–100 = Verified / Low Risk, 50–79 = Review Recommended, 0–49 = AI/Tampering Detected.
-        if authenticity >= 80:
+        # Keep audio scoring aligned with current VeriFYD certificate thresholds:
+        # 55–100 = REAL / Certified, 40–54 = UNDETERMINED, 0–39 = AI/Tampering Detected.
+        if authenticity >= 55:
             label = "REAL"
-        elif authenticity >= 50:
+        elif authenticity >= 40:
             label = "UNDETERMINED"
         else:
             label = "AI"
@@ -366,7 +366,7 @@ def process_audio_upload_job(file_key: str, filename: str, email: str) -> dict:
         try:
             update_certificate_hashes(job_id, original_sha256=sha256)
         except Exception as hash_e:
-            log.warning("Worker: audio original hash persistence failed for %s: %s", job_id, hash_e)
+            log.warning("Worker: original hash persistence failed for %s: %s", job_id, hash_e)
 
         result = {
             "status": ui_text,
@@ -979,7 +979,7 @@ def process_link_job(job_id: str, video_url: str, email: str, double_count: bool
         try:
             update_certificate_hashes(job_id, original_sha256=sha256)
         except Exception as hash_e:
-            log.warning("Worker: audio original hash persistence failed for %s: %s", job_id, hash_e)
+            log.warning("Worker: original hash persistence failed for %s: %s", job_id, hash_e)
 
         result = {
             "status": ui_text,
@@ -1297,7 +1297,7 @@ def process_document_upload_job(file_key: str, filename: str, email: str) -> dic
         try:
             update_certificate_hashes(job_id, original_sha256=sha256)
         except Exception as hash_e:
-            log.warning("Worker: audio original hash persistence failed for %s: %s", job_id, hash_e)
+            log.warning("Worker: original hash persistence failed for %s: %s", job_id, hash_e)
 
         result = {
             "status": ui_text,
