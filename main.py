@@ -14,7 +14,7 @@
 
 from fastapi import FastAPI, UploadFile, File, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 import os, uuid, requests, tempfile, logging, hashlib
 from contextlib import asynccontextmanager
 
@@ -23,6 +23,7 @@ from queue_helper import (enqueue_upload, enqueue_link,
                           enqueue_photo_upload, enqueue_photo_link,
                           enqueue_audio_upload,
                           enqueue_document_upload,
+                          enqueue_trust_desk_zip,
                           get_job_result)
 from config import (                  # single source of truth for all settings
     BASE_URL,
@@ -1066,8 +1067,6 @@ async def download_audio(cid: str):
     return JSONResponse({"error": "Certified audio not found or expired."}, status_code=404)
 
 
-
-
 # ─────────────────────────────────────────────
 #  Document upload endpoint — VeriFYD Docs MVP
 # ─────────────────────────────────────────────
@@ -1086,6 +1085,15 @@ DOCUMENT_SIZE_LIMITS = {
     "creator":     25 * 1024 * 1024,    # 25MB
     "pro":         75 * 1024 * 1024,    # 75MB
     "enterprise":  250 * 1024 * 1024,   # 250MB
+}
+
+
+TRUST_DESK_ALLOWED_EXTENSIONS = {".zip"}
+TRUST_DESK_SIZE_LIMITS = {
+    "free":        50 * 1024 * 1024,
+    "creator":    150 * 1024 * 1024,
+    "pro":        500 * 1024 * 1024,
+    "enterprise": 2048 * 1024 * 1024,
 }
 
 DOCUMENT_LABEL_UI = {
@@ -1111,6 +1119,126 @@ def _uploaded_pdf_has_verifyd_seal(path: str) -> tuple[bool, str]:
     except Exception as e:
         log.debug("already-certified PDF seal check failed: %s", e)
     return False, ""
+
+
+@app.post("/trust-desk/upload-zip/")
+async def upload_trust_desk_zip(
+    file: UploadFile = File(...),
+    email: str = Form(...),
+    organization: str = Form(""),
+    submitter_name: str = Form(""),
+    case_number: str = Form(""),
+    notes: str = Form(""),
+):
+    """
+    Trust Desk ZIP intake endpoint.
+
+    Phase 1 queues a ZIP for safe extraction, file inventory, SHA-256 hashing,
+    manifest creation, and Trust Desk return-package assembly. Individual
+    child-file certification routing will be added in the next phase.
+    """
+    if not is_valid_email(email):
+        return JSONResponse({"error": "Invalid email address."}, status_code=400)
+
+    is_deliverable, reason = _verify_email_deliverable(email)
+    if not is_deliverable:
+        return JSONResponse({"error": reason}, status_code=400)
+
+    if not is_email_verified(email):
+        return JSONResponse({
+            "error": "email_not_verified",
+            "message": "Please verify your email address before submitting a Trust Desk package.",
+        }, status_code=403)
+
+    ext = os.path.splitext(file.filename or "")[1].lower()
+    if ext not in TRUST_DESK_ALLOWED_EXTENSIONS:
+        return JSONResponse({
+            "error": "unsupported_format",
+            "message": "Trust Desk intake currently accepts ZIP packages only.",
+        }, status_code=415)
+
+    try:
+        _cleanup_old_files(max_age_hours=2.0)
+    except Exception:
+        pass
+
+    status = get_user_status(email)
+    if not status["allowed"]:
+        return JSONResponse({
+            "error": "limit_reached",
+            "plan": status["plan"],
+            "uses_left": 0,
+            "limit": status["limit"],
+        }, status_code=402)
+
+    user_plan = status["plan"]
+    max_bytes = TRUST_DESK_SIZE_LIMITS.get(user_plan, TRUST_DESK_SIZE_LIMITS["free"])
+    max_mb = max_bytes // (1024 * 1024)
+    plan_label = {"free": "Free", "creator": "Creator", "pro": "Pro", "enterprise": "Enterprise"}.get(user_plan, user_plan.title())
+
+    if file.size and file.size > max_bytes:
+        return JSONResponse({
+            "error": "file_too_large",
+            "message": f"Trust Desk ZIP exceeds the {max_mb}MB limit for your {plan_label} plan.",
+            "max_mb": max_mb,
+            "plan": user_plan,
+        }, status_code=413)
+
+    job_id = str(uuid.uuid4())
+    safe_name = os.path.basename(file.filename or "trust-desk-package.zip")
+    raw_path = f"{UPLOAD_DIR}/{job_id}_{safe_name}"
+
+    bytes_written = 0
+    with open(raw_path, "wb") as fh:
+        while chunk := await file.read(1024 * 1024):
+            bytes_written += len(chunk)
+            if bytes_written > max_bytes:
+                try:
+                    os.remove(raw_path)
+                except Exception:
+                    pass
+                return JSONResponse({
+                    "error": "file_too_large",
+                    "message": f"Trust Desk ZIP exceeds the {max_mb}MB limit for your {plan_label} plan.",
+                    "max_mb": max_mb,
+                    "plan": user_plan,
+                }, status_code=413)
+            fh.write(chunk)
+
+    log.info(
+        "trust_desk_upload: saved %dKB for %s (plan=%s org=%s case=%s file=%s)",
+        bytes_written // 1024, email, user_plan, organization, case_number, safe_name
+    )
+
+    try:
+        enqueue_trust_desk_zip(
+            job_id=job_id,
+            raw_path=raw_path,
+            filename=safe_name,
+            email=email,
+            organization=organization,
+            submitter_name=submitter_name,
+            case_number=case_number,
+            notes=notes,
+        )
+        return JSONResponse({
+            "trust_desk_job_id": job_id,
+            "job_id": job_id,
+            "status": "queued",
+            "message": "Trust Desk ZIP package received and queued for intake processing.",
+        })
+    except Exception as exc:
+        log.exception("trust_desk_upload: queue failed")
+        try:
+            if os.path.exists(raw_path):
+                os.remove(raw_path)
+        except Exception:
+            pass
+        return JSONResponse({
+            "error": "queue_unavailable",
+            "message": "Trust Desk package could not be queued. Please try again.",
+            "detail": str(exc)[:200],
+        }, status_code=500)
 
 
 @app.post("/upload-document/")
@@ -1253,6 +1381,22 @@ async def upload_document(file: UploadFile = File(...), email: str = Form(...)):
     return JSONResponse({"job_id": job_id, "status": "queued", "media_type": "document"})
 
 
+@app.get("/download-trust-desk/{cid}")
+def download_trust_desk_package(cid: str):
+    """Download the Trust Desk return package ZIP."""
+    try:
+        from storage import get_trust_desk_download_url, trust_desk_package_exists
+        if not trust_desk_package_exists(cid):
+            return JSONResponse({"error": "Trust Desk package not found or expired."}, status_code=404)
+        increment_downloads(cid)
+        url = get_trust_desk_download_url(cid)
+        log.info("download-trust-desk: R2 hit job=%s", cid)
+        return RedirectResponse(url)
+    except Exception as exc:
+        log.warning("download-trust-desk failed for %s: %s", cid, exc)
+        return JSONResponse({"error": "Unable to prepare Trust Desk package download."}, status_code=500)
+
+
 @app.get("/download-document/{cid}")
 async def download_document(cid: str):
     """
@@ -1263,7 +1407,7 @@ async def download_document(cid: str):
     That makes large certified PDFs, such as HEIC-generated document
     certificates, more reliable immediately after upload.
     """
-    from fastapi.responses import RedirectResponse, Response
+    from fastapi.responses import Response, StreamingResponse
 
     fname = f"VeriFYD_Certified_Document_{cid[:8]}.pdf"
 
@@ -1326,7 +1470,7 @@ async def download_certified_file_package(cid: str):
     For Pro/Enterprise ZIP evidence uploads, this package contains the parent
     summary PDF plus individually certified reports for supported internal files.
     """
-    from fastapi.responses import RedirectResponse, Response
+    from fastapi.responses import Response, StreamingResponse
 
     fname = f"VeriFYD_Certified_File_Package_{cid[:8]}.zip"
 
@@ -1932,7 +2076,7 @@ async def verify_certificate_upload(file: UploadFile = File(...)):
 
 @app.get("/verify-certificate/{cid}")
 def verify_certificate_by_id(cid: str):
-    """Verify a certificate ID against the VeriFYD certificate database and stored certified artifacts."""
+    """Verify a certificate ID against the VeriFYD certificate database and R2 storage."""
     cid = (cid or "").strip()
     if not cid:
         return JSONResponse({"verified": False, "status": "missing_certificate_id"}, status_code=400)
@@ -1946,292 +2090,142 @@ def verify_certificate_by_id(cid: str):
             "verification_status": "CERTIFICATE_NOT_FOUND",
         }, status_code=404)
 
-    def _bool_to_yes_no(value):
-        return "YES" if bool(value) else "NO"
-
-    def _clean_hash(value):
-        value = str(value or "").strip().lower()
-        return value if value else ""
-
-    def _detect_media_type(filename):
-        import os as _os
-        ext = _os.path.splitext(str(filename or ""))[1].lower()
-        if ext in (".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".oga", ".opus", ".webm"):
-            return "audio"
-        if ext in (".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tif", ".tiff", ".webp", ".heic", ".heif"):
-            return "photo"
-        if ext in (".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v"):
-            return "video"
-        if ext == ".zip":
-            return "package"
-        return "document"
-
-    filename = cert.get("original_file", "") or ""
-    media_type = _detect_media_type(filename)
-
     document_available = False
-    file_package_available = False
-    audio_available = False
-    photo_available = False
-    video_available = False
-
     try:
-        from storage import r2_available
+        from storage import r2_available, certified_document_exists
         if r2_available():
-            try:
-                from storage import certified_document_exists
-                document_available = bool(certified_document_exists(cid))
-            except Exception:
-                document_available = False
-            try:
-                from storage import certified_file_package_exists
-                file_package_available = bool(certified_file_package_exists(cid))
-            except Exception:
-                file_package_available = False
-            try:
-                from storage import certified_audio_exists
-                audio_available = bool(certified_audio_exists(cid))
-            except Exception:
-                audio_available = False
-            try:
-                from storage import certified_exists
-                video_available = bool(certified_exists(cid))
-            except Exception:
-                video_available = False
-            # Older storage.py builds may not have a certified_photo_exists helper.
-            # Do not fail the whole certificate lookup because of that.
-            try:
-                from storage import certified_photo_exists
-                photo_available = bool(certified_photo_exists(cid))
-            except Exception:
-                photo_available = False
+            document_available = bool(certified_document_exists(cid))
     except Exception:
         document_available = False
-        file_package_available = False
-        audio_available = False
-        photo_available = False
-        video_available = False
 
-    # Redis fallbacks for short-lived files.
-    try:
-        import redis as _redis
-        import os as _os
-        r = _redis.from_url(_os.environ.get("REDIS_URL", "redis://localhost:6379"), decode_responses=False)
-        if not document_available:
-            document_available = bool(r.exists(f"doccert:{cid}"))
-        if not file_package_available:
-            file_package_available = bool(r.exists(f"filecert:{cid}"))
-        if not audio_available:
-            audio_available = bool(r.exists(f"audiocert:{cid}"))
-        if not photo_available:
-            photo_available = bool(r.exists(f"photocert:{cid}"))
-        if not video_available:
-            video_available = bool(r.exists(f"cert:{cid}"))
-    except Exception:
-        pass
-
-    if audio_available:
-        media_type = "audio"
-    elif photo_available:
-        media_type = "photo"
-    elif video_available:
-        media_type = "video"
-    elif document_available:
-        media_type = "document"
-
-    original_sha256 = _clean_hash(cert.get("original_sha256") or cert.get("sha256") or cert.get("original_hash"))
-    certified_document_sha256 = _clean_hash(cert.get("certified_document_sha256"))
-    certified_package_sha256 = _clean_hash(cert.get("certified_file_package_sha256"))
-    certified_audio_sha256 = _clean_hash(cert.get("certified_audio_sha256") or (cert.get("certified_file_hash") if media_type == "audio" else ""))
-    certified_photo_sha256 = _clean_hash(cert.get("certified_photo_sha256") or (cert.get("certified_file_hash") if media_type == "photo" else ""))
-
-    database_original_hash_match = True if original_sha256 else None
-    certified_document_hash_match = True if certified_document_sha256 else None
-    certified_package_hash_match = True if certified_package_sha256 else None
-    certified_audio_hash_match = True if certified_audio_sha256 else None
-    certified_photo_hash_match = True if certified_photo_sha256 else None
-
-    # Keep the certificate API aligned with the public scoring explanation.
-    # VeriFYD certifies/authenticity-supports results at 55+; 40-54 is mixed; below 40 is high risk.
-    def _safe_int(value, default=0):
-        try:
-            return int(round(float(value)))
-        except Exception:
-            return default
-
-    authenticity_score = _safe_int(cert.get("authenticity", 0), 0)
-    ai_score_value = _safe_int(cert.get("ai_score", max(0, 100 - authenticity_score)), max(0, 100 - authenticity_score))
-
-    def _media_display_name(kind):
-        kind = (kind or "document").lower()
-        if kind == "photo":
-            return "PHOTO"
-        if kind == "audio":
-            return "AUDIO"
-        if kind == "video":
-            return "VIDEO"
-        if kind == "package":
-            return "CERTIFIED FILE"
-        return "DOCUMENT"
-
-    def _score_category(score, kind):
-        media_name = _media_display_name(kind)
-        if score >= 55:
-            return {
-                "label": "REAL",
-                "display_label": "CERTIFIED",
-                "score_band": "certified_authenticity_supported",
-                "score_band_title": "Certified / Authenticity Supported",
-                "headline": f"{media_name} CERTIFICATE VERIFIED",
-                "risk_level": "LOW",
-            }
-        if score >= 40:
-            return {
-                "label": "UNDETERMINED",
-                "display_label": "UNDETERMINED",
-                "score_band": "review_recommended_mixed_signals",
-                "score_band_title": "Review Recommended / Mixed Signals",
-                "headline": f"{media_name} REVIEW RECOMMENDED",
-                "risk_level": "MEDIUM",
-            }
-        return {
-            "label": "AI_DETECTED",
-            "display_label": "HIGH RISK",
-            "score_band": "ai_or_tampering_detected",
-            "score_band_title": "AI or Tampering Detected",
-            "headline": "AI OR TAMPERING DETECTED",
-            "risk_level": "HIGH",
-        }
-
-    score_category = _score_category(authenticity_score, media_type)
-    headline = score_category["headline"]
-
-    if media_type == "audio":
-        hash_status = "audio_hashes_available" if original_sha256 and certified_audio_sha256 else ("original_hash_stored" if original_sha256 else "hashes_not_available")
-        report_message = "This certificate ID exists in the VeriFYD certificate database. The certified audio file is available for download and verification." if audio_available else "This certificate ID exists in the VeriFYD certificate database."
-    elif media_type == "photo":
-        hash_status = "photo_hashes_available" if original_sha256 and certified_photo_sha256 else ("original_hash_stored" if original_sha256 else "hashes_not_available")
-        report_message = "This certificate ID exists in the VeriFYD certificate database. The certified photo is available for download and verification." if photo_available else "This certificate ID exists in the VeriFYD certificate database."
-    elif media_type == "video":
-        hash_status = "original_hash_stored" if original_sha256 else "hashes_not_available"
-        report_message = "This certificate ID exists in the VeriFYD certificate database. The certified video is available for download and verification." if video_available else "This certificate ID exists in the VeriFYD certificate database."
-    else:
-        if original_sha256 and certified_document_sha256 and certified_package_sha256:
-            hash_status = "all_hashes_available"
-        elif original_sha256:
-            hash_status = "original_hash_stored"
-        else:
-            hash_status = "hashes_not_available"
-        report_message = "This certificate ID exists in the VeriFYD certificate database and any stored hash metadata has been returned."
-
-    download_url = ""
-    if media_type == "audio" and audio_available:
-        download_url = f"{BASE_URL}/download-audio/{cid}"
-    elif media_type == "photo" and photo_available:
-        download_url = f"{BASE_URL}/download-photo/{cid}"
-    elif media_type == "video" and video_available:
-        download_url = f"{BASE_URL}/download/{cid}"
-    elif document_available:
-        download_url = f"{BASE_URL}/download-document/{cid}"
-
-    response = {
+    return JSONResponse({
         "verified": True,
         "status": "found",
         "verification_status": "CERTIFICATE_RECORD_FOUND",
         "certificate_id": cid,
-        "label": score_category["label"],
-        "stored_label": cert.get("label", ""),
-        "display_label": score_category["display_label"],
-        "score_band": score_category["score_band"],
-        "score_band_title": score_category["score_band_title"],
-        "risk_level": score_category["risk_level"],
-        "authenticity": authenticity_score,
-        "ai_score": ai_score_value,
-        "original_file": filename,
-        "file_type": media_type,
-        "media_type": media_type,
+        "label": cert.get("label", ""),
+        "authenticity": cert.get("authenticity", ""),
+        "ai_score": cert.get("ai_score", ""),
+        "original_file": cert.get("original_file", ""),
         "upload_time": cert.get("upload_time", ""),
         "download_count": cert.get("download_count", 0),
         "certified_to": cert.get("email", ""),
-        "sha256": original_sha256,
-        "original_sha256": original_sha256,
-        "certified_document_sha256": certified_document_sha256,
-        "certified_file_package_sha256": certified_package_sha256,
-        "certified_audio_sha256": certified_audio_sha256,
-        "certified_photo_sha256": certified_photo_sha256,
-        "certified_file_hash": certified_audio_sha256 if media_type == "audio" else (certified_photo_sha256 if media_type == "photo" else _clean_hash(cert.get("certified_file_hash"))),
-        "database_original_hash_match": database_original_hash_match,
-        "certified_document_hash_match": certified_document_hash_match,
-        "certified_file_package_hash_match": certified_package_hash_match,
-        "certified_audio_hash_match": certified_audio_hash_match,
-        "certified_photo_hash_match": certified_photo_hash_match,
-        "hash_status": hash_status,
         "certified_document_available": document_available,
-        "certified_file_package_available": file_package_available,
-        "certified_audio_available": audio_available,
-        "audio_available": audio_available,
-        "photo_available": photo_available,
-        "video_available": video_available,
-        "download_url": download_url,
-        "audio_download_url": f"{BASE_URL}/download-audio/{cid}" if audio_available else "",
-        "photo_download_url": f"{BASE_URL}/download-photo/{cid}" if photo_available else "",
-        "document_download_url": f"{BASE_URL}/download-document/{cid}" if document_available else "",
-        "certified_file_package_url": f"{BASE_URL}/download-certified-file/{cid}" if file_package_available else "",
-        "record_match_source": "database_record",
+        "download_url": f"{BASE_URL}/download-document/{cid}" if document_available else "",
         "verification_report": {
             "title": "VeriFYD Certificate Verification Report",
             "status": "FOUND",
             "certificate_id": cid,
             "database_match": "YES",
-            "media_type": media_type.upper(),
-            "certificate_headline": headline,
-            "score_band": score_category["score_band"],
-            "score_band_title": score_category["score_band_title"],
-            "risk_level": score_category["risk_level"],
-            "display_label": score_category["display_label"],
-            "stored_label": cert.get("label", ""),
-            "thresholds": {
-                "certified_authenticity_supported": "55-100",
-                "review_recommended_mixed_signals": "40-54",
-                "ai_or_tampering_detected": "0-39",
-            },
-            "certified_document_available": _bool_to_yes_no(document_available),
-            "certified_file_package_available": _bool_to_yes_no(file_package_available),
-            "certified_audio_available": _bool_to_yes_no(audio_available),
-            "certified_photo_available": _bool_to_yes_no(photo_available),
-            "original_sha256_available": "YES" if original_sha256 else "NO",
-            "certified_document_sha256_available": "YES" if certified_document_sha256 else "NO",
-            "certified_file_package_sha256_available": "YES" if certified_package_sha256 else "NO",
-            "certified_audio_sha256_available": "YES" if certified_audio_sha256 else "NO",
-            "certified_photo_sha256_available": "YES" if certified_photo_sha256 else "NO",
-            "database_original_hash_match": database_original_hash_match,
-            "certified_document_hash_match": certified_document_hash_match,
-            "certified_file_package_hash_match": certified_package_hash_match,
-            "certified_audio_hash_match": certified_audio_hash_match,
-            "certified_photo_hash_match": certified_photo_hash_match,
-            "hash_status": hash_status,
-            "trust_level": "CERTIFIED ARTIFACT FOUND" if (document_available or file_package_available or audio_available or photo_available or video_available) else "DATABASE RECORD FOUND",
-            "message": report_message,
+            "certified_document_available": "YES" if document_available else "UNKNOWN",
+            "trust_level": "DATABASE RECORD FOUND",
+            "message": "This certificate ID exists in the VeriFYD certificate database. Upload the certified PDF to verify the hidden secure seal and hash payload.",
         },
-    }
-    return JSONResponse(response)
+    })
 
 
 @app.get("/job-status/{job_id}")
 def job_status(job_id: str):
-    """Poll endpoint for direct async frontends."""
+    """Poll endpoint for async frontends.
+
+    Backward-compatible response:
+    - status / job_status / job_state = lifecycle state used for polling
+    - result_status / display_status / verdict_status = visible result-card title
+    """
     result = get_job_result(job_id)
+
     if not result or result.get("job_status") == "not_found":
-        return JSONResponse({"status": "not_found"}, status_code=404)
-    # Normalize job_status → status so frontend can use data.status consistently
-    job_st = result.get("job_status", "")
-    result_copy = {k: v for k, v in result.items() if k != "job_status"}
-    if job_st == "complete":
-        result_copy["status"] = "complete"
-    elif job_st == "error":
-        result_copy["status"] = "error"
+        return JSONResponse({
+            "status": "not_found",
+            "job_status": "not_found",
+            "job_state": "not_found",
+        }, status_code=404)
+
+    result_copy = dict(result)
+
+    raw_status = str(result.get("status") or "").strip()
+    raw_status_lc = raw_status.lower()
+    lifecycle_values = {"queued", "processing", "complete", "error", "not_found"}
+
+    job_st = (
+        result.get("job_status")
+        or result.get("job_state")
+        or ("error" if raw_status_lc == "error" else "")
+        or "processing"
+    )
+
+    # Preserve the visible verdict/title separately.
+    if raw_status and raw_status_lc not in lifecycle_values:
+        display_status = raw_status
     else:
-        result_copy["status"] = job_st or "processing"
+        label = str(result.get("label") or "").upper()
+        media_type = str(result.get("media_type") or "").lower()
+        download_type = str(result.get("download_type") or "").lower()
+
+        if media_type == "audio" or download_type == "certified_audio":
+            display_status = (
+                "REAL AUDIO VERIFIED" if label == "REAL" else
+                "AUDIO UNDETERMINED" if label == "UNDETERMINED" else
+                "AI AUDIO DETECTED" if label == "AI" else
+                "AUDIO ANALYSIS COMPLETE"
+            )
+        elif media_type == "video" or result.get("video_ready") is not None:
+            display_status = (
+                "REAL VIDEO VERIFIED" if label == "REAL" else
+                "VIDEO UNDETERMINED" if label == "UNDETERMINED" else
+                "AI DETECTED" if label == "AI" else
+                "VIDEO ANALYSIS COMPLETE"
+            )
+        elif media_type == "photo":
+            display_status = (
+                "REAL PHOTO VERIFIED" if label == "REAL" else
+                "PHOTO UNDETERMINED" if label == "UNDETERMINED" else
+                "AI DETECTED" if label == "AI" else
+                "PHOTO ANALYSIS COMPLETE"
+            )
+        elif media_type == "document":
+            display_status = (
+                "REAL DOCUMENT VERIFIED" if label == "REAL" else
+                "DOCUMENT UNDETERMINED" if label == "UNDETERMINED" else
+                "AI / TAMPERING DETECTED" if label == "AI" else
+                "DOCUMENT ANALYSIS COMPLETE"
+            )
+        else:
+            display_status = raw_status if raw_status and raw_status_lc not in lifecycle_values else "ANALYSIS COMPLETE"
+
+    result_copy["result_status"] = display_status
+    result_copy["display_status"] = display_status
+    result_copy["verdict_status"] = display_status
+
+    # Keep lifecycle state explicit and backward-compatible.
+    result_copy["job_status"] = job_st
+    result_copy["job_state"] = job_st
+
+    # Important: keep status as lifecycle so older frontend polling stops spinning.
+    result_copy["status"] = job_st
+
+    # Backend safety normalization for media download routing.
+    cid = result_copy.get("certificate_id") or job_id
+    media_type = str(result_copy.get("media_type") or "").lower()
+    download_type = str(result_copy.get("download_type") or "").lower()
+
+    if media_type == "audio" or download_type == "certified_audio":
+        result_copy["media_type"] = "audio"
+        result_copy["download_type"] = "certified_audio"
+        if not result_copy.get("download_url"):
+            result_copy["download_url"] = f"{BASE_URL}/download-audio/{cid}"
+        if not result_copy.get("share_url"):
+            result_copy["share_url"] = result_copy.get("download_url")
+
+    elif media_type == "video" or result_copy.get("video_ready") is not None:
+        result_copy["media_type"] = "video"
+        if result_copy.get("label") == "REAL":
+            result_copy["download_type"] = result_copy.get("download_type") or "certified_video"
+            if not result_copy.get("download_url"):
+                result_copy["download_url"] = f"{BASE_URL}/download/{cid}"
+            if not result_copy.get("share_url"):
+                result_copy["share_url"] = result_copy.get("download_url")
+
     return JSONResponse(result_copy)
 
 

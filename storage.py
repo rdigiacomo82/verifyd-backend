@@ -301,33 +301,13 @@ def get_certified_audio_key(job_id: str) -> str:
     return f"certified-audio/free/{job_id}.mp3"
 
 def get_audio_download_url(job_id: str, expires: int = CERT_URL_TTL) -> str:
-    """Generate a presigned certified-audio URL with download headers when possible."""
     key = get_certified_audio_key(job_id)
-    ext = os.path.splitext(key)[1].lower() or ".mp3"
-    content_types = {
-        ".mp3": "audio/mpeg",
-        ".wav": "audio/wav",
-        ".m4a": "audio/mp4",
-        ".aac": "audio/aac",
-        ".flac": "audio/flac",
-        ".ogg": "audio/ogg",
-        ".oga": "audio/ogg",
-        ".opus": "audio/opus",
-        ".webm": "audio/webm",
-    }
     if PUBLIC_URL:
-        # PUBLIC_URL cannot force Content-Disposition; main.py /download-audio/{cid}
-        # proxies R2 objects to guarantee attachment downloads.
         return f"{PUBLIC_URL.rstrip('/')}/{key}"
     client = _get_client()
     return client.generate_presigned_url(
         "get_object",
-        Params={
-            "Bucket": BUCKET,
-            "Key": key,
-            "ResponseContentDisposition": f'attachment; filename="VeriFYD_Certified_Audio_{job_id[:8]}{ext}"',
-            "ResponseContentType": content_types.get(ext, "application/octet-stream"),
-        },
+        Params={"Bucket": BUCKET, "Key": key},
         ExpiresIn=expires,
     )
 
@@ -388,6 +368,61 @@ def get_certified_file_package_key(job_id: str) -> str:
 def get_certified_file_package_download_url(job_id: str, expires: int = CERT_URL_TTL) -> str:
     """Generate a presigned URL for downloading a universal certified file package."""
     key = get_certified_file_package_key(job_id)
+    if PUBLIC_URL:
+        return f"{PUBLIC_URL.rstrip('/')}/{key}"
+    client = _get_client()
+    return client.generate_presigned_url(
+        "get_object",
+        Params={"Bucket": BUCKET, "Key": key},
+        ExpiresIn=expires,
+    )
+
+
+
+
+# ─────────────────────────────────────────────
+# Trust Desk package storage
+# ─────────────────────────────────────────────
+
+def upload_trust_desk_package(job_id: str, package_path: str, plan: str = "free") -> str:
+    """Upload a Trust Desk return package ZIP to R2."""
+    key = f"trust-desk/{plan}/{job_id}.zip"
+    client = _get_client()
+    client.upload_file(
+        package_path,
+        BUCKET,
+        key,
+        ExtraArgs={
+            "ContentType": "application/zip",
+            "Metadata": {"plan": plan, "job_id": job_id, "type": "trust_desk_package"},
+        },
+    )
+    log.info("storage: uploaded Trust Desk package → r2://%s/%s (plan=%s)", BUCKET, key, plan)
+    return key
+
+def trust_desk_package_exists(job_id: str) -> bool:
+    client = _get_client()
+    for plan in _PLAN_ORDER:
+        try:
+            client.head_object(Bucket=BUCKET, Key=f"trust-desk/{plan}/{job_id}.zip")
+            return True
+        except Exception:
+            continue
+    return False
+
+def get_trust_desk_package_key(job_id: str) -> str:
+    client = _get_client()
+    for plan in _PLAN_ORDER:
+        key = f"trust-desk/{plan}/{job_id}.zip"
+        try:
+            client.head_object(Bucket=BUCKET, Key=key)
+            return key
+        except Exception:
+            continue
+    return f"trust-desk/free/{job_id}.zip"
+
+def get_trust_desk_download_url(job_id: str, expires: int = CERT_URL_TTL) -> str:
+    key = get_trust_desk_package_key(job_id)
     if PUBLIC_URL:
         return f"{PUBLIC_URL.rstrip('/')}/{key}"
     client = _get_client()

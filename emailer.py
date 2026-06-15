@@ -11,44 +11,26 @@ import logging
 log = logging.getLogger("verifyd.emailer")
 
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
-FROM_ADDRESS   = os.environ.get("FROM_ADDRESS", "verify@vfvid.com")
-FROM_NAME      = os.environ.get("FROM_NAME", "VeriFYD")
-SITE_URL       = os.environ.get("SITE_URL", "https://vfvid.com").rstrip("/")
-BACKEND_URL    = os.environ.get("BACKEND_URL", "https://verifyd-backend.onrender.com").rstrip("/")
+FROM_ADDRESS   = "noreply@vfvid.com"
+FROM_NAME      = "VeriFYD"
+SITE_URL       = "https://vfvid.com"
+BACKEND_URL    = "https://verifyd-backend.onrender.com"
 
 
-
-LAST_RESEND_RESULT = {}
 def _send(payload: dict) -> bool:
     """Internal helper — sends email via Resend SDK."""
     if not RESEND_API_KEY:
         log.error("RESEND_API_KEY not set — cannot send email")
         return False
     try:
-        global LAST_RESEND_RESULT
         import resend
         resend.api_key = RESEND_API_KEY
-        log.info(
-            "Sending email via Resend: from=%s to=%s subject=%s has_html=%s has_text=%s",
-            payload.get("from"), payload.get("to"), payload.get("subject"),
-            bool(payload.get("html")), bool(payload.get("text")),
-        )
         result = resend.Emails.send(payload)
-        try:
-            LAST_RESEND_RESULT = dict(result or {})
-        except Exception:
-            LAST_RESEND_RESULT = {"raw": str(result)}
-        log.info("Email sent to %s — id: %s result=%s", payload.get("to"), result.get("id"), result)
+        log.info("Email sent to %s — id: %s", payload.get("to"), result.get("id"))
         return True
     except Exception as e:
-        log.exception("Failed to send email via Resend: %s", e)
+        log.error("Failed to send email: %s", e)
         return False
-
-
-
-def get_last_resend_result() -> dict:
-    """Return last Resend SDK response for diagnostics/outbox status."""
-    return dict(LAST_RESEND_RESULT or {})
 
 
 def _header_html() -> str:
@@ -128,19 +110,11 @@ def send_otp_email(to_email: str, code: str) -> bool:
 </body>
 </html>"""
 
-    text = (
-        f"Your VeriFYD verification code is: {code}\n\n"
-        "This code expires shortly. If you did not request this code, you can ignore this email.\n\n"
-        "VeriFYD\n"
-        f"{SITE_URL}"
-    )
-
     return _send({
         "from":    f"{FROM_NAME} <{FROM_ADDRESS}>",
         "to":      [to_email],
-        "subject": "Your VeriFYD verification code",
+        "subject": f"{code} is your VeriFYD verification code",
         "html":    html,
-        "text":    text,
     })
 
 
@@ -159,7 +133,7 @@ def send_certification_email(
     Includes download link, certificate link, and score.
     Pass is_photo=True, is_document=True, or is_audio=True for correct language.
     """
-    cert_url      = f"{SITE_URL}/verify-certificate/{certificate_id}"
+    cert_url      = f"{SITE_URL}/v/{certificate_id}"
     short_id      = certificate_id[:8].upper()
     safe_filename = original_filename[:40] + ("..." if len(original_filename) > 40 else "")
 
@@ -225,9 +199,7 @@ def send_certification_email(
             f"your {_media} and found no significant indicators of AI generation. Your certified "
             f"{_media} includes the VeriFYD watermark as proof of authenticity."
         )
-    # Keep subject plain ASCII for best deliverability across Gmail/Outlook.
-    # Older versions used an HTML entity in the subject; subjects are not HTML.
-    _subject      = f"VeriFYD Certification Ready - {_Media} #{short_id}"
+    _subject      = f"&#10003; Your {_media} has been certified — VeriFYD #{short_id}"
 
     # Score color — green for high, yellow for moderate
     score_color = "#22c55e" if authenticity >= 75 else "#f59e0b"
@@ -295,7 +267,7 @@ def send_certification_email(
           <tr>
             <td style="padding:0 32px 32px;">
               <!-- Download — primary action -->
-              <a href="{cert_url}"
+              <a href="{download_url}"
                  style="display:block;background:#22c55e;color:#000000;text-decoration:none;
                         text-align:center;padding:16px;border-radius:10px;
                         font-size:15px;font-weight:700;margin-bottom:12px;">
@@ -321,11 +293,11 @@ def send_certification_email(
                 <p style="margin:0 0 12px;color:#888;font-size:12px;line-height:1.6;">
                   {_share_desc}
                 </p>
-                <a href="{cert_url}"
+                <a href="{download_url}"
                    style="display:block;background:#1a1a1a;border:1px solid #7c3aed;border-radius:8px;
                           font-size:13px;color:#c4b5fd;font-family:'Courier New',monospace;
                           word-break:break-all;text-decoration:none;padding:12px;">
-                  {cert_url}
+                  {download_url}
                 </a>
                 <p style="margin:10px 0 0;color:#555;font-size:11px;">
                   {_share_tap}
@@ -356,23 +328,11 @@ def send_certification_email(
 </body>
 </html>"""
 
-    text = (
-        f"VeriFYD Certification Ready\n\n"
-        f"Your {_media} has been certified as REAL.\n"
-        f"File: {safe_filename}\n"
-        f"Authenticity Score: {authenticity}%\n"
-        f"Certificate ID: {certificate_id}\n\n"
-        f"Download: {download_url}\n"
-        f"Certificate: {cert_url}\n\n"
-        f"This email was sent after VeriFYD created and stored the certified {_media} artifact.\n"
-    )
-
     return _send({
         "from":    f"{FROM_NAME} <{FROM_ADDRESS}>",
         "to":      [to_email],
-        "subject": _subject,
+        "subject": f"&#10003; Your {_media} has been certified — VeriFYD #{short_id}",
         "html":    html,
-        "text":    text,
     })
 
 
@@ -486,3 +446,68 @@ def send_enterprise_welcome_email(
     })
 
 
+
+
+def send_trust_desk_ready_email(
+    to_email: str,
+    trust_desk_job_id: str,
+    organization: str,
+    case_number: str,
+    download_url: str,
+    summary: dict | None = None,
+) -> bool:
+    """Send Trust Desk package-ready email."""
+    summary = summary or {}
+    short_id = (trust_desk_job_id or "")[:8].upper()
+    org = organization or "Not provided"
+    case = case_number or "Not provided"
+    total = summary.get("total_files", 0)
+    supported = summary.get("supported_files", 0)
+    unsupported = summary.get("unsupported_files", 0)
+    videos = summary.get("video_files", 0)
+    photos = summary.get("photo_files", 0)
+    audio = summary.get("audio_files", 0)
+    docs = summary.get("document_files", 0)
+
+    html = f"""
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+<body style="margin:0;padding:0;background-color:#0a0a0a;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#0a0a0a;padding:40px 20px;">
+    <tr><td align="center">
+      <table width="560" cellpadding="0" cellspacing="0" style="background-color:#111111;border-radius:12px;border:1px solid #222;max-width:560px;width:100%;overflow:hidden;">
+        {_header_html()}
+        <tr><td style="padding:36px 32px 20px;text-align:center;">
+          <div style="display:inline-block;background:#1f1600;border:1px solid #f59e0b;border-radius:100px;padding:8px 18px;margin-bottom:22px;">
+            <span style="color:#f59e0b;font-size:13px;font-weight:700;letter-spacing:1px;text-transform:uppercase;">Trust Desk Package Ready</span>
+          </div>
+          <h2 style="margin:0 0 8px;font-size:24px;font-weight:800;color:#fff;">Your Trust Desk package is ready</h2>
+          <p style="margin:0;color:#9ca3af;font-size:15px;line-height:1.6;">VeriFYD completed ZIP intake, file inventory, hash preservation, and package assembly.</p>
+        </td></tr>
+        <tr><td style="padding:8px 32px 24px;">
+          <div style="background:#0f0f0f;border:1px solid #2a2a2a;border-radius:10px;padding:18px 20px;color:#d1d5db;font-size:14px;line-height:1.8;">
+            <strong style="color:#fff;">Trust Desk Job:</strong> {trust_desk_job_id}<br>
+            <strong style="color:#fff;">Organization:</strong> {org}<br>
+            <strong style="color:#fff;">Case / Claim / Matter:</strong> {case}<br>
+            <strong style="color:#fff;">Total Files:</strong> {total}<br>
+            <strong style="color:#fff;">Supported Files:</strong> {supported}<br>
+            <strong style="color:#fff;">Videos:</strong> {videos} &nbsp; <strong style="color:#fff;">Photos:</strong> {photos} &nbsp; <strong style="color:#fff;">Audio:</strong> {audio} &nbsp; <strong style="color:#fff;">Documents:</strong> {docs}<br>
+            <strong style="color:#fff;">Unsupported Preserved:</strong> {unsupported}
+          </div>
+        </td></tr>
+        <tr><td style="padding:0 32px 34px;text-align:center;">
+          <a href="{download_url}" style="display:inline-block;background:#f59e0b;color:#000;text-decoration:none;padding:14px 26px;border-radius:8px;font-size:14px;font-weight:800;">Download Trust Desk Package</a>
+        </td></tr>
+        {_footer_html()}
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>"""
+    return _send({
+        "from": f"{FROM_NAME} <{FROM_ADDRESS}>",
+        "to": [to_email],
+        "subject": f"VeriFYD Trust Desk Package Ready - #{short_id}",
+        "html": html,
+    })

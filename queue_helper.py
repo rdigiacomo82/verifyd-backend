@@ -270,6 +270,55 @@ def enqueue_document_upload(job_id: str, raw_path: str, filename: str, email: st
     )
 
 
+
+
+# ─────────────────────────────────────────────────────────────
+#  Trust Desk helpers — ZIP intake skeleton
+# ─────────────────────────────────────────────────────────────
+def enqueue_trust_desk_zip(
+    job_id: str,
+    raw_path: str,
+    filename: str,
+    email: str,
+    organization: str = "",
+    submitter_name: str = "",
+    case_number: str = "",
+    notes: str = "",
+):
+    """Store a Trust Desk ZIP and enqueue ZIP intake/inventory processing."""
+    from worker import process_trust_desk_zip_job
+
+    r = _get_redis(decode_responses=False)
+    q = _get_queue(r, DOCUMENT_QUEUE_NAME)
+
+    log.info(
+        "Enqueue Trust Desk ZIP job: job_id=%s filename=%s queue=%s organization=%s case=%s",
+        job_id, filename, DOCUMENT_QUEUE_NAME, organization, case_number
+    )
+
+    r2_key = _try_store_file_in_r2(job_id, raw_path, filename)
+    if r2_key:
+        _safe_remove(raw_path)
+        file_ref = f"r2:{r2_key}"
+    else:
+        file_ref = _store_file_in_redis(r, job_id, raw_path)
+        _safe_remove(raw_path)
+
+    return q.enqueue(
+        process_trust_desk_zip_job,
+        file_ref,
+        filename,
+        email,
+        organization or "",
+        submitter_name or "",
+        case_number or "",
+        notes or "",
+        job_id=job_id,
+        job_timeout=3600,
+        result_ttl=RESULT_TTL_SECONDS,
+    )
+
+
 # ─────────────────────────────────────────────────────────────
 #  Result helper
 # ─────────────────────────────────────────────────────────────
