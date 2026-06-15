@@ -354,6 +354,16 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
     if not is_valid_email(email):
         return JSONResponse({"error": "Invalid email address."}, status_code=400)
 
+    # Support both frontend field names: organization and organization_name.
+    # The Trust Desk intake page uses organization_name; the original backend
+    # skeleton expected organization. Normalize here so the manifest/email/logs
+    # always receive the company name.
+    organization = (organization or organization_name or "").strip()
+    submitter_name = (submitter_name or "").strip()
+    case_number = (case_number or "").strip()
+    notes = (notes or "").strip()
+
+
     # ── Email deliverability check ────────────────────────────
     is_deliverable, reason = _verify_email_deliverable(email)
     if not is_deliverable:
@@ -531,6 +541,16 @@ async def upload_photo(file: UploadFile = File(...), email: str = Form(...)):
     if not is_valid_email(email):
         return JSONResponse({"error": "Invalid email address."}, status_code=400)
 
+    # Support both frontend field names: organization and organization_name.
+    # The Trust Desk intake page uses organization_name; the original backend
+    # skeleton expected organization. Normalize here so the manifest/email/logs
+    # always receive the company name.
+    organization = (organization or organization_name or "").strip()
+    submitter_name = (submitter_name or "").strip()
+    case_number = (case_number or "").strip()
+    notes = (notes or "").strip()
+
+
     is_deliverable, reason = _verify_email_deliverable(email)
     if not is_deliverable:
         return JSONResponse({"error": reason}, status_code=400)
@@ -674,6 +694,16 @@ async def analyze_photo_link(request: Request, image_url: str = "", email: str =
     if not is_valid_email(email):
         return JSONResponse({"error": "Invalid email address."}, status_code=400)
 
+    # Support both frontend field names: organization and organization_name.
+    # The Trust Desk intake page uses organization_name; the original backend
+    # skeleton expected organization. Normalize here so the manifest/email/logs
+    # always receive the company name.
+    organization = (organization or organization_name or "").strip()
+    submitter_name = (submitter_name or "").strip()
+    case_number = (case_number or "").strip()
+    notes = (notes or "").strip()
+
+
     # Check URL cache first
     try:
         import hashlib as _hl, json as _jc
@@ -785,6 +815,16 @@ async def upload_audio(file: UploadFile = File(...), email: str = Form(...)):
     """
     if not is_valid_email(email):
         return JSONResponse({"error": "Invalid email address."}, status_code=400)
+
+    # Support both frontend field names: organization and organization_name.
+    # The Trust Desk intake page uses organization_name; the original backend
+    # skeleton expected organization. Normalize here so the manifest/email/logs
+    # always receive the company name.
+    organization = (organization or organization_name or "").strip()
+    submitter_name = (submitter_name or "").strip()
+    case_number = (case_number or "").strip()
+    notes = (notes or "").strip()
+
 
     is_deliverable, reason = _verify_email_deliverable(email)
     if not is_deliverable:
@@ -1126,6 +1166,7 @@ async def upload_trust_desk_zip(
     file: UploadFile = File(...),
     email: str = Form(...),
     organization: str = Form(""),
+    organization_name: str = Form(""),
     submitter_name: str = Form(""),
     case_number: str = Form(""),
     notes: str = Form(""),
@@ -1139,6 +1180,16 @@ async def upload_trust_desk_zip(
     """
     if not is_valid_email(email):
         return JSONResponse({"error": "Invalid email address."}, status_code=400)
+
+    # Support both frontend field names: organization and organization_name.
+    # The Trust Desk intake page uses organization_name; the original backend
+    # skeleton expected organization. Normalize here so the manifest/email/logs
+    # always receive the company name.
+    organization = (organization or organization_name or "").strip()
+    submitter_name = (submitter_name or "").strip()
+    case_number = (case_number or "").strip()
+    notes = (notes or "").strip()
+
 
     is_deliverable, reason = _verify_email_deliverable(email)
     if not is_deliverable:
@@ -1250,6 +1301,16 @@ async def upload_document(file: UploadFile = File(...), email: str = Form(...)):
     """
     if not is_valid_email(email):
         return JSONResponse({"error": "Invalid email address."}, status_code=400)
+
+    # Support both frontend field names: organization and organization_name.
+    # The Trust Desk intake page uses organization_name; the original backend
+    # skeleton expected organization. Normalize here so the manifest/email/logs
+    # always receive the company name.
+    organization = (organization or organization_name or "").strip()
+    submitter_name = (submitter_name or "").strip()
+    case_number = (case_number or "").strip()
+    notes = (notes or "").strip()
+
 
     is_deliverable, reason = _verify_email_deliverable(email)
     if not is_deliverable:
@@ -3659,6 +3720,16 @@ async def send_otp(email: str = Form(...)):
     if not is_valid_email(email):
         return JSONResponse({"error": "Invalid email address."}, status_code=400)
 
+    # Support both frontend field names: organization and organization_name.
+    # The Trust Desk intake page uses organization_name; the original backend
+    # skeleton expected organization. Normalize here so the manifest/email/logs
+    # always receive the company name.
+    organization = (organization or organization_name or "").strip()
+    submitter_name = (submitter_name or "").strip()
+    case_number = (case_number or "").strip()
+    notes = (notes or "").strip()
+
+
     # Check deliverability first
     is_deliverable, reason = _verify_email_deliverable(email)
     if not is_deliverable:
@@ -3687,6 +3758,16 @@ async def verify_otp_route(email: str = Form(...), code: str = Form(...)):
     """Verify the OTP code submitted by the user."""
     if not is_valid_email(email):
         return JSONResponse({"error": "Invalid email address."}, status_code=400)
+
+    # Support both frontend field names: organization and organization_name.
+    # The Trust Desk intake page uses organization_name; the original backend
+    # skeleton expected organization. Normalize here so the manifest/email/logs
+    # always receive the company name.
+    organization = (organization or organization_name or "").strip()
+    submitter_name = (submitter_name or "").strip()
+    case_number = (case_number or "").strip()
+    notes = (notes or "").strip()
+
 
     success, message = verify_otp(email, code)
 

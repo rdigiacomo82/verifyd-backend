@@ -149,7 +149,18 @@ def build_trust_desk_package(
     Build the first Trust Desk return package.
     Phase 1 is inventory + preservation. Individual certification routing
     will be layered on top in a later patch.
+
+    Important: the source ZIP must be extracted before inventory is built.
+    Earlier skeleton versions created an empty manifest because they built
+    inventory against an empty extraction directory.
     """
+    # Start from a clean extraction directory and safely extract the submitted ZIP.
+    extract_root = Path(extract_dir)
+    if extract_root.exists():
+        shutil.rmtree(extract_root, ignore_errors=True)
+    extract_root.mkdir(parents=True, exist_ok=True)
+
+    extracted_files = safe_extract_zip(source_zip_path, extract_dir)
     inventory, counts = build_inventory(extract_dir)
     original_zip_hash = sha256_file(source_zip_path)
     generated_at = datetime.now(timezone.utc).isoformat()
@@ -167,6 +178,7 @@ def build_trust_desk_package(
         "original_zip_sha256": original_zip_hash,
         "generated_at_utc": generated_at,
         "summary": {
+            "extracted_files": len(extracted_files),
             "total_files": counts.get("total", 0),
             "supported_files": counts.get("video", 0) + counts.get("photo", 0) + counts.get("audio", 0) + counts.get("document", 0),
             "video_files": counts.get("video", 0),
@@ -199,7 +211,8 @@ def build_trust_desk_package(
     hash_csv_path = work_dir / "00_Master_Report" / "hash_inventory.csv"
     write_hash_inventory_csv(str(hash_csv_path), inventory)
 
-    readme = f"""VeriFYD Trust Desk Package\n\nTrust Desk Job ID: {job_id}\nOrganization: {organization or 'Not provided'}\nCase / Claim / Matter Number: {case_number or 'Not provided'}\nSubmitter: {submitter_name or 'Not provided'} <{submitter_email}>\nGenerated UTC: {generated_at}\n\nPhase 1 Status:\nThis package confirms ZIP intake, safe extraction, file classification, SHA-256 hash inventory, and reassembly.\n\nSummary:\n- Total files: {manifest['summary']['total_files']}\n- Supported files: {manifest['summary']['supported_files']}\n- Video files: {manifest['summary']['video_files']}\n- Photo files: {manifest['summary']['photo_files']}\n- Audio files: {manifest['summary']['audio_files']}\n- Document files: {manifest['summary']['document_files']}\n- Unsupported files: {manifest['summary']['unsupported_files']}\n\nNext Implementation Phase:\nRoute supported files to VeriFYD video/photo/audio/document certification and insert child certificate IDs into this manifest.\n"""
+    readme = f"""VeriFYD Trust Desk Package\n\nTrust Desk Job ID: {job_id}\nOrganization: {organization or 'Not provided'}\nCase / Claim / Matter Number: {case_number or 'Not provided'}\nSubmitter: {submitter_name or 'Not provided'} <{submitter_email}>\nGenerated UTC: {generated_at}\n\nPhase 1 Status:\nThis package confirms ZIP intake, safe extraction, file classification, SHA-256 hash inventory, and reassembly.\n\nSummary:\n- Extracted files: {manifest['summary'].get('extracted_files', 0)}
+- Total files: {manifest['summary']['total_files']}\n- Supported files: {manifest['summary']['supported_files']}\n- Video files: {manifest['summary']['video_files']}\n- Photo files: {manifest['summary']['photo_files']}\n- Audio files: {manifest['summary']['audio_files']}\n- Document files: {manifest['summary']['document_files']}\n- Unsupported files: {manifest['summary']['unsupported_files']}\n\nNext Implementation Phase:\nRoute supported files to VeriFYD video/photo/audio/document certification and insert child certificate IDs into this manifest.\n"""
     (work_dir / "00_Master_Report" / "TrustDesk_ReadMe.txt").write_text(readme, encoding="utf-8")
     (work_dir / "05_Verification_Links" / "verification_links.txt").write_text(
         "Child certificate verification links will be added in the certification-routing phase.\n",
