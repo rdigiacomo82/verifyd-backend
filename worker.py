@@ -1742,7 +1742,7 @@ def process_trust_desk_zip_job(
         summary["child_certifications_timed_out"] = timed_out
         summary["final_package_ready"] = timed_out == 0
         manifest["phase"] = "phase_2b_final_package_after_child_certification"
-        manifest["finalized_at_utc"] = __import__("datetime").datetime.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+        manifest["finalized_at_utc"] = __import__("datetime").datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
         manifest["next_phase_note"] = "This package was generated after child certification jobs completed or timed out. Future phase can embed certified binaries directly in 02_Certified_Files and 03_Evidence_Packages."
 
         # Rebuild the Trust Desk ZIP with completed child result metadata and links.
