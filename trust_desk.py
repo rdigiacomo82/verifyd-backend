@@ -23,6 +23,8 @@ import hashlib
 import json
 import os
 import shutil
+import tempfile
+import uuid
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -132,6 +134,97 @@ def write_hash_inventory_csv(path: str, rows: List[Dict[str, Any]]) -> None:
             writer.writerow({key: row.get(key, "") for key in fieldnames})
 
 
+
+def _copy_for_child_enqueue(src_path: Path, job_id: str) -> str:
+    """Copy an extracted file to a temp path because enqueue helpers remove the path after upload."""
+    suffix = src_path.suffix or ""
+    tmp_path = os.path.join(tempfile.gettempdir(), f"trustdesk_child_{job_id}{suffix}")
+    shutil.copy2(src_path, tmp_path)
+    return tmp_path
+
+
+def enqueue_child_certification_jobs(
+    *,
+    inventory: List[Dict[str, Any]],
+    extract_dir: str,
+    submitter_email: str,
+    base_url: str = "",
+) -> Dict[str, Any]:
+    """
+    Trust Desk Phase 2A: enqueue each supported extracted file into the existing
+    VeriFYD detection/certification queues.
+
+    This does not wait for child jobs to finish yet. It records each child job ID
+    in the manifest so the next phase can collect certified outputs and rebuild
+    a final completed Trust Desk package.
+    """
+    from queue_helper import (
+        enqueue_upload,
+        enqueue_photo_upload,
+        enqueue_audio_upload,
+        enqueue_document_upload,
+    )
+
+    root = Path(extract_dir).resolve()
+    queued = 0
+    failed = 0
+    failures: List[Dict[str, str]] = []
+
+    for row in inventory:
+        media_type = row.get("media_type")
+        if row.get("supported") is not True or media_type == "unsupported":
+            continue
+
+        rel_path = str(row.get("relative_path") or "")
+        src_path = (root / rel_path).resolve()
+        if not str(src_path).startswith(str(root) + os.sep) or not src_path.exists() or not src_path.is_file():
+            row["processing_status"] = "certification_enqueue_failed"
+            row["certification_error"] = "Extracted source file not found"
+            failed += 1
+            failures.append({"relative_path": rel_path, "error": "Extracted source file not found"})
+            continue
+
+        child_job_id = str(uuid.uuid4())
+        child_tmp = _copy_for_child_enqueue(src_path, child_job_id)
+        filename = src_path.name
+
+        try:
+            if media_type == "video":
+                enqueue_upload(child_job_id, child_tmp, filename, submitter_email)
+                download_url = f"{base_url}/download/{child_job_id}" if base_url else ""
+            elif media_type == "photo":
+                enqueue_photo_upload(child_job_id, child_tmp, filename, submitter_email)
+                download_url = f"{base_url}/download-photo/{child_job_id}" if base_url else ""
+            elif media_type == "audio":
+                enqueue_audio_upload(child_job_id, child_tmp, filename, submitter_email)
+                download_url = f"{base_url}/download-audio/{child_job_id}" if base_url else ""
+            elif media_type == "document":
+                enqueue_document_upload(child_job_id, child_tmp, filename, submitter_email)
+                download_url = f"{base_url}/download-document/{child_job_id}" if base_url else ""
+            else:
+                row["processing_status"] = "preserved_unsupported"
+                continue
+
+            row["processing_status"] = "certification_queued"
+            row["certificate_id"] = child_job_id
+            row["child_job_id"] = child_job_id
+            row["verification_link"] = f"{base_url}/verify-certificate/{child_job_id}" if base_url else ""
+            row["download_url"] = download_url
+            queued += 1
+        except Exception as exc:
+            row["processing_status"] = "certification_enqueue_failed"
+            row["certification_error"] = str(exc)[:300]
+            failed += 1
+            failures.append({"relative_path": rel_path, "error": str(exc)[:300]})
+            try:
+                if child_tmp and os.path.exists(child_tmp):
+                    os.remove(child_tmp)
+            except Exception:
+                pass
+
+    return {"queued": queued, "failed": failed, "failures": failures}
+
+
 def build_trust_desk_package(
     *,
     job_id: str,
@@ -144,6 +237,8 @@ def build_trust_desk_package(
     submitter_email: str,
     case_number: str,
     notes: str,
+    base_url: str = "",
+    route_certifications: bool = False,
 ) -> Dict[str, Any]:
     """
     Build the first Trust Desk return package.
@@ -162,12 +257,20 @@ def build_trust_desk_package(
 
     extracted_files = safe_extract_zip(source_zip_path, extract_dir)
     inventory, counts = build_inventory(extract_dir)
+    routing_summary = {"queued": 0, "failed": 0, "failures": []}
+    if route_certifications:
+        routing_summary = enqueue_child_certification_jobs(
+            inventory=inventory,
+            extract_dir=extract_dir,
+            submitter_email=submitter_email,
+            base_url=base_url,
+        )
     original_zip_hash = sha256_file(source_zip_path)
     generated_at = datetime.now(timezone.utc).isoformat()
 
     manifest: Dict[str, Any] = {
         "title": "VeriFYD Trust Desk Intake Manifest",
-        "phase": "phase_1_zip_intake_inventory_skeleton",
+        "phase": "phase_2a_zip_intake_inventory_and_child_certification_routing",
         "trust_desk_job_id": job_id,
         "organization": organization,
         "submitter_name": submitter_name,
@@ -186,12 +289,15 @@ def build_trust_desk_package(
             "audio_files": counts.get("audio", 0),
             "document_files": counts.get("document", 0),
             "unsupported_files": counts.get("unsupported", 0),
+            "certification_jobs_queued": routing_summary.get("queued", 0),
+            "certification_enqueue_failures": routing_summary.get("failed", 0),
         },
+        "certification_routing": routing_summary,
         "items": inventory,
         "next_phase_note": (
-            "This first Trust Desk package confirms secure ZIP intake, extraction, "
-            "file classification, original hash inventory, and package reassembly. "
-            "The next patch can route supported files to the existing VeriFYD certification pipelines."
+            "This Trust Desk package confirms ZIP intake, extraction, file classification, "
+            "original hash inventory, package reassembly, and child certification job routing. "
+            "The next patch can collect completed child certificates and embed certified outputs in the master ZIP."
         ),
     }
 

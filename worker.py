@@ -145,7 +145,7 @@ def process_upload_job(file_key: str, filename: str, email: str) -> dict:
     from rq import get_current_job
     from detection import run_detection_multiclip
     from video import clip_first_6_seconds, stamp_video
-    from database import insert_certificate, increment_user_uses
+    from database import insert_certificate, increment_user_uses, update_certificate_hashes
     from config import BASE_URL
     from emailer import send_certification_email
 
@@ -201,6 +201,11 @@ def process_upload_job(file_key: str, filename: str, email: str) -> dict:
             ai_score=detail["ai_score"],
             sha256=sha256,
         )
+
+        try:
+            update_certificate_hashes(job_id, original_sha256=sha256)
+        except Exception as hash_e:
+            log.warning("Worker: original hash persistence failed for %s: %s", job_id, hash_e)
 
         result = {
             "status": ui_text,
@@ -287,6 +292,282 @@ def process_upload_job(file_key: str, filename: str, email: str) -> dict:
 
 
 
+def process_audio_upload_job(file_key: str, filename: str, email: str) -> dict:
+    """Background job: retrieve standalone audio, analyze it, certify REAL audio, and store result."""
+    import os as _os
+    import tempfile
+    import hashlib
+    from rq import get_current_job
+    from audio_detector import analyze_audio
+    from database import insert_certificate, increment_user_uses, get_user_status as _gus, update_certificate_hashes
+    from config import BASE_URL
+    from emailer import send_certification_email
+
+    rq_job = get_current_job()
+    job_id = rq_job.id if rq_job else file_key.replace("file:", "")
+    r = _get_redis()
+
+    AUDIO_LABEL_UI = {
+        "REAL": ("REAL AUDIO VERIFIED", "green", True),
+        "UNDETERMINED": ("AUDIO REVIEW RECOMMENDED", "blue", True),
+        "AI": ("AI AUDIO DETECTED", "red", False),
+    }
+
+    ext = _os.path.splitext(filename)[1].lower() or ".mp3"
+    if ext not in (".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".oga", ".opus", ".webm"):
+        ext = ".mp3"
+    tmp_path = _os.path.join(tempfile.gettempdir(), f"{job_id}{ext}")
+
+    try:
+        if file_key.startswith("r2:"):
+            r2_key = file_key[3:]
+            from storage import download_video, delete_video
+            download_video(r2_key, tmp_path)
+            delete_video(r2_key)
+            sha256 = _sha256_file(tmp_path)
+            log.info("Worker: retrieved audio from R2: job=%s key=%s size=%d bytes", job_id, r2_key, _os.path.getsize(tmp_path))
+        else:
+            file_bytes = r.get(file_key)
+            if not file_bytes:
+                result = {"job_status": "error", "error": "Audio file expired from queue. Please re-upload."}
+                _store_result(r, job_id, result)
+                return result
+            with open(tmp_path, "wb") as fh:
+                fh.write(file_bytes)
+            r.delete(file_key)
+            sha256 = hashlib.sha256(file_bytes).hexdigest()
+
+        detail = analyze_audio(tmp_path)
+        audio_score = int(detail.get("audio_ai_score", 50))
+        authenticity = max(0, min(100, 100 - audio_score))
+        # Keep audio scoring aligned with current VeriFYD certificate thresholds:
+        # 55–100 = REAL / Certified, 40–54 = UNDETERMINED, 0–39 = AI/Tampering Detected.
+        if authenticity >= 55:
+            label = "REAL"
+        elif authenticity >= 40:
+            label = "UNDETERMINED"
+        else:
+            label = "AI"
+
+        ui_text, color, certify = AUDIO_LABEL_UI.get(label, ("AUDIO UNDETERMINED", "blue", False))
+
+        increment_user_uses(email)
+        insert_certificate(
+            cert_id=job_id,
+            email=email,
+            original_file=filename,
+            label=label,
+            authenticity=authenticity,
+            ai_score=audio_score,
+            sha256=sha256,
+            original_sha256=sha256,
+        )
+
+        try:
+            update_certificate_hashes(job_id, original_sha256=sha256)
+        except Exception as hash_e:
+            log.warning("Worker: original hash persistence failed for %s: %s", job_id, hash_e)
+
+        result = {
+            "status": ui_text,
+            "authenticity_score": authenticity,
+            "color": color,
+            "label": label,
+            "media_type": "audio",
+            "job_status": "complete",
+            "audio_ready": False,
+            "certified_audio_ready": False,
+            "audio_score": audio_score,
+            "base_audio_score": detail.get("base_audio_ai_score", audio_score),
+            "audio_confidence": detail.get("confidence", "low"),
+            "audio_evidence": detail.get("evidence", []),
+            "audio_duration": detail.get("audio_duration", 0),
+            "duration_mismatch": detail.get("duration_mismatch", 0),
+            "stereo_corr": detail.get("stereo_corr"),
+            "gpt_audio_score": detail.get("gpt_audio_score", 0),
+            "gpt_audio_available": detail.get("gpt_audio_available", False),
+            "gpt_audio_adjustment": detail.get("gpt_audio_adjustment", 0),
+            "gpt_audio_reasoning": detail.get("gpt_audio_reasoning", ""),
+            "gpt_audio_flags": detail.get("gpt_audio_flags", []),
+            "signal_score": audio_score,
+            "gpt_score": detail.get("gpt_audio_score", 0),
+            "gpt_reasoning": _audio_reasoning_for_ui(detail, label),
+            "gpt_flags": detail.get("evidence", [])[:5],
+            "sha256": sha256,
+            "certificate_id": job_id,
+        }
+
+        if certify:
+            result["download_url"] = f"{BASE_URL}/download-audio/{job_id}"
+            result["share_url"] = result["download_url"]
+            result["download_type"] = "certified_audio"
+            result["certification_status"] = "processing"
+            result["certified_audio_ready"] = False
+
+        _store_result(r, job_id, result)
+
+        if certify:
+            certified_path = _os.path.join(tempfile.gettempdir(), f"cert_audio_{job_id}{ext}")
+            download_url = f"{BASE_URL}/download-audio/{job_id}"
+            try:
+                log.info(
+                    "Worker: creating certified audio: job=%s src=%s dest=%s label=%s auth=%s",
+                    job_id, tmp_path, certified_path, label, authenticity,
+                )
+                _create_certified_audio_copy(
+                    src_path=tmp_path,
+                    dest_path=certified_path,
+                    cert_id=job_id,
+                    authenticity=authenticity,
+                    sha256=sha256,
+                    filename=filename,
+                )
+                _cert_exists = _os.path.exists(certified_path)
+                _cert_size = _os.path.getsize(certified_path) if _cert_exists else 0
+                log.info(
+                    "Worker: certified audio created: job=%s exists=%s size=%d path=%s",
+                    job_id, _cert_exists, _cert_size, certified_path,
+                )
+                if not _cert_exists or _cert_size < 256:
+                    raise RuntimeError("Certified audio output missing or too small")
+
+                certified_audio_sha256 = _sha256_file(certified_path)
+                result["certified_audio_sha256"] = certified_audio_sha256
+                result["certified_file_hash"] = certified_audio_sha256
+                try:
+                    update_certificate_hashes(
+                        job_id,
+                        original_sha256=sha256,
+                        certified_audio_sha256=certified_audio_sha256,
+                        certified_file_hash=certified_audio_sha256,
+                    )
+                    log.info("Worker: certified audio sha256 calculated job=%s hash=%s", job_id, certified_audio_sha256)
+                except Exception as hash_e:
+                    log.warning("Worker: certified audio hash persistence failed for %s: %s", job_id, hash_e)
+
+                try:
+                    _plan = _gus(email).get("plan", "free")
+                except Exception:
+                    _plan = "free"
+
+                _stored = False
+                try:
+                    from storage import r2_available, upload_certified_audio
+                    if r2_available():
+                        log.info(
+                            "Worker: uploading certified audio to R2: job=%s path=%s size=%d plan=%s",
+                            job_id, certified_path, _os.path.getsize(certified_path), _plan,
+                        )
+                        upload_certified_audio(job_id, certified_path, _plan, ext)
+                        _os.remove(certified_path)
+                        _stored = True
+                        log.info("Worker: certified audio stored in R2: job=%s plan=%s ext=%s", job_id, _plan, ext)
+                except Exception as _r2e:
+                    log.warning("R2 audio cert upload failed, falling back to Redis: %s", _r2e)
+
+                if not _stored and _os.path.exists(certified_path):
+                    _cert_ttl = {"free": 86400, "creator": 259200, "pro": 604800, "enterprise": 2592000}.get(_plan, 86400)
+                    with open(certified_path, "rb") as af:
+                        cert_bytes = af.read()
+                    r.setex(f"audiocert:{job_id}", _cert_ttl, cert_bytes)
+                    r.setex(f"audiocert:{job_id}:ext", _cert_ttl, ext)
+                    _os.remove(certified_path)
+                    log.info("Worker: certified audio stored in Redis fallback: job=%s ttl=%s", job_id, _cert_ttl)
+
+                if email and "@" in email:
+                    try:
+                        sent = send_certification_email(email, job_id, authenticity, filename, download_url, is_audio=True)
+                        log.info("Worker: audio certification email sent=%s job=%s email=%s", sent, job_id, email)
+                    except Exception as em:
+                        log.warning("Worker: audio certification email failed for %s: %s", job_id, em)
+
+                result["audio_ready"] = True
+                result["certified_audio_ready"] = True
+                result["certification_status"] = "ready"
+                result["download_url"] = download_url
+                result["share_url"] = download_url
+                result["download_type"] = "certified_audio"
+                _store_result(r, job_id, result)
+            except Exception as cert_err:
+                log.error("Worker: audio certification failed for %s: %s", job_id, cert_err)
+                result["audio_ready"] = False
+                result["certified_audio_ready"] = False
+                result["certification_status"] = "failed"
+                result["certification_error"] = "Certified audio generation failed, but analysis completed."
+                _store_result(r, job_id, result)
+
+        log.info("Worker: audio detection complete job=%s label=%s auth=%d score=%d", job_id, label, authenticity, audio_score)
+        return result
+    except Exception as e:
+        log.exception("Worker: audio job %s failed", job_id)
+        result = {"job_status": "error", "error": str(e)[:300]}
+        _store_result(r, job_id, result)
+        return result
+    finally:
+        if _os.path.exists(tmp_path):
+            _os.remove(tmp_path)
+            log.info("Worker: cleaned up audio temp file %s", tmp_path)
+
+
+
+def _create_certified_audio_copy(src_path: str, dest_path: str, cert_id: str, authenticity: int, sha256: str, filename: str) -> None:
+    """
+    Create a certified audio artifact without audible watermarking.
+
+    Preferred path uses ffmpeg stream-copy with metadata tags, preserving the
+    original audio frames where the container supports it. Fallback is byte copy.
+    """
+    import os as _os
+    import shutil
+    import subprocess
+
+    metadata_args = [
+        "-metadata", "title=VeriFYD Certified Audio",
+        "-metadata", f"comment=VeriFYD Certificate ID: {cert_id}; Authenticity Score: {authenticity}; SHA-256: {sha256}",
+        "-metadata", "encoded_by=VeriFYD",
+        "-metadata", f"verifyd_certificate_id={cert_id}",
+        "-metadata", f"verifyd_authenticity={authenticity}",
+        "-metadata", f"verifyd_original_sha256={sha256}",
+        "-metadata", f"verifyd_original_filename={filename[:180]}",
+    ]
+
+    cmd = [
+        "ffmpeg", "-y", "-i", src_path,
+        "-vn", "-map", "0:a:0",
+        "-c:a", "copy",
+        *metadata_args,
+        dest_path,
+    ]
+    try:
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=90)
+        if proc.returncode == 0 and _os.path.exists(dest_path) and _os.path.getsize(dest_path) > 256:
+            return
+        log.warning("Certified audio ffmpeg metadata copy failed, falling back to byte copy: %s", proc.stderr.decode(errors="replace")[-200:])
+    except Exception as e:
+        log.warning("Certified audio ffmpeg metadata copy exception, falling back to byte copy: %s", e)
+
+    shutil.copyfile(src_path, dest_path)
+
+
+
+def _audio_reasoning_for_ui(detail: dict, label: str) -> str:
+    """Short user-safe explanation for standalone audio results."""
+    evidence = detail.get("evidence", []) if isinstance(detail, dict) else []
+    evidence_text = "; ".join(str(x) for x in evidence[:3])
+    if not evidence_text:
+        evidence_text = "Audio forensic signals were limited or inconclusive."
+    gpt_note = ""
+    if isinstance(detail, dict) and detail.get("gpt_audio_available"):
+        gpt_note = f" Spectrogram review nudged the score {int(detail.get('gpt_audio_adjustment', 0)):+d}."
+    if label == "REAL":
+        return f"Audio analysis found more natural recording characteristics than synthetic-audio indicators. {evidence_text}{gpt_note}"
+    if label == "AI":
+        return f"Audio analysis found synthetic-media indicators in the track. {evidence_text}{gpt_note}"
+    return f"Audio analysis was mixed or inconclusive. {evidence_text}{gpt_note}"
+
+
+
+
 def process_photo_upload_job(file_key: str, filename: str, email: str) -> dict:
     """Background job: retrieve photo from R2/Redis, analyze it, stamp if REAL, store result."""
     import os as _os
@@ -294,7 +575,7 @@ def process_photo_upload_job(file_key: str, filename: str, email: str) -> dict:
     import hashlib
     from rq import get_current_job
     from photo_detection import run_photo_detection
-    from database import insert_certificate, increment_user_uses, get_user_status as _gus
+    from database import insert_certificate, increment_user_uses, get_user_status as _gus, update_certificate_hashes
     from config import BASE_URL
     from emailer import send_certification_email
 
@@ -345,6 +626,11 @@ def process_photo_upload_job(file_key: str, filename: str, email: str) -> dict:
             ai_score=detail["ai_score"],
             sha256=sha256,
         )
+
+        try:
+            update_certificate_hashes(job_id, original_sha256=sha256)
+        except Exception as hash_e:
+            log.warning("Worker: photo original hash persistence failed for %s: %s", job_id, hash_e)
 
         result = {
             "status": ui_text,
@@ -417,6 +703,13 @@ def process_photo_upload_job(file_key: str, filename: str, email: str) -> dict:
 
             if not _os.path.exists(certified_path) or _os.path.getsize(certified_path) < 1000:
                 raise RuntimeError("Certified photo was not created or was too small.")
+
+            certified_photo_sha256 = _sha256_file(certified_path)
+            log.info("Worker: certified photo sha256 calculated job=%s hash=%s", job_id, certified_photo_sha256)
+            try:
+                update_certificate_hashes(job_id, original_sha256=sha256, certified_photo_sha256=certified_photo_sha256)
+            except Exception as hash_e:
+                log.warning("Worker: certified photo hash persistence failed for %s: %s", job_id, hash_e)
 
             try:
                 _plan = _gus(email).get("plan", "free")
@@ -524,7 +817,7 @@ def process_photo_link_job(job_id: str, image_url: str, email: str) -> dict:
             pass
 
         from photo_detection import run_photo_detection
-        from database import insert_certificate, increment_user_uses, get_user_status as _gus
+        from database import insert_certificate, increment_user_uses, get_user_status as _gus, update_certificate_hashes
         from config import BASE_URL
         from emailer import send_certification_email
 
@@ -545,6 +838,11 @@ def process_photo_link_job(job_id: str, image_url: str, email: str) -> dict:
             ai_score=detail["ai_score"],
             sha256=sha256,
         )
+
+        try:
+            update_certificate_hashes(job_id, original_sha256=sha256)
+        except Exception as hash_e:
+            log.warning("Worker: photo original hash persistence failed for %s: %s", job_id, hash_e)
 
         result = {
             "status": ui_text,
@@ -578,6 +876,13 @@ def process_photo_link_job(job_id: str, image_url: str, email: str) -> dict:
 
                 if not os.path.exists(certified_path) or os.path.getsize(certified_path) < 1000:
                     raise RuntimeError("Certified linked photo was not created or was too small.")
+
+                certified_photo_sha256 = _sha256_file(certified_path)
+                log.info("Worker: certified linked photo sha256 calculated job=%s hash=%s", job_id, certified_photo_sha256)
+                try:
+                    update_certificate_hashes(job_id, original_sha256=sha256, certified_photo_sha256=certified_photo_sha256)
+                except Exception as hash_e:
+                    log.warning("Worker: certified linked photo hash persistence failed for %s: %s", job_id, hash_e)
 
                 try:
                     _plan = _gus(email).get("plan", "free")
@@ -671,6 +976,11 @@ def process_link_job(job_id: str, video_url: str, email: str, double_count: bool
         for _ in range(uses):
             increment_user_uses(email)
         insert_certificate(cert_id=job_id, email=email, original_file=video_url, label=label, authenticity=authenticity, ai_score=detail["ai_score"], sha256=None)
+        try:
+            update_certificate_hashes(job_id, original_sha256=sha256)
+        except Exception as hash_e:
+            log.warning("Worker: original hash persistence failed for %s: %s", job_id, hash_e)
+
         result = {
             "status": ui_text,
             "authenticity_score": authenticity,
@@ -902,7 +1212,7 @@ def process_document_upload_job(file_key: str, filename: str, email: str) -> dic
     import hashlib as _hashlib
     from rq import get_current_job
     from document_detection import run_document_detection
-    from database import insert_certificate, increment_user_uses, get_user_status as _gus
+    from database import insert_certificate, increment_user_uses, get_user_status as _gus, update_certificate_hashes
     from config import BASE_URL
     from emailer import send_certification_email
 
@@ -984,6 +1294,11 @@ def process_document_upload_job(file_key: str, filename: str, email: str) -> dic
         )
 
         risk_report = detail.get("document_risk_report") or detail.get("risk_report", {})
+        try:
+            update_certificate_hashes(job_id, original_sha256=sha256)
+        except Exception as hash_e:
+            log.warning("Worker: original hash persistence failed for %s: %s", job_id, hash_e)
+
         result = {
             "status": ui_text,
             "authenticity_score": authenticity,
@@ -1046,6 +1361,20 @@ def process_document_upload_job(file_key: str, filename: str, email: str) -> dic
                 log.info("Worker: stamped certified document created: job=%s exists=%s size=%d original_size=%d path=%s", job_id, _cert_exists, _cert_size, _src_size, certified_path)
 
                 if _cert_exists and _cert_size > 1000:
+                    certified_document_sha256 = _sha256_file(certified_path)
+                    result["certified_document_sha256"] = certified_document_sha256
+                    result["certified_file_hash"] = certified_document_sha256
+                    log.info("Worker: certified document sha256 calculated job=%s hash=%s", job_id, certified_document_sha256)
+                    try:
+                        update_certificate_hashes(
+                            cert_id=job_id,
+                            original_sha256=sha256,
+                            certified_document_sha256=certified_document_sha256,
+                            certified_file_hash=certified_document_sha256,
+                        )
+                    except Exception as hash_e:
+                        log.warning("Worker: certified document hash persistence failed for %s: %s", job_id, hash_e)
+
                     try:
                         _plan = _gus(email).get("plan", "free")
                     except Exception:
@@ -1092,7 +1421,18 @@ def process_document_upload_job(file_key: str, filename: str, email: str) -> dic
                         )
                         result["universal_certified_file"] = "created"
                         result["certified_file_package"] = "present"
-                        log.info("Worker: universal certified file package created: job=%s path=%s size=%d", job_id, package_path, _os.path.getsize(package_path))
+                        certified_file_package_sha256 = _sha256_file(package_path)
+                        result["certified_file_package_sha256"] = certified_file_package_sha256
+                        log.info("Worker: universal certified file package created: job=%s path=%s size=%d hash=%s", job_id, package_path, _os.path.getsize(package_path), certified_file_package_sha256)
+                        try:
+                            update_certificate_hashes(
+                                cert_id=job_id,
+                                original_sha256=sha256,
+                                certified_document_sha256=result.get("certified_document_sha256"),
+                                certified_file_package_sha256=certified_file_package_sha256,
+                            )
+                        except Exception as hash_e:
+                            log.warning("Worker: certified file package hash persistence failed for %s: %s", job_id, hash_e)
                     except Exception as pkg_e:
                         result["universal_certified_file"] = "failed"
                         result["certified_file_package_error"] = str(pkg_e)[:200]
@@ -1200,26 +1540,11 @@ def process_document_upload_job(file_key: str, filename: str, email: str) -> dic
             log.info("Worker: cleaned up document temp file %s", tmp_path)
 
 
-# ─────────────────────────────────────────────────────────────
-#  Keepalive job — prevents worker cold starts
-# ─────────────────────────────────────────────────────────────
-def keepalive_ping():
-    """Lightweight no-op job enqueued every 8 minutes by main.py scheduler."""
-    import time as _time
-    _log_worker_runtime_dependencies("keepalive", force=True)
-    _ts = _time.strftime("%Y-%m-%d %H:%M:%S UTC", _time.gmtime())
-    log.info("Keepalive ping: worker alive at %s — models cached in memory", _ts)
-    return {"status": "alive", "ts": _ts}
-
-
-
-
-
 
 
 
 # ─────────────────────────────────────────────────────────────
-#  Trust Desk ZIP intake skeleton
+#  Trust Desk ZIP intake + child certification routing
 # ─────────────────────────────────────────────────────────────
 def process_trust_desk_zip_job(
     file_key: str,
@@ -1231,16 +1556,17 @@ def process_trust_desk_zip_job(
     notes: str = "",
 ) -> dict:
     """
-    Trust Desk Phase 1 worker:
+    Trust Desk Phase 2A worker:
       - retrieve submitted ZIP
       - safely extract it
       - classify and hash all files
-      - build a Trust Desk return ZIP package
+      - enqueue supported files into existing video/photo/audio/document certification engines
+      - build a Trust Desk return ZIP package containing inventory + child certificate IDs
       - upload the package to R2
       - store a pollable job result
 
-    This is intentionally an intake/inventory skeleton. Child file certification
-    routing will be added in the next implementation phase.
+    This phase routes child certification jobs but does not yet wait for them
+    and reassemble completed certified outputs into the master ZIP.
     """
     from rq import get_current_job
     from config import BASE_URL
@@ -1276,9 +1602,10 @@ def process_trust_desk_zip_job(
             raise ValueError("Trust Desk intake currently accepts ZIP files only")
 
         original_zip_sha256 = sha256_file(zip_path)
-        log.info("Trust Desk: starting ZIP intake job=%s email=%s file=%s sha256=%s", job_id, email, filename, original_zip_sha256)
+        log.info("Trust Desk: starting ZIP intake and routing job=%s email=%s file=%s sha256=%s", job_id, email, filename, original_zip_sha256)
 
-        # Count this as one Trust Desk intake use for MVP. Later phases can count per-file if desired.
+        # Count this as one Trust Desk intake use for MVP. Child file jobs also run
+        # through existing engines; usage policy can be refined later.
         try:
             increment_user_uses(email)
         except Exception as use_exc:
@@ -1295,6 +1622,8 @@ def process_trust_desk_zip_job(
             submitter_email=email,
             case_number=case_number,
             notes=notes,
+            base_url=BASE_URL,
+            route_certifications=True,
         )
 
         plan = "free"
@@ -1338,10 +1667,18 @@ def process_trust_desk_zip_job(
             "trust_desk_package_sha256": manifest.get("trust_desk_package_sha256"),
             "summary": summary,
             "manifest": manifest,
-            "message": "Trust Desk ZIP intake, file inventory, hash manifest, and return package assembly completed.",
+            "message": "Trust Desk ZIP intake, file inventory, hash manifest, child certification routing, and return package assembly completed.",
         }
         _store_result(r, job_id, result)
-        log.info("Trust Desk: complete job=%s total=%s supported=%s unsupported=%s", job_id, summary.get("total_files"), summary.get("supported_files"), summary.get("unsupported_files"))
+        log.info(
+            "Trust Desk: complete job=%s total=%s supported=%s unsupported=%s routed=%s routing_failed=%s",
+            job_id,
+            summary.get("total_files"),
+            summary.get("supported_files"),
+            summary.get("unsupported_files"),
+            summary.get("certification_jobs_queued"),
+            summary.get("certification_enqueue_failures"),
+        )
         return result
 
     except Exception as exc:
@@ -1360,3 +1697,21 @@ def process_trust_desk_zip_job(
             shutil.rmtree(tmp_root, ignore_errors=True)
         except Exception:
             pass
+
+
+# ─────────────────────────────────────────────────────────────
+#  Keepalive job — prevents worker cold starts
+# ─────────────────────────────────────────────────────────────
+def keepalive_ping():
+    """Lightweight no-op job enqueued every 8 minutes by main.py scheduler."""
+    import time as _time
+    _log_worker_runtime_dependencies("keepalive", force=True)
+    _ts = _time.strftime("%Y-%m-%d %H:%M:%S UTC", _time.gmtime())
+    log.info("Keepalive ping: worker alive at %s — models cached in memory", _ts)
+    return {"status": "alive", "ts": _ts}
+
+
+
+
+
+
