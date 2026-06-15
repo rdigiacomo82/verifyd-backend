@@ -111,6 +111,7 @@ def _enqueue_file_job(
     worker_func,
     job_timeout: int = 900,
     queue_name: Optional[str] = None,
+    suppress_email: bool = False,
 ):
     """
     Common upload helper:
@@ -139,6 +140,7 @@ def _enqueue_file_job(
             f"r2:{r2_key}",
             filename,
             email,
+            suppress_email,
             job_id=job_id,
             job_timeout=job_timeout,
             result_ttl=RESULT_TTL_SECONDS,
@@ -151,6 +153,7 @@ def _enqueue_file_job(
         file_key,
         filename,
         email,
+        suppress_email,
         job_id=job_id,
         job_timeout=job_timeout,
         result_ttl=RESULT_TTL_SECONDS,
@@ -160,7 +163,7 @@ def _enqueue_file_job(
 # ─────────────────────────────────────────────────────────────
 #  Video helpers
 # ─────────────────────────────────────────────────────────────
-def enqueue_upload(job_id: str, raw_path: str, filename: str, email: str):
+def enqueue_upload(job_id: str, raw_path: str, filename: str, email: str, suppress_email: bool = False):
     """Store uploaded video and enqueue video analysis."""
     from worker import process_upload_job
 
@@ -171,6 +174,7 @@ def enqueue_upload(job_id: str, raw_path: str, filename: str, email: str):
         email=email,
         worker_func=process_upload_job,
         job_timeout=1200,
+        suppress_email=suppress_email,
     )
 
 
@@ -196,7 +200,7 @@ def enqueue_link(job_id: str, video_url: str, email: str, double_count: bool = F
 # ─────────────────────────────────────────────────────────────
 #  Photo helpers
 # ─────────────────────────────────────────────────────────────
-def enqueue_photo_upload(job_id: str, raw_path: str, filename: str, email: str):
+def enqueue_photo_upload(job_id: str, raw_path: str, filename: str, email: str, suppress_email: bool = False):
     """Store uploaded photo and enqueue photo analysis."""
     from worker import process_photo_upload_job
 
@@ -207,6 +211,7 @@ def enqueue_photo_upload(job_id: str, raw_path: str, filename: str, email: str):
         email=email,
         worker_func=process_photo_upload_job,
         job_timeout=600,
+        suppress_email=suppress_email,
     )
 
 
@@ -230,7 +235,7 @@ def enqueue_photo_link(job_id: str, image_url: str, email: str):
 # ─────────────────────────────────────────────────────────────
 #  Audio helpers
 # ─────────────────────────────────────────────────────────────
-def enqueue_audio_upload(job_id: str, raw_path: str, filename: str, email: str):
+def enqueue_audio_upload(job_id: str, raw_path: str, filename: str, email: str, suppress_email: bool = False):
     """Store uploaded standalone audio and enqueue audio analysis."""
     from worker import process_audio_upload_job
 
@@ -241,13 +246,14 @@ def enqueue_audio_upload(job_id: str, raw_path: str, filename: str, email: str):
         email=email,
         worker_func=process_audio_upload_job,
         job_timeout=600,
+        suppress_email=suppress_email,
     )
 
 
 # ─────────────────────────────────────────────────────────────
 #  Document helpers — VeriFYD Docs MVP
 # ─────────────────────────────────────────────────────────────
-def enqueue_document_upload(job_id: str, raw_path: str, filename: str, email: str):
+def enqueue_document_upload(job_id: str, raw_path: str, filename: str, email: str, suppress_email: bool = False):
     """
     Store uploaded document and enqueue document authentication.
 
@@ -267,6 +273,7 @@ def enqueue_document_upload(job_id: str, raw_path: str, filename: str, email: st
         worker_func=process_document_upload_job,
         job_timeout=300,
         queue_name=DOCUMENT_QUEUE_NAME,
+        suppress_email=suppress_email,
     )
 
 

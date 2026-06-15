@@ -190,16 +190,16 @@ def enqueue_child_certification_jobs(
 
         try:
             if media_type == "video":
-                enqueue_upload(child_job_id, child_tmp, filename, submitter_email)
+                enqueue_upload(child_job_id, child_tmp, filename, submitter_email, suppress_email=True)
                 download_url = f"{base_url}/download/{child_job_id}" if base_url else ""
             elif media_type == "photo":
-                enqueue_photo_upload(child_job_id, child_tmp, filename, submitter_email)
+                enqueue_photo_upload(child_job_id, child_tmp, filename, submitter_email, suppress_email=True)
                 download_url = f"{base_url}/download-photo/{child_job_id}" if base_url else ""
             elif media_type == "audio":
-                enqueue_audio_upload(child_job_id, child_tmp, filename, submitter_email)
+                enqueue_audio_upload(child_job_id, child_tmp, filename, submitter_email, suppress_email=True)
                 download_url = f"{base_url}/download-audio/{child_job_id}" if base_url else ""
             elif media_type == "document":
-                enqueue_document_upload(child_job_id, child_tmp, filename, submitter_email)
+                enqueue_document_upload(child_job_id, child_tmp, filename, submitter_email, suppress_email=True)
                 download_url = f"{base_url}/download-document/{child_job_id}" if base_url else ""
             else:
                 row["processing_status"] = "preserved_unsupported"
@@ -348,3 +348,103 @@ def build_trust_desk_package(
     except Exception:
         pass
     return manifest
+
+
+
+def rebuild_trust_desk_package(
+    *,
+    manifest: Dict[str, Any],
+    extract_dir: str,
+    output_zip_path: str,
+) -> None:
+    """
+    Rebuild the Trust Desk ZIP after child certification results are available.
+    This final package contains the original files, completed manifest, hash CSV,
+    and verification link summary. A later phase can embed certified binaries.
+    """
+    job_id = str(manifest.get("trust_desk_job_id") or "trustdesk")
+    work_dir = Path(output_zip_path).parent / f"trustdesk_final_build_{job_id}"
+    if work_dir.exists():
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+    (work_dir / "00_Master_Report").mkdir(parents=True, exist_ok=True)
+    (work_dir / "01_Original_Files").mkdir(parents=True, exist_ok=True)
+    (work_dir / "02_Certified_Files").mkdir(parents=True, exist_ok=True)
+    (work_dir / "03_Evidence_Packages").mkdir(parents=True, exist_ok=True)
+    (work_dir / "04_Unsupported_Files").mkdir(parents=True, exist_ok=True)
+    (work_dir / "05_Verification_Links").mkdir(parents=True, exist_ok=True)
+
+    items = manifest.get("items", []) if isinstance(manifest.get("items"), list) else []
+
+    (work_dir / "00_Master_Report" / "manifest.json").write_text(
+        json.dumps(manifest, indent=2), encoding="utf-8"
+    )
+    write_hash_inventory_csv(str(work_dir / "00_Master_Report" / "hash_inventory.csv"), items)
+
+    summary = manifest.get("summary", {}) if isinstance(manifest.get("summary"), dict) else {}
+    readme = f"""VeriFYD Trust Desk Final Package
+
+Trust Desk Job ID: {job_id}
+Organization: {manifest.get('organization') or 'Not provided'}
+Case / Claim / Matter Number: {manifest.get('case_number') or 'Not provided'}
+Submitter: {manifest.get('submitter_name') or 'Not provided'} <{manifest.get('submitter_email') or ''}>
+Generated UTC: {manifest.get('generated_at_utc') or ''}
+Finalized UTC: {manifest.get('finalized_at_utc') or ''}
+
+Final Status:
+This package was generated after child certification routing completed and child results were collected.
+
+Summary:
+- Total files: {summary.get('total_files', 0)}
+- Supported files: {summary.get('supported_files', 0)}
+- Child certifications queued: {summary.get('certification_jobs_queued', 0)}
+- Child certifications complete: {summary.get('child_certifications_complete', 0)}
+- Child certifications failed: {summary.get('child_certifications_failed', 0)}
+- Child certifications timed out: {summary.get('child_certifications_timed_out', 0)}
+
+See 00_Master_Report/manifest.json and 05_Verification_Links/verification_links.txt for details.
+"""
+    (work_dir / "00_Master_Report" / "TrustDesk_ReadMe.txt").write_text(readme, encoding="utf-8")
+
+    links_lines = [
+        "VeriFYD Trust Desk Verification Links",
+        f"Trust Desk Job ID: {job_id}",
+        "",
+    ]
+    for idx, item in enumerate(items, start=1):
+        if item.get("certificate_id"):
+            links_lines.append(f"{idx}. {item.get('relative_path') or item.get('filename')}")
+            links_lines.append(f"   Type: {item.get('media_type', '')}")
+            links_lines.append(f"   Status: {item.get('processing_status', '')}")
+            links_lines.append(f"   Certificate ID: {item.get('certificate_id')}")
+            if item.get("authenticity_score") != "":
+                links_lines.append(f"   Authenticity: {item.get('authenticity_score')}%")
+            if item.get("verification_link"):
+                links_lines.append(f"   Verify: {item.get('verification_link')}")
+            if item.get("download_url"):
+                links_lines.append(f"   Download: {item.get('download_url')}")
+            links_lines.append("")
+    if len(links_lines) <= 3:
+        links_lines.append("No child certificate links were created for this package.")
+    (work_dir / "05_Verification_Links" / "verification_links.txt").write_text(
+        "\n".join(links_lines) + "\n", encoding="utf-8"
+    )
+
+    original_root = Path(extract_dir).resolve()
+    for src in original_root.rglob("*"):
+        if src.is_file():
+            rel = src.relative_to(original_root)
+            dest = work_dir / "01_Original_Files" / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dest)
+            if classify_file(src.name) == "unsupported":
+                unsupported_dest = work_dir / "04_Unsupported_Files" / rel
+                unsupported_dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, unsupported_dest)
+
+    with zipfile.ZipFile(output_zip_path, "w", compression=zipfile.ZIP_DEFLATED) as out:
+        for src in work_dir.rglob("*"):
+            if src.is_file():
+                out.write(src, src.relative_to(work_dir).as_posix())
+
+    shutil.rmtree(work_dir, ignore_errors=True)

@@ -140,7 +140,7 @@ _log_worker_runtime_dependencies("module_import")
 
 
 
-def process_upload_job(file_key: str, filename: str, email: str) -> dict:
+def process_upload_job(file_key: str, filename: str, email: str, suppress_email: bool = False) -> dict:
     """Background job: retrieve uploaded video, analyze it, store result."""
     from rq import get_current_job
     from detection import run_detection_multiclip
@@ -266,7 +266,10 @@ def process_upload_job(file_key: str, filename: str, email: str) -> dict:
 
                 if email and "@" in email:
                     try:
-                        send_certification_email(email, job_id, authenticity, filename, download_url)
+                        if suppress_email:
+                            log.info("Worker: certification email suppressed for child job=%s", job_id)
+                        else:
+                            send_certification_email(email, job_id, authenticity, filename, download_url)
                     except Exception as e:
                         log.warning("Worker: email failed for %s: %s", job_id, e)
 
@@ -292,7 +295,7 @@ def process_upload_job(file_key: str, filename: str, email: str) -> dict:
 
 
 
-def process_audio_upload_job(file_key: str, filename: str, email: str) -> dict:
+def process_audio_upload_job(file_key: str, filename: str, email: str, suppress_email: bool = False) -> dict:
     """Background job: retrieve standalone audio, analyze it, certify REAL audio, and store result."""
     import os as _os
     import tempfile
@@ -476,7 +479,11 @@ def process_audio_upload_job(file_key: str, filename: str, email: str) -> dict:
 
                 if email and "@" in email:
                     try:
-                        sent = send_certification_email(email, job_id, authenticity, filename, download_url, is_audio=True)
+                        if suppress_email:
+                            sent = False
+                            log.info("Worker: audio certification email suppressed for child job=%s", job_id)
+                        else:
+                            sent = send_certification_email(email, job_id, authenticity, filename, download_url, is_audio=True)
                         log.info("Worker: audio certification email sent=%s job=%s email=%s", sent, job_id, email)
                     except Exception as em:
                         log.warning("Worker: audio certification email failed for %s: %s", job_id, em)
@@ -568,7 +575,7 @@ def _audio_reasoning_for_ui(detail: dict, label: str) -> str:
 
 
 
-def process_photo_upload_job(file_key: str, filename: str, email: str) -> dict:
+def process_photo_upload_job(file_key: str, filename: str, email: str, suppress_email: bool = False) -> dict:
     """Background job: retrieve photo from R2/Redis, analyze it, stamp if REAL, store result."""
     import os as _os
     import tempfile
@@ -737,7 +744,11 @@ def process_photo_upload_job(file_key: str, filename: str, email: str) -> dict:
 
             if email and "@" in email:
                 try:
-                    sent = send_certification_email(email, job_id, authenticity, filename, download_url, is_photo=True)
+                    if suppress_email:
+                        sent = False
+                        log.info("Worker: photo certification email suppressed for child job=%s", job_id)
+                    else:
+                        sent = send_certification_email(email, job_id, authenticity, filename, download_url, is_photo=True)
                     log.info("Worker: photo certification email sent=%s job=%s email=%s", sent, job_id, email)
                 except Exception as em:
                     log.warning("Worker: photo certification email failed for %s: %s", job_id, em)
@@ -910,7 +921,11 @@ def process_photo_link_job(job_id: str, image_url: str, email: str) -> dict:
 
                 if email and "@" in email:
                     try:
-                        sent = send_certification_email(email, job_id, authenticity, image_url, download_url, is_photo=True)
+                        if suppress_email:
+                            sent = False
+                            log.info("Worker: photo-link certification email suppressed for child job=%s", job_id)
+                        else:
+                            sent = send_certification_email(email, job_id, authenticity, image_url, download_url, is_photo=True)
                         log.info("Worker: linked photo certification email sent=%s job=%s email=%s", sent, job_id, email)
                     except Exception as em:
                         log.warning("Worker: linked photo certification email failed for %s: %s", job_id, em)
@@ -1202,7 +1217,7 @@ def _create_zip_child_certified_artifacts(zip_path: str, *, parent_cert_id: str,
         log.warning("Worker: ZIP expanded certification failed parent=%s error=%s", parent_cert_id, e)
         return artifacts
 
-def process_document_upload_job(file_key: str, filename: str, email: str) -> dict:
+def process_document_upload_job(file_key: str, filename: str, email: str, suppress_email: bool = False) -> dict:
     """
     Background job: retrieve document from R2/Redis, analyze it, store result,
     create the existing certified PDF, and create a universal certified-file ZIP.
@@ -1507,7 +1522,11 @@ def process_document_upload_job(file_key: str, filename: str, email: str) -> dic
 
                     if email and "@" in email:
                         try:
-                            _sent = send_certification_email(email, job_id, authenticity, filename, email_download_url, is_document=True)
+                            if suppress_email:
+                                _sent = False
+                                log.info("Worker: document certification email suppressed for child job=%s", job_id)
+                            else:
+                                _sent = send_certification_email(email, job_id, authenticity, filename, email_download_url, is_document=True)
                             log.info("Worker: document certification email sent=%s job=%s email=%s", _sent, job_id, email)
                         except Exception as _em:
                             log.warning("Worker: document certification email failed for %s: %s", job_id, _em)
@@ -1556,22 +1575,20 @@ def process_trust_desk_zip_job(
     notes: str = "",
 ) -> dict:
     """
-    Trust Desk Phase 2A worker:
+    Trust Desk Phase 2B worker:
       - retrieve submitted ZIP
-      - safely extract it
-      - classify and hash all files
-      - enqueue supported files into existing video/photo/audio/document certification engines
-      - build a Trust Desk return ZIP package containing inventory + child certificate IDs
-      - upload the package to R2
-      - store a pollable job result
-
-    This phase routes child certification jobs but does not yet wait for them
-    and reassemble completed certified outputs into the master ZIP.
+      - safely extract and inventory it
+      - enqueue supported child files into existing certification engines
+      - suppress individual child certification emails
+      - wait for all child jobs to complete
+      - rebuild one final Trust Desk package with completed child results
+      - send one consolidated Trust Desk email
     """
     from rq import get_current_job
     from config import BASE_URL
     from database import get_user_status, increment_user_uses
-    from trust_desk import build_trust_desk_package, sha256_file
+    from trust_desk import build_trust_desk_package, rebuild_trust_desk_package, sha256_file
+    import time as _time
 
     rq_job = get_current_job()
     job_id = rq_job.id if rq_job else file_key.replace("file:", "")
@@ -1582,6 +1599,18 @@ def process_trust_desk_zip_job(
     extract_dir = os.path.join(tmp_root, "extracted")
     output_zip_path = os.path.join(tmp_root, f"VeriFYD_TrustDesk_{job_id}.zip")
     os.makedirs(extract_dir, exist_ok=True)
+
+    def _get_child_result(child_id: str) -> dict:
+        try:
+            data = r.get(f"result:{child_id}")
+            if not data:
+                return {"job_status": "not_found"}
+            if isinstance(data, bytes):
+                data = data.decode("utf-8", errors="replace")
+            obj = json.loads(data)
+            return obj if isinstance(obj, dict) else {"job_status": "error", "error": "Invalid result format"}
+        except Exception as exc:
+            return {"job_status": "error", "error": str(exc)[:200]}
 
     try:
         if file_key.startswith("r2:"):
@@ -1602,15 +1631,16 @@ def process_trust_desk_zip_job(
             raise ValueError("Trust Desk intake currently accepts ZIP files only")
 
         original_zip_sha256 = sha256_file(zip_path)
-        log.info("Trust Desk: starting ZIP intake and routing job=%s email=%s file=%s sha256=%s", job_id, email, filename, original_zip_sha256)
+        log.info("Trust Desk: starting ZIP intake, routing, and final assembly job=%s email=%s file=%s sha256=%s", job_id, email, filename, original_zip_sha256)
 
-        # Count this as one Trust Desk intake use for MVP. Child file jobs also run
-        # through existing engines; usage policy can be refined later.
         try:
             increment_user_uses(email)
         except Exception as use_exc:
             log.warning("Trust Desk: usage increment failed job=%s: %s", job_id, use_exc)
 
+        # Build initial manifest and enqueue child certification jobs. Child jobs are
+        # queued with suppress_email=True so the customer receives one consolidated
+        # Trust Desk response instead of one email per internal file.
         manifest = build_trust_desk_package(
             job_id=job_id,
             source_zip_path=zip_path,
@@ -1626,6 +1656,103 @@ def process_trust_desk_zip_job(
             route_certifications=True,
         )
 
+        items = manifest.get("items", []) if isinstance(manifest, dict) else []
+        child_items = [item for item in items if item.get("certificate_id")]
+        child_ids = [item.get("certificate_id") for item in child_items if item.get("certificate_id")]
+
+        # Store an intermediate result so the frontend can show processing/in-progress.
+        _store_result(r, job_id, {
+            "job_status": "processing",
+            "media_type": "trust_desk",
+            "trust_desk_job_id": job_id,
+            "status_label": "TRUST DESK CERTIFICATION IN PROGRESS",
+            "label": "TRUST_DESK_IN_PROGRESS",
+            "organization": organization,
+            "submitter_name": submitter_name,
+            "case_number": case_number,
+            "original_filename": filename,
+            "original_zip_sha256": original_zip_sha256,
+            "summary": manifest.get("summary", {}),
+            "manifest": manifest,
+            "message": "Trust Desk package received. Internal files are being certified before the final package is delivered.",
+        })
+
+        wait_seconds = int(os.environ.get("TRUST_DESK_CHILD_WAIT_SECONDS", "1200"))
+        poll_seconds = int(os.environ.get("TRUST_DESK_CHILD_POLL_SECONDS", "5"))
+        deadline = _time.time() + max(60, wait_seconds)
+        pending = set(child_ids)
+        child_results = {}
+
+        while pending and _time.time() < deadline:
+            for child_id in list(pending):
+                res = _get_child_result(child_id)
+                if res.get("job_status") == "complete":
+                    child_results[child_id] = res
+                    pending.remove(child_id)
+                elif res.get("job_status") == "error":
+                    child_results[child_id] = res
+                    pending.remove(child_id)
+            if pending:
+                _time.sleep(max(2, poll_seconds))
+
+        # Update manifest rows with completed child results, or timeout status.
+        completed = 0
+        failed = 0
+        timed_out = 0
+        for item in items:
+            child_id = item.get("certificate_id")
+            if not child_id:
+                continue
+            res = child_results.get(child_id)
+            if res and res.get("job_status") == "complete":
+                completed += 1
+                auth = res.get("authenticity_score", "")
+                label = res.get("label", "")
+                item["processing_status"] = "certification_complete"
+                item["authenticity_score"] = auth
+                try:
+                    item["ai_score"] = 100 - int(auth)
+                except Exception:
+                    item["ai_score"] = res.get("ai_score", "")
+                item["label"] = label
+                item["status"] = res.get("status", "")
+                item["download_url"] = item.get("download_url") or res.get("download_url", "")
+                item["verification_link"] = item.get("verification_link") or f"{BASE_URL}/verify-certificate/{child_id}"
+                if res.get("certified_document_sha256"):
+                    item["certified_sha256"] = res.get("certified_document_sha256")
+                elif res.get("certified_audio_sha256"):
+                    item["certified_sha256"] = res.get("certified_audio_sha256")
+                elif res.get("certified_photo_sha256"):
+                    item["certified_sha256"] = res.get("certified_photo_sha256")
+                elif res.get("certified_file_hash"):
+                    item["certified_sha256"] = res.get("certified_file_hash")
+            elif res and res.get("job_status") == "error":
+                failed += 1
+                item["processing_status"] = "certification_failed"
+                item["certification_error"] = res.get("error", "Child certification failed")
+            else:
+                timed_out += 1
+                item["processing_status"] = "certification_timeout"
+                item["certification_error"] = "Child certification did not complete before Trust Desk timeout"
+
+        summary = manifest.setdefault("summary", {})
+        summary["child_certifications_total"] = len(child_ids)
+        summary["child_certifications_complete"] = completed
+        summary["child_certifications_failed"] = failed
+        summary["child_certifications_timed_out"] = timed_out
+        summary["final_package_ready"] = timed_out == 0
+        manifest["phase"] = "phase_2b_final_package_after_child_certification"
+        manifest["finalized_at_utc"] = __import__("datetime").datetime.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+        manifest["next_phase_note"] = "This package was generated after child certification jobs completed or timed out. Future phase can embed certified binaries directly in 02_Certified_Files and 03_Evidence_Packages."
+
+        # Rebuild the Trust Desk ZIP with completed child result metadata and links.
+        rebuild_trust_desk_package(
+            manifest=manifest,
+            extract_dir=extract_dir,
+            output_zip_path=output_zip_path,
+        )
+        manifest["trust_desk_package_sha256"] = sha256_file(output_zip_path)
+
         plan = "free"
         try:
             status = get_user_status(email)
@@ -1637,7 +1764,7 @@ def process_trust_desk_zip_job(
         upload_trust_desk_package(job_id, output_zip_path, plan=plan)
         download_url = f"{BASE_URL}/download-trust-desk/{job_id}"
 
-        summary = manifest.get("summary", {}) if isinstance(manifest, dict) else {}
+        final_status = "TRUST DESK FINAL PACKAGE READY" if timed_out == 0 else "TRUST DESK PACKAGE READY WITH PENDING ITEMS"
         try:
             from emailer import send_trust_desk_ready_email
             sent = send_trust_desk_ready_email(
@@ -1648,15 +1775,15 @@ def process_trust_desk_zip_job(
                 download_url=download_url,
                 summary=summary,
             )
-            log.info("Trust Desk: ready email sent=%s job=%s email=%s", sent, job_id, email)
+            log.info("Trust Desk: consolidated ready email sent=%s job=%s email=%s", sent, job_id, email)
         except Exception as email_exc:
-            log.warning("Trust Desk: ready email failed job=%s: %s", job_id, email_exc)
+            log.warning("Trust Desk: consolidated ready email failed job=%s: %s", job_id, email_exc)
 
         result = {
             "job_status": "complete",
             "media_type": "trust_desk",
             "trust_desk_job_id": job_id,
-            "status_label": "TRUST DESK PACKAGE READY",
+            "status_label": final_status,
             "label": "TRUST_DESK_READY",
             "organization": organization,
             "submitter_name": submitter_name,
@@ -1667,17 +1794,17 @@ def process_trust_desk_zip_job(
             "trust_desk_package_sha256": manifest.get("trust_desk_package_sha256"),
             "summary": summary,
             "manifest": manifest,
-            "message": "Trust Desk ZIP intake, file inventory, hash manifest, child certification routing, and return package assembly completed.",
+            "message": "Trust Desk ZIP intake, file inventory, child certification, final manifest, and consolidated delivery completed.",
         }
         _store_result(r, job_id, result)
         log.info(
-            "Trust Desk: complete job=%s total=%s supported=%s unsupported=%s routed=%s routing_failed=%s",
+            "Trust Desk: final complete job=%s total=%s routed=%s complete=%s failed=%s timed_out=%s",
             job_id,
             summary.get("total_files"),
-            summary.get("supported_files"),
-            summary.get("unsupported_files"),
             summary.get("certification_jobs_queued"),
-            summary.get("certification_enqueue_failures"),
+            completed,
+            failed,
+            timed_out,
         )
         return result
 
