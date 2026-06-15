@@ -296,11 +296,17 @@ def enqueue_trust_desk_zip(
     from worker import process_trust_desk_zip_job
 
     r = _get_redis(decode_responses=False)
-    q = _get_queue(r, DOCUMENT_QUEUE_NAME)
+    # IMPORTANT: keep the Trust Desk parent/finalizer job off the document queue.
+    # The parent waits for document child jobs to finish; if it runs on the same
+    # verifyd-documents queue, it can occupy the only document worker and block
+    # its own PDF/YAML child jobs. The parent itself does not need LibreOffice,
+    # so run it on the general verifyd queue and let document children run on
+    # verifyd-documents.
+    q = _get_queue(r, QUEUE_NAME)
 
     log.info(
         "Enqueue Trust Desk ZIP job: job_id=%s filename=%s queue=%s organization=%s case=%s",
-        job_id, filename, DOCUMENT_QUEUE_NAME, organization, case_number
+        job_id, filename, QUEUE_NAME, organization, case_number
     )
 
     r2_key = _try_store_file_in_r2(job_id, raw_path, filename)
