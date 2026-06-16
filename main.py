@@ -2185,6 +2185,95 @@ def verify_certificate_by_id(cid: str):
     })
 
 
+
+
+def _trust_desk_child_certifications_from_manifest(result_obj: dict) -> list:
+    """
+    Build a frontend-friendly list of child file certificates from the
+    Trust Desk final manifest stored in the parent job result.
+
+    This keeps /job-status/{trust_desk_job_id} useful without changing
+    the underlying Trust Desk package format.
+    """
+    if not isinstance(result_obj, dict):
+        return []
+
+    manifest = result_obj.get("manifest") or {}
+    if not isinstance(manifest, dict):
+        return []
+
+    items = manifest.get("items") or manifest.get("files") or []
+    if not isinstance(items, list):
+        return []
+
+    children = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+
+        cert_id = (
+            item.get("certificate_id")
+            or item.get("cert_id")
+            or item.get("child_certificate_id")
+            or ""
+        )
+        cert_id = str(cert_id or "").strip()
+        if not cert_id:
+            continue
+
+        filename = (
+            item.get("filename")
+            or item.get("original_filename")
+            or item.get("relative_path")
+            or item.get("path")
+            or item.get("name")
+            or ""
+        )
+        filename = str(filename or "").strip()
+
+        media_type = (
+            item.get("media_type")
+            or item.get("file_type")
+            or item.get("category")
+            or item.get("type")
+            or ""
+        )
+        media_type = str(media_type or "").strip().lower()
+
+        auth = (
+            item.get("authenticity_score")
+            if item.get("authenticity_score") not in (None, "")
+            else item.get("authenticity")
+        )
+
+        label = str(item.get("label") or "").strip()
+        status = str(item.get("status") or item.get("display_status") or "").strip()
+
+        download_url = str(item.get("download_url") or "").strip()
+        verification_url = str(item.get("verification_link") or item.get("verification_url") or "").strip()
+
+        # Backend API verification endpoint plus frontend-friendly certificate page URL.
+        backend_verification_url = f"{BASE_URL}/verify-certificate/{cert_id}"
+        frontend_verification_url = f"https://vfvid.com/verify-certificate?cert_id={cert_id}"
+
+        children.append({
+            "filename": filename,
+            "media_type": media_type,
+            "certificate_id": cert_id,
+            "authenticity_score": auth,
+            "label": label,
+            "status": status,
+            "processing_status": item.get("processing_status", ""),
+            "download_url": download_url,
+            "verification_url": verification_url or frontend_verification_url,
+            "frontend_verification_url": frontend_verification_url,
+            "backend_verification_url": backend_verification_url,
+            "sha256": item.get("sha256") or item.get("original_sha256") or "",
+            "certified_sha256": item.get("certified_sha256") or "",
+        })
+
+    return children
+
 @app.get("/job-status/{job_id}")
 def job_status(job_id: str):
     """Poll endpoint for async frontends.
