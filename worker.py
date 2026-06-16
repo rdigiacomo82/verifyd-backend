@@ -1563,6 +1563,268 @@ def process_document_upload_job(file_key: str, filename: str, email: str, suppre
 
 
 # ─────────────────────────────────────────────────────────────
+#  Trust Desk certified artifact embedding helpers
+# ─────────────────────────────────────────────────────────────
+def _trustdesk_safe_arc_name(value: str, fallback: str = "file") -> str:
+    """Return a short filesystem-safe name for a Trust Desk ZIP folder/file."""
+    import re
+    base = str(value or "").replace("\\", "/").split("/")[-1].strip() or fallback
+    base = re.sub(r"[^A-Za-z0-9._ -]+", "_", base).strip(" ._") or fallback
+    return base[:120]
+
+
+def _trustdesk_sha256(path: str) -> str:
+    return _sha256_file(path) if path and os.path.exists(path) else ""
+
+
+def _trustdesk_write_bytes(path: str, data: bytes) -> bool:
+    if not data:
+        return False
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as fh:
+        fh.write(data)
+    return os.path.exists(path) and os.path.getsize(path) > 0
+
+
+def _trustdesk_download_r2_key(key: str, dest_path: str) -> bool:
+    """Best-effort direct R2 object download for certified child artifacts."""
+    try:
+        from storage import _get_client, BUCKET, r2_available
+        if not r2_available():
+            return False
+        client = _get_client()
+        obj = client.get_object(Bucket=BUCKET, Key=key)
+        body = obj.get("Body")
+        data = body.read() if body is not None else b""
+        if _trustdesk_write_bytes(dest_path, data):
+            log.info("Trust Desk: embedded certified artifact from R2 key=%s size=%d", key, os.path.getsize(dest_path))
+            return True
+    except Exception:
+        return False
+    return False
+
+
+def _trustdesk_download_first_r2(candidates: list[tuple[str, str]], dest_dir: str) -> tuple[str, str]:
+    """Try candidate (key, filename) pairs and return (local_path, key)."""
+    for key, filename in candidates:
+        local_path = os.path.join(dest_dir, filename)
+        if _trustdesk_download_r2_key(key, local_path):
+            return local_path, key
+    return "", ""
+
+
+def _trustdesk_redis_bytes(key: str) -> bytes:
+    try:
+        data = _get_redis().get(key)
+        return data if isinstance(data, bytes) else b""
+    except Exception:
+        return b""
+
+
+def _trustdesk_certified_artifact_candidates(child_id: str, media_type: str, original_name: str) -> list[tuple[str, str]]:
+    plans = ("pro", "creator", "enterprise", "free")
+    media_type = (media_type or "").lower()
+    base = f"VeriFYD_Certified_{_trustdesk_safe_arc_name(original_name, child_id)}"
+    candidates: list[tuple[str, str]] = []
+
+    if media_type == "video":
+        for plan in plans:
+            candidates.append((f"certified/{plan}/{child_id}.mp4", f"{base}_{child_id[:8]}.mp4"))
+    elif media_type == "photo":
+        for plan in plans:
+            for ext in (".jpg", ".jpeg", ".png", ".webp"):
+                candidates.append((f"certified-photos/{plan}/{child_id}{ext}", f"{base}_{child_id[:8]}{ext}"))
+    elif media_type == "audio":
+        for plan in plans:
+            for ext in (".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".oga", ".opus", ".webm"):
+                candidates.append((f"certified-audio/{plan}/{child_id}{ext}", f"{base}_{child_id[:8]}{ext}"))
+    else:
+        for plan in plans:
+            candidates.append((f"certified-documents/{plan}/{child_id}.pdf", f"{base}_{child_id[:8]}.pdf"))
+
+    return candidates
+
+
+def _trustdesk_download_child_certified_artifact(
+    *,
+    child_id: str,
+    media_type: str,
+    original_name: str,
+    dest_dir: str,
+) -> tuple[str, str, str]:
+    """Download the stamped/certified child artifact from R2 or Redis fallback."""
+    media_type = (media_type or "").lower()
+    os.makedirs(dest_dir, exist_ok=True)
+
+    local_path, source_key = _trustdesk_download_first_r2(
+        _trustdesk_certified_artifact_candidates(child_id, media_type, original_name),
+        dest_dir,
+    )
+    if local_path:
+        return local_path, source_key, "r2"
+
+    safe_base = _trustdesk_safe_arc_name(original_name, child_id)
+    if media_type == "video":
+        data = _trustdesk_redis_bytes(f"cert:{child_id}")
+        path = os.path.join(dest_dir, f"VeriFYD_Certified_{safe_base}_{child_id[:8]}.mp4")
+        if _trustdesk_write_bytes(path, data):
+            return path, f"cert:{child_id}", "redis"
+    elif media_type == "photo":
+        data = _trustdesk_redis_bytes(f"cert:{child_id}")
+        path = os.path.join(dest_dir, f"VeriFYD_Certified_{safe_base}_{child_id[:8]}.jpg")
+        if _trustdesk_write_bytes(path, data):
+            return path, f"cert:{child_id}", "redis"
+    elif media_type == "audio":
+        data = _trustdesk_redis_bytes(f"audiocert:{child_id}")
+        ext = ".mp3"
+        try:
+            raw_ext = _get_redis().get(f"audiocert:{child_id}:ext")
+            if raw_ext:
+                ext = raw_ext.decode("utf-8", errors="replace") if isinstance(raw_ext, bytes) else str(raw_ext)
+                if not ext.startswith("."):
+                    ext = "." + ext
+        except Exception:
+            pass
+        path = os.path.join(dest_dir, f"VeriFYD_Certified_{safe_base}_{child_id[:8]}{ext}")
+        if _trustdesk_write_bytes(path, data):
+            return path, f"audiocert:{child_id}", "redis"
+    else:
+        data = _trustdesk_redis_bytes(f"doccert:{child_id}")
+        path = os.path.join(dest_dir, f"VeriFYD_Certified_{safe_base}_{child_id[:8]}.pdf")
+        if _trustdesk_write_bytes(path, data):
+            return path, f"doccert:{child_id}", "redis"
+
+    return "", "", ""
+
+
+def _trustdesk_download_child_evidence_package(
+    *,
+    child_id: str,
+    original_name: str,
+    dest_dir: str,
+) -> tuple[str, str, str]:
+    """Download a universal certified evidence package ZIP for document children, when available."""
+    os.makedirs(dest_dir, exist_ok=True)
+    plans = ("pro", "creator", "enterprise", "free")
+    base = _trustdesk_safe_arc_name(original_name, child_id)
+    candidates = [
+        (f"certified-files/{plan}/{child_id}.zip", f"VeriFYD_Evidence_Package_{base}_{child_id[:8]}.zip")
+        for plan in plans
+    ]
+    local_path, source_key = _trustdesk_download_first_r2(candidates, dest_dir)
+    if local_path:
+        return local_path, source_key, "r2"
+
+    data = _trustdesk_redis_bytes(f"filecert:{child_id}")
+    path = os.path.join(dest_dir, f"VeriFYD_Evidence_Package_{base}_{child_id[:8]}.zip")
+    if _trustdesk_write_bytes(path, data):
+        return path, f"filecert:{child_id}", "redis"
+    return "", "", ""
+
+
+def _trustdesk_collect_certified_child_artifacts(
+    *,
+    items: list,
+    child_results: dict,
+    tmp_root: str,
+) -> list[dict]:
+    """Collect certified child artifacts and return ZIP arcname metadata."""
+    artifacts: list[dict] = []
+    artifact_root = os.path.join(tmp_root, "trustdesk_certified_children")
+    os.makedirs(artifact_root, exist_ok=True)
+
+    for idx, item in enumerate(items or [], start=1):
+        child_id = str(item.get("certificate_id") or "").strip()
+        if not child_id:
+            continue
+        res = child_results.get(child_id) or {}
+        if res.get("job_status") != "complete":
+            continue
+
+        media_type = str(res.get("media_type") or item.get("media_type") or "document").lower()
+        original_name = str(item.get("filename") or item.get("relative_path") or child_id)
+        folder = f"{idx:03d}_{_trustdesk_safe_arc_name(original_name, child_id)}"
+        child_dir = os.path.join(artifact_root, child_id)
+
+        local_path, source_key, source_type = _trustdesk_download_child_certified_artifact(
+            child_id=child_id,
+            media_type=media_type,
+            original_name=original_name,
+            dest_dir=child_dir,
+        )
+        if local_path:
+            arcname = f"02_Certified_Files/{folder}/{os.path.basename(local_path)}"
+            sha = _trustdesk_sha256(local_path)
+            item["certified_file"] = arcname
+            item["certified_package_path"] = arcname
+            item["certified_file_sha256"] = sha
+            item["certified_artifact_source"] = source_type
+            artifacts.append({
+                "path": local_path,
+                "arcname": arcname,
+                "kind": "certified_child_file",
+                "certificate_id": child_id,
+                "media_type": media_type,
+                "sha256": sha,
+                "source": source_type,
+                "source_key": source_key,
+            })
+
+        # Document children can also have a universal evidence ZIP containing
+        # the report, hashes, seal data, and original-file preservation metadata.
+        if media_type == "document" or res.get("certified_file_package_url") or res.get("universal_certified_file") in ("created", "stored"):
+            evidence_path, evidence_key, evidence_source = _trustdesk_download_child_evidence_package(
+                child_id=child_id,
+                original_name=original_name,
+                dest_dir=child_dir,
+            )
+            if evidence_path:
+                evidence_arcname = f"03_Evidence_Packages/{folder}/{os.path.basename(evidence_path)}"
+                evidence_sha = _trustdesk_sha256(evidence_path)
+                item["evidence_package"] = evidence_arcname
+                item["evidence_package_sha256"] = evidence_sha
+                item["evidence_package_source"] = evidence_source
+                artifacts.append({
+                    "path": evidence_path,
+                    "arcname": evidence_arcname,
+                    "kind": "child_evidence_package",
+                    "certificate_id": child_id,
+                    "media_type": media_type,
+                    "sha256": evidence_sha,
+                    "source": evidence_source,
+                    "source_key": evidence_key,
+                })
+
+    return artifacts
+
+
+def _trustdesk_append_artifacts_to_zip(output_zip_path: str, artifacts: list[dict]) -> None:
+    """Append collected certified artifacts to the final Trust Desk ZIP."""
+    if not artifacts:
+        return
+    import zipfile
+    with zipfile.ZipFile(output_zip_path, "a", compression=zipfile.ZIP_DEFLATED) as zf:
+        existing = set(zf.namelist())
+        for artifact in artifacts:
+            path = artifact.get("path")
+            arcname = artifact.get("arcname")
+            if not path or not arcname or not os.path.exists(path):
+                continue
+            # Avoid duplicate names if a rerun/rebuild ever appends twice.
+            candidate = arcname
+            n = 2
+            while candidate in existing:
+                root, ext = os.path.splitext(arcname)
+                candidate = f"{root}_{n}{ext}"
+                n += 1
+            artifact["arcname"] = candidate
+            zf.write(path, candidate)
+            existing.add(candidate)
+    log.info("Trust Desk: embedded %d certified artifact(s) in final ZIP", len(artifacts))
+
+
+
+# ─────────────────────────────────────────────────────────────
 #  Trust Desk ZIP intake + child certification routing
 # ─────────────────────────────────────────────────────────────
 def process_trust_desk_zip_job(
@@ -1743,14 +2005,27 @@ def process_trust_desk_zip_job(
         summary["final_package_ready"] = timed_out == 0
         manifest["phase"] = "phase_2b_final_package_after_child_certification"
         manifest["finalized_at_utc"] = __import__("datetime").datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
-        manifest["next_phase_note"] = "This package was generated after child certification jobs completed or timed out. Future phase can embed certified binaries directly in 02_Certified_Files and 03_Evidence_Packages."
+        embedded_artifacts = _trustdesk_collect_certified_child_artifacts(
+            items=items,
+            child_results=child_results,
+            tmp_root=tmp_root,
+        )
+        embedded_artifact_manifest = [
+            {k: v for k, v in artifact.items() if k not in ("path",)}
+            for artifact in embedded_artifacts
+        ]
+        summary["certified_artifacts_embedded"] = len(embedded_artifacts)
+        manifest["certified_artifacts_embedded"] = embedded_artifact_manifest
+        manifest["next_phase_note"] = "This package includes certified child artifacts in 02_Certified_Files when available, and child evidence packages in 03_Evidence_Packages when available."
 
-        # Rebuild the Trust Desk ZIP with completed child result metadata and links.
+        # Rebuild the Trust Desk ZIP with completed child result metadata and links,
+        # then append the actual certified/stamped child artifacts.
         rebuild_trust_desk_package(
             manifest=manifest,
             extract_dir=extract_dir,
             output_zip_path=output_zip_path,
         )
+        _trustdesk_append_artifacts_to_zip(output_zip_path, embedded_artifacts)
         manifest["trust_desk_package_sha256"] = sha256_file(output_zip_path)
 
         plan = "free"
@@ -1792,6 +2067,8 @@ def process_trust_desk_zip_job(
             "original_zip_sha256": original_zip_sha256,
             "download_url": download_url,
             "trust_desk_package_sha256": manifest.get("trust_desk_package_sha256"),
+            "certified_artifacts_embedded": len(embedded_artifacts),
+            "embedded_artifacts": embedded_artifact_manifest,
             "summary": summary,
             "manifest": manifest,
             "message": "Trust Desk ZIP intake, file inventory, child certification, final manifest, and consolidated delivery completed.",
