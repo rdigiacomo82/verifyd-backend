@@ -67,6 +67,94 @@ def _is_admin(key: str) -> bool:
     key = (key or "").strip()
     return key == _ADMIN_KEY or key == _ADMIN_KEY.replace("#", "%23")
 
+
+# ─────────────────────────────────────────────
+#  Email verification / auto-verified allowlist
+# ─────────────────────────────────────────────
+# Preserve the original DB verification function, then shadow is_email_verified
+# so all existing upload/link/audio/document/Trust Desk routes automatically
+# honor the allowlist without broad route rewrites.
+_db_is_email_verified = is_email_verified
+
+
+def normalize_email(email: str) -> str:
+    """Normalize email consistently without truncation or alias creation."""
+    return (email or "").strip().lower()
+
+
+def _auto_verified_email_patterns() -> set:
+    raw = os.environ.get("VERIFYD_AUTO_VERIFIED_EMAILS", "")
+    return {normalize_email(e) for e in raw.split(",") if normalize_email(e)}
+
+
+def is_auto_verified_email(email: str) -> bool:
+    """Return True for exact allowlisted emails or wildcard domain entries."""
+    normalized = normalize_email(email)
+    if not normalized:
+        return False
+    patterns = _auto_verified_email_patterns()
+    if normalized in patterns:
+        log.info("AUTO_VERIFIED_EMAIL accepted: %s", normalized)
+        return True
+    if "@" in normalized:
+        domain = normalized.split("@", 1)[1]
+        wildcard = f"*@{domain}"
+        if wildcard in patterns:
+            log.info("AUTO_VERIFIED_EMAIL accepted by wildcard %s: %s", wildcard, normalized)
+            return True
+    return False
+
+
+def is_email_verified(email: str) -> bool:
+    """
+    Shared server-side verification source of truth.
+    This intentionally shadows the imported database.is_email_verified so existing
+    route code keeps working while gaining allowlist support.
+    """
+    normalized = normalize_email(email)
+    if is_auto_verified_email(normalized):
+        return True
+    try:
+        return bool(_db_is_email_verified(normalized))
+    except Exception as exc:
+        log.warning("email verification lookup failed for %s: %s", normalized, exc)
+        return False
+
+
+def is_email_verified_or_allowlisted(email: str) -> dict:
+    normalized = normalize_email(email)
+    auto_verified = is_auto_verified_email(normalized)
+    verified = True if auto_verified else is_email_verified(normalized)
+    return {
+        "email": normalized,
+        "verified": bool(verified),
+        "auto_verified": bool(auto_verified),
+    }
+
+
+def _verification_status_payload(email: str) -> dict:
+    check = is_email_verified_or_allowlisted(email)
+    normalized = check["email"]
+    plan = "free"
+    uses = 0
+    limit = FREE_USES
+    try:
+        if normalized and is_valid_email(normalized):
+            status = get_user_status(normalized)
+            plan = status.get("plan", plan)
+            uses = int(status.get("uses", status.get("used", status.get("period_uses", uses))) or 0)
+            limit = int(status.get("limit", limit) or limit)
+    except Exception as exc:
+        log.warning("verification-status usage lookup failed for %s: %s", normalized, exc)
+    return {
+        "email": normalized,
+        "verified": bool(check["verified"]),
+        "plan": plan,
+        "uses": uses,
+        "limit": limit,
+        "auto_verified": bool(check["auto_verified"]),
+    }
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
@@ -277,7 +365,11 @@ def _verify_email_deliverable(email: str) -> tuple:
     Returns (is_valid: bool, reason: str)
     Caches results to avoid repeated API calls for same email.
     """
-    email_lower = email.lower().strip()
+    email_lower = normalize_email(email)
+
+    # Approved demo/admin emails are trusted by backend allowlist.
+    if is_auto_verified_email(email_lower):
+        return True, "auto_verified"
 
     # Return cached result
     if email_lower in _email_cache:
@@ -348,6 +440,18 @@ def _verify_email_deliverable(email: str) -> tuple:
 # ─────────────────────────────────────────────
 #  Routes
 # ─────────────────────────────────────────────
+
+
+@app.get("/verification-status/")
+def verification_status(email: str = ""):
+    """Return backend email verification status for the frontend before upload."""
+    email = normalize_email(email)
+    if not email:
+        return JSONResponse({"detail": "email_required"}, status_code=400)
+    if not is_valid_email(email):
+        return JSONResponse({"detail": "invalid_email", "email": email}, status_code=400)
+    return JSONResponse(_verification_status_payload(email))
+
 @app.post("/upload/")
 async def upload(file: UploadFile = File(...), email: str = Form(...)):
     # ── Email format validation ───────────────────────────────
@@ -3759,6 +3863,10 @@ async def send_otp(email: str = Form(...)):
     if not is_valid_email(email):
         return JSONResponse({"error": "Invalid email address."}, status_code=400)
 
+    # auto_verified_email_otp_bypass
+    if is_auto_verified_email(email):
+        return {"status": "already_verified", "message": "Email already verified.", "email": email, "verified": True, "auto_verified": True}
+
     # Check deliverability first
     is_deliverable, reason = _verify_email_deliverable(email)
     if not is_deliverable:
@@ -3787,6 +3895,10 @@ async def verify_otp_route(email: str = Form(...), code: str = Form(...)):
     """Verify the OTP code submitted by the user."""
     if not is_valid_email(email):
         return JSONResponse({"error": "Invalid email address."}, status_code=400)
+
+    # auto_verified_email_verify_bypass
+    if is_auto_verified_email(email):
+        return {"status": "verified", "message": "Email already verified.", "email": email, "verified": True, "auto_verified": True}
 
     success, message = verify_otp(email, code)
 
