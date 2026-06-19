@@ -436,6 +436,48 @@ Add "audio_visual_manipulation" to top_flags if you detect any of the above.
 
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ SHORT-FORM PUBLIC DESTRUCTION / IMPOSSIBLE EVENT REELS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Be very strict with short vertical social-media reels that show a dramatic
+public incident, luxury object destruction, museum/store/gallery accident,
+crowd shock event, child-caused destruction, impossible collapse, or "who is
+at fault?" style viral scenario.
+
+These videos are commonly AI-generated even when still frames look photographic.
+Do NOT classify them as Real merely because:
+  • the lighting looks plausible;
+  • the clip has social-media compression grain;
+  • the crowd/background is detailed;
+  • one frame looks like real phone footage.
+
+For these event reels, check the sequence, not just the still image quality:
+  • Does the destruction/damage progress with realistic force transfer?
+  • Do objects break, scatter, deform, and settle naturally?
+  • Do people react with realistic delay, urgency, eye-lines, and body language?
+  • Do security/staff/bystanders behave as real people would after a major event?
+  • Does the background/ground plane subtly warp during movement?
+  • Are shadows, object boundaries, hands, faces, clothing, and debris stable
+    from frame to frame?
+  • Does the camera perfectly capture a complete dramatic story from setup to
+    climax and aftermath?
+
+Score guidance for public destruction/event reels:
+  • motion_physics should be 7-10 if the damage, impact, collapse, or human
+    movement lacks realistic inertia, recoil, debris, deformation, or follow-through.
+  • temporal_stability should be 7-10 if objects, edges, shadows, debris,
+    faces, clothing, or background geometry morph between frames.
+  • physics_violations should be 7-10 if a large object breaks/collapses in a
+    way that lacks realistic force transfer or material behavior.
+  • behavioral_plausibility should be 7-10 if bystanders, staff, security,
+    parents, or witnesses react too calmly, too late, too uniformly, or not at all.
+  • scene_staging should be 7-10 if the video has perfect viral framing,
+    perfect narrative timing, or a complete setup→incident→reaction arc.
+
+If the scene is visually plausible but narratively and physically suspicious,
+use generator_guess="Unknown-AI" rather than "Real".
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
  SHORT-FORM ANIMAL / ACTION / COLLISION CLIPS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Important: Be stricter with short-form animal/action/collision clips from Instagram,
@@ -672,6 +714,41 @@ def analyze_frames_with_gpt(frames_b64: list, physics_summary: str = "",
                 "gpt_vision: strong animal/action guard %d→%d hits=%d generator=%s",
                 old_prob, ai_prob, _large_action_hits, generator_guess
             )
+
+
+        # Viral public-event/destruction reel guard
+        # If GPT scores multiple event-level dimensions as suspicious, do not let
+        # a photorealistic still-frame impression collapse the score to REAL.
+        # This supports LEGO/luxury-object/public-incident/social-event reels.
+        _event_dims = (
+            scores.get("motion_physics", 0),
+            scores.get("temporal_stability", 0),
+            scores.get("background_realism", 0),
+            scores.get("physics_violations", 0),
+            scores.get("behavioral_plausibility", 0),
+            scores.get("scene_staging", 0),
+        )
+        _event_hits = sum(1 for v in _event_dims if v >= 6)
+        _event_strong_hits = sum(1 for v in _event_dims if v >= 7)
+        if content_type in ("action", "cinematic") and _event_hits >= 3 and ai_prob < 68:
+            old_prob = ai_prob
+            ai_prob = max(ai_prob, 68)
+            if generator_guess == "Real":
+                generator_guess = "Unknown-AI"
+            log.info(
+                "gpt_vision: public-event/destruction guard %d→%d hits=%d strong_hits=%d generator=%s",
+                old_prob, ai_prob, _event_hits, _event_strong_hits, generator_guess
+            )
+        elif content_type in ("action", "cinematic") and _event_strong_hits >= 2 and ai_prob < 58:
+            old_prob = ai_prob
+            ai_prob = max(ai_prob, 58)
+            if generator_guess == "Real":
+                generator_guess = "Unknown-AI"
+            log.info(
+                "gpt_vision: soft public-event/destruction guard %d→%d hits=%d strong_hits=%d generator=%s",
+                old_prob, ai_prob, _event_hits, _event_strong_hits, generator_guess
+            )
+
 
         # Audio-visual manipulation boost
         # If GPT flagged manipulation signals AND score looks real (>40),
@@ -948,6 +1025,53 @@ def _build_physics_summary(ctx: dict) -> str:
                 "physics_violations across clips, not just within one."
             )
         )
+
+
+    # ── Viral public destruction / social-event hint ────────
+    # Signal composite for short vertical social reels: these may look like
+    # real phone footage in still frames, but the sequence often reveals AI.
+    _portrait_evt = ctx.get("portrait", False)
+    _bg_evt = ctx.get("bg_drift", 0) or 0
+    _period_evt = ctx.get("motion_period", ctx.get("period", 0)) or 0
+    _edge_evt = ctx.get("edge_cov", ctx.get("edge_cov_var", 0)) or 0
+    _tcv_evt = ctx.get("tcv", 0) or 0
+    _omni_evt = ctx.get("omni_flow_entropy", ctx.get("omni_ent", 0)) or 0
+    _ifdv_evt = ctx.get("ifdv", 1.0) or 1.0
+    _motion_evt = ctx.get("motion", 0) or 0
+    _public_event_signature = (
+        content_type in ("action", "cinematic") and
+        _portrait_evt and
+        _motion_evt >= 18 and
+        _bg_evt >= 30 and
+        _period_evt >= 0.60 and
+        _edge_evt >= 0.50 and
+        _tcv_evt >= 250 and
+        (_omni_evt >= 3.35 or _ifdv_evt <= 0.12)
+    )
+    if _public_event_signature:
+        hints.append(
+            "🚨 VIRAL PUBLIC-EVENT / DESTRUCTION REEL SIGNATURE DETECTED:\n"
+            "The signal detector found a short vertical action/event pattern that "
+            "often appears in AI-generated social reels: high background drift, "
+            "strong periodic/generated motion, coherent edge coverage, elevated "
+            "temporal variance, and AI-like motion/detail variation. Do NOT judge "
+            "this clip only from one realistic still frame.\n\n"
+            "CHECK THE FULL EVENT SEQUENCE:\n"
+            "  • Does the destruction/collapse/damage progress with real force transfer?\n"
+            "  • Do pieces/debris scatter, deform, and settle naturally?\n"
+            "  • Do people react with realistic startle delay, urgency, eye-lines, "
+            "and body language? Or do they seem staged/too calm/too synchronized?\n"
+            "  • Do shadows, object edges, clothing, faces, hands, and background "
+            "geometry remain stable from frame to frame?\n"
+            "  • Is the camera perfectly framed to capture a complete viral story "
+            "from setup to incident to reaction?\n\n"
+            "If the incident is dramatic but the physics, crowd behavior, or damage "
+            "progression is not clearly realistic, score motion_physics, "
+            "temporal_stability, physics_violations, behavioral_plausibility, and "
+            "scene_staging high (7-10). Use generator_guess='Unknown-AI' rather "
+            "than 'Real' for visually plausible but suspicious public-event reels."
+        )
+
 
     # ── Animal / Wildlife / Pet content hint ────────────────
     # AI-generated animal videos are extremely common on TikTok/social media.
