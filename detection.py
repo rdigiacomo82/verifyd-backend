@@ -73,6 +73,249 @@ THRESHOLD_REAL         = 55
 THRESHOLD_UNDETERMINED = 40
 
 
+# ─────────────────────────────────────────────────────────────
+#  VERIFYD_VIRAL_AI_REEL_PATCH_V1
+#  Viral AI reel / staged short-form social clip guard
+# ─────────────────────────────────────────────────────────────
+def _vfyd_safe_float(value, default=0.0):
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def _vfyd_safe_int(value, default=0):
+    try:
+        if value is None:
+            return default
+        return int(round(float(value)))
+    except Exception:
+        return default
+
+
+def _vfyd_load_sidecar(video_path: str) -> dict:
+    """Load VeriFYD .meta.json sidecar if present."""
+    try:
+        import json as _json
+        candidates = []
+        root, ext = os.path.splitext(video_path or "")
+        if root:
+            candidates.append(root + ".meta.json")
+        if video_path:
+            candidates.append(
+                video_path.replace(".mp4", ".meta.json")
+                          .replace(".MP4", ".meta.json")
+                          .replace(".mov", ".meta.json")
+                          .replace(".MOV", ".meta.json")
+            )
+        for sidecar in candidates:
+            if sidecar and os.path.exists(sidecar):
+                with open(sidecar, "r", encoding="utf-8", errors="replace") as sf:
+                    data = _json.load(sf)
+                return data if isinstance(data, dict) else {}
+    except Exception:
+        pass
+    return {}
+
+
+def _vfyd_is_generic_mobile_filename(filename: str) -> bool:
+    """True when mobile/social apps stripped useful caption/source text."""
+    import re as _re
+    name = os.path.basename(str(filename or "")).strip().lower()
+    stem, ext = os.path.splitext(name)
+    if ext and ext not in (".mp4", ".mov", ".m4v", ".webm", ".mkv"):
+        return False
+    if not stem:
+        return False
+    generic_exact = {
+        "video", "download", "reel", "instagram", "tiktok", "facebook",
+        "screenrecording", "screen recording", "movie", "clip",
+    }
+    if stem in generic_exact:
+        return True
+    patterns = (
+        r"^\d{6,}$",
+        r"^img[_-]?\d{3,}$",
+        r"^vid[_-]?\d{3,}$",
+        r"^pxl[_-]?\d{6,}$",
+        r"^video[_-]?\d{3,}$",
+        r"^screenrecord[_-]?\d{3,}$",
+        r"^screen_recording[_-]?\d{3,}$",
+        r"^[a-f0-9]{8,}$",
+    )
+    return any(_re.match(p, stem) for p in patterns)
+
+
+def _vfyd_probe_video_summary(video_path: str) -> dict:
+    """Return width/height/duration and basic tags using ffprobe."""
+    out = {"width": 0, "height": 0, "duration": 0.0, "tags": {}, "has_real_device_metadata": False}
+    try:
+        import subprocess as _sp, json as _json
+        result = _sp.run(
+            ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", video_path],
+            capture_output=True, text=True, timeout=15
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return out
+        data = _json.loads(result.stdout)
+        fmt = data.get("format", {}) if isinstance(data, dict) else {}
+        tags = fmt.get("tags", {}) or {}
+        out["tags"] = tags
+        try:
+            out["duration"] = float(fmt.get("duration") or 0.0)
+        except Exception:
+            out["duration"] = 0.0
+        for s in data.get("streams", []) or []:
+            if s.get("codec_type") == "video":
+                out["width"] = int(s.get("width") or 0)
+                out["height"] = int(s.get("height") or 0)
+                break
+        tag_blob = " ".join(f"{k}={v}" for k, v in tags.items()).lower()
+        out["has_real_device_metadata"] = any(x in tag_blob for x in (
+            "com.android.version", "com.apple.quicktime.make", "com.apple.quicktime.model",
+            "iphone", "samsung", "google pixel", "dji", "gopro", "sony", "canon", "nikon",
+        ))
+    except Exception:
+        pass
+    return out
+
+
+def _vfyd_max_ctx(contexts, key: str, default=0.0):
+    vals = []
+    for ctx in contexts or []:
+        if isinstance(ctx, dict) and key in ctx:
+            vals.append(_vfyd_safe_float(ctx.get(key), default))
+    return max(vals) if vals else default
+
+
+def _vfyd_add_unique_flag(flags, flag: str):
+    if flags is None:
+        flags = []
+    if not isinstance(flags, list):
+        flags = list(flags) if flags else []
+    if flag not in flags:
+        flags.append(flag)
+    return flags
+
+
+def _vfyd_prepare_viral_ai_reel_context(video_path: str, contexts, signal_context: dict) -> dict:
+    """Inject mobile/social-reel risk context for GPT without changing thresholds."""
+    signal_context = signal_context or {}
+    contexts = [c for c in (contexts or []) if isinstance(c, dict)]
+    sidecar = _vfyd_load_sidecar(video_path)
+    probe = _vfyd_probe_video_summary(video_path)
+    original_filename = sidecar.get("original_filename") or sidecar.get("filename") or os.path.basename(video_path or "")
+    generic_mobile = _vfyd_is_generic_mobile_filename(original_filename)
+    width = _vfyd_safe_int(probe.get("width"), 0)
+    height = _vfyd_safe_int(probe.get("height"), 0)
+    duration = _vfyd_safe_float(probe.get("duration"), 0.0)
+    short_vertical = bool(height > width and 3.0 <= duration <= 18.0)
+    no_real_device = not bool(probe.get("has_real_device_metadata"))
+    max_deepfake = _vfyd_max_ctx(contexts, "deepfake_score", 0.0)
+    max_skin = _vfyd_max_ctx(contexts, "skin_ratio", _vfyd_safe_float(signal_context.get("skin_ratio", 0.0)))
+    max_motion_period = _vfyd_max_ctx(contexts, "motion_period", _vfyd_safe_float(signal_context.get("motion_period", 0.0)))
+    max_omni = _vfyd_max_ctx(contexts, "omni_flow_entropy", _vfyd_safe_float(signal_context.get("omni_flow_entropy", 0.0)))
+    content_type = str(signal_context.get("content_type") or "").lower()
+    source = str(sidecar.get("source") or signal_context.get("source") or "upload").lower()
+    signal_context["generic_mobile_filename"] = generic_mobile
+    signal_context["original_filename"] = original_filename
+    signal_context["short_vertical_social_video"] = short_vertical
+    signal_context["no_real_device_metadata"] = no_real_device
+    signal_context["video_duration"] = duration
+    signal_context["video_width"] = width
+    signal_context["video_height"] = height
+    signal_context["deepfake_score"] = max(_vfyd_safe_float(signal_context.get("deepfake_score"), 0.0), max_deepfake)
+    signal_context["max_skin_ratio"] = max_skin
+    signal_context["max_motion_period"] = max_motion_period
+    signal_context["max_omni_flow_entropy"] = max_omni
+    viral_candidate = (
+        short_vertical and no_real_device and
+        (content_type in ("action", "cinematic", "portrait", "single_subject") or max_skin >= 0.08) and
+        (max_deepfake >= 75 or (generic_mobile and max_motion_period >= 0.55 and max_omni >= 3.25) or source in ("instagram", "tiktok", "upload"))
+    )
+    if viral_candidate:
+        signal_context["viral_ai_reel_candidate"] = True
+        signal_context["_extra_context"] = (
+            str(signal_context.get("_extra_context", ""))
+            + "\nVIRAL AI REEL CONTEXT: short vertical social-style clip; "
+              f"generic_mobile_filename={generic_mobile}; no_real_device_metadata={no_real_device}; "
+              f"deepfake_score={max_deepfake:.0f}; skin_ratio={max_skin:.3f}; "
+              f"motion_period={max_motion_period:.3f}; omni_flow_entropy={max_omni:.3f}. "
+              "Inspect for a complete staged viral narrative/punchline, perfectly convenient framing, "
+              "and scripted reaction timing. Do not score as real solely because frames look photorealistic."
+        )
+    return signal_context
+
+
+def _vfyd_apply_viral_ai_reel_guard(*, video_path: str, combined_ai_score: float, mode: str, signal_ai_score: int,
+                                    gpt_ai_score: int, gpt_result: dict, signal_context: dict,
+                                    all_signal_contexts=None, n_clips: int = 1):
+    """Guard against mobile-renamed photorealistic AI social reels slipping to REAL."""
+    signal_context = signal_context or {}
+    contexts = [signal_context] + [c for c in (all_signal_contexts or []) if isinstance(c, dict)]
+    sidecar = _vfyd_load_sidecar(video_path)
+    probe = _vfyd_probe_video_summary(video_path)
+    original_filename = sidecar.get("original_filename") or signal_context.get("original_filename") or os.path.basename(video_path or "")
+    generic_mobile = bool(signal_context.get("generic_mobile_filename")) or _vfyd_is_generic_mobile_filename(original_filename)
+    width = _vfyd_safe_int(probe.get("width") or signal_context.get("video_width"), 0)
+    height = _vfyd_safe_int(probe.get("height") or signal_context.get("video_height"), 0)
+    duration = _vfyd_safe_float(probe.get("duration") or signal_context.get("video_duration"), 0.0)
+    short_vertical = bool(height > width and 3.0 <= duration <= 18.0)
+    no_real_device = bool(signal_context.get("no_real_device_metadata")) or not bool(probe.get("has_real_device_metadata"))
+    max_deepfake = max(_vfyd_max_ctx(contexts, "deepfake_score", 0.0), _vfyd_safe_float(signal_context.get("deepfake_score", 0.0)))
+    max_skin = max(_vfyd_max_ctx(contexts, "skin_ratio", 0.0), _vfyd_safe_float(signal_context.get("max_skin_ratio", 0.0)))
+    max_motion_period = max(_vfyd_max_ctx(contexts, "motion_period", 0.0), _vfyd_safe_float(signal_context.get("max_motion_period", 0.0)))
+    max_omni = max(_vfyd_max_ctx(contexts, "omni_flow_entropy", 0.0), _vfyd_safe_float(signal_context.get("max_omni_flow_entropy", 0.0)))
+    content_type = str(signal_context.get("content_type") or "").lower()
+    gpt_flags = list(gpt_result.get("flags") or []) if isinstance(gpt_result, dict) else []
+    gpt_reasoning = str(gpt_result.get("reasoning", "") if isinstance(gpt_result, dict) else "").lower()
+    gpt_scores = gpt_result.get("scores", {}) if isinstance(gpt_result, dict) else {}
+    scene_staging = _vfyd_safe_int(gpt_scores.get("scene_staging", 0), 0) if isinstance(gpt_scores, dict) else 0
+    behavioral = _vfyd_safe_int(gpt_scores.get("behavioral_plausibility", 0), 0) if isinstance(gpt_scores, dict) else 0
+    generator_artifacts = _vfyd_safe_int(gpt_scores.get("generator_artifacts", 0), 0) if isinstance(gpt_scores, dict) else 0
+    visual_ai_hint = (
+        "viral_ai_reel_pattern" in gpt_flags or "staged_social_reel" in gpt_flags or "viral ai" in gpt_reasoning or
+        scene_staging >= 7 or behavioral >= 7 or generator_artifacts >= 7
+    )
+    face_or_person_action = content_type in ("action", "cinematic", "portrait", "single_subject", "selfie", "talking_head") or max_skin >= 0.08
+    high_deepfake_mobile_reel = short_vertical and generic_mobile and no_real_device and face_or_person_action and max_deepfake >= 78
+    staged_reel_visual_guard = short_vertical and no_real_device and face_or_person_action and visual_ai_hint and gpt_ai_score >= 50
+    pattern_signal_guard = short_vertical and generic_mobile and no_real_device and face_or_person_action and max_deepfake >= 70 and max_motion_period >= 0.55 and max_omni >= 3.25
+    if not (high_deepfake_mobile_reel or staged_reel_visual_guard or pattern_signal_guard):
+        return None
+    target = 78.0 if high_deepfake_mobile_reel else 68.0
+    if pattern_signal_guard:
+        target = max(target, 72.0)
+    old_combined = float(combined_ai_score)
+    new_combined = max(old_combined, target)
+    new_mode = "viral-ai-reel provenance/behavior guard"
+    if isinstance(gpt_result, dict):
+        gpt_result["flags"] = _vfyd_add_unique_flag(gpt_flags, "viral_ai_reel_pattern")
+        gpt_result["flags"] = _vfyd_add_unique_flag(gpt_result.get("flags"), "generic_mobile_upload_no_source_text")
+        reason_prefix = "Short vertical mobile/social upload has a staged viral-reel pattern: generic filename, no real-device provenance, person/action content, and high facial/deepfake or behavior signals. "
+        existing_reason = str(gpt_result.get("reasoning", ""))
+        if reason_prefix not in existing_reason:
+            gpt_result["reasoning"] = (reason_prefix + existing_reason)[:1000]
+    log.info(
+        "VIRAL_AI_REEL_GUARD: combined %.1f→%.1f generic=%s short_vertical=%s no_device=%s deepfake=%.0f skin=%.3f motion_period=%.3f omni=%.3f gpt=%d file=%s",
+        old_combined, new_combined, generic_mobile, short_vertical, no_real_device, max_deepfake, max_skin, max_motion_period, max_omni, gpt_ai_score, original_filename,
+    )
+    return {
+        "combined_ai_score": new_combined,
+        "mode": new_mode,
+        "viral_ai_reel_pattern": True,
+        "generic_mobile_filename": generic_mobile,
+        "no_real_device_metadata": no_real_device,
+        "deepfake_score": int(round(max_deepfake)),
+        "max_motion_period": round(max_motion_period, 4),
+        "max_omni_flow_entropy": round(max_omni, 4),
+        "original_filename": original_filename,
+        "short_vertical_social_video": short_vertical,
+    }
+
+
 # AI_SOURCE_PROVENANCE_PATCH: helper fields for API/job result detail
 def _ai_source_detail_fields(video_path: str) -> dict:
     """Return optional detail fields for explicit AI-source provenance evidence."""
@@ -335,6 +578,7 @@ def run_detection(video_path: str) -> tuple:
 
     # ── Engine 2: GPT-4o ──────────────────────────────────────
     frames_b64      = extract_key_frames(video_path)
+    signal_context = _vfyd_prepare_viral_ai_reel_context(video_path, [signal_context], signal_context)
     gpt_result      = gpt_vision_score_with_context(frames_b64, signal_context)
     gpt_ai_score    = gpt_result["ai_probability"]
     gpt_available   = gpt_result.get("available", False)
@@ -420,6 +664,21 @@ def run_detection(video_path: str) -> tuple:
                  mode, signal_ai_score, gpt_ai_score, w_sig*100, w_gpt*100)
 
     combined_ai_score = max(0.0, min(100.0, combined))
+    _viral_ai_reel_guard = _vfyd_apply_viral_ai_reel_guard(
+        video_path=video_path,
+        combined_ai_score=combined_ai_score,
+        mode=mode if not gpt_failed else "signal-only",
+        signal_ai_score=signal_ai_score,
+        gpt_ai_score=gpt_ai_score,
+        gpt_result=gpt_result,
+        signal_context=signal_context,
+        all_signal_contexts=[signal_context],
+        n_clips=1,
+    )
+    if _viral_ai_reel_guard:
+        combined_ai_score = _viral_ai_reel_guard["combined_ai_score"]
+        mode = _viral_ai_reel_guard["mode"]
+        gpt_flags = gpt_result.get("flags", [])
     authenticity      = 100 - int(round(combined_ai_score))
 
     if authenticity >= THRESHOLD_REAL:
@@ -448,6 +707,11 @@ def run_detection(video_path: str) -> tuple:
         "threshold_real":  THRESHOLD_REAL,
         "threshold_undet": THRESHOLD_UNDETERMINED,
     }
+
+    if _viral_ai_reel_guard:
+        detail.update(_viral_ai_reel_guard)
+        detail["gpt_flags"] = gpt_result.get("flags", detail.get("gpt_flags", []))
+        detail["blend_mode"] = mode
 
     # Build content-aware user-facing reasoning for single-clip path
     user_reasoning = _build_content_aware_reasoning(
@@ -1030,6 +1294,8 @@ def run_detection_multiclip(video_path: str) -> tuple:
             signal_context["youtube_lowres_adjusted"] = True
         else:
             log.info("YOUTUBE: source=youtube but resolution adequate -- no adjustment")
+
+    signal_context = _vfyd_prepare_viral_ai_reel_context(video_path, all_signal_contexts, signal_context)
 
     # ── Hybrid detection ──────────────────────────────────────
     score_variance = max(signal_scores) - min(signal_scores) if len(signal_scores) > 1 else 0
@@ -2024,6 +2290,23 @@ def run_detection_multiclip(video_path: str) -> tuple:
                 old_combined, combined_ai_score, ov_reason
             )
 
+    _viral_ai_reel_guard = _vfyd_apply_viral_ai_reel_guard(
+        video_path=video_path,
+        combined_ai_score=combined_ai_score,
+        mode=mode,
+        signal_ai_score=signal_ai_score,
+        gpt_ai_score=gpt_ai_score,
+        gpt_result=gpt_result,
+        signal_context=signal_context,
+        all_signal_contexts=all_signal_contexts,
+        n_clips=n_clips,
+    )
+    if _viral_ai_reel_guard:
+        combined_ai_score = _viral_ai_reel_guard["combined_ai_score"]
+        mode = _viral_ai_reel_guard["mode"]
+        gpt_flags = gpt_result.get("flags", gpt_flags)
+        signal_context["viral_ai_reel_pattern"] = True
+
     combined_ai_score = max(0.0, min(100.0, combined_ai_score))
     authenticity = 100 - int(round(combined_ai_score))
     authenticity = max(0, min(100, authenticity))
@@ -2102,6 +2385,11 @@ def run_detection_multiclip(video_path: str) -> tuple:
         "threshold_real":     THRESHOLD_REAL,
         "threshold_undet":    THRESHOLD_UNDETERMINED,
     }
+    if _viral_ai_reel_guard:
+        detail.update(_viral_ai_reel_guard)
+        detail["gpt_flags"] = gpt_result.get("flags", detail.get("gpt_flags", []))
+        detail["blend_mode"] = mode
+
     return authenticity, label, detail
 
 

@@ -402,6 +402,37 @@ REAL videos. Score dimensions on the underlying content — not on compression q
         If the video has a security cam overlay but the content seems too dramatic
         or perfectly framed → score scene_staging 8-9.
 
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ VIRAL AI SKIT / STAGED SOCIAL REEL PATTERN
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+AI video generators increasingly create short vertical social-media clips that look
+like casual phone footage but contain a complete, overly convenient narrative. Do
+not score these as real merely because individual frames look photorealistic.
+
+Raise SCENE_STAGING, BEHAVIORAL_PLAUSIBILITY, and GENERATOR_ARTIFACTS when a clip
+has several of these traits:
+  • full setup → action → punchline/reaction arc captured cleanly in one short clip;
+  • camera is already perfectly positioned before the unusual event begins;
+  • a baby, child, animal, worker, or bystander performs an unlikely action that creates a viral visual payoff;
+  • adults/bystanders enter or react at exactly the right moment for the joke;
+  • the incident is centered, cleanly framed, and easy to understand without missing context;
+  • the event resembles a generated social-media prank, “caught on camera” skit, or AI viral reel;
+  • there is no messy real-world interruption, no partial/missed action, and no believable camera reaction to surprise.
+
+Examples include a baby/toddler walking through wet concrete, paint, mud, spilled
+food, or fragile objects while adults react perfectly; animals/children creating
+an unusually perfect mess or pattern; construction/DIY accidents captured from
+the ideal angle; driveway/garage/backyard incidents with a clean punchline.
+
+If this pattern is present:
+  → score scene_staging 8-10;
+  → score behavioral_plausibility 7-10 if reactions feel scripted or theatrically convenient;
+  → score generator_artifacts 6-8 even without a visible watermark;
+  → include top_flags value "viral_ai_reel_pattern";
+  → mention “viral AI skit pattern” or “staged social reel pattern” in reasoning.
+
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
  AUDIO-VISUAL MANIPULATION FLAGS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -749,6 +780,28 @@ def analyze_frames_with_gpt(frames_b64: list, physics_summary: str = "",
                 old_prob, ai_prob, _event_hits, _event_strong_hits, generator_guess
             )
 
+
+
+
+        # VERIFYD_VIRAL_AI_REEL_PATCH_V1 — post-GPT staged social reel guard
+        _viral_dims = (
+            scores.get("scene_staging", 0),
+            scores.get("behavioral_plausibility", 0),
+            scores.get("generator_artifacts", 0),
+            scores.get("motion_physics", 0),
+            scores.get("temporal_stability", 0),
+        )
+        _viral_hits = sum(1 for v in _viral_dims if v >= 7)
+        _viral_flagged = any("viral_ai_reel_pattern" in str(f).lower() or "staged_social_reel" in str(f).lower() for f in top_flags)
+        if content_type in ("action", "cinematic", "single_subject", "portrait") and (_viral_flagged or _viral_hits >= 2):
+            old_prob = ai_prob
+            ai_prob = max(ai_prob, 68 if _viral_hits < 3 else 78)
+            if "viral_ai_reel_pattern" not in top_flags:
+                top_flags.append("viral_ai_reel_pattern")
+            if generator_guess == "Real":
+                generator_guess = "Unknown-AI"
+            if ai_prob != old_prob:
+                log.info("gpt_vision: viral AI reel guard %d→%d hits=%d flags=%s", old_prob, ai_prob, _viral_hits, top_flags)
 
         # Audio-visual manipulation boost
         # If GPT flagged manipulation signals AND score looks real (>40),
@@ -1382,6 +1435,27 @@ def _build_physics_summary(ctx: dict) -> str:
                 "  → If audio feels artificial or mismatched: "
                 "score temporal_stability 7-9 and color_naturalism 7-8."
             )
+
+
+
+    # VERIFYD_VIRAL_AI_REEL_PATCH_V1 — GPT context for mobile-renamed AI reels
+    try:
+        if ctx.get("viral_ai_reel_candidate") or ctx.get("generic_mobile_filename"):
+            hints.append(
+                "🎬 VIRAL AI REEL / STAGED SOCIAL CLIP CONTEXT: "
+                f"generic_mobile_filename={ctx.get('generic_mobile_filename')}, "
+                f"short_vertical_social_video={ctx.get('short_vertical_social_video')}, "
+                f"no_real_device_metadata={ctx.get('no_real_device_metadata')}, "
+                f"deepfake_score={ctx.get('deepfake_score', 0)}, "
+                f"motion_period={ctx.get('max_motion_period', 0)}, "
+                f"omni_flow_entropy={ctx.get('max_omni_flow_entropy', 0)}.\n"
+                "  Look for a complete setup→action→punchline/reaction arc, perfect camera placement, "
+                "scripted adult/bystander reaction timing, and a viral social-media skit pattern.\n"
+                "  If present, score scene_staging 8-10, behavioral_plausibility 7-10, "
+                "generator_artifacts 6-8, and add top_flags=['viral_ai_reel_pattern']."
+            )
+    except Exception:
+        pass
 
     if hints:
         lines.append("VISUAL INSPECTION PRIORITIES:")
