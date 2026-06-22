@@ -839,6 +839,27 @@ def _build_physics_summary(ctx: dict) -> str:
     lines.append("Use them to guide your visual inspection — confirm or override with what you observe.")
     lines.append("IMPORTANT: Your 'reasoning' field must reference what you specifically observe")
     lines.append("in these frames — not generic phrases. Be concrete about what you see.\n")
+    # AI_SOURCE_PROVENANCE_PATCH: tell GPT when source text explicitly names an AI generator.
+    ai_source = ctx.get("ai_source_generator") or ctx.get("ai_source") or ""
+    ai_source_reason = ctx.get("ai_source_reason") or ""
+    ai_source_text = ctx.get("ai_source_text") or ""
+    if ctx.get("ai_source_detected") or ai_source:
+        lines.append("EXPLICIT AI-SOURCE PROVENANCE DETECTED:")
+        lines.append(
+            "The filename, caption, source text, or metadata explicitly references an AI generator/platform. "
+            "This is direct provenance evidence, not a weak visual clue."
+        )
+        if ai_source:
+            lines.append(f"Detected generator/platform: {ai_source}")
+        if ai_source_reason:
+            lines.append(f"Reason: {ai_source_reason}")
+        if ai_source_text:
+            lines.append(f"Source text excerpt: {str(ai_source_text)[:500]}")
+        lines.append(
+            "Instruction: score generator_artifacts as 10 and set generator_guess to the detected generator/platform. "
+            "Do not mark this as real merely because the frames look photorealistic."
+        )
+        lines.append("")
 
     # Pass full signal values so GPT can reference them in the explanation
     signal_details = []
@@ -1411,6 +1432,26 @@ def gpt_vision_score_with_context(frames_b64: list, physics_context: dict) -> di
     content_type    = physics_context.get("content_type", "cinematic")
     physics_summary = _build_physics_summary(physics_context)
     result          = analyze_frames_with_gpt(frames_b64, physics_summary, content_type)
+
+    # AI_SOURCE_PROVENANCE_PATCH: enforce direct source/caption/filename evidence after GPT.
+    # This protects against photorealistic AI frames being visually scored as real.
+    if physics_context.get("ai_source_detected") or physics_context.get("ai_source_generator"):
+        generator = physics_context.get("ai_source_generator") or physics_context.get("ai_source") or "AI generator"
+        reason = physics_context.get("ai_source_reason") or "Source text explicitly identifies an AI generator/platform."
+        scores = dict(result.get("scores") or {})
+        scores["generator_artifacts"] = max(int(scores.get("generator_artifacts", 0) or 0), 10)
+        flags = list(result.get("flags") or [])
+        if "ai_source_provenance" not in flags:
+            flags.insert(0, "ai_source_provenance")
+        result.update({
+            "ai_probability": max(int(result.get("ai_probability", 50) or 50), 95),
+            "scores": scores,
+            "flags": flags[:8],
+            "generator_guess": generator,
+            "reasoning": f"{reason} Generator/platform: {generator}. " + str(result.get("reasoning", "")),
+            "available": True,
+        })
+
     result["available"] = True
     return result
 

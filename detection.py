@@ -23,6 +23,12 @@ import os
 from detector    import detect_ai
 from gpt_vision  import gpt_vision_score_with_context, extract_key_frames
 
+# AI_SOURCE_PROVENANCE_PATCH: explicit AI generator/source text detector
+try:
+    from ai_source_detector import scan_video_source_for_ai
+except Exception:
+    scan_video_source_for_ai = None
+
 log = logging.getLogger("verifyd.detection")
 
 # New detection engines — imported lazily to avoid startup failures
@@ -67,12 +73,72 @@ THRESHOLD_REAL         = 55
 THRESHOLD_UNDETERMINED = 40
 
 
+# AI_SOURCE_PROVENANCE_PATCH: helper fields for API/job result detail
+def _ai_source_detail_fields(video_path: str) -> dict:
+    """Return optional detail fields for explicit AI-source provenance evidence."""
+    try:
+        if not scan_video_source_for_ai:
+            return {}
+        src_hit = scan_video_source_for_ai(video_path)
+        if not src_hit.get("detected"):
+            return {}
+        return {
+            "ai_source_detected": True,
+            "ai_source_generator": src_hit.get("generator", ""),
+            "ai_source_matched": src_hit.get("matched", ""),
+            "ai_source_confidence": src_hit.get("confidence", ""),
+            "ai_source_text": src_hit.get("source_text", "")[:500],
+            "provenance_override": src_hit.get("confidence") == "high",
+        }
+    except Exception as exc:
+        log.debug("AI source detail field scan skipped: %s", exc)
+        return {}
+
+
+def _add_ai_source_context(video_path: str, signal_context: dict) -> None:
+    """Pass explicit AI-source evidence into GPT context without changing thresholds."""
+    try:
+        if not scan_video_source_for_ai or signal_context is None:
+            return
+        src_hit = scan_video_source_for_ai(video_path)
+        if not src_hit.get("detected"):
+            return
+        signal_context["ai_source_detected"] = True
+        signal_context["ai_source_generator"] = src_hit.get("generator", "")
+        signal_context["ai_source_matched"] = src_hit.get("matched", "")
+        signal_context["ai_source_confidence"] = src_hit.get("confidence", "")
+        signal_context["ai_source_reason"] = src_hit.get("reason", "")
+        signal_context["ai_source_text"] = src_hit.get("source_text", "")[:500]
+    except Exception as exc:
+        log.debug("AI source context pass-through skipped: %s", exc)
+
+
 def _check_metadata_override(video_path: str) -> tuple:
     """
     Check for definitive metadata signals before running engines.
     Returns (override: bool, ai_score: int, label: str, reason: str)
     """
     import subprocess, json as _json, os
+
+
+    # AI_SOURCE_PROVENANCE_PATCH: explicit AI-source / provenance text check
+    # Examples: "Made with @higgsfield.ai", "generated with Sora", "created with Runway".
+    # This is source-level evidence and should override photorealistic pixels.
+    try:
+        if scan_video_source_for_ai:
+            src_hit = scan_video_source_for_ai(video_path)
+            if src_hit.get("detected") and src_hit.get("confidence") == "high":
+                reason = src_hit.get("reason") or "Source text identifies an AI video generator."
+                generator = src_hit.get("generator") or src_hit.get("matched") or "AI generator"
+                reason = f"{reason} Generator/platform: {generator}."
+                log.info(
+                    "METADATA_OVERRIDE: explicit AI source provenance detected -> AI | generator=%s matched=%s",
+                    generator,
+                    src_hit.get("matched", ""),
+                )
+                return True, int(src_hit.get("ai_score", 96) or 96), "AI", reason
+    except Exception as e:
+        log.warning("METADATA: AI source provenance check error: %s", e)
 
     # 1. Check sidecar file written by SMVD TikTok downloader
     sidecar = video_path.replace(".mp4", ".meta.json")
@@ -210,11 +276,12 @@ def run_detection(video_path: str) -> tuple:
             "signal_ai_score": ov_ai_score,
             "gpt_ai_score":    ov_ai_score,
             "gpt_reasoning":   ov_reason,
-            "gpt_flags":       ["metadata_override"],
+            "gpt_flags":       ["metadata_override", "ai_source_provenance"],
             "content_type":    "unknown",
             "blend_mode":      "metadata-override",
             "weight_signal":   1.0,
             "weight_gpt":      0.0,
+            **_ai_source_detail_fields(video_path),
         }
     elif override and ov_label == "LAVF_AI_PIPELINE":
         # Soft LAVF flag — do not override, just note it for composite boost below
@@ -234,6 +301,8 @@ def run_detection(video_path: str) -> tuple:
         signal_ai_score, signal_context = int(_raw_signal), {}
     log.info("Signal detector ai_score: %d  content_type: %s",
              signal_ai_score, signal_context.get("content_type", "unknown"))
+    # AI_SOURCE_PROVENANCE_PATCH: pass source/caption/filename evidence into GPT context
+    _add_ai_source_context(video_path, signal_context)
 
     # ── Engine 1B: Audio detector (additive, conservative) ───
     audio_result = {"available": False, "audio_ai_score": 50, "confidence": "unavailable", "evidence": []}
@@ -624,11 +693,12 @@ def run_detection_multiclip(video_path: str) -> tuple:
             "signal_ai_score": ov_ai_score,
             "gpt_ai_score":    ov_ai_score,
             "gpt_reasoning":   ov_reason,
-            "gpt_flags":       ["metadata_override"],
+            "gpt_flags":       ["metadata_override", "ai_source_provenance"],
             "content_type":    "unknown",
             "blend_mode":      "metadata-override",
             "weight_signal":   1.0,
             "weight_gpt":      0.0,
+            **_ai_source_detail_fields(video_path),
         }
 
     # ── Extract clips from multiple positions ─────────────────

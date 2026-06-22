@@ -188,6 +188,25 @@ def process_upload_job(file_key: str, filename: str, email: str, suppress_email:
 
     try:
         log.info("Worker: starting detection for job=%s email=%s", job_id, email)
+
+        # AI_SOURCE_PROVENANCE_PATCH: preserve original upload filename/source text.
+        # Detection receives a temp/R2-staged path, so write a sidecar to keep
+        # evidence such as "Made with @higgsfield.ai" available to detection.py.
+        try:
+            import json as _json
+            _sidecar_path = os.path.splitext(tmp_path)[0] + ".meta.json"
+            _sidecar_data = {
+                "source": "upload",
+                "original_filename": filename or "",
+                "submitted_email": email or "",
+                "job_id": job_id or "",
+            }
+            with open(_sidecar_path, "w", encoding="utf-8") as _sf:
+                _json.dump(_sidecar_data, _sf, ensure_ascii=False)
+            log.info("Worker: wrote upload source sidecar for provenance detection: %s", _sidecar_path)
+        except Exception as _sidecar_exc:
+            log.warning("Worker: could not write upload source sidecar for %s: %s", job_id, _sidecar_exc)
+
         authenticity, label, detail = run_detection_multiclip(tmp_path)
         ui_text, color, certify = LABEL_UI.get(label, ("VIDEO UNDETERMINED", "blue", False))
 
@@ -220,6 +239,13 @@ def process_upload_job(file_key: str, filename: str, email: str, suppress_email:
             "audio_confidence": detail.get("audio_confidence", "unavailable"),
             "audio_contribution": detail.get("audio_contribution", 0),
             "audio_evidence": detail.get("audio_evidence", []),
+            # AI_SOURCE_PROVENANCE_PATCH: expose provenance flags in job results
+            "ai_source_detected": detail.get("ai_source_detected", False),
+            "ai_source_generator": detail.get("ai_source_generator", ""),
+            "ai_source_matched": detail.get("ai_source_matched", ""),
+            "ai_source_confidence": detail.get("ai_source_confidence", ""),
+            "blend_mode": detail.get("blend_mode", ""),
+            "provenance_override": detail.get("provenance_override", False),
             "job_status": "complete",
             "video_ready": False,
         }
