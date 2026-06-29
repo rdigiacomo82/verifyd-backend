@@ -217,6 +217,16 @@ class NoSizeLimitMiddleware(BaseHTTPMiddleware):
 #  Keep presentation logic here, detection
 #  thresholds stay in detection.py.
 # ─────────────────────────────────────────────
+# VERIFYD_VIDEO_FORMAT_EXPANSION_PATCH: accepted public video containers.
+# ffprobe/video.is_valid_video remains the source of truth that a file actually contains video.
+VIDEO_ALLOWED_EXTENSIONS = {
+    ".mp4", ".mov", ".m4v", ".avi", ".webm", ".mkv",
+    ".mpg", ".mpeg", ".3gp", ".3g2", ".mts", ".m2ts",
+    ".ts", ".ogv", ".flv", ".wmv",
+}
+VIDEO_ACCEPT_STRING = "video/*,.mp4,.mov,.m4v,.avi,.webm,.mkv,.mpg,.mpeg,.3gp,.3g2,.mts,.m2ts,.ts,.ogv,.flv,.wmv"
+VIDEO_FORMAT_LABEL = "MP4, MOV, M4V, AVI, WEBM, MKV, MPEG/MPG, 3GP/3G2, MTS/M2TS, TS, OGV, FLV, WMV"
+
 LABEL_UI = {
     "REAL":          ("REAL VIDEO VERIFIED", "green",  True),
     "UNDETERMINED":  ("VIDEO UNDETERMINED",  "blue",   False),
@@ -4418,10 +4428,10 @@ def widget_embed(key: str = ""):
 <!-- Upload Panel -->
 <div class="tab-panel active" id="panelUpload">
   <div class="drop-zone" id="dropZone">
-    <input type="file" id="fileInput" accept="video/*,.mp4,.mov,.avi,.webm,.mkv">
+    <input type="file" id="fileInput" accept="video/*,.mp4,.mov,.m4v,.avi,.webm,.mkv,.mpg,.mpeg,.3gp,.3g2,.mts,.m2ts,.ts,.ogv,.flv,.wmv">
     <div class="drop-icon">🎬</div>
     <div class="drop-label">Drop video here or <span>browse</span></div>
-    <div class="drop-sub">MP4, MOV, AVI, WEBM · Max 2GB</div>
+    <div class="drop-sub">MP4, MOV, M4V, AVI, WEBM, MKV, MPEG/MPG, 3GP, MTS, TS, OGV, FLV, WMV · Max 2GB</div>
   </div>
   <div class="file-preview" id="filePreview">
     <span style="font-size:20px">🎬</span>

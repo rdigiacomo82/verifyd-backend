@@ -13,6 +13,16 @@ from config import FFMPEG_BIN, FFPROBE_BIN, TMP_DIR
 
 log = logging.getLogger("verifyd.video")
 
+# VERIFYD_VIDEO_FORMAT_EXPANSION_PATCH: public video containers supported by upload/link analysis.
+# Keep final certified output normalized to MP4; ffprobe validates actual video streams.
+VIDEO_ALLOWED_EXTENSIONS = {
+    ".mp4", ".mov", ".m4v", ".avi", ".webm", ".mkv",
+    ".mpg", ".mpeg", ".3gp", ".3g2", ".mts", ".m2ts",
+    ".ts", ".ogv", ".flv", ".wmv",
+}
+VIDEO_FORMAT_LABEL = "MP4, MOV, M4V, AVI, WEBM, MKV, MPEG/MPG, 3GP/3G2, MTS/M2TS, TS, OGV, FLV, WMV"
+
+
 # ── SMVD RapidAPI config ──────────────────────────────────────
 # Social Media Video Downloader by Emmanuel David
 RAPIDAPI_KEY  = os.environ.get("RAPIDAPI_KEY", "")
@@ -561,7 +571,7 @@ def download_video_ytdlp(url: str, output_path: str) -> None:
             raise RuntimeError("This video is unavailable or has been removed.")
         if "Unsupported URL" in msg:
             raise RuntimeError(
-                "This URL is not supported. Please try a direct .mp4 link or "
+                "This URL is not supported. Please try a direct video file link or "
                 "a URL from YouTube, TikTok, Instagram, Twitter/X, or Reddit."
             )
         log.error("yt-dlp download error: %s", msg)
@@ -580,7 +590,7 @@ def clip_first_6_seconds(input_path: str) -> str:
     if not is_valid_video(input_path):
         raise ValueError(
             "File does not appear to be a valid video. "
-            "Please try a direct .mp4 link or a URL from a supported platform."
+            "Please try a direct supported video file link or a URL from a supported platform."
         )
 
     # Determine start offset — skip intro for longer videos

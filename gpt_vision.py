@@ -179,13 +179,13 @@ def extract_key_frames(video_path: str, n_frames: int = MAX_FRAMES) -> list:
     """
     Extract n evenly-spaced frames from the video.
     Returns list of base64-encoded JPEG strings.
-    Converts WebM/MKV/MOV to MP4 first for cv2 reliability.
+    Converts WebM/MKV/MOV and legacy video containers to MP4 first for cv2 reliability.
     """
     import subprocess
 
     converted_path = None
     ext = os.path.splitext(video_path)[1].lower()
-    if ext in ('.webm', '.mkv', '.ogg', '.mov'):
+    if ext in ('.webm', '.mkv', '.ogg', '.ogv', '.mov', '.m4v', '.avi', '.mpg', '.mpeg', '.3gp', '.3g2', '.mts', '.m2ts', '.ts', '.flv', '.wmv'):
         try:
             tmp = tempfile.NamedTemporaryFile(suffix='.mp4', delete=False)
             converted_path = tmp.name
