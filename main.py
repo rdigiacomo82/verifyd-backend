@@ -32,6 +32,7 @@ from config import (                  # single source of truth for all settings
 from emailer  import send_otp_email, send_certification_email, send_enterprise_welcome_email
 from database import (init_db, insert_certificate, increment_downloads,
                       get_or_create_user, get_user_status, increment_user_uses,
+                      get_user_by_email, get_email_typo_suggestion,
                       is_valid_email, FREE_USES, get_certificate,
                       is_email_verified, create_otp, verify_otp,
                       create_api_key, get_api_key, increment_api_key_uses,
@@ -80,6 +81,20 @@ _db_is_email_verified = is_email_verified
 def normalize_email(email: str) -> str:
     """Normalize email consistently without truncation or alias creation."""
     return (email or "").strip().lower()
+
+
+def _email_typo_json(email: str):
+    """Return a JSONResponse for common email-domain typos, otherwise None."""
+    suggestion = get_email_typo_suggestion(email)
+    if not suggestion:
+        return None
+    normalized = normalize_email(email)
+    return JSONResponse({
+        "error": "possible_email_typo",
+        "message": f"Did you mean {suggestion}?",
+        "email": normalized,
+        "suggested_email": suggestion,
+    }, status_code=400)
 
 
 def _auto_verified_email_patterns() -> set:
@@ -140,7 +155,7 @@ def _verification_status_payload(email: str) -> dict:
     limit = FREE_USES
     try:
         if normalized and is_valid_email(normalized):
-            status = get_user_status(normalized)
+            status = get_user_status(normalized, create=False)
             plan = status.get("plan", plan)
             uses = int(status.get("uses", status.get("used", status.get("period_uses", uses))) or 0)
             limit = int(status.get("limit", limit) or limit)
@@ -460,6 +475,9 @@ def verification_status(email: str = ""):
         return JSONResponse({"detail": "email_required"}, status_code=400)
     if not is_valid_email(email):
         return JSONResponse({"detail": "invalid_email", "email": email}, status_code=400)
+    typo_response = _email_typo_json(email)
+    if typo_response:
+        return typo_response
     return JSONResponse(_verification_status_payload(email))
 
 @app.post("/upload/")
@@ -467,6 +485,9 @@ async def upload(file: UploadFile = File(...), email: str = Form(...)):
     # ── Email format validation ───────────────────────────────
     if not is_valid_email(email):
         return JSONResponse({"error": "Invalid email address."}, status_code=400)
+    typo_response = _email_typo_json(email)
+    if typo_response:
+        return typo_response
 
     # ── Email deliverability check ────────────────────────────
     is_deliverable, reason = _verify_email_deliverable(email)
@@ -644,6 +665,9 @@ async def upload_photo(file: UploadFile = File(...), email: str = Form(...)):
     # ── Email validation ──────────────────────────────────────
     if not is_valid_email(email):
         return JSONResponse({"error": "Invalid email address."}, status_code=400)
+    typo_response = _email_typo_json(email)
+    if typo_response:
+        return typo_response
 
     is_deliverable, reason = _verify_email_deliverable(email)
     if not is_deliverable:
@@ -899,6 +923,9 @@ async def upload_audio(file: UploadFile = File(...), email: str = Form(...)):
     """
     if not is_valid_email(email):
         return JSONResponse({"error": "Invalid email address."}, status_code=400)
+    typo_response = _email_typo_json(email)
+    if typo_response:
+        return typo_response
 
     is_deliverable, reason = _verify_email_deliverable(email)
     if not is_deliverable:
@@ -1254,6 +1281,9 @@ async def upload_trust_desk_zip(
     """
     if not is_valid_email(email):
         return JSONResponse({"error": "Invalid email address."}, status_code=400)
+    typo_response = _email_typo_json(email)
+    if typo_response:
+        return typo_response
 
     # Support both frontend field names: organization and organization_name.
     # The Trust Desk intake page uses organization_name; the original backend
@@ -1375,6 +1405,9 @@ async def upload_document(file: UploadFile = File(...), email: str = Form(...)):
     """
     if not is_valid_email(email):
         return JSONResponse({"error": "Invalid email address."}, status_code=400)
+    typo_response = _email_typo_json(email)
+    if typo_response:
+        return typo_response
 
     is_deliverable, reason = _verify_email_deliverable(email)
     if not is_deliverable:
@@ -2464,7 +2497,7 @@ def upload_limits(email: str = ""):
     plan = "free"
     if email and is_valid_email(email):
         try:
-            status = get_user_status(email)
+            status = get_user_status(email, create=False)
             plan = status.get("plan", "free")
         except Exception:
             pass
@@ -2786,6 +2819,9 @@ async def register_email(request: Request):
 
     if not is_valid_email(email):
         return JSONResponse({"error": "invalid email"}, status_code=400)
+    typo_response = _email_typo_json(email)
+    if typo_response:
+        return typo_response
 
     # Create or reuse session token for this email
     token = hashlib.sha256(f"{email}:{int(time.time() // 3600)}".encode()).hexdigest()[:32]
@@ -2815,7 +2851,10 @@ def user_status(email: str = ""):
     """
     if not email or not is_valid_email(email):
         return JSONResponse({"error": "Invalid email"}, status_code=400)
-    status = get_user_status(email)
+    typo_response = _email_typo_json(email)
+    if typo_response:
+        return typo_response
+    status = get_user_status(email, create=False)
     return status
 
 
@@ -3872,6 +3911,9 @@ async def send_otp(email: str = Form(...)):
     """Send a 6-digit OTP to the given email for verification."""
     if not is_valid_email(email):
         return JSONResponse({"error": "Invalid email address."}, status_code=400)
+    typo_response = _email_typo_json(email)
+    if typo_response:
+        return typo_response
 
     # auto_verified_email_otp_bypass
     if is_auto_verified_email(email):
@@ -3905,6 +3947,9 @@ async def verify_otp_route(email: str = Form(...), code: str = Form(...)):
     """Verify the OTP code submitted by the user."""
     if not is_valid_email(email):
         return JSONResponse({"error": "Invalid email address."}, status_code=400)
+    typo_response = _email_typo_json(email)
+    if typo_response:
+        return typo_response
 
     # auto_verified_email_verify_bypass
     if is_auto_verified_email(email):

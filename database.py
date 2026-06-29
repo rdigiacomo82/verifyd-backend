@@ -159,11 +159,67 @@ def is_valid_email(email: str) -> bool:
 
 
 # ─────────────────────────────────────────────────────────────
+#  Email normalization / typo guard
+# ─────────────────────────────────────────────────────────────
+
+COMMON_EMAIL_DOMAIN_TYPOS = {
+    "gmail.co": "gmail.com",
+    "googlemail.co": "googlemail.com",
+    "yahoo.co": "yahoo.com",
+    "outlook.co": "outlook.com",
+    "hotmail.co": "hotmail.com",
+    "icloud.co": "icloud.com",
+    "aol.co": "aol.com",
+    "protonmail.co": "protonmail.com",
+    "proton.co": "proton.me",
+}
+
+
+def normalize_email_value(email: str) -> str:
+    """Normalize an email value without changing aliases or truncating."""
+    return (email or "").strip().lower()
+
+
+def get_email_typo_suggestion(email: str) -> Optional[str]:
+    """Return a suggested correction for common consumer-domain typos.
+
+    This intentionally does not block all .co domains. It only catches common
+    accidental entries like gmail.co when the user most likely meant gmail.com.
+    """
+    normalized = normalize_email_value(email)
+    if "@" not in normalized:
+        return None
+    local, domain = normalized.rsplit("@", 1)
+    suggested_domain = COMMON_EMAIL_DOMAIN_TYPOS.get(domain)
+    if not suggested_domain:
+        return None
+    return f"{local}@{suggested_domain}"
+
+
+def get_user_by_email(email: str) -> Optional[dict]:
+    """Read-only user lookup. Does not create or update a user row."""
+    email_lower = normalize_email_value(email)
+    if not email_lower:
+        return None
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT * FROM users WHERE email_lower = %s",
+            (email_lower,)
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+
+# ─────────────────────────────────────────────────────────────
 #  User management
 # ─────────────────────────────────────────────────────────────
 
 def get_or_create_user(email: str) -> dict:
     email_lower = email.strip().lower()
+    suggestion = get_email_typo_suggestion(email_lower)
+    if suggestion:
+        raise ValueError(f"possible_email_typo:{email_lower}:{suggestion}")
     now = datetime.now(timezone.utc).isoformat()
 
     with get_db() as conn:
@@ -205,8 +261,26 @@ def get_or_create_user(email: str) -> dict:
         }
 
 
-def get_user_status(email: str) -> dict:
-    user  = get_or_create_user(email)
+def get_user_status(email: str, create: bool = True) -> dict:
+    """Return usage status.
+
+    create=True preserves the original behavior for upload/payment flows.
+    create=False is for read-only UI checks so partially typed valid-looking
+    addresses, such as gmail.co, do not create accidental admin rows.
+    """
+    user = get_or_create_user(email) if create else get_user_by_email(email)
+    if not user:
+        return {
+            "allowed":     True,
+            "uses_left":   FREE_USES,
+            "plan":        "free",
+            "total_uses":  0,
+            "period_uses": 0,
+            "limit":       FREE_USES,
+            "over_limit":  False,
+            "user_exists": False,
+        }
+
     plan  = user.get("plan", "free")
     limit = PLAN_LIMITS.get(plan, FREE_USES)
 
@@ -233,6 +307,7 @@ def get_user_status(email: str) -> dict:
         "period_uses": period_uses,
         "limit":       limit,
         "over_limit":  over_limit,
+        "user_exists": True,
     }
 
 
