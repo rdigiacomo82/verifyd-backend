@@ -2234,7 +2234,12 @@ async def verify_certificate_upload(file: UploadFile = File(...)):
 
 @app.get("/verify-certificate/{cid}")
 def verify_certificate_by_id(cid: str):
-    """Verify a certificate ID against the VeriFYD certificate database and R2 storage."""
+    """Verify a certificate ID against the VeriFYD certificate database and R2 storage.
+
+    Certificate-ID lookup is a record/storage lookup. Full hidden secure-seal and
+    byte-for-byte tamper verification still requires uploading the certified PDF
+    through /verify-certificate/ or /verify-document-seal/.
+    """
     cid = (cid or "").strip()
     if not cid:
         return JSONResponse({"verified": False, "status": "missing_certificate_id"}, status_code=400)
@@ -2248,13 +2253,113 @@ def verify_certificate_by_id(cid: str):
             "verification_status": "CERTIFICATE_NOT_FOUND",
         }, status_code=404)
 
+    original_sha256 = (
+        cert.get("original_sha256")
+        or cert.get("original_hash")
+        or cert.get("sha256")
+        or ""
+    )
+    certified_document_sha256 = cert.get("certified_document_sha256") or ""
+    certified_file_package_sha256 = cert.get("certified_file_package_sha256") or ""
+    certified_audio_sha256 = cert.get("certified_audio_sha256") or ""
+    certified_photo_sha256 = cert.get("certified_photo_sha256") or ""
+    certified_file_hash = (
+        cert.get("certified_file_hash")
+        or certified_file_package_sha256
+        or certified_document_sha256
+        or certified_audio_sha256
+        or certified_photo_sha256
+        or ""
+    )
+
     document_available = False
+    file_package_available = False
+    video_available = False
+    audio_available = False
+    photo_available = False
+
     try:
-        from storage import r2_available, certified_document_exists
+        from storage import (
+            r2_available,
+            certified_document_exists,
+            certified_file_package_exists,
+            certified_exists,
+            certified_audio_exists,
+        )
         if r2_available():
             document_available = bool(certified_document_exists(cid))
+            file_package_available = bool(certified_file_package_exists(cid))
+            video_available = bool(certified_exists(cid))
+            audio_available = bool(certified_audio_exists(cid))
+    except Exception as e:
+        log.warning("verify-certificate: R2 availability lookup failed for %s: %s", cid, e)
+
+    try:
+        from storage import _get_client, BUCKET, r2_available
+        if r2_available():
+            client = _get_client()
+            for plan in ("free", "creator", "pro", "enterprise"):
+                for ext in (".jpg", ".jpeg", ".png", ".webp"):
+                    try:
+                        client.head_object(Bucket=BUCKET, Key=f"certified-photos/{plan}/{cid}{ext}")
+                        photo_available = True
+                        break
+                    except Exception:
+                        continue
+                if photo_available:
+                    break
     except Exception:
-        document_available = False
+        pass
+
+    if not video_available:
+        try:
+            import redis as _redis
+            r = _redis.from_url(os.environ.get("REDIS_URL", "redis://localhost:6379"), decode_responses=False)
+            video_available = bool(r.exists(f"cert:{cid}"))
+        except Exception:
+            pass
+
+    document_download_url = f"{BASE_URL}/download-document/{cid}" if document_available else ""
+    file_package_url = f"{BASE_URL}/download-certified-file/{cid}" if file_package_available else ""
+    video_download_url = f"{BASE_URL}/download/{cid}" if video_available else ""
+    audio_download_url = f"{BASE_URL}/download-audio/{cid}" if audio_available else ""
+    photo_download_url = f"{BASE_URL}/download-photo/{cid}" if photo_available else ""
+
+    media_type = "document" if document_available or certified_document_sha256 else (
+        "audio" if audio_available or certified_audio_sha256 else
+        "photo" if photo_available or certified_photo_sha256 else
+        "video" if video_available else
+        "file"
+    )
+
+    primary_download_url = (
+        document_download_url
+        or file_package_url
+        or audio_download_url
+        or photo_download_url
+        or video_download_url
+        or ""
+    )
+
+    verification_report = {
+        "title": "VeriFYD Certificate Verification Report",
+        "status": "FOUND",
+        "certificate_id": cid,
+        "database_match": "YES",
+        "certified_document_available": "YES" if document_available else "NO",
+        "certified_file_package_available": "YES" if file_package_available else "NO",
+        "video_available": "YES" if video_available else "NO",
+        "audio_available": "YES" if audio_available else "NO",
+        "photo_available": "YES" if photo_available else "NO",
+        "trust_level": "DATABASE RECORD FOUND",
+        "message": (
+            "This certificate ID exists in the VeriFYD certificate database. "
+            "Upload the certified PDF to verify the hidden secure seal and hash payload."
+        ),
+        "original_sha256": original_sha256,
+        "certified_document_sha256": certified_document_sha256,
+        "certified_file_package_sha256": certified_file_package_sha256,
+    }
 
     return JSONResponse({
         "verified": True,
@@ -2268,108 +2373,44 @@ def verify_certificate_by_id(cid: str):
         "upload_time": cert.get("upload_time", ""),
         "download_count": cert.get("download_count", 0),
         "certified_to": cert.get("email", ""),
-        "certified_document_available": document_available,
-        "download_url": f"{BASE_URL}/download-document/{cid}" if document_available else "",
-        "verification_report": {
-            "title": "VeriFYD Certificate Verification Report",
-            "status": "FOUND",
-            "certificate_id": cid,
-            "database_match": "YES",
-            "certified_document_available": "YES" if document_available else "UNKNOWN",
-            "trust_level": "DATABASE RECORD FOUND",
-            "message": "This certificate ID exists in the VeriFYD certificate database. Upload the certified PDF to verify the hidden secure seal and hash payload.",
-        },
+        "media_type": media_type,
+        "file_type": media_type,
+
+        "sha256": original_sha256,
+        "original_sha256": original_sha256,
+        "original_hash": original_sha256,
+        "certified_document_sha256": certified_document_sha256,
+        "certified_document_hash": certified_document_sha256,
+        "certified_file_package_sha256": certified_file_package_sha256,
+        "certified_file_package_hash": certified_file_package_sha256,
+        "certified_evidence_package_hash": certified_file_package_sha256,
+        "certified_audio_sha256": certified_audio_sha256,
+        "certified_photo_sha256": certified_photo_sha256,
+        "certified_file_hash": certified_file_hash,
+
+        "certified_document_available": bool(document_available),
+        "certified_file_package_available": bool(file_package_available),
+        "certified_evidence_package_available": bool(file_package_available),
+        "video_available": bool(video_available),
+        "audio_available": bool(audio_available),
+        "photo_available": bool(photo_available),
+
+        "download_url": primary_download_url,
+        "certified_document_url": document_download_url,
+        "certified_file_package_url": file_package_url,
+        "certified_evidence_package_url": file_package_url,
+        "video_download_url": video_download_url,
+        "audio_download_url": audio_download_url,
+        "photo_download_url": photo_download_url,
+
+        "original_hash_match": "NOT_CHECKED",
+        "certified_document_hash_match": "NOT_CHECKED",
+        "certified_file_package_hash_match": "NOT_CHECKED",
+        "certified_evidence_package_hash_match": "NOT_CHECKED",
+        "record_match_source": "certificate_lookup",
+        "verification_report": verification_report,
     })
 
-
-
-
-def _trust_desk_child_certifications_from_manifest(result_obj: dict) -> list:
-    """
-    Build a frontend-friendly list of child file certificates from the
-    Trust Desk final manifest stored in the parent job result.
-
-    This keeps /job-status/{trust_desk_job_id} useful without changing
-    the underlying Trust Desk package format.
-    """
-    if not isinstance(result_obj, dict):
-        return []
-
-    manifest = result_obj.get("manifest") or {}
-    if not isinstance(manifest, dict):
-        return []
-
-    items = manifest.get("items") or manifest.get("files") or []
-    if not isinstance(items, list):
-        return []
-
-    children = []
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-
-        cert_id = (
-            item.get("certificate_id")
-            or item.get("cert_id")
-            or item.get("child_certificate_id")
-            or ""
-        )
-        cert_id = str(cert_id or "").strip()
-        if not cert_id:
-            continue
-
-        filename = (
-            item.get("filename")
-            or item.get("original_filename")
-            or item.get("relative_path")
-            or item.get("path")
-            or item.get("name")
-            or ""
-        )
-        filename = str(filename or "").strip()
-
-        media_type = (
-            item.get("media_type")
-            or item.get("file_type")
-            or item.get("category")
-            or item.get("type")
-            or ""
-        )
-        media_type = str(media_type or "").strip().lower()
-
-        auth = (
-            item.get("authenticity_score")
-            if item.get("authenticity_score") not in (None, "")
-            else item.get("authenticity")
-        )
-
-        label = str(item.get("label") or "").strip()
-        status = str(item.get("status") or item.get("display_status") or "").strip()
-
-        download_url = str(item.get("download_url") or "").strip()
-        verification_url = str(item.get("verification_link") or item.get("verification_url") or "").strip()
-
-        # Backend API verification endpoint plus frontend-friendly certificate page URL.
-        backend_verification_url = f"{BASE_URL}/verify-certificate/{cert_id}"
-        frontend_verification_url = f"https://vfvid.com/verify-certificate?cert_id={cert_id}"
-
-        children.append({
-            "filename": filename,
-            "media_type": media_type,
-            "certificate_id": cert_id,
-            "authenticity_score": auth,
-            "label": label,
-            "status": status,
-            "processing_status": item.get("processing_status", ""),
-            "download_url": download_url,
-            "verification_url": verification_url or frontend_verification_url,
-            "frontend_verification_url": frontend_verification_url,
-            "backend_verification_url": backend_verification_url,
-            "sha256": item.get("sha256") or item.get("original_sha256") or "",
-            "certified_sha256": item.get("certified_sha256") or "",
-        })
-
-    return children
 
 @app.get("/job-status/{job_id}")
 def job_status(job_id: str):
