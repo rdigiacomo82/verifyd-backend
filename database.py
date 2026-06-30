@@ -10,6 +10,7 @@
 # ============================================================
 
 import os
+import json
 import logging
 import re
 import random
@@ -145,6 +146,57 @@ def init_db() -> None:
                 last_used       TEXT
             )
         """)
+
+
+        # ── VeriFYD Vault Records ─────────────────────────────
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS vault_records (
+                id              SERIAL PRIMARY KEY,
+                vault_key       TEXT    UNIQUE NOT NULL,
+                cert_id         TEXT    UNIQUE NOT NULL,
+                email           TEXT    NOT NULL DEFAULT '',
+                vault_status    TEXT    NOT NULL DEFAULT 'stored',
+                created_at      TEXT    NOT NULL,
+                updated_at      TEXT    NOT NULL,
+                original_file   TEXT    NOT NULL DEFAULT '',
+                media_type      TEXT    NOT NULL DEFAULT '',
+                original_sha256 TEXT    NOT NULL DEFAULT '',
+                certified_document_sha256 TEXT NOT NULL DEFAULT '',
+                certified_file_package_sha256 TEXT NOT NULL DEFAULT '',
+                certified_audio_sha256 TEXT NOT NULL DEFAULT '',
+                certified_photo_sha256 TEXT NOT NULL DEFAULT '',
+                certified_file_hash TEXT NOT NULL DEFAULT '',
+                stored_evidence_json TEXT NOT NULL DEFAULT '{}',
+                evidence_timeline_json TEXT NOT NULL DEFAULT '[]',
+                verification_report_json TEXT NOT NULL DEFAULT '{}',
+                notes           TEXT    NOT NULL DEFAULT ''
+            )
+        """)
+
+        # ── Vault columns (safe for existing Postgres DBs) ───────────────
+        for _column_name, _column_type in (
+            ("email", "TEXT NOT NULL DEFAULT ''"),
+            ("vault_status", "TEXT NOT NULL DEFAULT 'stored'"),
+            ("created_at", "TEXT NOT NULL DEFAULT ''"),
+            ("updated_at", "TEXT NOT NULL DEFAULT ''"),
+            ("original_file", "TEXT NOT NULL DEFAULT ''"),
+            ("media_type", "TEXT NOT NULL DEFAULT ''"),
+            ("original_sha256", "TEXT NOT NULL DEFAULT ''"),
+            ("certified_document_sha256", "TEXT NOT NULL DEFAULT ''"),
+            ("certified_file_package_sha256", "TEXT NOT NULL DEFAULT ''"),
+            ("certified_audio_sha256", "TEXT NOT NULL DEFAULT ''"),
+            ("certified_photo_sha256", "TEXT NOT NULL DEFAULT ''"),
+            ("certified_file_hash", "TEXT NOT NULL DEFAULT ''"),
+            ("stored_evidence_json", "TEXT NOT NULL DEFAULT '{}'"),
+            ("evidence_timeline_json", "TEXT NOT NULL DEFAULT '[]'"),
+            ("verification_report_json", "TEXT NOT NULL DEFAULT '{}'"),
+            ("notes", "TEXT NOT NULL DEFAULT ''"),
+        ):
+            try:
+                cur.execute(f"ALTER TABLE vault_records ADD COLUMN IF NOT EXISTS {_column_name} {_column_type}")
+            except Exception as e:
+                log.warning("Could not ensure vault_records.%s column: %s", _column_name, e)
+
 
         log.info("PostgreSQL database initialized")
 
@@ -503,6 +555,252 @@ def increment_downloads(cert_id: str) -> None:
             "UPDATE certificates SET download_count = download_count + 1 WHERE cert_id = %s",
             (cert_id,),
         )
+
+
+
+# ─────────────────────────────────────────────────────────────
+#  VeriFYD Vault operations
+# ─────────────────────────────────────────────────────────────
+
+def generate_vault_key(cert_id: str) -> str:
+    """Generate a stable user-facing Vault Key from a certificate ID.
+
+    This is a reference/access key, not an encryption key.
+    """
+    clean = (cert_id or "").strip().replace("-", "").upper()
+    return f"VFYD-VAULT-{(clean or 'UNKNOWN')[:8]}"
+
+
+def _vault_media_type(cert: dict) -> str:
+    if cert.get("certified_document_sha256"):
+        return "document"
+    if cert.get("certified_audio_sha256"):
+        return "audio"
+    if cert.get("certified_photo_sha256"):
+        return "photo"
+    return "video"
+
+
+def _vault_bool(value) -> bool:
+    return bool(value is not None and str(value).strip())
+
+
+def _vault_evidence_from_cert(cert: dict) -> dict:
+    return {
+        "original_file_hash": _vault_bool(cert.get("original_sha256") or cert.get("original_hash") or cert.get("sha256")),
+        "certified_document": _vault_bool(cert.get("certified_document_sha256")),
+        "certified_evidence_package": _vault_bool(cert.get("certified_file_package_sha256")),
+        "certified_audio": _vault_bool(cert.get("certified_audio_sha256")),
+        "certified_photo": _vault_bool(cert.get("certified_photo_sha256")),
+        "evidence_timeline": True,
+        "verification_report": True,
+    }
+
+
+def _vault_timeline_from_cert(cert: dict) -> list:
+    original_hash = cert.get("original_sha256") or cert.get("original_hash") or cert.get("sha256") or ""
+    doc_hash = cert.get("certified_document_sha256") or ""
+    package_hash = cert.get("certified_file_package_sha256") or ""
+    audio_hash = cert.get("certified_audio_sha256") or ""
+    photo_hash = cert.get("certified_photo_sha256") or ""
+    label = cert.get("label") or ""
+    authenticity = cert.get("authenticity")
+    ai_score = cert.get("ai_score")
+
+    timeline = []
+    timeline.append({
+        "event": "File Uploaded / Certificate Created",
+        "timestamp": cert.get("upload_time") or "",
+        "detail": cert.get("original_file") or "",
+        "status": "complete",
+    })
+    if original_hash:
+        timeline.append({
+            "event": "Original File Hash Generated",
+            "timestamp": cert.get("upload_time") or "",
+            "detail": f"SHA-256: {original_hash}",
+            "status": "complete",
+        })
+    if label:
+        timeline.append({
+            "event": "Authenticity Analysis Completed",
+            "timestamp": cert.get("upload_time") or "",
+            "detail": f"{label} — {authenticity}% authenticity / {ai_score}% AI risk",
+            "status": "complete",
+        })
+    if doc_hash:
+        timeline.append({
+            "event": "Certified Document Created",
+            "timestamp": cert.get("upload_time") or "",
+            "detail": f"SHA-256: {doc_hash}",
+            "status": "complete",
+        })
+    if package_hash:
+        timeline.append({
+            "event": "Certified Evidence Package Created",
+            "timestamp": cert.get("upload_time") or "",
+            "detail": f"SHA-256: {package_hash}",
+            "status": "complete",
+        })
+    if audio_hash:
+        timeline.append({
+            "event": "Certified Audio Created",
+            "timestamp": cert.get("upload_time") or "",
+            "detail": f"SHA-256: {audio_hash}",
+            "status": "complete",
+        })
+    if photo_hash:
+        timeline.append({
+            "event": "Certified Photo Created",
+            "timestamp": cert.get("upload_time") or "",
+            "detail": f"SHA-256: {photo_hash}",
+            "status": "complete",
+        })
+    if doc_hash or package_hash or audio_hash or photo_hash:
+        timeline.append({
+            "event": "Certified Files Stored",
+            "timestamp": cert.get("upload_time") or "",
+            "detail": "Certified files available for secure preservation",
+            "status": "complete",
+        })
+    timeline.append({
+        "event": "Certificate Record Verified",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "detail": "Verified in VeriFYD Vault",
+        "status": "complete",
+    })
+    return timeline
+
+
+def _vault_report_from_cert(cert: dict, vault_key: str) -> dict:
+    return {
+        "title": "VeriFYD Vault Record",
+        "status": "STORED",
+        "vault_key": vault_key,
+        "certificate_id": cert.get("cert_id") or "",
+        "vault_status": "Stored in VeriFYD Vault",
+        "message": "This certificate record has been saved as a VeriFYD Vault reference for future lookup and preservation workflow.",
+        "original_sha256": cert.get("original_sha256") or cert.get("original_hash") or cert.get("sha256") or "",
+        "certified_document_sha256": cert.get("certified_document_sha256") or "",
+        "certified_file_package_sha256": cert.get("certified_file_package_sha256") or "",
+        "certified_audio_sha256": cert.get("certified_audio_sha256") or "",
+        "certified_photo_sha256": cert.get("certified_photo_sha256") or "",
+    }
+
+
+def save_certificate_to_vault(cert_id: str, email: str = "", notes: str = "") -> dict:
+    """Create or update a VeriFYD Vault record for an existing certificate."""
+    cert_id = (cert_id or "").strip()
+    if not cert_id:
+        raise ValueError("missing_certificate_id")
+
+    cert = get_certificate(cert_id)
+    if not cert:
+        raise ValueError("certificate_not_found")
+
+    now = datetime.now(timezone.utc).isoformat()
+    vault_key = generate_vault_key(cert_id)
+    cert_email = (email or cert.get("email") or "").strip().lower()
+    original_sha256 = cert.get("original_sha256") or cert.get("original_hash") or cert.get("sha256") or ""
+    certified_file_hash = (
+        cert.get("certified_file_hash")
+        or cert.get("certified_file_package_sha256")
+        or cert.get("certified_document_sha256")
+        or cert.get("certified_audio_sha256")
+        or cert.get("certified_photo_sha256")
+        or ""
+    )
+    media_type = _vault_media_type(cert)
+    stored_evidence = _vault_evidence_from_cert(cert)
+    timeline = _vault_timeline_from_cert(cert)
+    report = _vault_report_from_cert(cert, vault_key)
+
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO vault_records (
+                vault_key, cert_id, email, vault_status, created_at, updated_at,
+                original_file, media_type, original_sha256,
+                certified_document_sha256, certified_file_package_sha256,
+                certified_audio_sha256, certified_photo_sha256, certified_file_hash,
+                stored_evidence_json, evidence_timeline_json, verification_report_json, notes
+            )
+            VALUES (%s, %s, %s, 'stored', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (cert_id) DO UPDATE SET
+                email = EXCLUDED.email,
+                vault_status = 'stored',
+                updated_at = EXCLUDED.updated_at,
+                original_file = EXCLUDED.original_file,
+                media_type = EXCLUDED.media_type,
+                original_sha256 = EXCLUDED.original_sha256,
+                certified_document_sha256 = EXCLUDED.certified_document_sha256,
+                certified_file_package_sha256 = EXCLUDED.certified_file_package_sha256,
+                certified_audio_sha256 = EXCLUDED.certified_audio_sha256,
+                certified_photo_sha256 = EXCLUDED.certified_photo_sha256,
+                certified_file_hash = EXCLUDED.certified_file_hash,
+                stored_evidence_json = EXCLUDED.stored_evidence_json,
+                evidence_timeline_json = EXCLUDED.evidence_timeline_json,
+                verification_report_json = EXCLUDED.verification_report_json,
+                notes = COALESCE(NULLIF(EXCLUDED.notes, ''), vault_records.notes)
+            RETURNING *
+            """,
+            (
+                vault_key, cert_id, cert_email, now, now,
+                cert.get("original_file") or "", media_type, original_sha256,
+                cert.get("certified_document_sha256") or "",
+                cert.get("certified_file_package_sha256") or "",
+                cert.get("certified_audio_sha256") or "",
+                cert.get("certified_photo_sha256") or "",
+                certified_file_hash,
+                json.dumps(stored_evidence, sort_keys=True),
+                json.dumps(timeline, sort_keys=True),
+                json.dumps(report, sort_keys=True),
+                notes or "",
+            ),
+        )
+        row = cur.fetchone()
+
+    log.info("Vault record stored cert_id=%s vault_key=%s", cert_id, vault_key)
+    return _hydrate_vault_record(dict(row))
+
+
+def _hydrate_vault_record(row: dict) -> dict:
+    if not row:
+        return row
+    for key, default in (
+        ("stored_evidence_json", {}),
+        ("evidence_timeline_json", []),
+        ("verification_report_json", {}),
+    ):
+        try:
+            row[key.replace("_json", "")] = json.loads(row.get(key) or json.dumps(default))
+        except Exception:
+            row[key.replace("_json", "")] = default
+    return row
+
+
+def get_vault_record(vault_key: str) -> Optional[dict]:
+    vault_key = (vault_key or "").strip().upper()
+    if not vault_key:
+        return None
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM vault_records WHERE UPPER(vault_key) = %s", (vault_key,))
+        row = cur.fetchone()
+        return _hydrate_vault_record(dict(row)) if row else None
+
+
+def get_vault_record_by_cert_id(cert_id: str) -> Optional[dict]:
+    cert_id = (cert_id or "").strip()
+    if not cert_id:
+        return None
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM vault_records WHERE cert_id = %s", (cert_id,))
+        row = cur.fetchone()
+        return _hydrate_vault_record(dict(row)) if row else None
+
 
 
 def list_certificates(limit: int = 50, label: Optional[str] = None) -> list:

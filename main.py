@@ -34,6 +34,7 @@ from database import (init_db, insert_certificate, increment_downloads,
                       get_or_create_user, get_user_status, increment_user_uses,
                       get_user_by_email, get_email_typo_suggestion,
                       is_valid_email, FREE_USES, get_certificate,
+                      save_certificate_to_vault, get_vault_record, get_vault_record_by_cert_id,
                       is_email_verified, create_otp, verify_otp,
                       create_api_key, get_api_key, increment_api_key_uses,
                       revoke_api_key, list_api_keys, update_api_key_branding)
@@ -2410,6 +2411,105 @@ def verify_certificate_by_id(cid: str):
         "record_match_source": "certificate_lookup",
         "verification_report": verification_report,
     })
+
+
+
+# ─────────────────────────────────────────────
+#  VeriFYD Vault — certificate preservation records
+# ─────────────────────────────────────────────
+
+def _vault_public_payload(record: dict) -> dict:
+    """Return a user-safe Vault response payload."""
+    record = dict(record or {})
+    return {
+        "status": "stored",
+        "vault_status": "Stored in VeriFYD Vault",
+        "vault_key": record.get("vault_key", ""),
+        "vault_record_id": record.get("cert_id", ""),
+        "certificate_id": record.get("cert_id", ""),
+        "email": record.get("email", ""),
+        "original_file": record.get("original_file", ""),
+        "media_type": record.get("media_type", ""),
+        "created_at": record.get("created_at", ""),
+        "updated_at": record.get("updated_at", ""),
+        "original_sha256": record.get("original_sha256", ""),
+        "certified_document_sha256": record.get("certified_document_sha256", ""),
+        "certified_file_package_sha256": record.get("certified_file_package_sha256", ""),
+        "certified_audio_sha256": record.get("certified_audio_sha256", ""),
+        "certified_photo_sha256": record.get("certified_photo_sha256", ""),
+        "certified_file_hash": record.get("certified_file_hash", ""),
+        "stored_evidence": record.get("stored_evidence", {}),
+        "evidence_timeline": record.get("evidence_timeline", []),
+        "verification_report": record.get("verification_report", {}),
+        "message": "Certificate saved to VeriFYD Vault for future reference.",
+    }
+
+
+@app.post("/vault/save")
+async def vault_save(request: Request):
+    """Save an existing certificate record into VeriFYD Vault.
+
+    Accepts JSON, form fields, or query parameters:
+    - cert_id or certificate_id
+    - email optional
+    - notes optional
+    """
+    payload = {}
+    try:
+        content_type = (request.headers.get("content-type") or "").lower()
+        if "application/json" in content_type:
+            payload = await request.json()
+        elif "form" in content_type:
+            form = await request.form()
+            payload = dict(form)
+    except Exception:
+        payload = {}
+
+    cert_id = (
+        str(payload.get("cert_id") or payload.get("certificate_id") or "").strip()
+        or str(request.query_params.get("cert_id") or request.query_params.get("certificate_id") or "").strip()
+    )
+    email = (
+        str(payload.get("email") or "").strip()
+        or str(request.query_params.get("email") or "").strip()
+    )
+    notes = (
+        str(payload.get("notes") or "").strip()
+        or str(request.query_params.get("notes") or "").strip()
+    )
+
+    if not cert_id:
+        return JSONResponse({"status": "error", "error": "missing_certificate_id"}, status_code=400)
+
+    try:
+        record = save_certificate_to_vault(cert_id=cert_id, email=email, notes=notes)
+        return JSONResponse(_vault_public_payload(record))
+    except ValueError as exc:
+        err = str(exc)
+        if err == "certificate_not_found":
+            return JSONResponse({"status": "error", "error": "certificate_not_found", "certificate_id": cert_id}, status_code=404)
+        return JSONResponse({"status": "error", "error": err}, status_code=400)
+    except Exception as exc:
+        log.exception("vault_save failed for cert_id=%s", cert_id)
+        return JSONResponse({"status": "error", "error": "vault_save_failed", "detail": str(exc)[:200]}, status_code=500)
+
+
+@app.get("/vault/by-certificate/{cid}")
+def vault_lookup_by_certificate(cid: str):
+    """Look up a Vault record by certificate ID."""
+    record = get_vault_record_by_cert_id(cid)
+    if not record:
+        return JSONResponse({"status": "not_found", "error": "vault_record_not_found", "certificate_id": cid}, status_code=404)
+    return JSONResponse(_vault_public_payload(record))
+
+
+@app.get("/vault/{vault_key}")
+def vault_lookup(vault_key: str):
+    """Look up a Vault record by Vault Key."""
+    record = get_vault_record(vault_key)
+    if not record:
+        return JSONResponse({"status": "not_found", "error": "vault_record_not_found", "vault_key": vault_key}, status_code=404)
+    return JSONResponse(_vault_public_payload(record))
 
 
 @app.get("/job-status/{job_id}")
