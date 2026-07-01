@@ -49,6 +49,42 @@ def _store_result(redis_conn, job_id: str, result: dict) -> None:
 
 
 # ─────────────────────────────────────────────────────────────
+#  Phase 3A — VeriFYD Content Credentials Plus Report
+# ─────────────────────────────────────────────────────────────
+def _content_credentials_report_for_path(path: str, filename: str = "", media_type: str = "") -> dict:
+    """
+    Best-effort C2PA / Content Credentials inspection.
+
+    This is informational in Phase 3A. It does not make or override the final
+    authenticity decision; it adds a provenance card to the verification result.
+    """
+    try:
+        from c2pa_checker import analyze_content_credentials
+        return analyze_content_credentials(path, filename=filename, media_type=media_type)
+    except Exception as exc:
+        log.warning("Content Credentials Plus report failed for %s: %s", filename, exc)
+        return {
+            "title": "VeriFYD Content Credentials Plus Report",
+            "status": "CONTENT_CREDENTIALS_UNAVAILABLE",
+            "manifest_found": False,
+            "manifest_valid": "unknown",
+            "claim_generator": "",
+            "reported_actions": [],
+            "ingredients": [],
+            "interpretation": (
+                "Content Credentials inspection was not available for this file. "
+                "This does not affect VeriFYD's forensic, AI, metadata, hash, and file-structure analysis."
+            ),
+            "risk_level": "informational",
+            "filename": filename or "",
+            "media_type": media_type or "",
+            "tool_available": False,
+            "tool_used": "",
+            "technical_notes": [str(exc)[:200]],
+        }
+
+
+# ─────────────────────────────────────────────────────────────
 #  Runtime diagnostics / document-rendering dependencies
 # ─────────────────────────────────────────────────────────────
 _OFFICE_DIAGNOSTICS_LOGGED = False
@@ -208,6 +244,7 @@ def process_upload_job(file_key: str, filename: str, email: str, suppress_email:
             log.warning("Worker: could not write upload source sidecar for %s: %s", job_id, _sidecar_exc)
 
         authenticity, label, detail = run_detection_multiclip(tmp_path)
+        content_credentials_report = _content_credentials_report_for_path(tmp_path, filename, "video")
         ui_text, color, certify = LABEL_UI.get(label, ("VIDEO UNDETERMINED", "blue", False))
 
         increment_user_uses(email)
@@ -246,6 +283,7 @@ def process_upload_job(file_key: str, filename: str, email: str, suppress_email:
             "ai_source_confidence": detail.get("ai_source_confidence", ""),
             "blend_mode": detail.get("blend_mode", ""),
             "provenance_override": detail.get("provenance_override", False),
+            "content_credentials_report": content_credentials_report,
             "job_status": "complete",
             "video_ready": False,
         }
@@ -367,6 +405,7 @@ def process_audio_upload_job(file_key: str, filename: str, email: str, suppress_
             sha256 = hashlib.sha256(file_bytes).hexdigest()
 
         detail = analyze_audio(tmp_path)
+        content_credentials_report = _content_credentials_report_for_path(tmp_path, filename, "audio")
         audio_score = int(detail.get("audio_ai_score", 50))
         authenticity = max(0, min(100, 100 - audio_score))
         # Keep audio scoring aligned with current VeriFYD certificate thresholds:
@@ -424,6 +463,7 @@ def process_audio_upload_job(file_key: str, filename: str, email: str, suppress_
             "gpt_flags": detail.get("evidence", [])[:5],
             "sha256": sha256,
             "certificate_id": job_id,
+            "content_credentials_report": content_credentials_report,
         }
 
         if certify:
@@ -647,6 +687,7 @@ def process_photo_upload_job(file_key: str, filename: str, email: str, suppress_
             sha256 = hashlib.sha256(file_bytes).hexdigest()
 
         authenticity, label, detail = run_photo_detection(tmp_path)
+        content_credentials_report = _content_credentials_report_for_path(tmp_path, filename, "photo")
         ui_text, color, certify = LABEL_UI.get(label, ("PHOTO UNDETERMINED", "blue", False))
 
         increment_user_uses(email)
@@ -677,6 +718,7 @@ def process_photo_upload_job(file_key: str, filename: str, email: str, suppress_
             "ela_score": detail.get("ela_score", 0),
             "generator_guess": detail.get("generator_guess", "Unknown"),
             "media_type": "photo",
+            "content_credentials_report": content_credentials_report,
             "job_status": "complete",
             "photo_ready": False,
         }
@@ -1321,6 +1363,7 @@ def process_document_upload_job(file_key: str, filename: str, email: str, suppre
         else:
             authenticity, label, detail = run_document_detection(tmp_path)
 
+        content_credentials_report = _content_credentials_report_for_path(tmp_path, filename, "document")
         ui_text, color, certify = LABEL_UI.get(label, ("DOCUMENT UNDETERMINED", "blue", False))
 
         increment_user_uses(email)
@@ -1353,6 +1396,7 @@ def process_document_upload_job(file_key: str, filename: str, email: str, suppre
             "text_score": detail.get("text_score", 0),
             "document_risk_report": risk_report,
             "risk_report": risk_report,
+            "content_credentials_report": content_credentials_report,
             "overall_risk": risk_report.get("overall_risk") if isinstance(risk_report, dict) else None,
             "risk_score": risk_report.get("risk_score") if isinstance(risk_report, dict) else None,
             "metadata_integrity": risk_report.get("metadata_integrity") if isinstance(risk_report, dict) else None,
