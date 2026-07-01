@@ -1984,6 +1984,382 @@ def _classify_post_certification_pdf_change(
     return classification
 
 
+
+def _download_stored_certified_document_to_path(cid: str, dest_path: str) -> dict:
+    """
+    Download VeriFYD's issued certified PDF to a temp path for visual comparison.
+
+    This helper is only used after deterministic hash comparison already shows the
+    uploaded certified PDF differs from the stored issued copy.
+    """
+    result = {
+        "available": False,
+        "source": "",
+        "key": "",
+        "path": "",
+        "sha256": "",
+        "size_bytes": 0,
+        "error": "",
+    }
+    cid = (cid or "").strip()
+    if not cid:
+        result["error"] = "missing_certificate_id"
+        return result
+
+    try:
+        from storage import _get_client, BUCKET, r2_available
+        if r2_available():
+            client = _get_client()
+            for plan in ("pro", "creator", "enterprise", "free"):
+                key = f"certified-documents/{plan}/{cid}.pdf"
+                try:
+                    client.download_file(BUCKET, key, dest_path)
+                    if os.path.exists(dest_path) and os.path.getsize(dest_path) > 0:
+                        result.update({
+                            "available": True,
+                            "source": "r2",
+                            "key": key,
+                            "path": dest_path,
+                            "sha256": _sha256(dest_path),
+                            "size_bytes": os.path.getsize(dest_path),
+                            "error": "",
+                        })
+                        return result
+                except Exception:
+                    continue
+    except Exception as e:
+        result["error"] = f"r2_download_failed:{str(e)[:120]}"
+
+    try:
+        r = _get_redis()
+        data = r.get(f"doccert:{cid}")
+        if data:
+            with open(dest_path, "wb") as fh:
+                fh.write(data)
+            result.update({
+                "available": True,
+                "source": "redis",
+                "key": f"doccert:{cid}",
+                "path": dest_path,
+                "sha256": _sha256(dest_path),
+                "size_bytes": os.path.getsize(dest_path),
+                "error": "",
+            })
+            return result
+    except Exception as e:
+        result["error"] = (result.get("error") + "; " if result.get("error") else "") + f"redis_download_failed:{str(e)[:120]}"
+
+    if not result.get("error"):
+        result["error"] = "stored_certified_document_not_found"
+    return result
+
+
+def _render_pdf_pages_for_change_report(pdf_path: str, out_dir: str, prefix: str, max_pages: int = 5) -> dict:
+    """Render PDF pages to PNG images for VeriFYD Change Report comparison."""
+    info = {"available": False, "page_count": 0, "pages": [], "error": ""}
+    try:
+        import fitz  # PyMuPDF
+    except Exception as e:
+        info["error"] = f"pymupdf_unavailable:{str(e)[:120]}"
+        return info
+
+    try:
+        doc = fitz.open(pdf_path)
+        info["page_count"] = int(doc.page_count)
+        render_count = min(int(doc.page_count), max(1, int(max_pages or 5)))
+        matrix = fitz.Matrix(1.35, 1.35)
+        for idx in range(render_count):
+            page = doc.load_page(idx)
+            pix = page.get_pixmap(matrix=matrix, alpha=False)
+            out_path = os.path.join(out_dir, f"{prefix}_page_{idx + 1}.png")
+            pix.save(out_path)
+            info["pages"].append({"page": idx + 1, "path": out_path, "width": pix.width, "height": pix.height})
+        info["available"] = bool(info["pages"])
+        doc.close()
+    except Exception as e:
+        info["error"] = f"render_failed:{str(e)[:160]}"
+    return info
+
+
+def _compare_rendered_pdf_pages(stored_render: dict, uploaded_render: dict) -> list:
+    """Return visual page difference summaries for rendered PDF pages."""
+    findings = []
+    try:
+        from PIL import Image, ImageChops, ImageStat
+    except Exception as e:
+        return [{
+            "page": 0,
+            "changed": False,
+            "difference_score": 0,
+            "summary": f"Visual image comparison unavailable: {str(e)[:100]}",
+        }]
+
+    stored_pages = {int(p.get("page")): p for p in stored_render.get("pages", [])}
+    uploaded_pages = {int(p.get("page")): p for p in uploaded_render.get("pages", [])}
+    all_pages = sorted(set(stored_pages) | set(uploaded_pages))
+
+    for page_no in all_pages:
+        sp = stored_pages.get(page_no)
+        up = uploaded_pages.get(page_no)
+        if not sp or not up:
+            findings.append({
+                "page": page_no,
+                "changed": True,
+                "difference_score": 100,
+                "summary": "Page exists in one copy but not the other.",
+                "region": "page_missing_or_added",
+            })
+            continue
+
+        try:
+            a = Image.open(sp["path"]).convert("RGB")
+            b = Image.open(up["path"]).convert("RGB")
+            if a.size != b.size:
+                b = b.resize(a.size)
+            diff = ImageChops.difference(a, b)
+            stat = ImageStat.Stat(diff)
+            mean = sum(stat.mean) / len(stat.mean)
+            # Scale roughly to 0-100. Small antialiasing/rendering shifts should stay low.
+            score = round(min(100.0, (mean / 255.0) * 100.0), 3)
+            bbox = diff.getbbox()
+            changed = bool(score >= 0.15 or bbox)
+            region = "none"
+            if bbox:
+                w, h = a.size
+                x1, y1, x2, y2 = bbox
+                cx = (x1 + x2) / 2.0 / max(1, w)
+                cy = (y1 + y2) / 2.0 / max(1, h)
+                vertical = "top" if cy < 0.33 else "middle" if cy < 0.66 else "bottom"
+                horizontal = "left" if cx < 0.33 else "center" if cx < 0.66 else "right"
+                region = f"{vertical}-{horizontal}"
+            findings.append({
+                "page": page_no,
+                "changed": changed,
+                "difference_score": score,
+                "region": region,
+                "summary": (
+                    f"Visual difference detected on page {page_no}"
+                    + (f" near the {region} area." if region != "none" else ".")
+                    if changed else f"No meaningful visual difference detected on rendered page {page_no}."
+                ),
+            })
+        except Exception as e:
+            findings.append({
+                "page": page_no,
+                "changed": False,
+                "difference_score": 0,
+                "summary": f"Page comparison failed: {str(e)[:120]}",
+            })
+
+    return findings
+
+
+def _make_change_report_side_by_side(stored_image: str, uploaded_image: str, out_path: str) -> str:
+    """Create a labeled side-by-side PNG for GPT Vision review."""
+    from PIL import Image, ImageDraw
+
+    left = Image.open(stored_image).convert("RGB")
+    right = Image.open(uploaded_image).convert("RGB")
+
+    max_w = 900
+    for img_name in ("left", "right"):
+        img = left if img_name == "left" else right
+        if img.width > max_w:
+            ratio = max_w / float(img.width)
+            resized = img.resize((int(img.width * ratio), int(img.height * ratio)))
+            if img_name == "left":
+                left = resized
+            else:
+                right = resized
+
+    h = max(left.height, right.height)
+    pad = 28
+    header = 42
+    canvas = Image.new("RGB", (left.width + right.width + pad * 3, h + header + pad), "white")
+    canvas.paste(left, (pad, header))
+    canvas.paste(right, (left.width + pad * 2, header))
+
+    draw = ImageDraw.Draw(canvas)
+    draw.text((pad, 12), "Stored VeriFYD certified PDF", fill=(0, 0, 0))
+    draw.text((left.width + pad * 2, 12), "Uploaded PDF being verified", fill=(0, 0, 0))
+    draw.line((left.width + int(pad * 1.5), 0, left.width + int(pad * 1.5), canvas.height), fill=(160, 160, 160), width=2)
+    canvas.save(out_path, format="PNG")
+    return out_path
+
+
+def _gpt_vision_change_report(side_by_side_png: str, deterministic_context: dict) -> dict:
+    """
+    Ask GPT Vision to explain visible differences. This is advisory only:
+    deterministic hash comparison remains the source of truth.
+    """
+    out = {"available": False, "summary": "", "findings": [], "likely_change_type": "", "confidence": "low", "error": ""}
+    api_key = os.environ.get("OPENAI_API_KEY", "")
+    if not api_key:
+        out["error"] = "OPENAI_API_KEY not configured"
+        return out
+
+    try:
+        import base64
+        from openai import OpenAI
+        client = OpenAI(api_key=api_key, timeout=25)
+        with open(side_by_side_png, "rb") as fh:
+            b64 = base64.b64encode(fh.read()).decode("ascii")
+
+        prompt = (
+            "You are reviewing a side-by-side comparison for a VeriFYD Change Report. "
+            "The left image is the stored VeriFYD certified PDF. The right image is the uploaded PDF being verified. "
+            "The backend has already determined by cryptographic hash comparison that the uploaded PDF changed after certification. "
+            "Your job is only to describe visible differences in plain language. Do not decide authenticity. "
+            "Focus on pages/regions, likely visible change type such as signature, form-field update, annotation, date/text change, page replacement, or no obvious visible change. "
+            "Return strict JSON with keys: summary, likely_change_type, confidence, findings. findings must be an array of short strings."
+        )
+
+        response = client.chat.completions.create(
+            model=os.environ.get("VERIFYD_CHANGE_REPORT_MODEL", "gpt-4o-mini"),
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt + "\nContext: " + str(deterministic_context)[:1200]},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
+                ],
+            }],
+            response_format={"type": "json_object"},
+            max_tokens=450,
+        )
+        raw = response.choices[0].message.content or "{}"
+        import json as _json
+        parsed = _json.loads(raw)
+        out.update({
+            "available": True,
+            "summary": str(parsed.get("summary") or "")[:900],
+            "likely_change_type": str(parsed.get("likely_change_type") or "")[:120],
+            "confidence": str(parsed.get("confidence") or "low")[:40],
+            "findings": [str(x)[:220] for x in (parsed.get("findings") or [])[:6]],
+            "error": "",
+        })
+    except Exception as e:
+        out["error"] = str(e)[:180]
+    return out
+
+
+def _create_verifyd_change_report(
+    cid: str,
+    uploaded_pdf_path: str,
+    stored_doc: dict | None,
+    tamper_detail: dict | None,
+    seal_result: dict | None,
+) -> dict:
+    """
+    Build a VeriFYD Change Report for certified PDFs modified after certification.
+
+    The report is explanatory only. Hash mismatch remains the tamper decision.
+    """
+    tamper_detail = tamper_detail or {}
+    seal_result = seal_result or {}
+    report = {
+        "title": "VeriFYD Change Report",
+        "status": "MODIFIED_AFTER_CERTIFICATION",
+        "summary": "The uploaded certified PDF no longer matches the exact VeriFYD-issued certified document.",
+        "deterministic_basis": "Uploaded certified PDF SHA-256 differs from VeriFYD stored certified PDF SHA-256.",
+        "likely_change_type": tamper_detail.get("tamper_reason", "PDF changed after certification"),
+        "confidence": tamper_detail.get("tamper_confidence", "LOW"),
+        "changed_pages": [],
+        "page_findings": [],
+        "gpt_visual_analysis_available": False,
+        "gpt_visual_summary": "",
+        "gpt_visual_findings": [],
+        "recommendation": (
+            "Use the original VeriFYD certified file from the Vault or evidence package as the authoritative copy. "
+            "Treat the uploaded version as modified after certification."
+        ),
+        "technical_findings": list(tamper_detail.get("tamper_evidence") or []),
+        "errors": [],
+    }
+
+    if not cid or not uploaded_pdf_path or not os.path.exists(uploaded_pdf_path):
+        report["errors"].append("uploaded_pdf_unavailable")
+        return report
+
+    tmp_dir = tempfile.mkdtemp(prefix=f"verifyd_change_{cid[:8]}_")
+    stored_path = os.path.join(tmp_dir, "stored_certified.pdf")
+    try:
+        stored_file = _download_stored_certified_document_to_path(cid, stored_path)
+        if not stored_file.get("available"):
+            report["errors"].append(stored_file.get("error") or "stored_certified_document_unavailable")
+            return report
+
+        try:
+            if stored_file.get("sha256"):
+                report["technical_findings"].append(f"Stored certified PDF SHA-256: {stored_file.get('sha256')}")
+            if seal_result.get("certified_pdf_sha256"):
+                report["technical_findings"].append(f"Uploaded certified PDF SHA-256: {seal_result.get('certified_pdf_sha256')}")
+        except Exception:
+            pass
+
+        stored_render = _render_pdf_pages_for_change_report(stored_path, tmp_dir, "stored", max_pages=5)
+        uploaded_render = _render_pdf_pages_for_change_report(uploaded_pdf_path, tmp_dir, "uploaded", max_pages=5)
+        if not stored_render.get("available") or not uploaded_render.get("available"):
+            report["errors"].append(stored_render.get("error") or uploaded_render.get("error") or "visual_render_unavailable")
+            return report
+
+        if stored_render.get("page_count") != uploaded_render.get("page_count"):
+            report["technical_findings"].append(
+                f"Page count changed: stored={stored_render.get('page_count')} uploaded={uploaded_render.get('page_count')}"
+            )
+
+        page_findings = _compare_rendered_pdf_pages(stored_render, uploaded_render)
+        changed_pages = [p.get("page") for p in page_findings if p.get("changed") and p.get("page")]
+        report["changed_pages"] = changed_pages[:20]
+        report["page_findings"] = page_findings[:20]
+
+        if changed_pages:
+            first_changed = int(changed_pages[0])
+            report["summary"] = f"The uploaded certified PDF differs visually on page {first_changed} and no longer matches the VeriFYD-issued copy."
+        elif page_findings:
+            report["summary"] = (
+                "The PDF hash changed after certification, but rendered page comparison did not find an obvious visible page-content change. "
+                "The change may be metadata, signature structure, embedded object, or PDF-internal data."
+            )
+
+        # GPT Vision advisory explanation for the first changed page, when available.
+        try:
+            first_page = int(changed_pages[0]) if changed_pages else 1
+            sp = next((p for p in stored_render.get("pages", []) if int(p.get("page")) == first_page), None)
+            up = next((p for p in uploaded_render.get("pages", []) if int(p.get("page")) == first_page), None)
+            if sp and up:
+                side_by_side = _make_change_report_side_by_side(
+                    sp["path"], up["path"], os.path.join(tmp_dir, f"change_page_{first_page}_side_by_side.png")
+                )
+                gpt = _gpt_vision_change_report(side_by_side, {
+                    "certificate_id": cid,
+                    "tamper_reason": tamper_detail.get("tamper_reason"),
+                    "tamper_evidence": tamper_detail.get("tamper_evidence", [])[:6],
+                    "changed_pages": report["changed_pages"],
+                })
+                report["gpt_visual_analysis_available"] = bool(gpt.get("available"))
+                report["gpt_visual_summary"] = gpt.get("summary", "")
+                report["gpt_visual_findings"] = gpt.get("findings", [])
+                if gpt.get("likely_change_type"):
+                    report["likely_change_type"] = gpt.get("likely_change_type")
+                if gpt.get("confidence"):
+                    report["confidence"] = gpt.get("confidence")
+                if gpt.get("summary"):
+                    report["summary"] = gpt.get("summary")
+                if gpt.get("error") and not gpt.get("available"):
+                    report["errors"].append("gpt_visual_review_unavailable:" + str(gpt.get("error"))[:120])
+        except Exception as e:
+            report["errors"].append("gpt_visual_review_failed:" + str(e)[:120])
+
+    finally:
+        try:
+            import shutil as _shutil
+            _shutil.rmtree(tmp_dir, ignore_errors=True)
+        except Exception:
+            pass
+
+    return report
+
+
 def _enrich_certificate_verification_result(result: dict, uploaded_pdf_path: str = "") -> dict:
     """Add database, storage, and tamper-detection context to a secure-seal verification response."""
     result = dict(result or {})
@@ -2151,6 +2527,16 @@ def _enrich_certificate_verification_result(result: dict, uploaded_pdf_path: str
             ),
         }
 
+        change_report = _create_verifyd_change_report(
+            cid=cid,
+            uploaded_pdf_path=uploaded_pdf_path,
+            stored_doc=stored_doc,
+            tamper_detail=tamper_detail,
+            seal_result=result,
+        ) if uploaded_pdf_path else {}
+        if change_report:
+            result["verifyd_change_report"] = change_report
+
         result["verified"] = False
         result["status"] = "modified_after_certification"
         result["seal_status"] = "valid" if result.get("seal_valid") else "invalid"
@@ -2173,6 +2559,8 @@ def _enrich_certificate_verification_result(result: dict, uploaded_pdf_path: str
         report["tamper_reason"] = result["tamper_reason"]
         report["tamper_confidence"] = result["tamper_confidence"]
         report["tamper_evidence"] = result["tamper_evidence"]
+        if result.get("verifyd_change_report"):
+            report["verifyd_change_report"] = result.get("verifyd_change_report")
         report["trust_level"] = "LOW"
         report["message"] = result["tamper_explanation"]
     elif seal_ok and record_confirmed and stored_hash_available and stored_hash_matches and original_hash_ok:
