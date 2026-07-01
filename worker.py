@@ -84,6 +84,91 @@ def _content_credentials_report_for_path(path: str, filename: str = "", media_ty
         }
 
 
+
+
+# ─────────────────────────────────────────────────────────────
+#  Content Credentials AI / generative provenance override
+# ─────────────────────────────────────────────────────────────
+def _content_credentials_ai_provenance_detected(report: dict) -> bool:
+    """Return True when C2PA / Content Credentials explicitly claim AI or generative media.
+
+    This is intentionally narrow: it only triggers when the embedded provenance
+    itself points to an AI/generative tool or workflow. It does not punish files
+    merely for having missing or normal Content Credentials.
+    """
+    if not isinstance(report, dict) or not report.get("manifest_found"):
+        return False
+
+    text_parts = [
+        str(report.get("status", "")),
+        str(report.get("claim_generator", "")),
+        str(report.get("risk_level", "")),
+        " ".join(str(x) for x in (report.get("reported_actions") or [])),
+        " ".join(str(x) for x in (report.get("ingredients") or [])),
+        str(report.get("interpretation", "")),
+    ]
+    blob = " ".join(text_parts).lower().replace("_", " ").replace("-", " ")
+
+    generative_terms = (
+        "ai or generative", "generative tool", "generative media", "ai generator",
+        "ai generated", "generated image", "created with ai", "adobe firefly",
+        "firefly", "openai", "dall e", "dalle", "midjourney", "runway",
+        "sora", "pika", "kling", "stable diffusion", "stability ai",
+        "microsoft designer", "canva", "gemini", "imagen",
+    )
+    return any(term in blob for term in generative_terms)
+
+
+def _apply_content_credentials_ai_override(
+    authenticity: int,
+    label: str,
+    detail: dict,
+    certify: bool,
+    report: dict,
+    media_type: str = "file",
+) -> tuple[int, str, dict, bool]:
+    """Use explicit signed AI/generative provenance as source-level evidence.
+
+    Pixel/GPT engines can miss photorealistic generative images. When Content
+    Credentials explicitly identify an AI/generative workflow, VeriFYD should
+    not certify the file as real just because it looks camera-like.
+    """
+    if not _content_credentials_ai_provenance_detected(report):
+        return authenticity, label, detail, certify
+
+    detail = dict(detail or {})
+    generator = str(report.get("claim_generator") or "generative media tool").replace("_", " ").strip()
+    status = str(report.get("status") or "AI/generative provenance claimed").replace("_", " ").strip()
+    reason = (
+        f"Embedded Content Credentials identify an AI/generative workflow"
+        f" ({generator}). VeriFYD treats signed provenance as source-level evidence, "
+        f"even when pixel and visual realism signals appear natural."
+    )
+
+    detail["content_credentials_provenance_override"] = True
+    detail["provenance_override"] = True
+    detail["ai_source_detected"] = True
+    detail["ai_source_generator"] = generator
+    detail["ai_source_confidence"] = "high" if str(report.get("manifest_valid", "")).lower() in ("true", "yes", "valid") or report.get("manifest_valid") is True else "medium"
+    detail["ai_source_matched"] = status
+    detail["ai_score"] = max(int(float(detail.get("ai_score", 0) or 0)), 95)
+    detail["signal_ai_score"] = max(int(float(detail.get("signal_ai_score", 0) or 0)), 95)
+    detail["gpt_ai_score"] = max(int(float(detail.get("gpt_ai_score", 0) or 0)), 95)
+    detail["gpt_reasoning"] = (reason + " " + str(detail.get("gpt_reasoning", ""))).strip()[:1200]
+
+    flags = list(detail.get("gpt_flags") or [])
+    for flag in ("content_credentials_ai_provenance", "generative_tool_claimed"):
+        if flag not in flags:
+            flags.append(flag)
+    detail["gpt_flags"] = flags
+
+    log.info(
+        "CONTENT_CREDENTIALS_OVERRIDE: %s label=%s→AI authenticity=%s→5 generator=%s status=%s",
+        media_type, label, authenticity, generator, status,
+    )
+    return 5, "AI", detail, False
+
+
 # ─────────────────────────────────────────────────────────────
 #  Runtime diagnostics / document-rendering dependencies
 # ─────────────────────────────────────────────────────────────
@@ -246,6 +331,11 @@ def process_upload_job(file_key: str, filename: str, email: str, suppress_email:
         authenticity, label, detail = run_detection_multiclip(tmp_path)
         content_credentials_report = _content_credentials_report_for_path(tmp_path, filename, "video")
         ui_text, color, certify = LABEL_UI.get(label, ("VIDEO UNDETERMINED", "blue", False))
+        authenticity, label, detail, certify = _apply_content_credentials_ai_override(
+            authenticity, label, detail, certify, content_credentials_report, "video"
+        )
+        ui_text, color, _default_certify = LABEL_UI.get(label, ("VIDEO UNDETERMINED", "blue", False))
+        certify = bool(certify and _default_certify)
 
         increment_user_uses(email)
         insert_certificate(
@@ -418,6 +508,11 @@ def process_audio_upload_job(file_key: str, filename: str, email: str, suppress_
             label = "AI"
 
         ui_text, color, certify = AUDIO_LABEL_UI.get(label, ("AUDIO UNDETERMINED", "blue", False))
+        authenticity, label, detail, certify = _apply_content_credentials_ai_override(
+            authenticity, label, detail, certify, content_credentials_report, "audio"
+        )
+        ui_text, color, _default_certify = AUDIO_LABEL_UI.get(label, ("AUDIO UNDETERMINED", "blue", False))
+        certify = bool(certify and _default_certify)
 
         increment_user_uses(email)
         insert_certificate(
@@ -689,6 +784,11 @@ def process_photo_upload_job(file_key: str, filename: str, email: str, suppress_
         authenticity, label, detail = run_photo_detection(tmp_path)
         content_credentials_report = _content_credentials_report_for_path(tmp_path, filename, "photo")
         ui_text, color, certify = LABEL_UI.get(label, ("PHOTO UNDETERMINED", "blue", False))
+        authenticity, label, detail, certify = _apply_content_credentials_ai_override(
+            authenticity, label, detail, certify, content_credentials_report, "photo"
+        )
+        ui_text, color, _default_certify = LABEL_UI.get(label, ("PHOTO UNDETERMINED", "blue", False))
+        certify = bool(certify and _default_certify)
 
         increment_user_uses(email)
         insert_certificate(
@@ -1365,6 +1465,11 @@ def process_document_upload_job(file_key: str, filename: str, email: str, suppre
 
         content_credentials_report = _content_credentials_report_for_path(tmp_path, filename, "document")
         ui_text, color, certify = LABEL_UI.get(label, ("DOCUMENT UNDETERMINED", "blue", False))
+        authenticity, label, detail, certify = _apply_content_credentials_ai_override(
+            authenticity, label, detail, certify, content_credentials_report, "document"
+        )
+        ui_text, color, _default_certify = LABEL_UI.get(label, ("DOCUMENT UNDETERMINED", "blue", False))
+        certify = bool(certify and _default_certify)
 
         increment_user_uses(email)
         insert_certificate(
