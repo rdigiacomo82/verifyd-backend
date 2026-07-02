@@ -2628,7 +2628,82 @@ def verify_certificate_by_id(cid: str):
     Certificate-ID lookup is a record/storage lookup. Full hidden secure-seal and
     byte-for-byte tamper verification still requires uploading the certified PDF
     through /verify-certificate/ or /verify-document-seal/.
+
+    Phase 3B-1 addition:
+    Certified Web Capture records are stored using the existing certified-document
+    and certified-file-package artifact paths, so this lookup detects those records
+    and returns web-capture-specific metadata/URLs instead of generic document
+    wording for the frontend.
     """
+    import io as _io
+    import json as _json
+    import zipfile as _zipfile
+
+    def _is_public_http_url(value: str) -> bool:
+        value = str(value or "").strip().lower()
+        return value.startswith("http://") or value.startswith("https://")
+
+    def _load_web_capture_package_metadata(_cid: str) -> dict:
+        """Best-effort read of metadata.json and hashes.json from the web capture ZIP."""
+        out = {"metadata": {}, "hashes": {}, "package_found": False, "source": "", "key": ""}
+
+        def _read_zip_bytes(data: bytes, source: str = "", key: str = "") -> dict:
+            if not data:
+                return out
+            try:
+                with _zipfile.ZipFile(_io.BytesIO(data), "r") as zf:
+                    names = set(zf.namelist())
+                    metadata = {}
+                    hashes = {}
+                    if "metadata.json" in names:
+                        metadata = _json.loads(zf.read("metadata.json").decode("utf-8", errors="replace") or "{}")
+                    if "hashes.json" in names:
+                        hashes = _json.loads(zf.read("hashes.json").decode("utf-8", errors="replace") or "{}")
+                    if metadata or hashes:
+                        return {
+                            "metadata": metadata if isinstance(metadata, dict) else {},
+                            "hashes": hashes if isinstance(hashes, dict) else {},
+                            "package_found": True,
+                            "source": source,
+                            "key": key,
+                        }
+            except Exception as exc:
+                log.debug("verify-certificate: web capture package metadata read failed for %s: %s", _cid, exc)
+            return out
+
+        # R2 first: web capture evidence packages are stored in the universal
+        # certified-files/{plan}/{cid}.zip location.
+        try:
+            from storage import _get_client, BUCKET, r2_available
+            if r2_available():
+                client = _get_client()
+                for plan in ("pro", "creator", "enterprise", "free"):
+                    key = f"certified-files/{plan}/{_cid}.zip"
+                    try:
+                        obj = client.get_object(Bucket=BUCKET, Key=key)
+                        body = obj.get("Body")
+                        data = body.read() if body is not None else b""
+                        loaded = _read_zip_bytes(data, "r2", key)
+                        if loaded.get("package_found"):
+                            return loaded
+                    except Exception:
+                        continue
+        except Exception as exc:
+            log.debug("verify-certificate: R2 web capture package metadata lookup failed for %s: %s", _cid, exc)
+
+        # Redis fallback for local/dev or fallback storage jobs.
+        try:
+            import redis as _redis
+            r = _redis.from_url(os.environ.get("REDIS_URL", "redis://localhost:6379"), decode_responses=False)
+            data = r.get(f"filecert:{_cid}")
+            loaded = _read_zip_bytes(data, "redis", f"filecert:{_cid}")
+            if loaded.get("package_found"):
+                return loaded
+        except Exception as exc:
+            log.debug("verify-certificate: Redis web capture package metadata lookup failed for %s: %s", _cid, exc)
+
+        return out
+
     cid = (cid or "").strip()
     if not cid:
         return JSONResponse({"verified": False, "status": "missing_certificate_id"}, status_code=400)
@@ -2642,6 +2717,7 @@ def verify_certificate_by_id(cid: str):
             "verification_status": "CERTIFICATE_NOT_FOUND",
         }, status_code=404)
 
+    original_file = cert.get("original_file", "") or ""
     original_sha256 = (
         cert.get("original_sha256")
         or cert.get("original_hash")
@@ -2714,6 +2790,174 @@ def verify_certificate_by_id(cid: str):
     audio_download_url = f"{BASE_URL}/download-audio/{cid}" if audio_available else ""
     photo_download_url = f"{BASE_URL}/download-photo/{cid}" if photo_available else ""
 
+    # Certified Web Capture records currently reuse the certified document/PDF
+    # and certified file package storage locations. They are identifiable by a
+    # public URL as original_file + report/package hashes + no media artifact.
+    maybe_web_capture = (
+        _is_public_http_url(original_file)
+        and bool(certified_document_sha256 or document_available)
+        and bool(certified_file_package_sha256 or file_package_available)
+        and not bool(certified_audio_sha256 or audio_available)
+        and not bool(certified_photo_sha256 or photo_available)
+        and not bool(video_available)
+    )
+
+    web_capture_meta = {}
+    web_capture_hashes = {}
+    web_capture_package_source = ""
+    web_capture_package_key = ""
+    if maybe_web_capture:
+        loaded_capture_package = _load_web_capture_package_metadata(cid)
+        web_capture_meta = loaded_capture_package.get("metadata") or {}
+        web_capture_hashes = loaded_capture_package.get("hashes") or {}
+        web_capture_package_source = loaded_capture_package.get("source", "")
+        web_capture_package_key = loaded_capture_package.get("key", "")
+
+    is_web_capture = bool(
+        maybe_web_capture
+        and (
+            web_capture_meta.get("title") == "VeriFYD Certified Web Capture Metadata"
+            or web_capture_meta.get("captured_url")
+            or web_capture_hashes.get("screenshot_png")
+            or web_capture_hashes.get("captured_html")
+            # Keep existing already-created records working even if the ZIP
+            # metadata cannot be read at lookup time.
+            or _is_public_http_url(original_file)
+        )
+    )
+
+    if is_web_capture:
+        captured_url = web_capture_meta.get("captured_url") or original_file
+        final_url = web_capture_meta.get("final_url") or captured_url
+        page_title = web_capture_meta.get("page_title") or ""
+        captured_at = web_capture_meta.get("captured_at") or cert.get("upload_time", "")
+        screenshot_sha256 = (
+            web_capture_meta.get("screenshot_sha256")
+            or web_capture_hashes.get("screenshot_png")
+            or original_sha256
+        )
+        html_sha256 = (
+            web_capture_meta.get("html_sha256")
+            or web_capture_hashes.get("captured_html")
+            or ""
+        )
+        report_sha256 = (
+            web_capture_meta.get("report_sha256")
+            or web_capture_hashes.get("certified_web_capture_report_pdf")
+            or certified_document_sha256
+        )
+
+        web_document_download_url = f"{BASE_URL}/download-web-capture/{cid}" if document_available else ""
+        web_package_url = f"{BASE_URL}/download-web-capture-package/{cid}" if file_package_available else ""
+        primary_download_url = web_document_download_url or web_package_url or ""
+
+        verification_report = {
+            "title": "VeriFYD Certified Web Capture Verification Report",
+            "status": "FOUND",
+            "record_type": "Certified Web Capture",
+            "certificate_id": cid,
+            "database_match": "YES",
+            "certified_document_available": "YES" if document_available else "NO",
+            "certified_file_package_available": "YES" if file_package_available else "NO",
+            "video_available": "NO",
+            "audio_available": "NO",
+            "photo_available": "NO",
+            "trust_level": "DATABASE RECORD FOUND",
+            "message": (
+                "This certificate ID exists in the VeriFYD certificate database. "
+                "The captured webpage record, screenshot hash, HTML snapshot hash, certified report, "
+                "evidence package, and timeline are shown below."
+            ),
+            "captured_url": captured_url,
+            "final_url": final_url,
+            "page_title": page_title,
+            "captured_at": captured_at,
+            "screenshot_sha256": screenshot_sha256,
+            "html_sha256": html_sha256,
+            "certified_document_sha256": report_sha256,
+            "certified_file_package_sha256": certified_file_package_sha256,
+        }
+
+        return JSONResponse({
+            "verified": True,
+            "status": "found",
+            "verification_status": "CERTIFICATE_RECORD_FOUND",
+            "certificate_id": cid,
+            "label": "CERTIFIED WEB CAPTURE CREATED",
+            "authenticity": "",
+            "ai_score": "",
+            "authenticity_score": "",
+            "original_file": captured_url,
+            "original_url": captured_url,
+            "captured_url": captured_url,
+            "final_url": final_url,
+            "page_title": page_title,
+            "captured_at": captured_at,
+            "upload_time": cert.get("upload_time", ""),
+            "download_count": cert.get("download_count", 0),
+            "certified_to": cert.get("email", ""),
+            "media_type": "web_capture",
+            "file_type": "web_capture",
+            "record_type": "Certified Web Capture",
+            "download_type": "certified_web_capture",
+            "web_capture": True,
+            "status_label": "CERTIFIED WEB CAPTURE CREATED",
+            "display_status": "CERTIFIED WEB CAPTURE RECORD VERIFIED",
+            "result_status": "CERTIFIED WEB CAPTURE CREATED",
+            "verdict_status": "CERTIFIED WEB CAPTURE CREATED",
+
+            "sha256": screenshot_sha256,
+            "screenshot_sha256": screenshot_sha256,
+            "html_sha256": html_sha256,
+            "original_sha256": screenshot_sha256,
+            "original_hash": screenshot_sha256,
+            "certified_document_sha256": report_sha256,
+            "certified_document_hash": report_sha256,
+            "certified_file_package_sha256": certified_file_package_sha256,
+            "certified_file_package_hash": certified_file_package_sha256,
+            "certified_evidence_package_hash": certified_file_package_sha256,
+            "certified_audio_sha256": "",
+            "certified_photo_sha256": "",
+            "certified_file_hash": certified_file_hash,
+
+            "certified_document_available": bool(document_available),
+            "certified_file_package_available": bool(file_package_available),
+            "certified_evidence_package_available": bool(file_package_available),
+            "video_available": False,
+            "audio_available": False,
+            "photo_available": False,
+
+            "download_url": primary_download_url,
+            "certified_document_url": web_document_download_url,
+            "certified_file_package_url": web_package_url,
+            "certified_evidence_package_url": web_package_url,
+            "evidence_package_url": web_package_url,
+            "download_all_certified_files_url": web_package_url,
+            "video_download_url": "",
+            "audio_download_url": "",
+            "photo_download_url": "",
+
+            "capture_report": {
+                "title": "VeriFYD Certified Web Capture Report",
+                "summary": "VeriFYD captured this public web page at the listed time and generated a certified evidence record.",
+                "captured_url": captured_url,
+                "final_url": final_url,
+                "page_title": page_title,
+                "captured_at": captured_at,
+                "screenshot_sha256": screenshot_sha256,
+                "html_sha256": html_sha256,
+                "metadata_source": web_capture_package_source,
+                "metadata_key": web_capture_package_key,
+            },
+
+            "original_hash_match": "NOT_CHECKED",
+            "certified_document_hash_match": "NOT_CHECKED",
+            "certified_file_package_hash_match": "NOT_CHECKED",
+            "certified_evidence_package_hash_match": "NOT_CHECKED",
+            "record_match_source": "certificate_lookup",
+            "verification_report": verification_report,
+        })
+
     media_type = "document" if document_available or certified_document_sha256 else (
         "audio" if audio_available or certified_audio_sha256 else
         "photo" if photo_available or certified_photo_sha256 else
@@ -2758,7 +3002,7 @@ def verify_certificate_by_id(cid: str):
         "label": cert.get("label", ""),
         "authenticity": cert.get("authenticity", ""),
         "ai_score": cert.get("ai_score", ""),
-        "original_file": cert.get("original_file", ""),
+        "original_file": original_file,
         "upload_time": cert.get("upload_time", ""),
         "download_count": cert.get("download_count", 0),
         "certified_to": cert.get("email", ""),
@@ -2799,6 +3043,8 @@ def verify_certificate_by_id(cid: str):
         "record_match_source": "certificate_lookup",
         "verification_report": verification_report,
     })
+
+
 
 
 
