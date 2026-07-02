@@ -361,3 +361,23 @@ def get_job_result(job_id: str) -> Dict[str, Any]:
     except Exception as exc:
         log.warning("get_job_result failed for %s: %s", job_id, exc)
         return {"job_status": "error", "error": "Could not retrieve job result."}
+
+# ─────────────────────────────────────────────────────────────
+#  Phase 3B-1 — Certified Web & Social Capture
+# ─────────────────────────────────────────────────────────────
+def enqueue_web_capture(job_id: str, url: str, email: str):
+    """Enqueue a certified public URL screenshot/evidence capture job."""
+    from worker import process_web_capture_job
+
+    r = _get_redis(decode_responses=False)
+    q = _get_queue(r, QUEUE_NAME)
+    log.info("Enqueue web capture job: job_id=%s queue=%s url=%s", job_id, QUEUE_NAME, (url or '')[:120])
+    return q.enqueue(
+        process_web_capture_job,
+        job_id,
+        url,
+        email,
+        job_id=job_id,
+        job_timeout=900,
+        result_ttl=RESULT_TTL_SECONDS,
+    )

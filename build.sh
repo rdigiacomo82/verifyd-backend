@@ -433,6 +433,8 @@ fi
 # ── Python dependencies ───────────────────────────────────────
 pip install --upgrade pip
 pip install -r requirements.txt
+# Phase 3B-1 Certified Web Capture browser runtime
+python -m playwright install chromium || echo "WARNING: Playwright Chromium install failed — /capture-url will return an unavailable error until Chromium is installed."
 pip install redis rq
 # Install yt-dlp with curl-cffi extra so impersonation handler is registered
 pip install --upgrade "yt-dlp[default,curl-cffi]"

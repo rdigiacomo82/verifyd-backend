@@ -5485,3 +5485,88 @@ async def widget_analyze_link(request: Request, key: str = ""):
     except Exception as e:
         log.exception("widget-analyze-link enqueue failed: %s", e)
         return JSONResponse({"error": "Failed to queue analysis. Please try again."}, status_code=500)
+
+# ─────────────────────────────────────────────
+#  Phase 3B-1 — Certified Web & Social Capture MVP
+# ─────────────────────────────────────────────
+def _web_capture_common_response(target_url: str, email: str):
+    """Validate and enqueue a public URL screenshot/evidence capture."""
+    target_url = (target_url or "").strip()
+    email = normalize_email(email)
+
+    if not target_url:
+        return JSONResponse({"error": "url_required", "message": "A public URL is required."}, status_code=400)
+    if not target_url.lower().startswith(("http://", "https://")):
+        target_url = "https://" + target_url
+
+    if not email or not is_valid_email(email):
+        return JSONResponse({"error": "Invalid email address."}, status_code=400)
+    typo_response = _email_typo_json(email)
+    if typo_response:
+        return typo_response
+
+    is_deliverable, reason = _verify_email_deliverable(email)
+    if not is_deliverable:
+        return JSONResponse({"error": reason}, status_code=400)
+
+    if not is_email_verified(email):
+        return JSONResponse({
+            "error": "email_not_verified",
+            "message": "Please verify your email address before capturing a web page.",
+        }, status_code=403)
+
+    status = get_user_status(email)
+    if not status["allowed"]:
+        return JSONResponse({
+            "error": "limit_reached",
+            "plan": status["plan"],
+            "uses_left": 0,
+            "limit": status["limit"],
+        }, status_code=402)
+
+    # Run URL normalization/SSRF validation before queueing so users get a fast error.
+    try:
+        from web_capture import normalize_public_url
+        target_url = normalize_public_url(target_url)
+    except Exception as exc:
+        return JSONResponse({"error": "invalid_or_private_url", "message": str(exc)[:240]}, status_code=400)
+
+    job_id = str(uuid.uuid4())
+    try:
+        from queue_helper import enqueue_web_capture
+        enqueue_web_capture(job_id, target_url, email)
+    except Exception as exc:
+        log.warning("capture-url: queue unavailable: %s", exc)
+        return JSONResponse({"error": f"Queue unavailable: {str(exc)[:120]}"}, status_code=503)
+
+    return JSONResponse({
+        "job_id": job_id,
+        "status": "queued",
+        "job_status": "queued",
+        "media_type": "web_capture",
+        "message": "Certified Web Capture queued. Poll /job-status/{job_id} for the certified capture result.",
+    })
+
+
+@app.post("/capture-url/")
+async def capture_url(url: str = Form(""), target_url: str = Form(""), email: str = Form("")):
+    """Create a certified web capture from a public URL."""
+    return _web_capture_common_response(target_url or url, email)
+
+
+@app.get("/capture-url/")
+async def capture_url_get(url: str = "", target_url: str = "", email: str = ""):
+    """GET helper for testing Certified Web Capture from a public URL."""
+    return _web_capture_common_response(target_url or url, email)
+
+
+@app.get("/download-web-capture/{cid}")
+async def download_web_capture(cid: str):
+    """Alias for downloading the Certified Web Capture PDF report."""
+    return RedirectResponse(url=f"{BASE_URL}/download-document/{cid}", status_code=302)
+
+
+@app.get("/download-web-capture-package/{cid}")
+async def download_web_capture_package(cid: str):
+    """Alias for downloading the Certified Web Capture evidence package ZIP."""
+    return RedirectResponse(url=f"{BASE_URL}/download-certified-file/{cid}", status_code=302)

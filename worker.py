@@ -2294,3 +2294,129 @@ def keepalive_ping():
 
 
 
+
+
+# ─────────────────────────────────────────────────────────────
+#  Phase 3B-1 — Certified Web & Social Capture MVP
+# ─────────────────────────────────────────────────────────────
+def process_web_capture_job(job_id: str, url: str, email: str) -> dict:
+    """Background job: capture a public web page screenshot and certify it as evidence."""
+    import os as _os
+    import shutil as _shutil
+    from database import insert_certificate, increment_user_uses, get_user_status as _gus, update_certificate_hashes
+    from config import BASE_URL
+    from web_capture import create_certified_web_capture
+
+    r = _get_redis()
+    work_dir = ""
+
+    try:
+        log.info("Worker: starting web capture job=%s email=%s url=%s", job_id, email, (url or '')[:180])
+        capture = create_certified_web_capture(url, job_id, email=email)
+        work_dir = capture.get("work_dir", "") or ""
+
+        screenshot_sha256 = capture.get("screenshot_sha256", "")
+        report_sha256 = capture.get("report_sha256", "")
+        package_sha256 = capture.get("package_sha256", "")
+        report_path = capture.get("report_path", "")
+        package_path = capture.get("package_path", "")
+
+        try:
+            increment_user_uses(email)
+        except Exception as use_e:
+            log.warning("Worker: web capture usage increment failed for %s: %s", email, use_e)
+
+        insert_certificate(
+            cert_id=job_id,
+            email=email,
+            original_file=capture.get("captured_url") or url,
+            label="REAL",
+            authenticity=100,
+            ai_score=0,
+            sha256=screenshot_sha256,
+            original_sha256=screenshot_sha256,
+            certified_document_sha256=report_sha256,
+            certified_file_package_sha256=package_sha256,
+        )
+        try:
+            update_certificate_hashes(
+                job_id,
+                original_sha256=screenshot_sha256,
+                certified_document_sha256=report_sha256,
+                certified_file_package_sha256=package_sha256,
+            )
+        except Exception as hash_e:
+            log.warning("Worker: web capture hash persistence failed for %s: %s", job_id, hash_e)
+
+        plan = "free"
+        try:
+            plan = _gus(email).get("plan", "free")
+        except Exception:
+            plan = "free"
+
+        stored_in_r2 = False
+        try:
+            from storage import r2_available, upload_certified_document, upload_certified_file_package
+            if r2_available():
+                upload_certified_document(job_id, report_path, plan)
+                upload_certified_file_package(job_id, package_path, plan)
+                stored_in_r2 = True
+                log.info("Worker: web capture artifacts stored in R2 job=%s plan=%s", job_id, plan)
+        except Exception as r2_e:
+            log.warning("Worker: web capture R2 upload failed, falling back to Redis: %s", r2_e)
+
+        if not stored_in_r2:
+            ttl = {"free": 86400, "creator": 259200, "pro": 604800, "enterprise": 2592000}.get(plan, 86400)
+            with open(report_path, "rb") as rf:
+                r.setex(f"doccert:{job_id}", ttl, rf.read())
+            with open(package_path, "rb") as pf:
+                r.setex(f"filecert:{job_id}", ttl, pf.read())
+
+        download_url = f"{BASE_URL}/download-web-capture/{job_id}"
+        package_url = f"{BASE_URL}/download-web-capture-package/{job_id}"
+        result = {
+            "job_status": "complete",
+            "media_type": "web_capture",
+            "status": "CERTIFIED WEB CAPTURE CREATED",
+            "result_status": "CERTIFIED WEB CAPTURE CREATED",
+            "display_status": "CERTIFIED WEB CAPTURE CREATED",
+            "color": "green",
+            "label": "REAL",
+            "authenticity_score": 100,
+            "ai_score": 0,
+            "certificate_id": job_id,
+            "captured_url": capture.get("captured_url", ""),
+            "final_url": capture.get("final_url", ""),
+            "page_title": capture.get("page_title", ""),
+            "captured_at": capture.get("captured_at", ""),
+            "screenshot_sha256": screenshot_sha256,
+            "html_sha256": capture.get("html_sha256", ""),
+            "certified_document_sha256": report_sha256,
+            "certified_file_package_sha256": package_sha256,
+            "download_url": download_url,
+            "certified_document_url": download_url,
+            "evidence_package_url": package_url,
+            "certified_file_package_url": package_url,
+            "download_all_certified_files_url": package_url,
+            "download_type": "certified_web_capture",
+            "capture_report": {
+                "title": "VeriFYD Certified Web Capture Report",
+                "summary": "VeriFYD captured this public web page at the listed time and generated a certified evidence record.",
+                "captured_url": capture.get("captured_url", ""),
+                "final_url": capture.get("final_url", ""),
+                "page_title": capture.get("page_title", ""),
+                "captured_at": capture.get("captured_at", ""),
+                "screenshot_sha256": screenshot_sha256,
+            },
+        }
+        _store_result(r, job_id, result)
+        return result
+
+    except Exception as exc:
+        log.exception("Worker: web capture job %s failed", job_id)
+        result = {"job_status": "error", "error": str(exc)[:300], "media_type": "web_capture"}
+        _store_result(r, job_id, result)
+        return result
+    finally:
+        if work_dir and _os.path.isdir(work_dir):
+            _shutil.rmtree(work_dir, ignore_errors=True)
