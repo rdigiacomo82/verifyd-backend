@@ -336,6 +336,122 @@ def send_certification_email(
     })
 
 
+
+def send_web_capture_ready_email(
+    to_email: str,
+    certificate_id: str,
+    captured_url: str,
+    final_url: str = "",
+    page_title: str = "",
+    report_url: str = "",
+    package_url: str = "",
+    captured_at: str = "",
+    screenshot_sha256: str = "",
+    html_sha256: str = "",
+) -> bool:
+    """Send Certified Web Capture completion email.
+
+    Web capture is evidence preservation, not AI/deepfake detection, so this
+    intentionally avoids authenticity-score and AI-risk wording.
+    """
+    short_id = (certificate_id or "")[:8].upper()
+    captured_url = captured_url or final_url or ""
+    final_url = final_url or captured_url
+    page_title = page_title or "Captured webpage"
+    report_url = report_url or f"{BACKEND_URL}/download-web-capture/{certificate_id}"
+    package_url = package_url or f"{BACKEND_URL}/download-web-capture-package/{certificate_id}"
+    verify_url = f"{SITE_URL}/verify-certificate"
+    safe_title = page_title[:80] + ("..." if len(page_title) > 80 else "")
+    safe_url = captured_url[:120] + ("..." if len(captured_url) > 120 else "")
+
+    html = f"""
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="margin:0;padding:0;background-color:#0a0a0a;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#0a0a0a;padding:40px 20px;">
+    <tr>
+      <td align="center">
+        <table width="560" cellpadding="0" cellspacing="0" style="background-color:#111111;border-radius:12px;border:1px solid #222222;overflow:hidden;max-width:560px;width:100%;">
+          {_header_html()}
+
+          <tr>
+            <td style="padding:40px 32px 24px;text-align:center;">
+              <div style="display:inline-block;background:#1f1600;border:1px solid #f59e0b;border-radius:100px;padding:8px 20px;margin-bottom:24px;">
+                <span style="color:#f59e0b;font-size:13px;font-weight:700;letter-spacing:1px;text-transform:uppercase;">
+                  Certified Web Capture Created
+                </span>
+              </div>
+              <h2 style="margin:0 0 8px;font-size:24px;font-weight:800;color:#ffffff;">
+                Your certified web capture is ready
+              </h2>
+              <p style="margin:0;color:#888888;font-size:15px;line-height:1.6;">
+                VeriFYD captured and preserved this public webpage as timestamped evidence.
+              </p>
+            </td>
+          </tr>
+
+          <tr>
+            <td style="padding:0 32px 24px;">
+              <div style="background:#0f0f0f;border:1px solid #2a2a2a;border-radius:12px;padding:20px;color:#d1d5db;font-size:14px;line-height:1.8;">
+                <strong style="color:#ffffff;">Page Title:</strong> {safe_title}<br>
+                <strong style="color:#ffffff;">Captured URL:</strong> <span style="word-break:break-all;">{safe_url}</span><br>
+                <strong style="color:#ffffff;">Certificate ID:</strong> <span style="color:#f59e0b;font-family:'Courier New',monospace;">{certificate_id}</span><br>
+                <strong style="color:#ffffff;">Captured At:</strong> {captured_at or "Recorded in VeriFYD certificate"}
+              </div>
+            </td>
+          </tr>
+
+          <tr>
+            <td style="padding:0 32px 28px;">
+              <a href="{report_url}"
+                 style="display:block;background:#f59e0b;color:#000000;text-decoration:none;text-align:center;padding:16px;border-radius:10px;font-size:15px;font-weight:800;margin-bottom:12px;">
+                Download Certified Web Capture Report
+              </a>
+              <a href="{package_url}"
+                 style="display:block;background:#1a1a1a;color:#f59e0b;text-decoration:none;text-align:center;padding:16px;border-radius:10px;font-size:15px;font-weight:700;border:1px solid #333;margin-bottom:12px;">
+                Download Web Capture Evidence Package
+              </a>
+              <a href="{verify_url}"
+                 style="display:block;background:#111111;color:#c4b5fd;text-decoration:none;text-align:center;padding:16px;border-radius:10px;font-size:15px;font-weight:700;border:1px solid #7c3aed;">
+                Verify Certificate ID
+              </a>
+            </td>
+          </tr>
+
+          <tr>
+            <td style="padding:0 32px 32px;">
+              <p style="margin:0 0 12px;color:#555;font-size:12px;line-height:1.7;">
+                <strong style="color:#777;">What is included?</strong><br>
+                The evidence package includes the captured screenshot, HTML snapshot, metadata, SHA-256 hash records,
+                certified PDF report, certificate ID, and verification details.
+              </p>
+              <p style="margin:0;color:#444;font-size:11px;line-height:1.6;">
+                Note: Certified Web Capture preserves what a public webpage displayed at capture time. It does not certify
+                that the webpage's claims are true or perform AI/deepfake analysis.
+              </p>
+            </td>
+          </tr>
+
+          {_footer_html()}
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>"""
+
+    return _send({
+        "from": f"{FROM_NAME} <{FROM_ADDRESS}>",
+        "to": [to_email],
+        "subject": f"Certified Web Capture Ready — VeriFYD #{short_id}",
+        "html": html,
+    })
+
+
 def send_enterprise_welcome_email(
     to_email:     str,
     company_name: str,

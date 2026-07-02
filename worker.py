@@ -2409,6 +2409,28 @@ def process_web_capture_job(job_id: str, url: str, email: str) -> dict:
                 "screenshot_sha256": screenshot_sha256,
             },
         }
+        if email and "@" in str(email):
+            try:
+                from emailer import send_web_capture_ready_email
+                sent = send_web_capture_ready_email(
+                    to_email=email,
+                    certificate_id=job_id,
+                    captured_url=capture.get("captured_url", "") or url,
+                    final_url=capture.get("final_url", ""),
+                    page_title=capture.get("page_title", ""),
+                    report_url=download_url,
+                    package_url=package_url,
+                    captured_at=capture.get("captured_at", ""),
+                    screenshot_sha256=screenshot_sha256,
+                    html_sha256=capture.get("html_sha256", ""),
+                )
+                result["email_sent"] = bool(sent)
+                log.info("Worker: web capture ready email sent=%s job=%s email=%s", sent, job_id, email)
+            except Exception as email_exc:
+                result["email_sent"] = False
+                result["email_error"] = str(email_exc)[:200]
+                log.warning("Worker: web capture ready email failed job=%s email=%s error=%s", job_id, email, email_exc)
+
         _store_result(r, job_id, result)
         return result
 
