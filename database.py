@@ -572,6 +572,12 @@ def generate_vault_key(cert_id: str) -> str:
 
 
 def _vault_media_type(cert: dict) -> str:
+    label = str(cert.get("label") or "").upper()
+    original_file = str(cert.get("original_file") or "")
+    if label == "TRUST_MAIL" or original_file.startswith("TrustMail:"):
+        return "trust_mail"
+    if original_file.lower().startswith(("http://", "https://")) and cert.get("certified_file_package_sha256"):
+        return "web_capture"
     if cert.get("certified_document_sha256"):
         return "document"
     if cert.get("certified_audio_sha256"):

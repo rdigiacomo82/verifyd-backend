@@ -23,6 +23,7 @@ from queue_helper import (enqueue_upload, enqueue_link,
                           enqueue_photo_upload, enqueue_photo_link,
                           enqueue_audio_upload,
                           enqueue_document_upload,
+                          enqueue_trust_mail_upload,
                           enqueue_trust_desk_zip,
                           get_job_result)
 from config import (                  # single source of truth for all settings
@@ -1396,6 +1397,63 @@ async def upload_trust_desk_zip(
             "detail": str(exc)[:200],
         }, status_code=500)
 
+
+
+# ─────────────────────────────────────────────
+#  Trust Mail upload endpoint — Phase 1
+# ─────────────────────────────────────────────
+TRUST_MAIL_ALLOWED_EXTENSIONS = {".eml", ".msg"}
+TRUST_MAIL_SIZE_LIMITS = {"free": 10 * 1024 * 1024, "creator": 25 * 1024 * 1024, "pro": 75 * 1024 * 1024, "enterprise": 250 * 1024 * 1024}
+
+@app.post("/trust-mail/upload/")
+async def upload_trust_mail(file: UploadFile = File(...), email: str = Form(...)):
+    """Upload an .eml or .msg file for Certified Trust Mail preservation."""
+    if not is_valid_email(email): return JSONResponse({"error": "Invalid email address."}, status_code=400)
+    typo_response = _email_typo_json(email)
+    if typo_response: return typo_response
+    is_deliverable, reason = _verify_email_deliverable(email)
+    if not is_deliverable: return JSONResponse({"error": reason}, status_code=400)
+    if not is_email_verified(email): return JSONResponse({"error": "email_not_verified", "message": "Please verify your email address before using Trust Mail."}, status_code=403)
+    ext = os.path.splitext(file.filename or "")[1].lower()
+    if ext not in TRUST_MAIL_ALLOWED_EXTENSIONS: return JSONResponse({"error": "unsupported_format", "message": "Trust Mail Phase 1 accepts .eml and .msg email files."}, status_code=415)
+    try: _cleanup_old_files(max_age_hours=2.0)
+    except Exception: pass
+    status = get_user_status(email)
+    if not status["allowed"]: return JSONResponse({"error": "limit_reached", "plan": status["plan"], "uses_left": 0, "limit": status["limit"]}, status_code=402)
+    user_plan = status["plan"]
+    max_bytes = TRUST_MAIL_SIZE_LIMITS.get(user_plan, TRUST_MAIL_SIZE_LIMITS["free"])
+    max_mb = max_bytes // (1024 * 1024)
+    plan_label = {"free": "Free", "creator": "Creator", "pro": "Pro", "enterprise": "Enterprise"}.get(user_plan, user_plan.title())
+    if file.size and file.size > max_bytes: return JSONResponse({"error": "file_too_large", "message": f"Trust Mail file exceeds the {max_mb}MB limit for your {plan_label} plan.", "max_mb": max_mb, "plan": user_plan}, status_code=413)
+    job_id = str(uuid.uuid4())
+    safe_name = os.path.basename(file.filename or f"trust-mail{ext}")
+    raw_path = f"{UPLOAD_DIR}/{job_id}_{safe_name}"
+    bytes_written = 0
+    with open(raw_path, "wb") as fh:
+        while chunk := await file.read(1024 * 1024):
+            bytes_written += len(chunk)
+            if bytes_written > max_bytes:
+                try: os.remove(raw_path)
+                except Exception: pass
+                return JSONResponse({"error": "file_too_large", "message": f"Trust Mail file exceeds the {max_mb}MB limit for your {plan_label} plan.", "max_mb": max_mb, "plan": user_plan}, status_code=413)
+            fh.write(chunk)
+    try:
+        enqueue_trust_mail_upload(job_id, raw_path, safe_name, email)
+        return JSONResponse({"job_id": job_id, "status": "queued", "job_status": "queued", "media_type": "trust_mail", "message": "Trust Mail queued. Poll /job-status/{job_id} for the certified email result."})
+    except Exception as exc:
+        log.exception("trust_mail_upload: queue failed")
+        try:
+            if os.path.exists(raw_path): os.remove(raw_path)
+        except Exception: pass
+        return JSONResponse({"error": "queue_unavailable", "message": "Trust Mail could not be queued. Please try again.", "detail": str(exc)[:200]}, status_code=500)
+
+@app.get("/download-trust-mail/{cid}")
+async def download_trust_mail(cid: str):
+    return RedirectResponse(url=f"{BASE_URL}/download-document/{cid}", status_code=302)
+
+@app.get("/download-trust-mail-package/{cid}")
+async def download_trust_mail_package(cid: str):
+    return RedirectResponse(url=f"{BASE_URL}/download-certified-file/{cid}", status_code=302)
 
 @app.post("/upload-document/")
 async def upload_document(file: UploadFile = File(...), email: str = Form(...)):
@@ -2957,6 +3015,15 @@ def verify_certificate_by_id(cid: str):
             "record_match_source": "certificate_lookup",
             "verification_report": verification_report,
         })
+
+
+    is_trust_mail = bool(str(cert.get("label", "") or "").upper() == "TRUST_MAIL" or str(original_file or "").startswith("TrustMail:"))
+    if is_trust_mail:
+        trust_document_download_url = f"{BASE_URL}/download-trust-mail/{cid}" if document_available else ""
+        trust_package_url = f"{BASE_URL}/download-trust-mail-package/{cid}" if file_package_available else ""
+        trust_filename = str(original_file or "").replace("TrustMail:", "", 1)
+        verification_report = {"title": "VeriFYD Trust Mail Verification Report", "status": "FOUND", "record_type": "Certified Trust Mail", "certificate_id": cid, "database_match": "YES", "certified_document_available": "YES" if document_available else "NO", "certified_file_package_available": "YES" if file_package_available else "NO", "trust_level": "DATABASE RECORD FOUND", "message": "This Trust Mail certificate ID exists in the VeriFYD certificate database. The certified email report, original email hash, evidence package, and attachment inventory are preserved in the Trust Mail package.", "original_sha256": original_sha256, "certified_document_sha256": certified_document_sha256, "certified_file_package_sha256": certified_file_package_sha256}
+        return JSONResponse({"verified": True, "status": "found", "verification_status": "CERTIFICATE_RECORD_FOUND", "certificate_id": cid, "label": "TRUST MAIL CERTIFIED", "authenticity": "", "ai_score": "", "authenticity_score": "", "original_file": trust_filename, "upload_time": cert.get("upload_time", ""), "download_count": cert.get("download_count", 0), "certified_to": cert.get("email", ""), "media_type": "trust_mail", "file_type": "trust_mail", "record_type": "Certified Trust Mail", "download_type": "certified_trust_mail", "trust_mail": True, "status_label": "TRUST MAIL CERTIFIED", "display_status": "TRUST MAIL RECORD VERIFIED", "result_status": "TRUST MAIL CERTIFIED", "sha256": original_sha256, "original_sha256": original_sha256, "original_hash": original_sha256, "certified_document_sha256": certified_document_sha256, "certified_document_hash": certified_document_sha256, "certified_file_package_sha256": certified_file_package_sha256, "certified_file_package_hash": certified_file_package_sha256, "certified_evidence_package_hash": certified_file_package_sha256, "certified_file_hash": certified_file_hash, "certified_document_available": bool(document_available), "certified_file_package_available": bool(file_package_available), "certified_evidence_package_available": bool(file_package_available), "video_available": False, "audio_available": False, "photo_available": False, "download_url": trust_document_download_url or trust_package_url, "certified_document_url": trust_document_download_url, "certified_file_package_url": trust_package_url, "certified_evidence_package_url": trust_package_url, "evidence_package_url": trust_package_url, "download_all_certified_files_url": trust_package_url, "verification_report": verification_report})
 
     media_type = "document" if document_available or certified_document_sha256 else (
         "audio" if audio_available or certified_audio_sha256 else

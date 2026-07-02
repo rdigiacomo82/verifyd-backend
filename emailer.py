@@ -337,6 +337,41 @@ def send_certification_email(
 
 
 
+
+def send_trust_mail_ready_email(
+    to_email: str,
+    certificate_id: str,
+    subject: str = "",
+    sender: str = "",
+    recipient: str = "",
+    message_date: str = "",
+    report_url: str = "",
+    package_url: str = "",
+    original_sha256: str = "",
+    attachment_count: int = 0,
+) -> bool:
+    # Send Trust Mail completion email. Trust Mail is evidence preservation, not AI detection.
+    short_id = (certificate_id or "")[:8].upper()
+    report_url = report_url or f"{BACKEND_URL}/download-trust-mail/{certificate_id}"
+    package_url = package_url or f"{BACKEND_URL}/download-trust-mail-package/{certificate_id}"
+    verify_url = f"{SITE_URL}/verify-certificate"
+    safe_subject = (subject or "Certified email record")[:120]
+    safe_sender = (sender or "Not available")[:160]
+    safe_recipient = (recipient or "Not available")[:160]
+    html = f"""
+<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+<body style="margin:0;padding:0;background-color:#0a0a0a;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
+<table width="100%" cellpadding="0" cellspacing="0" style="background-color:#0a0a0a;padding:40px 20px;"><tr><td align="center">
+<table width="560" cellpadding="0" cellspacing="0" style="background-color:#111111;border-radius:12px;border:1px solid #222222;overflow:hidden;max-width:560px;width:100%;">
+{_header_html()}
+<tr><td style="padding:40px 32px 24px;text-align:center;"><div style="display:inline-block;background:#1f1600;border:1px solid #f59e0b;border-radius:100px;padding:8px 20px;margin-bottom:24px;"><span style="color:#f59e0b;font-size:13px;font-weight:700;letter-spacing:1px;text-transform:uppercase;">Trust Mail Certified</span></div><h2 style="margin:0 0 8px;font-size:24px;font-weight:800;color:#ffffff;">Your certified email record is ready</h2><p style="margin:0;color:#888888;font-size:15px;line-height:1.6;">VeriFYD preserved this email file, extracted headers, inventoried attachments, and generated certified evidence hashes.</p></td></tr>
+<tr><td style="padding:0 32px 24px;"><div style="background:#0f0f0f;border:1px solid #2a2a2a;border-radius:12px;padding:20px;color:#d1d5db;font-size:14px;line-height:1.8;"><strong style="color:#ffffff;">Subject:</strong> {safe_subject}<br><strong style="color:#ffffff;">From:</strong> {safe_sender}<br><strong style="color:#ffffff;">To:</strong> {safe_recipient}<br><strong style="color:#ffffff;">Date:</strong> {message_date or 'Recorded in VeriFYD certificate'}<br><strong style="color:#ffffff;">Attachments:</strong> {attachment_count}<br><strong style="color:#ffffff;">Certificate ID:</strong> <span style="color:#f59e0b;font-family:'Courier New',monospace;">{certificate_id}</span></div></td></tr>
+<tr><td style="padding:0 32px 28px;"><a href="{report_url}" style="display:block;background:#f59e0b;color:#000;text-decoration:none;text-align:center;padding:16px;border-radius:10px;font-size:15px;font-weight:800;margin-bottom:12px;">Download Certified Trust Mail Report</a><a href="{package_url}" style="display:block;background:#1a1a1a;color:#f59e0b;text-decoration:none;text-align:center;padding:16px;border-radius:10px;font-size:15px;font-weight:700;border:1px solid #333;margin-bottom:12px;">Download Trust Mail Evidence Package</a><a href="{verify_url}" style="display:block;background:#111;color:#c4b5fd;text-decoration:none;text-align:center;padding:16px;border-radius:10px;font-size:15px;font-weight:700;border:1px solid #7c3aed;">Verify Certificate ID</a></td></tr>
+<tr><td style="padding:0 32px 32px;"><p style="margin:0;color:#555;font-size:12px;line-height:1.7;">Trust Mail preserves email evidence and metadata. It does not claim the sender identity is legally proven; it records the submitted file, headers, content, attachments, and hashes for later verification.</p></td></tr>
+{_footer_html()}
+</table></td></tr></table></body></html>"""
+    return _send({"from": f"{FROM_NAME} <{FROM_ADDRESS}>", "to": [to_email], "subject": f"Trust Mail Certified — VeriFYD #{short_id}", "html": html})
+
 def send_web_capture_ready_email(
     to_email: str,
     certificate_id: str,

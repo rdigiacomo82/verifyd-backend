@@ -277,6 +277,21 @@ def enqueue_document_upload(job_id: str, raw_path: str, filename: str, email: st
     )
 
 
+def enqueue_trust_mail_upload(job_id: str, raw_path: str, filename: str, email: str, suppress_email: bool = False):
+    # Store uploaded .eml/.msg email file and enqueue Trust Mail certification.
+    from worker import process_trust_mail_job
+
+    return _enqueue_file_job(
+        job_id=job_id,
+        raw_path=raw_path,
+        filename=filename,
+        email=email,
+        worker_func=process_trust_mail_job,
+        job_timeout=900,
+        suppress_email=suppress_email,
+    )
+
+
 
 
 # ─────────────────────────────────────────────────────────────

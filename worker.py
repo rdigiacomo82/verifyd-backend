@@ -2299,6 +2299,103 @@ def keepalive_ping():
 # ─────────────────────────────────────────────────────────────
 #  Phase 3B-1 — Certified Web & Social Capture MVP
 # ─────────────────────────────────────────────────────────────
+
+def process_trust_mail_job(file_key: str, filename: str, email: str, suppress_email: bool = False) -> dict:
+    """Background job: parse/certify Trust Mail .eml/.msg, store PDF + ZIP result."""
+    import os as _os
+    import tempfile
+    import shutil as _shutil
+    import hashlib as _hashlib
+    from rq import get_current_job
+    from database import insert_certificate, increment_user_uses, get_user_status as _gus, update_certificate_hashes
+    from config import BASE_URL
+    rq_job = get_current_job()
+    job_id = rq_job.id if rq_job else file_key.replace("file:", "")
+    r = _get_redis()
+    work_dir = ""
+    ext = _os.path.splitext(filename or "")[1].lower() or ".eml"
+    if ext not in (".eml", ".msg"):
+        ext = ".eml"
+    tmp_path = _os.path.join(tempfile.gettempdir(), f"{job_id}{ext}")
+    try:
+        if str(file_key).startswith("r2:"):
+            r2_key = file_key[3:]
+            from storage import download_video, delete_video
+            download_video(r2_key, tmp_path)
+            delete_video(r2_key)
+            original_sha256 = _sha256_file(tmp_path)
+        else:
+            file_bytes = r.get(file_key)
+            if not file_bytes:
+                result = {"job_status": "error", "error": "Trust Mail file expired from queue. Please re-upload.", "media_type": "trust_mail"}
+                _store_result(r, job_id, result)
+                return result
+            with open(tmp_path, "wb") as fh:
+                fh.write(file_bytes)
+            r.delete(file_key)
+            original_sha256 = _hashlib.sha256(file_bytes).hexdigest()
+        from trust_mail import create_certified_trust_mail
+        log.info("Worker: starting Trust Mail job=%s email=%s file=%s", job_id, email, filename)
+        tm = create_certified_trust_mail(tmp_path, job_id, email=email, filename=filename)
+        work_dir = tm.get("work_dir", "") or ""
+        report_path = tm.get("report_path", "")
+        package_path = tm.get("package_path", "")
+        report_sha256 = tm.get("report_sha256", "")
+        package_sha256 = tm.get("package_sha256", "")
+        try:
+            increment_user_uses(email)
+        except Exception as use_e:
+            log.warning("Worker: Trust Mail usage increment failed for %s: %s", email, use_e)
+        insert_certificate(cert_id=job_id, email=email, original_file=f"TrustMail:{filename}", label="TRUST_MAIL", authenticity=100, ai_score=0, sha256=original_sha256, original_sha256=original_sha256, certified_document_sha256=report_sha256, certified_file_package_sha256=package_sha256)
+        try:
+            update_certificate_hashes(job_id, original_sha256=original_sha256, certified_document_sha256=report_sha256, certified_file_package_sha256=package_sha256)
+        except Exception as hash_e:
+            log.warning("Worker: Trust Mail hash persistence failed for %s: %s", job_id, hash_e)
+        try:
+            plan = _gus(email).get("plan", "free")
+        except Exception:
+            plan = "free"
+        stored_in_r2 = False
+        try:
+            from storage import r2_available, upload_certified_document, upload_certified_file_package
+            if r2_available():
+                upload_certified_document(job_id, report_path, plan)
+                upload_certified_file_package(job_id, package_path, plan)
+                stored_in_r2 = True
+        except Exception as r2_e:
+            log.warning("Worker: Trust Mail R2 upload failed, falling back to Redis: %s", r2_e)
+        if not stored_in_r2:
+            ttl = {"free": 86400, "creator": 259200, "pro": 604800, "enterprise": 2592000}.get(plan, 86400)
+            with open(report_path, "rb") as rf: r.setex(f"doccert:{job_id}", ttl, rf.read())
+            with open(package_path, "rb") as pf: r.setex(f"filecert:{job_id}", ttl, pf.read())
+        download_url = f"{BASE_URL}/download-trust-mail/{job_id}"
+        package_url = f"{BASE_URL}/download-trust-mail-package/{job_id}"
+        result = {"job_status": "complete", "media_type": "trust_mail", "status": "TRUST MAIL CERTIFIED", "result_status": "TRUST MAIL CERTIFIED", "display_status": "TRUST MAIL CERTIFIED", "color": "green", "label": "TRUST_MAIL", "certificate_id": job_id, "subject": tm.get("subject", ""), "from": tm.get("from", ""), "to": tm.get("to", ""), "cc": tm.get("cc", ""), "bcc": tm.get("bcc", ""), "reply_to": tm.get("reply_to", ""), "return_path": tm.get("return_path", ""), "message_date": tm.get("message_date", ""), "message_id": tm.get("message_id", ""), "source_type": tm.get("source_type", ""), "attachment_count": len(tm.get("attachments") or []), "attachments": tm.get("attachments") or [], "original_sha256": original_sha256, "sha256": original_sha256, "certified_document_sha256": report_sha256, "trust_mail_report_sha256": report_sha256, "certified_file_package_sha256": package_sha256, "trust_mail_evidence_package_sha256": package_sha256, "download_url": download_url, "certified_document_url": download_url, "evidence_package_url": package_url, "certified_file_package_url": package_url, "download_all_certified_files_url": package_url, "download_type": "certified_trust_mail", "trust_mail": True}
+        if email and "@" in str(email):
+            try:
+                if suppress_email:
+                    sent = False
+                else:
+                    from emailer import send_trust_mail_ready_email
+                    sent = send_trust_mail_ready_email(to_email=email, certificate_id=job_id, subject=tm.get("subject", ""), sender=tm.get("from", ""), recipient=tm.get("to", ""), message_date=tm.get("message_date", ""), report_url=download_url, package_url=package_url, original_sha256=original_sha256, attachment_count=len(tm.get("attachments") or []))
+                result["email_sent"] = bool(sent)
+                log.info("Worker: Trust Mail ready email sent=%s job=%s email=%s", sent, job_id, email)
+            except Exception as em:
+                result["email_sent"] = False
+                log.warning("Worker: Trust Mail ready email failed for %s: %s", job_id, em)
+        _store_result(r, job_id, result)
+        return result
+    except Exception as exc:
+        log.exception("Worker: Trust Mail job %s failed", job_id)
+        result = {"job_status": "error", "error": str(exc)[:300], "media_type": "trust_mail"}
+        _store_result(r, job_id, result)
+        return result
+    finally:
+        try:
+            if tmp_path and _os.path.exists(tmp_path): _os.remove(tmp_path)
+        except Exception: pass
+        if work_dir and _os.path.isdir(work_dir): _shutil.rmtree(work_dir, ignore_errors=True)
+
 def process_web_capture_job(job_id: str, url: str, email: str) -> dict:
     """Background job: capture a public web page screenshot and certify it as evidence."""
     import os as _os
