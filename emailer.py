@@ -59,7 +59,7 @@ def _footer_html() -> str:
             <a href="{SITE_URL}" style="color:#f59e0b;text-decoration:none;">vfvid.com</a>
           </p>
           <p style="margin:0;color:#333333;font-size:11px;">
-            © 2026 VeriFYD · You are receiving this because you used VeriFYD to verify a video.
+            © 2026 VeriFYD · You are receiving this because a VeriFYD certified record was securely sent to you.
           </p>
         </td>
       </tr>"""
@@ -664,7 +664,7 @@ def send_trust_desk_ready_email(
     })
 
 # ─────────────────────────────────────────────
-# Certified Send — branded delivery email
+# Certified Send / VeriFYD Trust Mail — branded delivery email
 # ─────────────────────────────────────────────
 def send_certified_delivery_email(
     *,
@@ -691,7 +691,7 @@ def send_certified_delivery_email(
     attachments: list | None = None,
 ) -> bool:
     """
-    Send an official VeriFYD-branded Certified Send email to a third-party recipient.
+    Send an official VeriFYD Trust Mail delivery email to a third-party recipient.
 
     This is intentionally separate from the normal uploader notification email.
     It tells the recipient the evidence was certified through VeriFYD before delivery,
@@ -705,6 +705,12 @@ def send_certified_delivery_email(
             text = text[: limit - 1] + "…"
         return _html.escape(text)
 
+    def _clean_percent(value) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        return text if text.endswith("%") else f"{text}%"
+
     short_id = str(certificate_id or "")[:8].upper()
     recipient_label = esc(recipient_name or recipient_email, 160)
     sender_label = esc(sender_email or certified_to or "VeriFYD user", 200)
@@ -712,11 +718,11 @@ def send_certified_delivery_email(
     verify_url = verify_url or f"{SITE_URL}/verify-certificate"
 
     authenticity_line = ""
-    if str(authenticity) != "":
-        authenticity_line = f"<p style='margin:0;color:#d1d5db;font-size:14px;'><strong>Authenticity:</strong> {esc(authenticity,80)}%</p>"
+    if str(authenticity).strip() != "":
+        authenticity_line = f"<p style='margin:0 0 7px;color:#d1d5db;font-size:14px;'><strong>Certification Score:</strong> {_clean_percent(esc(authenticity,80))}</p>"
     ai_line = ""
-    if str(ai_score) != "":
-        ai_line = f"<p style='margin:0;color:#d1d5db;font-size:14px;'><strong>AI Risk:</strong> {esc(ai_score,80)}%</p>"
+    if str(ai_score).strip() != "":
+        ai_line = f"<p style='margin:0;color:#d1d5db;font-size:14px;'><strong>AI / Manipulation Indicators:</strong> {_clean_percent(esc(ai_score,80))}</p>"
 
     note_html = ""
     if message:
@@ -744,28 +750,41 @@ def send_certified_delivery_email(
           </div>
         """
 
-    report_button = ""
+    # Email-client-safe button table. Keep inline CSS; do not rely on Tailwind/classes.
+    button_cells = []
     if include_report and report_url:
-        report_button = f"""
-          <a href="{esc(report_url, 2000)}" style="display:inline-block;margin:8px 8px 0 0;padding:12px 18px;background:#2563eb;color:#ffffff;text-decoration:none;border-radius:8px;font-weight:700;font-size:14px;">
-            Download Certified Report
-          </a>
-        """
-
-    package_button = ""
+        button_cells.append(f"""
+          <td align="center" valign="top" style="padding:0 8px 10px 0;">
+            <a href="{esc(report_url, 2000)}" style="display:inline-block;width:178px;min-width:178px;padding:14px 10px;background:#2563eb;color:#ffffff;text-decoration:none;border-radius:10px;font-weight:800;font-size:14px;line-height:1.25;text-align:center;box-shadow:0 8px 18px rgba(37,99,235,0.28);">
+              Download Certified Report
+            </a>
+          </td>
+        """)
     if include_package and package_url:
-        package_button = f"""
-          <a href="{esc(package_url, 2000)}" style="display:inline-block;margin:8px 8px 0 0;padding:12px 18px;background:#111827;color:#f9fafb;text-decoration:none;border-radius:8px;border:1px solid #374151;font-weight:700;font-size:14px;">
-            Download Evidence Package
-          </a>
-        """
-
-    verify_button = ""
+        button_cells.append(f"""
+          <td align="center" valign="top" style="padding:0 8px 10px 0;">
+            <a href="{esc(package_url, 2000)}" style="display:inline-block;width:178px;min-width:178px;padding:14px 10px;background:#9333ea;color:#ffffff;text-decoration:none;border-radius:10px;font-weight:800;font-size:14px;line-height:1.25;text-align:center;box-shadow:0 8px 18px rgba(147,51,234,0.28);">
+              Download Evidence Package
+            </a>
+          </td>
+        """)
     if include_verify_link and verify_url:
-        verify_button = f"""
-          <a href="{esc(verify_url, 2000)}" style="display:inline-block;margin:8px 8px 0 0;padding:12px 18px;background:#f59e0b;color:#111827;text-decoration:none;border-radius:8px;font-weight:800;font-size:14px;">
-            Verify Certificate
-          </a>
+        button_cells.append(f"""
+          <td align="center" valign="top" style="padding:0 0 10px 0;">
+            <a href="{esc(verify_url, 2000)}" style="display:inline-block;width:178px;min-width:178px;padding:14px 10px;background:#f59e0b;color:#111827;text-decoration:none;border-radius:10px;font-weight:900;font-size:14px;line-height:1.25;text-align:center;box-shadow:0 8px 18px rgba(245,158,11,0.30);">
+              Verify Certificate
+            </a>
+          </td>
+        """)
+
+    buttons_html = ""
+    if button_cells:
+        buttons_html = f"""
+          <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin:24px 0 4px;border-collapse:collapse;">
+            <tr>
+              {''.join(button_cells)}
+            </tr>
+          </table>
         """
 
     html = f"""
@@ -779,12 +798,12 @@ def send_certified_delivery_email(
   <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#050505;padding:34px 16px;">
     <tr>
       <td align="center">
-        <table width="640" cellpadding="0" cellspacing="0" style="max-width:640px;width:100%;background:#0b0f14;border:1px solid #1f2937;border-radius:16px;overflow:hidden;">
+        <table width="680" cellpadding="0" cellspacing="0" style="max-width:680px;width:100%;background:#0b0f14;border:1px solid #1f2937;border-radius:16px;overflow:hidden;">
           <tr>
             <td style="padding:28px 28px 24px;text-align:center;background:linear-gradient(135deg,#050505 0%,#111827 58%,#1e1b4b 100%);border-bottom:1px solid #263246;">
               <div style="display:inline-block;width:70px;height:70px;border-radius:50%;border:2px solid #38bdf8;box-shadow:0 0 22px rgba(56,189,248,.35);line-height:70px;text-align:center;color:#22c55e;font-size:38px;font-weight:900;margin-bottom:10px;">✓</div>
               <h1 style="margin:0;font-size:30px;font-weight:900;color:#ffffff;letter-spacing:-0.7px;">
-                Veri<span style="color:#f59e0b;">FYD</span> Certified Send
+                Veri<span style="color:#f59e0b;">FYD</span> Trust Mail
               </h1>
               <p style="margin:8px 0 0;color:#93c5fd;font-size:12px;letter-spacing:2px;text-transform:uppercase;font-weight:700;">
                 Certified evidence delivered with VeriFYD seal
@@ -793,9 +812,9 @@ def send_certified_delivery_email(
           </tr>
           <tr>
             <td style="padding:30px 30px 26px;">
-              <h2 style="margin:0 0 10px;font-size:22px;color:#f9fafb;">Certified evidence package received</h2>
+              <h2 style="margin:0 0 10px;font-size:22px;color:#f9fafb;">You received VeriFYD Trust Mail</h2>
               <p style="margin:0 0 18px;color:#d1d5db;font-size:15px;line-height:1.65;">
-                {recipient_label}, a certified VeriFYD record was sent to you by <strong style="color:#ffffff;">{sender_label}</strong>.
+                {recipient_label}, <strong style="color:#ffffff;">{sender_label}</strong> sent you a VeriFYD-certified record.
                 This file was certified through VeriFYD before delivery and includes a Certificate ID, SHA-256 hash record, verification link, and certified downloads when available.
               </p>
 
@@ -819,11 +838,7 @@ def send_certified_delivery_email(
 
               {note_html}
 
-              <div style="margin:24px 0 4px;">
-                {report_button}
-                {package_button}
-                {verify_button}
-              </div>
+              {buttons_html}
 
               {attachment_html}
 
@@ -844,10 +859,9 @@ def send_certified_delivery_email(
     payload = {
         "from": f"{FROM_NAME} <{FROM_ADDRESS}>",
         "to": [recipient_email],
-        "subject": f"VeriFYD Certified Evidence Package — Certificate #{short_id}",
+        "subject": f"VeriFYD Trust Mail — Certificate #{short_id}",
         "html": html,
     }
     if attachments:
         payload["attachments"] = attachments
     return _send(payload)
-
