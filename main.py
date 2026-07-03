@@ -5883,3 +5883,245 @@ async def download_web_capture(cid: str):
 async def download_web_capture_package(cid: str):
     """Alias for downloading the Certified Web Capture evidence package ZIP."""
     return RedirectResponse(url=f"{BASE_URL}/download-certified-file/{cid}", status_code=302)
+
+# ─────────────────────────────────────────────
+# Certified Send — send a branded certified email after certification
+# ─────────────────────────────────────────────
+@app.post("/send-certified-email/")
+async def send_certified_email_endpoint(request: Request):
+    """
+    Send a VeriFYD-branded certified email to a third-party recipient.
+
+    Expected JSON or form fields:
+      certificate_id, recipient_email, recipient_name, sender_email, message,
+      include_report, include_package, include_verify_link
+    """
+    import base64 as _base64
+    import os as _os
+
+    def _as_bool(value, default: bool = True) -> bool:
+        if value is None or value == "":
+            return default
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() in ("1", "true", "yes", "y", "on")
+
+    try:
+        content_type = str(request.headers.get("content-type", "")).lower()
+        if "application/json" in content_type:
+            data = await request.json()
+        else:
+            form = await request.form()
+            data = dict(form)
+    except Exception:
+        data = {}
+
+    certificate_id = str(data.get("certificate_id") or data.get("cert_id") or "").strip()
+    recipient_email = normalize_email(str(data.get("recipient_email") or data.get("to_email") or data.get("to") or ""))
+    recipient_name = str(data.get("recipient_name") or "").strip()
+    sender_email = normalize_email(str(data.get("sender_email") or data.get("from_email") or ""))
+    message = str(data.get("message") or data.get("note") or "").strip()[:500]
+    include_report = _as_bool(data.get("include_report"), True)
+    include_package = _as_bool(data.get("include_package"), True)
+    include_verify_link = _as_bool(data.get("include_verify_link"), True)
+
+    if not certificate_id:
+        return JSONResponse({"sent": False, "status": "missing_certificate_id"}, status_code=400)
+    if not recipient_email or not is_valid_email(recipient_email):
+        return JSONResponse({"sent": False, "status": "invalid_recipient_email"}, status_code=400)
+    if sender_email and not is_valid_email(sender_email):
+        return JSONResponse({"sent": False, "status": "invalid_sender_email"}, status_code=400)
+
+    cert = get_certificate(certificate_id)
+    if not cert:
+        return JSONResponse({
+            "sent": False,
+            "status": "certificate_not_found",
+            "certificate_id": certificate_id,
+        }, status_code=404)
+
+    original_file = cert.get("original_file") or cert.get("filename") or "Certified evidence"
+    certified_to = cert.get("certified_to") or cert.get("email") or sender_email or ""
+    if not sender_email:
+        sender_email = certified_to if is_valid_email(str(certified_to)) else ""
+
+    original_sha256 = cert.get("original_sha256") or cert.get("original_hash") or cert.get("sha256") or ""
+    certified_document_sha256 = cert.get("certified_document_sha256") or ""
+    certified_file_package_sha256 = cert.get("certified_file_package_sha256") or ""
+    authenticity = cert.get("authenticity") if cert.get("authenticity") is not None else cert.get("authenticity_score", "")
+    ai_score = cert.get("ai_score", "")
+    upload_time = cert.get("upload_time") or cert.get("created_at") or cert.get("timestamp") or ""
+
+    report_url = ""
+    package_url = ""
+    verify_url = f"https://vfvid.com/verify-certificate?certificate_id={certificate_id}"
+    attachment_status = []
+    attachments = []
+
+    document_available = False
+    package_available = False
+    video_available = False
+    audio_available = False
+    photo_available = False
+
+    try:
+        from storage import (
+            r2_available,
+            certified_document_exists,
+            certified_file_package_exists,
+            certified_exists,
+            certified_audio_exists,
+        )
+        if r2_available():
+            document_available = bool(certified_document_exists(certificate_id))
+            package_available = bool(certified_file_package_exists(certificate_id))
+            video_available = bool(certified_exists(certificate_id))
+            audio_available = bool(certified_audio_exists(certificate_id))
+    except Exception as exc:
+        log.warning("certified-send: availability lookup failed cert=%s error=%s", certificate_id, exc)
+
+    try:
+        from storage import _get_client, BUCKET, r2_available
+        if r2_available():
+            client = _get_client()
+            for plan in ("free", "creator", "pro", "enterprise"):
+                for ext in (".jpg", ".jpeg", ".png", ".webp"):
+                    try:
+                        client.head_object(Bucket=BUCKET, Key=f"certified-photos/{plan}/{certificate_id}{ext}")
+                        photo_available = True
+                        break
+                    except Exception:
+                        continue
+                if photo_available:
+                    break
+    except Exception:
+        pass
+
+    if document_available:
+        report_url = f"{BASE_URL}/download-document/{certificate_id}"
+    elif video_available:
+        report_url = f"{BASE_URL}/download/{certificate_id}"
+    elif audio_available:
+        report_url = f"{BASE_URL}/download-audio/{certificate_id}"
+    elif photo_available:
+        report_url = f"{BASE_URL}/download-photo/{certificate_id}"
+
+    if package_available:
+        package_url = f"{BASE_URL}/download-certified-file/{certificate_id}"
+
+    max_mb = float(_os.environ.get("VERIFYD_CERTIFIED_SEND_MAX_ATTACHMENT_MB", "8") or "8")
+    max_bytes = int(max_mb * 1024 * 1024)
+
+    def _try_attach_r2(key: str, filename: str, content_type: str) -> None:
+        if not key or not filename:
+            return
+        try:
+            from storage import _get_client, BUCKET, r2_available
+            if not r2_available():
+                attachment_status.append({"filename": filename, "status": "not attached; R2 storage unavailable, link included instead"})
+                return
+            client = _get_client()
+            try:
+                head = client.head_object(Bucket=BUCKET, Key=key)
+                size = int(head.get("ContentLength") or 0)
+            except Exception:
+                size = 0
+            if size and size > max_bytes:
+                attachment_status.append({"filename": filename, "status": f"not attached; file is larger than {max_mb:g} MB, link included instead"})
+                return
+            obj = client.get_object(Bucket=BUCKET, Key=key)
+            body = obj.get("Body")
+            raw = body.read() if body is not None else b""
+            if not raw:
+                attachment_status.append({"filename": filename, "status": "not attached; empty object, link included instead"})
+                return
+            if len(raw) > max_bytes:
+                attachment_status.append({"filename": filename, "status": f"not attached; file is larger than {max_mb:g} MB, link included instead"})
+                return
+            attachments.append({
+                "filename": filename,
+                "content": _base64.b64encode(raw).decode("ascii"),
+                "content_type": content_type,
+            })
+            attachment_status.append({"filename": filename, "status": "attached"})
+        except Exception as exc:
+            log.warning("certified-send: attachment failed cert=%s key=%s error=%s", certificate_id, key, exc)
+            attachment_status.append({"filename": filename, "status": "not attached; secure download link included instead"})
+
+    if include_report and document_available:
+        try:
+            from storage import get_certified_document_key
+            _try_attach_r2(
+                get_certified_document_key(certificate_id),
+                f"VeriFYD_Certified_Report_{certificate_id[:8]}.pdf",
+                "application/pdf",
+            )
+        except Exception:
+            pass
+
+    if include_package and package_available:
+        try:
+            from storage import get_certified_file_package_key
+            _try_attach_r2(
+                get_certified_file_package_key(certificate_id),
+                f"VeriFYD_Evidence_Package_{certificate_id[:8]}.zip",
+                "application/zip",
+            )
+        except Exception:
+            pass
+
+    try:
+        from emailer import send_certified_delivery_email
+        sent = send_certified_delivery_email(
+            recipient_email=recipient_email,
+            recipient_name=recipient_name,
+            sender_email=sender_email,
+            message=message,
+            certificate_id=certificate_id,
+            original_filename=str(original_file),
+            certified_to=str(certified_to),
+            authenticity=authenticity,
+            ai_score=ai_score,
+            upload_time=str(upload_time),
+            original_sha256=str(original_sha256),
+            certified_document_sha256=str(certified_document_sha256),
+            certified_file_package_sha256=str(certified_file_package_sha256),
+            report_url=report_url,
+            package_url=package_url,
+            verify_url=verify_url,
+            include_report=include_report,
+            include_package=include_package,
+            include_verify_link=include_verify_link,
+            attachment_status=attachment_status,
+            attachments=attachments,
+        )
+    except Exception as exc:
+        log.exception("certified-send: email send failed cert=%s recipient=%s", certificate_id, recipient_email)
+        return JSONResponse({
+            "sent": False,
+            "status": "send_error",
+            "certificate_id": certificate_id,
+            "recipient_email": recipient_email,
+            "error": str(exc)[:300],
+        }, status_code=500)
+
+    if not sent:
+        return JSONResponse({
+            "sent": False,
+            "status": "email_provider_failed",
+            "certificate_id": certificate_id,
+            "recipient_email": recipient_email,
+        }, status_code=502)
+
+    return {
+        "sent": True,
+        "status": "sent",
+        "certificate_id": certificate_id,
+        "recipient_email": recipient_email,
+        "report_url": report_url,
+        "package_url": package_url,
+        "verify_url": verify_url,
+        "attachments_included": len(attachments),
+        "attachment_status": attachment_status,
+    }
+

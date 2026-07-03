@@ -662,3 +662,192 @@ def send_trust_desk_ready_email(
         "subject": f"VeriFYD Trust Desk Package Ready - #{short_id}",
         "html": html,
     })
+
+# ─────────────────────────────────────────────
+# Certified Send — branded delivery email
+# ─────────────────────────────────────────────
+def send_certified_delivery_email(
+    *,
+    recipient_email: str,
+    recipient_name: str = "",
+    sender_email: str = "",
+    message: str = "",
+    certificate_id: str,
+    original_filename: str = "",
+    certified_to: str = "",
+    authenticity: str | int = "",
+    ai_score: str | int = "",
+    upload_time: str = "",
+    original_sha256: str = "",
+    certified_document_sha256: str = "",
+    certified_file_package_sha256: str = "",
+    report_url: str = "",
+    package_url: str = "",
+    verify_url: str = "",
+    include_report: bool = True,
+    include_package: bool = True,
+    include_verify_link: bool = True,
+    attachment_status: list | None = None,
+    attachments: list | None = None,
+) -> bool:
+    """
+    Send an official VeriFYD-branded Certified Send email to a third-party recipient.
+
+    This is intentionally separate from the normal uploader notification email.
+    It tells the recipient the evidence was certified through VeriFYD before delivery,
+    includes the certificate ID, hashes, verification link, and optional attachments.
+    """
+    import html as _html
+
+    def esc(value, limit: int = 1200) -> str:
+        text = str(value or "")
+        if len(text) > limit:
+            text = text[: limit - 1] + "…"
+        return _html.escape(text)
+
+    short_id = str(certificate_id or "")[:8].upper()
+    recipient_label = esc(recipient_name or recipient_email, 160)
+    sender_label = esc(sender_email or certified_to or "VeriFYD user", 200)
+    safe_filename = esc(original_filename or "Certified evidence", 240)
+    verify_url = verify_url or f"{SITE_URL}/verify-certificate"
+
+    authenticity_line = ""
+    if str(authenticity) != "":
+        authenticity_line = f"<p style='margin:0;color:#d1d5db;font-size:14px;'><strong>Authenticity:</strong> {esc(authenticity,80)}%</p>"
+    ai_line = ""
+    if str(ai_score) != "":
+        ai_line = f"<p style='margin:0;color:#d1d5db;font-size:14px;'><strong>AI Risk:</strong> {esc(ai_score,80)}%</p>"
+
+    note_html = ""
+    if message:
+        note_html = f"""
+          <div style="margin:22px 0 0;padding:16px;border-radius:10px;background:#101827;border:1px solid #263246;">
+            <p style="margin:0 0 8px;color:#9ca3af;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Sender Note</p>
+            <p style="margin:0;color:#e5e7eb;font-size:14px;line-height:1.55;">{esc(message, 700)}</p>
+          </div>
+        """
+
+    attach_lines = []
+    for item in list(attachment_status or []):
+        try:
+            name = esc(item.get("filename", "file"), 180)
+            status = esc(item.get("status", ""), 260)
+            attach_lines.append(f"<li style='margin:4px 0;color:#9ca3af;font-size:13px;'>{name}: {status}</li>")
+        except Exception:
+            continue
+    attachment_html = ""
+    if attach_lines:
+        attachment_html = f"""
+          <div style="margin:18px 0 0;">
+            <p style="margin:0 0 6px;color:#9ca3af;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Attachment Status</p>
+            <ul style="margin:0;padding-left:18px;">{''.join(attach_lines)}</ul>
+          </div>
+        """
+
+    report_button = ""
+    if include_report and report_url:
+        report_button = f"""
+          <a href="{esc(report_url, 2000)}" style="display:inline-block;margin:8px 8px 0 0;padding:12px 18px;background:#2563eb;color:#ffffff;text-decoration:none;border-radius:8px;font-weight:700;font-size:14px;">
+            Download Certified Report
+          </a>
+        """
+
+    package_button = ""
+    if include_package and package_url:
+        package_button = f"""
+          <a href="{esc(package_url, 2000)}" style="display:inline-block;margin:8px 8px 0 0;padding:12px 18px;background:#111827;color:#f9fafb;text-decoration:none;border-radius:8px;border:1px solid #374151;font-weight:700;font-size:14px;">
+            Download Evidence Package
+          </a>
+        """
+
+    verify_button = ""
+    if include_verify_link and verify_url:
+        verify_button = f"""
+          <a href="{esc(verify_url, 2000)}" style="display:inline-block;margin:8px 8px 0 0;padding:12px 18px;background:#f59e0b;color:#111827;text-decoration:none;border-radius:8px;font-weight:800;font-size:14px;">
+            Verify Certificate
+          </a>
+        """
+
+    html = f"""
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="margin:0;padding:0;background-color:#050505;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#050505;padding:34px 16px;">
+    <tr>
+      <td align="center">
+        <table width="640" cellpadding="0" cellspacing="0" style="max-width:640px;width:100%;background:#0b0f14;border:1px solid #1f2937;border-radius:16px;overflow:hidden;">
+          <tr>
+            <td style="padding:28px 28px 24px;text-align:center;background:linear-gradient(135deg,#050505 0%,#111827 58%,#1e1b4b 100%);border-bottom:1px solid #263246;">
+              <div style="display:inline-block;width:70px;height:70px;border-radius:50%;border:2px solid #38bdf8;box-shadow:0 0 22px rgba(56,189,248,.35);line-height:70px;text-align:center;color:#22c55e;font-size:38px;font-weight:900;margin-bottom:10px;">✓</div>
+              <h1 style="margin:0;font-size:30px;font-weight:900;color:#ffffff;letter-spacing:-0.7px;">
+                Veri<span style="color:#f59e0b;">FYD</span> Certified Send
+              </h1>
+              <p style="margin:8px 0 0;color:#93c5fd;font-size:12px;letter-spacing:2px;text-transform:uppercase;font-weight:700;">
+                Certified evidence delivered with VeriFYD seal
+              </p>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:30px 30px 26px;">
+              <h2 style="margin:0 0 10px;font-size:22px;color:#f9fafb;">Certified evidence package received</h2>
+              <p style="margin:0 0 18px;color:#d1d5db;font-size:15px;line-height:1.65;">
+                {recipient_label}, a certified VeriFYD record was sent to you by <strong style="color:#ffffff;">{sender_label}</strong>.
+                This file was certified through VeriFYD before delivery and includes a Certificate ID, SHA-256 hash record, verification link, and certified downloads when available.
+              </p>
+
+              <div style="background:#111827;border:1px solid #334155;border-radius:12px;padding:18px;margin:20px 0;">
+                <p style="margin:0 0 8px;color:#9ca3af;font-size:12px;letter-spacing:1px;text-transform:uppercase;">Certificate ID</p>
+                <p style="margin:0;color:#ffffff;font-size:17px;font-family:'Courier New',monospace;font-weight:700;word-break:break-all;">{esc(certificate_id,120)}</p>
+                <div style="height:1px;background:#243244;margin:16px 0;"></div>
+                <p style="margin:0 0 7px;color:#d1d5db;font-size:14px;"><strong>Certified item:</strong> {safe_filename}</p>
+                <p style="margin:0 0 7px;color:#d1d5db;font-size:14px;"><strong>Certified to:</strong> {esc(certified_to or sender_email,220)}</p>
+                <p style="margin:0 0 7px;color:#d1d5db;font-size:14px;"><strong>Certified on:</strong> {esc(upload_time,160)}</p>
+                {authenticity_line}
+                {ai_line}
+              </div>
+
+              <div style="background:#07111f;border:1px solid #1e3a5f;border-radius:12px;padding:16px;margin:20px 0;">
+                <p style="margin:0 0 8px;color:#93c5fd;font-size:12px;letter-spacing:1px;text-transform:uppercase;">SHA-256 Hashes</p>
+                <p style="margin:0 0 8px;color:#dbeafe;font-size:12px;line-height:1.55;word-break:break-all;"><strong>Original:</strong> {esc(original_sha256 or 'Not available',160)}</p>
+                <p style="margin:0 0 8px;color:#dbeafe;font-size:12px;line-height:1.55;word-break:break-all;"><strong>Certified Report:</strong> {esc(certified_document_sha256 or 'Not available',160)}</p>
+                <p style="margin:0;color:#dbeafe;font-size:12px;line-height:1.55;word-break:break-all;"><strong>Evidence Package:</strong> {esc(certified_file_package_sha256 or 'Not available',160)}</p>
+              </div>
+
+              {note_html}
+
+              <div style="margin:24px 0 4px;">
+                {report_button}
+                {package_button}
+                {verify_button}
+              </div>
+
+              {attachment_html}
+
+              <p style="margin:22px 0 0;color:#6b7280;font-size:12px;line-height:1.55;">
+                VeriFYD certification records can be independently verified using the Certificate ID above. Links may expire based on plan retention and security settings; the certificate record remains independently verifiable.
+              </p>
+            </td>
+          </tr>
+          {_footer_html()}
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>
+"""
+
+    payload = {
+        "from": f"{FROM_NAME} <{FROM_ADDRESS}>",
+        "to": [recipient_email],
+        "subject": f"VeriFYD Certified Evidence Package — Certificate #{short_id}",
+        "html": html,
+    }
+    if attachments:
+        payload["attachments"] = attachments
+    return _send(payload)
+
