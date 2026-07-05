@@ -224,6 +224,20 @@ def _build_photo_gpt_context(signal_score: int, signal_context: dict) -> dict:
             "Score generator_artifacts 9-10 immediately."
         )
 
+    # ── PHOTO_SOCIAL_AI_COMPOSITE_PATCH_V1 ───────────────────
+    if signal_context.get("photo_ai_social_composite"):
+        photo_notes.append(
+            "Strong synthetic social/poster image composite detected by signals: "
+            "no camera EXIF/device provenance, group/person content, high RGB channel-lock, "
+            "borderline PRNU, clean ELA, staged text/props, and generated-image texture. "
+            "Inspect for AI poster traits: overly staged patriotic/event composition, exaggerated anatomy, "
+            "plastic/airbrushed skin, inconsistent hands/fingers, repeated faces/body shapes, "
+            "unnatural clothing seams, and text/signage that looks rendered into the scene. "
+            "Do not score as real merely because the image has fake grain or readable text. "
+            "If the visual composition confirms this, score generator_artifacts, scene_staging, "
+            "skin_texture, and text_objects high."
+        )
+
     if photo_notes:
         ctx["photo_signal_notes"] = "\n".join(
             ["PHOTO SIGNAL ANALYSIS — guide your inspection:"] +
@@ -388,6 +402,28 @@ def run_photo_detection(image_path: str) -> tuple:
             old, combined, signal_score, gpt_score,
             signal_context.get("chan_corr", 0),
             signal_context.get("flat_noise", 0),
+            signal_context.get("no_camera_metadata", False),
+        )
+
+    # ── PHOTO_SOCIAL_AI_COMPOSITE_PATCH_V1 ───────────────────
+    # Keep generated social/poster-style people images in AI territory even when
+    # GPT initially accepts the scene as photorealistic.
+    if signal_context.get("photo_ai_social_composite"):
+        old = combined
+        combined = max(combined, 72.0)
+        mode = "photo social/poster AI composite override"
+        try:
+            if "photo_ai_social_composite" not in gpt_flags:
+                gpt_flags = list(gpt_flags or []) + ["photo_ai_social_composite"]
+        except Exception:
+            gpt_flags = ["photo_ai_social_composite"]
+        log.info(
+            "PHOTO_SOCIAL_AI_COMPOSITE final floor: combined %.1f→%.1f "
+            "(signal=%d gpt=%d chan_corr=%.3f flat=%.3f sat=%.1f no_meta=%s)",
+            old, combined, signal_score, gpt_score,
+            signal_context.get("chan_corr", 0),
+            signal_context.get("flat_noise", 0),
+            signal_context.get("avg_saturation", 0),
             signal_context.get("no_camera_metadata", False),
         )
 

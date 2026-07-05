@@ -433,6 +433,29 @@ If this pattern is present:
   → include top_flags value "viral_ai_reel_pattern";
   → mention “viral AI skit pattern” or “staged social reel pattern” in reasoning.
 
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ STATIC PHOTO / AI POSTER / GROUP-PORTRAIT CHECKS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+If the input is a single still photo rather than video, motion/temporal dimensions may be N/A,
+but still photos can contain strong AI evidence. Do not mark a still photo as real merely
+because it is photorealistic, high-resolution, or has fake grain.
+
+For AI-generated social images, event posters, group photos, holiday images, or promotional
+scenes, check especially for:
+  • overly staged composition where every person/prop/sign is perfectly arranged;
+  • exaggerated anatomy, identical muscle definition, plastic skin, or airbrushed bodies;
+  • inconsistent hands, fingers, arms, torsos, clothing straps, boots, logos, or seams;
+  • repeated face shapes, repeated body shapes, duplicated hats/props, or mismatched scale;
+  • text/signage that is unusually clean, warped into objects, misspelled, or poster-like;
+  • lighting that makes subjects look composited into the background;
+  • fake camera grain/noise that does not match real sensor provenance.
+
+If a still image has NO camera EXIF/device provenance and looks like a generated social/poster
+scene with people, signs, costumes, or props, raise GENERATOR_ARTIFACTS and SCENE_STAGING.
+If anatomy/skin/hair/clothing/text also show generated-image traits, score it as AI even if
+it appears superficially photographic.
+
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
  AUDIO-VISUAL MANIPULATION FLAGS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -957,6 +980,21 @@ def _build_physics_summary(ctx: dict) -> str:
         lines.append("KEY MEASURED SIGNALS — reference these specifically in your reasoning field:")
         for d in signal_details:
             lines.append(f"  • {d}")
+        lines.append("")
+
+    # PHOTO_SOCIAL_AI_COMPOSITE context hint
+    if ctx.get("photo_ai_social_composite"):
+        lines.append("🚨 PHOTO SOCIAL/POSTER AI COMPOSITE DETECTED BY SIGNALS:")
+        lines.append(
+            "No camera/device provenance plus high RGB channel-lock, borderline PRNU, clean ELA, "
+            "and staged people/poster composition suggest a generated still image. Inspect anatomy, "
+            "skin, clothing seams, hands, repeated faces/body shapes, props, and text/signage. "
+            "Do not score this as real merely because it has fake grain or looks photorealistic."
+        )
+        lines.append(
+            "Instruction: if the visual scene confirms a generated social/poster/group image, "
+            "score generator_artifacts 7-9, scene_staging 7-9, and text_objects/skin_texture/hair_detail as applicable."
+        )
         lines.append("")
 
     ct_labels = {

@@ -606,6 +606,66 @@ def detect_ai_photo(image_path: str) -> Tuple[int, dict]:
     # Clamp after composite override
     ai_score = max(0, min(100, ai_score))
 
+
+    # ── PHOTO_SOCIAL_AI_COMPOSITE_PATCH_V1 ───────────────────
+    # Production miss: a ChatGPT-generated patriotic group/poster image scored REAL
+    # because fake grain/texture and low HF kurtosis were treated as real-camera
+    # evidence while GPT visually accepted the image. The repeatable fingerprint is
+    # a synthetic social/poster-style people image with no camera provenance, high
+    # RGB channel lock, borderline PRNU, clean ELA, staged text/props, and generated
+    # social-media composition. This is separate from the close-up portrait override.
+    try:
+        if "no_camera_metadata" not in locals():
+            no_camera_metadata = (
+                meta_adjustment >= 10 and
+                not (meta_dict.get("make") or meta_dict.get("model"))
+            )
+        _aspect = max(h, w) / max(1, min(h, w))
+        _large_or_social_canvas = max(h, w) >= 900
+        photo_ai_social_composite = (
+            no_camera_metadata and
+            _large_or_social_canvas and
+            content_type == "portrait" and
+            skin_ratio >= 0.12 and
+            0.80 <= chan_corr < 0.955 and
+            1.15 <= flat_noise <= 1.60 and
+            95 <= avg_sat <= 145 and
+            noise >= 2500 and
+            hf_kurt <= 22 and
+            tex_var >= 1000 and
+            ela_score <= 28
+        )
+        # Alternate path for poster/group images: very strong staging/color/channel
+        # composite even when flat noise is a little outside the main band.
+        photo_ai_social_composite_alt = (
+            no_camera_metadata and
+            _large_or_social_canvas and
+            content_type == "portrait" and
+            skin_ratio >= 0.15 and
+            chan_corr >= 0.78 and
+            105 <= avg_sat <= 155 and
+            noise >= 3000 and
+            hf_kurt <= 18 and
+            tex_var >= 1500 and
+            ela_score <= 22 and
+            _aspect <= 1.85
+        )
+        if photo_ai_social_composite or photo_ai_social_composite_alt:
+            old_score = ai_score
+            ai_score = max(ai_score, 72)
+            log.info(
+                "PHOTO_SOCIAL_AI_COMPOSITE override: no_camera_meta=%s content=%s "
+                "skin=%.3f aspect=%.2f chan_corr=%.3f flat=%.3f sat=%.1f "
+                "noise=%.0f hf_kurt=%.1f tex=%.0f ela=%.0f score %d→%d",
+                no_camera_metadata, content_type, skin_ratio, _aspect, chan_corr,
+                flat_noise, avg_sat, noise, hf_kurt, tex_var, ela_score,
+                old_score, ai_score,
+            )
+    except Exception as _social_patch_exc:
+        photo_ai_social_composite = False
+        photo_ai_social_composite_alt = False
+        log.debug("PHOTO_SOCIAL_AI_COMPOSITE check skipped: %s", _social_patch_exc)
+
     log.info(
         "Photo AI score v1: %d  (ela=%.0f flat=%.3f corr=%.3f dct=%.0f "
         "kurt=%.1f tex=%.0f sat=%.0f noise=%.0f meta=%+d)",
@@ -633,6 +693,9 @@ def detect_ai_photo(image_path: str) -> Tuple[int, dict]:
         "image_height":  h,
         "signal_score":  ai_score,
         "source":        "photo_upload",
+        "no_camera_metadata": bool(locals().get("no_camera_metadata", False)),
+        "photo_ai_social_composite": bool(locals().get("photo_ai_social_composite", False) or locals().get("photo_ai_social_composite_alt", False)),
+        "photo_ai_social_composite_reason": "no-EXIF social/poster people image with high channel-lock, borderline PRNU, clean ELA, staged composition, and generated-image texture signals" if (locals().get("photo_ai_social_composite", False) or locals().get("photo_ai_social_composite_alt", False)) else "",
     }
 
     # ── HEIC temp file cleanup ───────────────────────────────
