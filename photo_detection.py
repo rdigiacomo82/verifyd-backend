@@ -367,6 +367,30 @@ def run_photo_detection(image_path: str) -> tuple:
         combined = max(combined, 90.0)
         log.info("Photo: generator_artifacts=%d → floor 90", gen_score)
 
+    # ── PHOTO_AI_PORTRAIT_COMPOSITE_PATCH_V1 ─────────────────
+    # If the signal detector found the no-EXIF + portrait + mobile/social aspect
+    # + high RGB channel-lock composite, keep the final result in AI territory even
+    # when GPT visually accepts a photorealistic image. This catches AI-edited
+    # portraits with generated anatomy/fake grain that otherwise get blended back
+    # to REAL by the both-real bonus.
+    if signal_context.get("photo_ai_portrait_composite"):
+        old = combined
+        combined = max(combined, 72.0)
+        mode = "photo AI portrait composite override"
+        try:
+            if "photo_ai_portrait_composite" not in gpt_flags:
+                gpt_flags = list(gpt_flags or []) + ["photo_ai_portrait_composite"]
+        except Exception:
+            gpt_flags = ["photo_ai_portrait_composite"]
+        log.info(
+            "PHOTO_AI_PORTRAIT_COMPOSITE final floor: combined %.1f→%.1f "
+            "(signal=%d gpt=%d chan_corr=%.3f flat=%.3f no_meta=%s)",
+            old, combined, signal_score, gpt_score,
+            signal_context.get("chan_corr", 0),
+            signal_context.get("flat_noise", 0),
+            signal_context.get("no_camera_metadata", False),
+        )
+
     combined_ai_score = max(0.0, min(100.0, combined))
     authenticity      = 100 - int(round(combined_ai_score))
     authenticity      = max(0, min(100, authenticity))

@@ -546,9 +546,6 @@ def detect_ai_photo(image_path: str) -> Tuple[int, dict]:
     # Metadata adjustment
     ai_score += meta_adjustment
 
-    # Clamp
-    ai_score = max(0, min(100, ai_score))
-
     # Determine content type (for GPT hint)
     skin_ratio = _estimate_skin_ratio(img_bgr)
     if skin_ratio > 0.15:
@@ -557,6 +554,57 @@ def detect_ai_photo(image_path: str) -> Tuple[int, dict]:
         content_type = "action"
     else:
         content_type = "scene"
+
+    # ── PHOTO_AI_PORTRAIT_COMPOSITE_PATCH_V1 ─────────────────
+    # Production miss: an AI-generated / heavily AI-edited portrait passed as REAL
+    # because fake grain and texture were treated as real-camera evidence while GPT
+    # visually accepted the image. The repeatable fingerprint was:
+    #   • no camera EXIF / no device provenance,
+    #   • portrait/person content,
+    #   • tall mobile/social aspect ratio,
+    #   • near-perfect RGB channel lock,
+    #   • neutral/low saturation, and
+    #   • heavy apparent noise that can be generated or added after AI editing.
+    # This is NOT a generic no-EXIF penalty. It requires multiple independent
+    # image-generation / re-render indicators and places the signal score into
+    # AI territory so the combiner cannot subtract it back to REAL.
+    no_camera_metadata = (
+        meta_adjustment >= 10 and
+        not (meta_dict.get("make") or meta_dict.get("model"))
+    )
+    tall_mobile_aspect = (max(h, w) / max(1, min(h, w))) >= 1.75
+    ai_portrait_composite = (
+        content_type == "portrait" and
+        no_camera_metadata and
+        tall_mobile_aspect and
+        skin_ratio >= 0.12 and
+        chan_corr >= 0.955 and
+        0.70 <= flat_noise <= 1.25 and
+        avg_sat <= 75 and
+        noise >= 1500
+    )
+    high_lock_no_provenance = (
+        no_camera_metadata and
+        chan_corr >= 0.965 and
+        0.70 <= flat_noise <= 1.25 and
+        avg_sat <= 85 and
+        noise >= 3000 and
+        (content_type == "portrait" or tall_mobile_aspect)
+    )
+
+    if ai_portrait_composite or high_lock_no_provenance:
+        old_score = ai_score
+        ai_score = max(ai_score, 72)
+        log.info(
+            "PHOTO_AI_PORTRAIT_COMPOSITE override: no_camera_meta=%s portrait=%s "
+            "tall_mobile=%s skin=%.3f chan_corr=%.3f flat=%.3f sat=%.1f noise=%.0f "
+            "score %d→%d",
+            no_camera_metadata, content_type == "portrait", tall_mobile_aspect,
+            skin_ratio, chan_corr, flat_noise, avg_sat, noise, old_score, ai_score
+        )
+
+    # Clamp after composite override
+    ai_score = max(0, min(100, ai_score))
 
     log.info(
         "Photo AI score v1: %d  (ela=%.0f flat=%.3f corr=%.3f dct=%.0f "
@@ -567,6 +615,9 @@ def detect_ai_photo(image_path: str) -> Tuple[int, dict]:
 
     context = {
         "content_type":  content_type,
+        "photo_ai_portrait_composite": ai_portrait_composite or high_lock_no_provenance,
+        "no_camera_metadata": no_camera_metadata,
+        "tall_mobile_aspect": tall_mobile_aspect,
         "ela_score":     ela_score,
         "flat_noise":    flat_noise,
         "chan_corr":      chan_corr,
