@@ -14,3 +14,4 @@ tools/
 ffmpeg.zip
 .env
 *.log_local_backups/
+/_local_backups/
