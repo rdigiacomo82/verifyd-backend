@@ -865,3 +865,116 @@ def send_certified_delivery_email(
     if attachments:
         payload["attachments"] = attachments
     return _send(payload)
+
+def _td_escape(value) -> str:
+    """Small HTML escape helper for Trust Desk email fields."""
+    import html
+    return html.escape(str(value or ""), quote=True)
+
+
+def send_trust_desk_package_email(
+    recipient_email: str,
+    trust_desk_job_id: str,
+    sender_email: str = "",
+    sender_name: str = "",
+    recipient_name: str = "",
+    organization: str = "",
+    case_number: str = "",
+    message: str = "",
+    package_sha256: str = "",
+    download_url: str = "",
+    include_package: bool = True,
+    include_manifest: bool = True,
+    include_verify_link: bool = True,
+) -> bool:
+    """Send a completed Trust Desk package by VeriFYD Trust Mail.
+
+    The ZIP is linked rather than attached because Trust Desk packages can exceed
+    transactional email attachment limits.
+    """
+    recipient_email = (recipient_email or "").strip()
+    trust_desk_job_id = (trust_desk_job_id or "").strip()
+    if not recipient_email or not trust_desk_job_id:
+        log.error("Trust Desk Trust Mail missing recipient or job id")
+        return False
+
+    short_id = trust_desk_job_id[:8].upper()
+    if not download_url:
+        download_url = f"{BACKEND_URL}/download-trust-desk/{trust_desk_job_id}"
+    verify_url = f"{SITE_URL}/trust-desk"
+
+    safe_sender_name = _td_escape(sender_name or sender_email or "A VeriFYD user")
+    safe_sender_email = _td_escape(sender_email)
+    safe_org = _td_escape(organization or "Not provided")
+    safe_case = _td_escape(case_number or "Not provided")
+    safe_msg = _td_escape(message or "")
+    safe_hash = _td_escape(package_sha256 or "Not available")
+    safe_job = _td_escape(trust_desk_job_id)
+    safe_download_url = _td_escape(download_url)
+    safe_verify_url = _td_escape(verify_url)
+
+    package_line = "Included" if include_package else "Download link only"
+    manifest_line = "Included in package" if include_manifest else "Not requested"
+    verify_line = "Included" if include_verify_link else "Not requested"
+
+    message_block = ""
+    if safe_msg:
+        message_block = f"""
+        <tr><td style=\"padding:0 32px 24px;\">
+          <div style=\"background:#0f0f0f;border:1px solid #2a2a2a;border-radius:10px;padding:16px 18px;\">
+            <p style=\"margin:0 0 8px;color:#9ca3af;font-size:12px;text-transform:uppercase;letter-spacing:1px;\">Sender Note</p>
+            <p style=\"margin:0;color:#e5e7eb;font-size:15px;line-height:1.6;\">{safe_msg}</p>
+          </div>
+        </td></tr>"""
+
+    html = f"""<!DOCTYPE html>
+<html>
+<head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"></head>
+<body style=\"margin:0;padding:0;background-color:#0a0a0a;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;\">
+  <table width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" style=\"background-color:#0a0a0a;padding:40px 20px;\">
+    <tr><td align=\"center\">
+      <table width=\"600\" cellpadding=\"0\" cellspacing=\"0\" style=\"background-color:#111111;border-radius:12px;border:1px solid #222;max-width:600px;width:100%;overflow:hidden;\">
+        {_header_html()}
+        <tr><td style=\"padding:36px 32px 20px;text-align:center;\">
+          <div style=\"display:inline-block;background:#1f1600;border:1px solid #f59e0b;border-radius:100px;padding:8px 18px;margin-bottom:22px;\">
+            <span style=\"color:#f59e0b;font-size:13px;font-weight:700;letter-spacing:1px;text-transform:uppercase;\">VeriFYD Trust Mail</span>
+          </div>
+          <h2 style=\"margin:0 0 8px;font-size:24px;font-weight:800;color:#fff;\">Trust Desk package delivered</h2>
+          <p style=\"margin:0;color:#9ca3af;font-size:15px;line-height:1.6;\">{safe_sender_name} sent you a VeriFYD Trust Desk package with verification details and package hash information.</p>
+        </td></tr>
+        <tr><td style=\"padding:8px 32px 24px;\">
+          <div style=\"background:#0f0f0f;border:1px solid #2a2a2a;border-radius:10px;padding:18px 20px;color:#d1d5db;font-size:14px;line-height:1.8;\">
+            <strong style=\"color:#fff;\">Trust Desk Job:</strong> {safe_job}<br>
+            <strong style=\"color:#fff;\">Organization:</strong> {safe_org}<br>
+            <strong style=\"color:#fff;\">Case / Matter:</strong> {safe_case}<br>
+            <strong style=\"color:#fff;\">Sender:</strong> {safe_sender_name} {safe_sender_email}<br>
+            <strong style=\"color:#fff;\">Package SHA-256:</strong><br>
+            <span style=\"font-family:'Courier New',monospace;color:#f59e0b;word-break:break-all;\">{safe_hash}</span><br>
+            <strong style=\"color:#fff;\">Return Package:</strong> {package_line}<br>
+            <strong style=\"color:#fff;\">Manifest:</strong> {manifest_line}<br>
+            <strong style=\"color:#fff;\">Verification Link:</strong> {verify_line}
+          </div>
+        </td></tr>
+        {message_block}
+        <tr><td style=\"padding:0 32px 28px;text-align:center;\">
+          <a href=\"{safe_download_url}\" style=\"display:inline-block;background:#f59e0b;color:#000;text-decoration:none;padding:14px 24px;border-radius:8px;font-size:14px;font-weight:800;margin:0 6px 10px;\">Download Trust Desk Package</a>
+          <a href=\"{safe_verify_url}\" style=\"display:inline-block;background:#1a1a1a;color:#f59e0b;text-decoration:none;padding:14px 24px;border-radius:8px;font-size:14px;font-weight:700;border:1px solid #333;margin:0 6px 10px;\">Open VeriFYD</a>
+        </td></tr>
+        <tr><td style=\"padding:0 32px 28px;\">
+          <p style=\"margin:0;color:#6b7280;font-size:12px;line-height:1.6;text-align:center;\">VeriFYD Trust Mail delivers a certified analysis package and verification trail. It does not independently guarantee legal admissibility or the authenticity of every item inside the package.</p>
+        </td></tr>
+        {_footer_html()}
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>"""
+
+    subject_case = f" — {case_number}" if case_number else ""
+    return _send({
+        "from": f"{FROM_NAME} <{FROM_ADDRESS}>",
+        "to": [recipient_email],
+        "subject": f"VeriFYD Trust Desk Package {short_id}{subject_case}",
+        "html": html,
+    })
+

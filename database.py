@@ -1031,3 +1031,92 @@ def update_api_key_branding(
         if widget_domains is not None:
             cur.execute("UPDATE api_keys SET widget_domains = %s WHERE api_key = %s", (widget_domains, api_key))
     return get_api_key(api_key)
+
+def save_trust_desk_package_to_vault(
+    trust_desk_job_id: str,
+    email: str = "",
+    original_file: str = "Trust Desk Package",
+    package_sha256: str = "",
+    notes: str = "",
+    summary: dict | None = None,
+) -> dict:
+    """Save a completed Trust Desk package into VeriFYD Vault."""
+    trust_desk_job_id = (trust_desk_job_id or "").strip()
+    if not trust_desk_job_id:
+        raise ValueError("trust_desk_job_id required")
+
+    now = datetime.now(timezone.utc).isoformat()
+    vault_key = generate_vault_key(trust_desk_job_id)
+    summary = summary or {}
+    stored_evidence = {
+        "trust_desk_return_package": True,
+        "hash_inventory_manifest": True,
+        "verification_link": True,
+        "package_sha256": bool(package_sha256),
+    }
+    timeline = [
+        {"event": "Trust Desk Intake Completed", "timestamp": now, "detail": original_file or trust_desk_job_id, "status": "complete"},
+        {"event": "Trust Desk Package Stored in Vault", "timestamp": now, "detail": package_sha256 or "Package hash not available", "status": "stored"},
+    ]
+    verification_report = {
+        "media_type": "trust_desk",
+        "label": "TRUST_DESK_READY",
+        "trust_desk_job_id": trust_desk_job_id,
+        "summary": summary,
+    }
+
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO vault_records (
+                vault_key, cert_id, email, vault_status, created_at, updated_at,
+                original_file, media_type, original_sha256,
+                certified_document_sha256, certified_file_package_sha256,
+                certified_audio_sha256, certified_photo_sha256, certified_file_hash,
+                stored_evidence_json, evidence_timeline_json, verification_report_json, notes
+            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            ON CONFLICT (cert_id) DO UPDATE SET
+                email = EXCLUDED.email,
+                vault_status = EXCLUDED.vault_status,
+                updated_at = EXCLUDED.updated_at,
+                original_file = EXCLUDED.original_file,
+                media_type = EXCLUDED.media_type,
+                certified_file_package_sha256 = EXCLUDED.certified_file_package_sha256,
+                certified_file_hash = EXCLUDED.certified_file_hash,
+                stored_evidence_json = EXCLUDED.stored_evidence_json,
+                evidence_timeline_json = EXCLUDED.evidence_timeline_json,
+                verification_report_json = EXCLUDED.verification_report_json,
+                notes = EXCLUDED.notes
+            RETURNING *
+            """,
+            (
+                vault_key, trust_desk_job_id, email or "", "stored", now, now,
+                original_file or "Trust Desk Package", "trust_desk", "",
+                "", package_sha256 or "", "", "", package_sha256 or "",
+                json.dumps(stored_evidence), json.dumps(timeline), json.dumps(verification_report), notes or "",
+            ),
+        )
+        row = cur.fetchone()
+        record = dict(row) if row else {}
+
+    return {
+        "status": "stored",
+        "vault_status": "Stored in VeriFYD Vault",
+        "vault_key": record.get("vault_key", vault_key),
+        "vault_record_id": record.get("cert_id", trust_desk_job_id),
+        "certificate_id": record.get("cert_id", trust_desk_job_id),
+        "trust_desk_job_id": trust_desk_job_id,
+        "email": record.get("email", email or ""),
+        "original_file": record.get("original_file", original_file or "Trust Desk Package"),
+        "media_type": "trust_desk",
+        "created_at": record.get("created_at", now),
+        "updated_at": record.get("updated_at", now),
+        "certified_file_package_sha256": package_sha256 or "",
+        "certified_file_hash": package_sha256 or "",
+        "stored_evidence": stored_evidence,
+        "evidence_timeline": timeline,
+        "verification_report": verification_report,
+        "message": "Trust Desk package saved to VeriFYD Vault for future reference.",
+    }
+

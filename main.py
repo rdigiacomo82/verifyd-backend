@@ -6125,3 +6125,159 @@ async def send_certified_email_endpoint(request: Request):
         "attachment_status": attachment_status,
     }
 
+# ─────────────────────────────────────────────
+#  Trust Desk — Trust Mail delivery + Vault save
+# ─────────────────────────────────────────────
+
+def _trust_desk_payload_value(payload: dict, *names, default=""):
+    for name in names:
+        value = payload.get(name)
+        if value is not None and str(value).strip() != "":
+            return value
+    return default
+
+
+def _trust_desk_result_for(job_id: str) -> dict:
+    try:
+        result = get_job_result(job_id) or {}
+        if isinstance(result, dict):
+            return result
+    except Exception as exc:
+        log.warning("Trust Desk result lookup failed for %s: %s", job_id, exc)
+    return {}
+
+
+@app.post("/send-trust-desk-email/")
+async def send_trust_desk_email(request: Request):
+    """Send a completed Trust Desk package by VeriFYD Trust Mail."""
+    try:
+        payload = await request.json()
+    except Exception:
+        return JSONResponse({"detail": "invalid_json"}, status_code=400)
+
+    trust_desk_job_id = str(_trust_desk_payload_value(payload, "trust_desk_job_id", "job_id", "id")).strip()
+    recipient_email = normalize_email(str(_trust_desk_payload_value(payload, "recipient_email", "to", "email")))
+    recipient_name = str(_trust_desk_payload_value(payload, "recipient_name", "name", default="")).strip()
+    sender_email = normalize_email(str(_trust_desk_payload_value(payload, "sender_email", "from_email", default="")))
+    sender_name = str(_trust_desk_payload_value(payload, "sender_name", "from_name", default="")).strip()
+    organization = str(_trust_desk_payload_value(payload, "organization", "company", default="")).strip()
+    case_number = str(_trust_desk_payload_value(payload, "case_number", "case", "matter", default="")).strip()
+    message = str(_trust_desk_payload_value(payload, "message", "note", default="")).strip()[:500]
+    include_package = bool(payload.get("include_package", True))
+    include_manifest = bool(payload.get("include_manifest", True))
+    include_verify_link = bool(payload.get("include_verify_link", True))
+
+    if not trust_desk_job_id:
+        return JSONResponse({"detail": "trust_desk_job_id_required"}, status_code=400)
+    if not recipient_email or not is_valid_email(recipient_email):
+        return JSONResponse({"detail": "valid_recipient_email_required"}, status_code=400)
+    if sender_email and not is_valid_email(sender_email):
+        return JSONResponse({"detail": "invalid_sender_email"}, status_code=400)
+
+    result = _trust_desk_result_for(trust_desk_job_id)
+    job_status = str(result.get("job_status") or result.get("status") or result.get("job_state") or "").lower()
+    label = str(result.get("label") or "").upper()
+    media_type = str(result.get("media_type") or "").lower()
+    download_url = result.get("download_url") or f"{BASE_URL}/download-trust-desk/{trust_desk_job_id}"
+    package_sha256 = (
+        result.get("trust_desk_package_sha256")
+        or result.get("package_sha256")
+        or result.get("sha256")
+        or payload.get("trust_desk_package_sha256")
+        or payload.get("package_sha256")
+        or ""
+    )
+
+    complete = (
+        job_status in {"complete", "completed", "success", "ready"}
+        or label == "TRUST_DESK_READY"
+        or (media_type == "trust_desk" and bool(download_url))
+    )
+    if result and not complete:
+        return JSONResponse({"detail": "trust_desk_package_not_ready", "job_status": job_status or label}, status_code=409)
+
+    try:
+        from emailer import send_trust_desk_package_email
+        sent = send_trust_desk_package_email(
+            recipient_email=recipient_email,
+            trust_desk_job_id=trust_desk_job_id,
+            sender_email=sender_email,
+            sender_name=sender_name,
+            recipient_name=recipient_name,
+            organization=organization or result.get("organization", ""),
+            case_number=case_number or result.get("case_number", ""),
+            message=message,
+            package_sha256=package_sha256,
+            download_url=download_url,
+            include_package=include_package,
+            include_manifest=include_manifest,
+            include_verify_link=include_verify_link,
+        )
+    except Exception as exc:
+        log.exception("Trust Desk Trust Mail send failed for %s", trust_desk_job_id)
+        return JSONResponse({"detail": "send_failed", "error": str(exc)}, status_code=500)
+
+    if not sent:
+        return JSONResponse({"detail": "email_send_failed"}, status_code=502)
+
+    return JSONResponse({
+        "sent": True,
+        "status": "sent",
+        "media_type": "trust_desk",
+        "trust_desk_job_id": trust_desk_job_id,
+        "recipient_email": recipient_email,
+        "download_url": download_url,
+        "trust_desk_package_sha256": package_sha256,
+    })
+
+
+@app.post("/vault/save-trust-desk")
+async def vault_save_trust_desk(request: Request):
+    """Save a completed Trust Desk package into VeriFYD Vault."""
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+
+    trust_desk_job_id = str(_trust_desk_payload_value(payload, "trust_desk_job_id", "job_id", "id")).strip()
+    email = normalize_email(str(_trust_desk_payload_value(payload, "email", "sender_email", "submitter_email", default="")))
+    notes = str(_trust_desk_payload_value(payload, "notes", "message", "note", default="")).strip()[:1000]
+
+    if not trust_desk_job_id:
+        return JSONResponse({"detail": "trust_desk_job_id_required"}, status_code=400)
+    if email and not is_valid_email(email):
+        return JSONResponse({"detail": "invalid_email"}, status_code=400)
+
+    result = _trust_desk_result_for(trust_desk_job_id)
+    package_sha256 = (
+        result.get("trust_desk_package_sha256")
+        or result.get("package_sha256")
+        or payload.get("trust_desk_package_sha256")
+        or payload.get("package_sha256")
+        or ""
+    )
+    original_file = (
+        result.get("original_filename")
+        or result.get("filename")
+        or payload.get("original_filename")
+        or payload.get("filename")
+        or "Trust Desk Package"
+    )
+    summary = result.get("summary") or payload.get("summary") or {}
+
+    try:
+        from database import save_trust_desk_package_to_vault
+        record = save_trust_desk_package_to_vault(
+            trust_desk_job_id=trust_desk_job_id,
+            email=email,
+            original_file=original_file,
+            package_sha256=package_sha256,
+            notes=notes,
+            summary=summary,
+        )
+    except Exception as exc:
+        log.exception("Trust Desk Vault save failed for %s", trust_desk_job_id)
+        return JSONResponse({"detail": "vault_save_failed", "error": str(exc)}, status_code=500)
+
+    return JSONResponse(record)
+
