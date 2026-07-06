@@ -352,30 +352,94 @@ def enqueue_trust_desk_zip(
 # ─────────────────────────────────────────────────────────────
 def get_job_result(job_id: str) -> Dict[str, Any]:
     """
-    Return a stored job result from Redis.
+    Return job status/result for async polling.
 
-    Worker stores results at:
-      result:{job_id}
+    Priority:
+      1. Final or early worker result stored at result:{job_id}
+      2. Live RQ job status if the worker has not stored a result yet
+      3. not_found only when neither result nor RQ job exists
 
-    Returns {"job_status": "not_found"} when no result exists.
+    This prevents /job-status/{job_id} from returning 404 while an
+    analysis job is actively queued or running.
     """
     if not job_id:
-        return {"job_status": "not_found"}
+        return {"job_status": "not_found", "status": "not_found", "job_state": "not_found"}
 
     try:
         r = _get_redis(decode_responses=False)
+
         data = r.get(f"result:{job_id}")
-        if not data:
-            return {"job_status": "not_found"}
-        if isinstance(data, bytes):
-            data = data.decode("utf-8", errors="replace")
-        result = json.loads(data)
-        if isinstance(result, dict):
-            return result
-        return {"job_status": "error", "error": "Invalid job result format."}
+        if data:
+            if isinstance(data, bytes):
+                data = data.decode("utf-8", errors="replace")
+            result = json.loads(data)
+            if isinstance(result, dict):
+                return result
+            return {
+                "job_status": "error",
+                "status": "error",
+                "job_state": "error",
+                "error": "Invalid job result format.",
+            }
+
+        try:
+            from rq.job import Job
+            from rq.exceptions import NoSuchJobError
+
+            try:
+                job = Job.fetch(job_id, connection=r)
+            except NoSuchJobError:
+                job = None
+
+            if job is not None:
+                rq_status = str(job.get_status(refresh=True) or "").lower()
+
+                if rq_status in {"queued", "deferred", "scheduled"}:
+                    lifecycle = "queued"
+                elif rq_status in {"started", "busy"}:
+                    lifecycle = "processing"
+                elif rq_status == "finished":
+                    return {
+                        "status": "error",
+                        "job_status": "error",
+                        "job_state": "error",
+                        "queue_status": rq_status,
+                        "job_id": job_id,
+                        "error": "Analysis job finished but no result was stored. Please try again.",
+                    }
+                elif rq_status in {"failed", "stopped", "canceled", "cancelled"}:
+                    return {
+                        "status": "error",
+                        "job_status": "error",
+                        "job_state": "error",
+                        "queue_status": rq_status,
+                        "job_id": job_id,
+                        "error": "Analysis job failed. Please try again.",
+                    }
+                else:
+                    lifecycle = "processing"
+
+                return {
+                    "status": lifecycle,
+                    "job_status": lifecycle,
+                    "job_state": lifecycle,
+                    "queue_status": rq_status,
+                    "job_id": job_id,
+                }
+
+        except Exception as rq_exc:
+            log.warning("RQ fallback status lookup failed for %s: %s", job_id, rq_exc)
+
+        return {"job_status": "not_found", "status": "not_found", "job_state": "not_found"}
+
     except Exception as exc:
         log.warning("get_job_result failed for %s: %s", job_id, exc)
-        return {"job_status": "error", "error": "Could not retrieve job result."}
+        return {
+            "job_status": "error",
+            "status": "error",
+            "job_state": "error",
+            "error": "Could not retrieve job result.",
+        }
 
 # ─────────────────────────────────────────────────────────────
 #  Phase 3B-1 — Certified Web & Social Capture
