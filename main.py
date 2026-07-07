@@ -6281,3 +6281,12 @@ async def vault_save_trust_desk(request: Request):
 
     return JSONResponse(record)
 
+# --- VeriFYD Trust Message routes ---
+try:
+    from trust_message import router as trust_message_router
+    app.include_router(trust_message_router)
+    print("[trust-message] routes enabled")
+except Exception as exc:
+    print(f"[trust-message] routes not enabled: {exc}")
+# --- End VeriFYD Trust Message routes ---
+
