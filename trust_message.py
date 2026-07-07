@@ -10,7 +10,7 @@ import urllib.request
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 try:
@@ -548,6 +548,16 @@ async def send_trust_message(payload: SendTrustMessageRequest):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
+    if is_phone_opted_out(normalized_phone):
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "sent": False,
+                "status": "opted_out",
+                "error": "This recipient has opted out of Trust Message SMS delivery.",
+            },
+        )
+
     trust_message_id = "VFYD-TM-" + uuid.uuid4().hex[:10].upper()
     trust_message_url = f"{FRONTEND_BASE_URL}/trust-message/{trust_message_id}"
 
@@ -666,4 +676,244 @@ async def get_trust_message(trust_message_id: str):
     }
 
 
+
+
+# --- VeriFYD Trust Message Twilio inbound/status support ---
+
+def init_trust_message_opt_out_table() -> None:
+    conn = _db_connect()
+    if conn is None:
+        print("[trust-message] opt-out table not initialized because DATABASE_URL is unavailable.")
+        return
+
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS trust_message_opt_outs (
+                        id SERIAL PRIMARY KEY,
+                        recipient_phone_hash TEXT UNIQUE NOT NULL,
+                        recipient_phone_last4 TEXT,
+                        recipient_phone_masked TEXT,
+                        status TEXT DEFAULT 'opted_out',
+                        source TEXT,
+                        raw_body TEXT,
+                        provider_message_id TEXT,
+                        created_at TIMESTAMPTZ DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ DEFAULT NOW()
+                    );
+                    """
+                )
+    except Exception as exc:
+        print(f"[trust-message] opt-out table init failed: {exc}")
+    finally:
+        conn.close()
+
+
+def is_phone_opted_out(normalized_phone: str) -> bool:
+    conn = _db_connect()
+    if conn is None:
+        return False
+
+    try:
+        phone_hash = hash_phone(normalized_phone)
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT 1
+                FROM trust_message_opt_outs
+                WHERE recipient_phone_hash = %s
+                  AND status = 'opted_out'
+                LIMIT 1;
+                """,
+                (phone_hash,),
+            )
+            return cur.fetchone() is not None
+    except Exception as exc:
+        print(f"[trust-message] opt-out lookup failed: {exc}")
+        return False
+    finally:
+        conn.close()
+
+
+def record_phone_opt_out(
+    normalized_phone: str,
+    raw_body: str = "",
+    provider_message_id: str = "",
+    source: str = "twilio",
+) -> None:
+    conn = _db_connect()
+    if conn is None:
+        print("[trust-message] opt-out not persisted because DATABASE_URL is unavailable.")
+        return
+
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO trust_message_opt_outs (
+                        recipient_phone_hash,
+                        recipient_phone_last4,
+                        recipient_phone_masked,
+                        status,
+                        source,
+                        raw_body,
+                        provider_message_id,
+                        updated_at
+                    )
+                    VALUES (%s, %s, %s, 'opted_out', %s, %s, %s, NOW())
+                    ON CONFLICT (recipient_phone_hash)
+                    DO UPDATE SET
+                        status = 'opted_out',
+                        source = EXCLUDED.source,
+                        raw_body = EXCLUDED.raw_body,
+                        provider_message_id = EXCLUDED.provider_message_id,
+                        updated_at = NOW();
+                    """,
+                    (
+                        hash_phone(normalized_phone),
+                        phone_last4(normalized_phone),
+                        mask_phone(normalized_phone),
+                        source,
+                        raw_body or "",
+                        provider_message_id or "",
+                    ),
+                )
+    except Exception as exc:
+        print(f"[trust-message] opt-out insert failed: {exc}")
+    finally:
+        conn.close()
+
+
+def update_twilio_message_status(
+    provider_message_id: str,
+    message_status: str,
+    error_code: str = "",
+    error_message: str = "",
+) -> None:
+    if not provider_message_id:
+        return
+
+    conn = _db_connect()
+    if conn is None:
+        return
+
+    status_value = f"twilio:{message_status}" if message_status else "twilio:status_callback"
+
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE trust_messages
+                    SET status = %s
+                    WHERE provider_message_id = %s;
+                    """,
+                    (status_value, provider_message_id),
+                )
+    except Exception as exc:
+        print(
+            f"[trust-message] Twilio status update failed: {exc} "
+            f"error_code={error_code} error_message={error_message}"
+        )
+    finally:
+        conn.close()
+
+
+async def parse_twilio_form(request: Request) -> Dict[str, str]:
+    body = await request.body()
+    parsed = urllib.parse.parse_qs(body.decode("utf-8", errors="replace"))
+    return {key: values[0] if values else "" for key, values in parsed.items()}
+
+
+@router.post("/twilio/sms-webhook/")
+async def twilio_sms_webhook(request: Request):
+    """
+    Twilio inbound SMS webhook for STOP/HELP handling.
+
+    Later, configure this on the Twilio number:
+    https://verifyd-backend.onrender.com/twilio/sms-webhook/
+    """
+    form = await parse_twilio_form(request)
+
+    from_phone = form.get("From") or ""
+    body = (form.get("Body") or "").strip()
+    message_sid = form.get("MessageSid") or form.get("SmsMessageSid") or ""
+
+    normalized_body = re.sub(r"\s+", " ", body.upper()).strip()
+
+    stop_words = {"STOP", "STOPALL", "UNSUBSCRIBE", "CANCEL", "END", "QUIT"}
+    help_words = {"HELP", "INFO"}
+
+    print(f"[trust-message] inbound SMS from={mask_phone(from_phone)} body={normalized_body}")
+
+    try:
+        normalized_phone = normalize_phone(from_phone)
+    except Exception:
+        normalized_phone = ""
+
+    if normalized_body in stop_words and normalized_phone:
+        record_phone_opt_out(
+            normalized_phone,
+            raw_body=body,
+            provider_message_id=message_sid,
+            source="twilio",
+        )
+        return Response(
+            content="You have been opted out of VeriFYD Trust Message alerts. Reply HELP for help.",
+            media_type="text/plain",
+        )
+
+    if normalized_body in help_words:
+        return Response(
+            content=(
+                "VeriFYD Trust Message shares certified verification links. "
+                "We will never ask for passwords, bank logins, or one-time codes. "
+                "Reply STOP to opt out."
+            ),
+            media_type="text/plain",
+        )
+
+    return Response(
+        content="VeriFYD Trust Message received your reply. Reply STOP to opt out or HELP for help.",
+        media_type="text/plain",
+    )
+
+
+@router.post("/twilio/status-callback/")
+async def twilio_status_callback(request: Request):
+    """
+    Twilio delivery status callback.
+
+    Optional later:
+    TWILIO_STATUS_CALLBACK_URL=https://verifyd-backend.onrender.com/twilio/status-callback/
+    """
+    form = await parse_twilio_form(request)
+
+    message_sid = form.get("MessageSid") or form.get("SmsMessageSid") or ""
+    message_status = form.get("MessageStatus") or form.get("SmsStatus") or ""
+    to_phone = form.get("To") or ""
+    error_code = form.get("ErrorCode") or ""
+    error_message = form.get("ErrorMessage") or ""
+
+    print(
+        f"[trust-message] Twilio status sid={message_sid} "
+        f"status={message_status} to={mask_phone(to_phone)} error={error_code}"
+    )
+
+    update_twilio_message_status(
+        provider_message_id=message_sid,
+        message_status=message_status,
+        error_code=error_code,
+        error_message=error_message,
+    )
+
+    return {"ok": True}
+
+# --- End VeriFYD Trust Message Twilio inbound/status support ---
+
+
 init_trust_message_table()
+init_trust_message_opt_out_table()
