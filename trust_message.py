@@ -12,6 +12,13 @@ from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field
+from database import (
+    is_valid_email,
+    is_email_verified as _db_is_email_verified,
+    get_user_status,
+    increment_user_uses,
+)
+
 
 try:
     import psycopg2
@@ -45,6 +52,62 @@ class SendTrustMessageRequest(BaseModel):
     include_verify_link: bool = True
     include_certificate_id: bool = True
     include_sender_info: bool = True
+
+
+
+
+def normalize_email(email: str) -> str:
+    return (email or "").strip().lower()
+
+
+def _auto_verified_email_patterns() -> set:
+    raw = os.environ.get("VERIFYD_AUTO_VERIFIED_EMAILS", "")
+    return {normalize_email(e) for e in raw.split(",") if normalize_email(e)}
+
+
+def is_auto_verified_email(email: str) -> bool:
+    normalized = normalize_email(email)
+    if not normalized:
+        return False
+
+    patterns = _auto_verified_email_patterns()
+    if normalized in patterns:
+        return True
+
+    if "@" in normalized:
+        domain = normalized.split("@", 1)[1]
+        if f"*@{domain}" in patterns:
+            return True
+
+    return False
+
+
+def is_verified_sender_email(email: str) -> bool:
+    normalized = normalize_email(email)
+    if not normalized or not is_valid_email(normalized):
+        return False
+
+    if is_auto_verified_email(normalized):
+        return True
+
+    try:
+        return bool(_db_is_email_verified(normalized))
+    except Exception as exc:
+        print(f"[trust-message] sender email verification lookup failed for {normalized}: {exc}")
+        return False
+
+
+def consume_trust_message_use(email: str) -> None:
+    normalized = normalize_email(email)
+    if not normalized:
+        return
+
+    try:
+        increment_user_uses(normalized)
+        print(f"[trust-message] usage incremented for {normalized}")
+    except Exception as exc:
+        # Do not fail after SMS delivery/demo creation. Avoid duplicate user sends.
+        print(f"[trust-message] usage increment failed for {normalized}: {exc}")
 
 
 def _utc_now_iso() -> str:
@@ -532,6 +595,41 @@ async def send_trust_message(payload: SendTrustMessageRequest):
     if not certificate_id:
         raise HTTPException(status_code=400, detail="certificate_id is required.")
 
+    sender_email = normalize_email(payload.sender_email or "")
+    if not sender_email or not is_valid_email(sender_email):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "sent": False,
+                "status": "invalid_sender_email",
+                "error": "A valid verified sender email is required for Trust Message.",
+            },
+        )
+
+    if not is_verified_sender_email(sender_email):
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "sent": False,
+                "status": "email_not_verified",
+                "error": "Please verify your sender email before using Trust Message.",
+            },
+        )
+
+    usage_status = get_user_status(sender_email)
+    if not usage_status.get("allowed"):
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "sent": False,
+                "status": "limit_reached",
+                "error": "You have reached your VeriFYD plan usage limit.",
+                "plan": usage_status.get("plan"),
+                "uses_left": 0,
+                "limit": usage_status.get("limit"),
+            },
+        )
+
     cert = lookup_certificate(certificate_id)
     if not cert:
         raise HTTPException(
@@ -578,7 +676,7 @@ async def send_trust_message(payload: SendTrustMessageRequest):
         normalized_phone=normalized_phone,
         recipient_name=payload.recipient_name or "",
         sender_name=payload.sender_name or "",
-        sender_email=payload.sender_email or "",
+        sender_email=sender_email,
         message=payload.message or "",
         sms_body=sms_body,
         status=send_result.get("status") or "unknown",
@@ -600,6 +698,8 @@ async def send_trust_message(payload: SendTrustMessageRequest):
         )
 
     print(f"[trust-message] {send_result.get('status')} {trust_message_id}")
+
+    consume_trust_message_use(sender_email)
 
     response = {
         "sent": True,
