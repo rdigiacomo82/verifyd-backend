@@ -4917,6 +4917,8 @@ async def paddlezlam_contact(request: Request):
             headers={
                 "Authorization": f"Bearer {resend_key}",
                 "Content-Type": "application/json",
+                "Accept": "application/json",
+                "User-Agent": "VeriFYD-PaddleZlam-Contact/1.0",
             },
             method="POST",
         )
