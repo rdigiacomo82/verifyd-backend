@@ -79,6 +79,108 @@ def _download_from_url(direct_url: str, output_path: str) -> None:
                 f.write(chunk)
 
 
+
+def _normalize_social_video_for_detection(path: str, source: str = "") -> None:
+    """
+    Normalize social-platform link downloads before detection.
+
+    TikTok/Instagram/Facebook links often arrive as HEVC/H.265 platform re-encodes,
+    while manual uploads are usually H.264 MP4s. HEVC/social transcodes can exaggerate
+    DCT/grid/edge/shadow/omni-flow signals. Re-encoding to H.264 keeps link analysis
+    closer to upload analysis.
+    """
+    src = str(source or "").lower()
+    if not any(s in src for s in ("tiktok", "instagram", "facebook", "fb.watch", "youtube", "smvd")):
+        return
+    if not path or not os.path.exists(path):
+        return
+
+    try:
+        import json as _json
+
+        probe = subprocess.run(
+            [
+                FFPROBE_BIN, "-v", "quiet",
+                "-print_format", "json",
+                "-show_streams",
+                path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+
+        if probe.returncode != 0 or not probe.stdout.strip():
+            return
+
+        data = _json.loads(probe.stdout)
+        codec = "unknown"
+        width = 0
+        height = 0
+
+        for stream in data.get("streams", []) or []:
+            if stream.get("codec_type") == "video":
+                codec = str(stream.get("codec_name") or "unknown").lower()
+                width = int(stream.get("width") or 0)
+                height = int(stream.get("height") or 0)
+                break
+
+        needs_normalize = (
+            codec in ("hevc", "h265", "bytevc1") or
+            width > 720 or
+            (height > 1280 and height > width)
+        )
+
+        if not needs_normalize:
+            log.info(
+                "social normalize: source=%s skip codec=%s size=%sx%s",
+                src, codec, width, height,
+            )
+            return
+
+        tmp_out = path + ".h264norm.mp4"
+
+        cmd = [
+            FFMPEG_BIN, "-y",
+            "-i", path,
+            "-map", "0:v:0",
+            "-map", "0:a?",
+            "-vf", "scale='min(iw,576)':-2",
+            "-c:v", "libx264",
+            "-preset", "ultrafast",
+            "-crf", "24",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac",
+            "-b:a", "128k",
+            "-movflags", "+faststart",
+            tmp_out,
+        ]
+
+        r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
+
+        if r.returncode != 0 or not os.path.exists(tmp_out) or os.path.getsize(tmp_out) < 1024:
+            log.warning(
+                "social normalize: ffmpeg failed source=%s codec=%s size=%sx%s err=%s",
+                src, codec, width, height, r.stderr.decode(errors="replace")[-300:],
+            )
+            try:
+                if os.path.exists(tmp_out):
+                    os.remove(tmp_out)
+            except Exception:
+                pass
+            return
+
+        os.replace(tmp_out, path)
+
+        log.info(
+            "social normalize: source=%s original_codec=%s original=%sx%s normalized=h264 path=%s",
+            src, codec, width, height, path,
+        )
+
+    except Exception as e:
+        log.warning("social normalize: skipped source=%s error=%s", src, e)
+
+
 def _extract_video_id(url: str) -> str:
     """Extract YouTube video ID from various URL formats."""
     import re
@@ -455,6 +557,7 @@ def _try_smvd_tiktok(url: str, output_path: str) -> bool:
         return False
 
     _download_from_url(video_url, output_path)
+    _normalize_social_video_for_detection(output_path, "tiktok")
     size = os.path.getsize(output_path)
     if size > 1024:
         log.info("SMVD TikTok: success — %d bytes", size)
@@ -534,6 +637,7 @@ def _try_smvd_instagram(url: str, output_path: str) -> bool:
         return False
 
     _download_from_url(video_url, output_path)
+    _normalize_social_video_for_detection(output_path, "instagram")
     size = os.path.getsize(output_path)
     if size > 1024:
         log.info("SMVD Instagram: success — %d bytes", size)
