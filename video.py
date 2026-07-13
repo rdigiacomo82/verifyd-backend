@@ -352,20 +352,98 @@ def _try_smvd_tiktok(url: str, output_path: str) -> bool:
                  v.get("size", "?"),
                  v.get("url", "")[:60])
 
-    # Prefer lowest quality — matches what users manually download from TikTok
-    # and produces more consistent detection results. High-res SMVD encodes
-    # have different noise characteristics that confuse the signal detector.
-    preferred_qualities = ["low", "normal", "sd", "360p", "480p", "540p", "lowest_540", "adapt_540", "normal_540", "720p", "hd", "1080p"]
+    # Prefer the smallest usable TikTok video stream.
+    #
+    # Why:
+    # - Manual TikTok downloads are usually lower-resolution H.264 social encodes.
+    # - SMVD/RapidAPI may expose higher-res HEVC or alternate platform encodes.
+    # - Those high-res/social transcodes can exaggerate forensic signals
+    #   such as edge crawl, frozen saturation, and omni-flow noise.
+    # - Choosing the smallest usable video stream keeps link-analysis closer
+    #   to the same content users get when they manually upload the TikTok file.
+    def _vfyd_int_size(value):
+        try:
+            if value is None:
+                return 0
+            s = str(value).strip().lower().replace(",", "")
+            mult = 1
+            if s.endswith("kb"):
+                mult = 1024
+                s = s[:-2]
+            elif s.endswith("mb"):
+                mult = 1024 * 1024
+                s = s[:-2]
+            elif s.endswith("gb"):
+                mult = 1024 * 1024 * 1024
+                s = s[:-2]
+            return int(float(s) * mult)
+        except Exception:
+            return 0
+
+    def _vfyd_quality_height(v):
+        q = str(v.get("quality", v.get("label", ""))).lower()
+        nums = []
+        for m in re.findall(r'(\d{3,4})p', q):
+            try:
+                nums.append(int(m))
+            except Exception:
+                pass
+        for m in re.findall(r'[_\- ](\d{3,4})(?:[_\- ]|$)', q):
+            try:
+                nums.append(int(m))
+            except Exception:
+                pass
+        return min(nums) if nums else 9999
+
+    candidates = []
+    for v in videos:
+        direct = v.get("url", "")
+        if not direct:
+            continue
+        quality = str(v.get("quality", v.get("label", "unknown"))).lower()
+        size = _vfyd_int_size(v.get("size"))
+        height = _vfyd_quality_height(v)
+
+        # Prefer known social/mobile qualities; penalize HD when smaller options exist.
+        q_rank = 50
+        if any(x in quality for x in ("low", "lowest", "sd", "360", "480", "540", "normal")):
+            q_rank = 0
+        elif any(x in quality for x in ("720", "hd", "1080", "fhd", "uhd", "2k", "4k")):
+            q_rank = 90
+
+        candidates.append({
+            "url": direct,
+            "quality": quality,
+            "size": size,
+            "height": height,
+            "q_rank": q_rank,
+        })
+
     video_url = None
-    for q in preferred_qualities:
-        for v in videos:
-            quality = str(v.get("quality", v.get("label", ""))).lower()
-            if q in quality:
-                video_url = v.get("url", "")
-                log.info("SMVD TikTok: selected quality=%s", quality)
-                break
-        if video_url:
-            break
+    if candidates:
+        # If SMVD gives sizes, size is the best proxy for the user-facing TikTok download.
+        # Otherwise fall back to quality label / height.
+        any_size = any(c["size"] > 0 for c in candidates)
+        if any_size:
+            candidates.sort(key=lambda c: (
+                c["size"] if c["size"] > 0 else 10**18,
+                c["q_rank"],
+                c["height"],
+            ))
+        else:
+            candidates.sort(key=lambda c: (
+                c["q_rank"],
+                c["height"],
+            ))
+
+        selected = candidates[0]
+        video_url = selected["url"]
+        log.info(
+            "SMVD TikTok: selected smallest usable stream quality=%s size=%s height=%s",
+            selected["quality"],
+            selected["size"] or "?",
+            selected["height"] if selected["height"] != 9999 else "?",
+        )
 
     # Fallback: take last video (usually lowest quality)
     if not video_url:
