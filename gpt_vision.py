@@ -1495,6 +1495,22 @@ def _build_physics_summary(ctx: dict) -> str:
     except Exception:
         pass
 
+    if ctx.get("social_reencode_guard"):
+        lines.append("SOCIAL RE-ENCODE REAL-VIDEO REVIEW:")
+        lines.append(
+            "This input came from a social-platform link/re-encode with no platform AIGC label. "
+            "Do not treat TikTok/Instagram/Facebook compression as AI evidence. "
+            "Blockiness, DCT grids, edge crawl, low flat-region noise, shadow drift, missing device metadata, "
+            "and social-media transcode artifacts can occur in real phone videos."
+        )
+        lines.append(
+            "Only raise AI probability when you can visually confirm explicit AI evidence: impossible physics, "
+            "morphing face/hands/text, unstable anatomy, garbled/morphing text, AI watermark/source label, "
+            "or a genuinely staged complete viral AI event pattern. For ordinary selfie/person/kitchen/social footage, "
+            "score conservatively toward Real or Undetermined."
+        )
+        lines.append("")
+
     if hints:
         lines.append("VISUAL INSPECTION PRIORITIES:")
         for h in hints:

@@ -233,7 +233,7 @@ def _vfyd_prepare_viral_ai_reel_context(video_path: str, contexts, signal_contex
     viral_candidate = (
         short_vertical and no_real_device and
         (content_type in ("action", "cinematic", "portrait", "single_subject") or max_skin >= 0.08) and
-        (max_deepfake >= 75 or (generic_mobile and max_motion_period >= 0.55 and max_omni >= 3.25) or source in ("instagram", "tiktok", "upload"))
+        (max_deepfake >= 75 or (generic_mobile and max_motion_period >= 0.55 and max_omni >= 3.25))
     )
     if viral_candidate:
         signal_context["viral_ai_reel_candidate"] = True
@@ -1297,6 +1297,31 @@ def run_detection_multiclip(video_path: str) -> tuple:
 
     signal_context = _vfyd_prepare_viral_ai_reel_context(video_path, all_signal_contexts, signal_context)
 
+    # SOCIAL_REENCODE_REAL_GUARD_V2
+    # TikTok/Instagram/Facebook link downloads are platform re-encodes. They can
+    # create DCT grid, edge crawl, flat-noise, shadow drift, and omni-flow artifacts
+    # even on real phone videos. Pass this to GPT and the final override guard.
+    _social_reencode_source_v2 = any(
+        s in str(_video_source).lower()
+        for s in ("tiktok", "instagram", "facebook", "fb.watch", "youtube", "smvd")
+    )
+    if _social_reencode_source_v2:
+        signal_context["social_reencode_guard"] = True
+        signal_context["social_reencode_source"] = _video_source
+        signal_context["clip_signal_scores"] = signal_scores
+        signal_context["realish_clip_count"] = sum(1 for s in signal_scores if int(s) <= 45)
+        signal_context["_extra_context"] = (
+            str(signal_context.get("_extra_context", ""))
+            + "\nSOCIAL RE-ENCODE REAL-VIDEO GUARD: This came from a social-platform link "
+              "with no platform AIGC label. Treat compression/transcode artifacts conservatively. "
+              "Do NOT score as AI merely because of DCT grid/blocking, edge crawl, low flat-region noise, "
+              "shadow drift, missing device metadata, or social-media compression. Only raise AI if frames "
+              "show explicit visual evidence such as impossible physics, morphing hands/face/text, unstable anatomy, "
+              "an AI watermark/source label, or a truly complete staged viral AI event pattern. "
+              "For normal selfie/person/kitchen/social footage, prefer REAL or UNDETERMINED unless those explicit signs are visible."
+        )
+        log.info("SOCIAL_REENCODE_REAL_GUARD_V2: source=%s clips=%s realish=%d", _video_source, signal_scores, signal_context["realish_clip_count"])
+
     # ── Hybrid detection ──────────────────────────────────────
     score_variance = max(signal_scores) - min(signal_scores) if len(signal_scores) > 1 else 0
     signal_avg_pre = sum(signal_scores) / len(signal_scores)
@@ -1945,11 +1970,11 @@ def run_detection_multiclip(video_path: str) -> tuple:
         s in str(_video_source).lower()
         for s in ("tiktok", "instagram", "youtube", "facebook", "smvd")
     )
-    _gpt_neutral_or_refused_for_cine = bool(gpt_refused) or (45 <= int(gpt_ai_score or 50) <= 55 and not gpt_flags)
+    _gpt_neutral_or_refused_for_cine = bool(gpt_refused) or (45 <= int(gpt_ai_score or 50) <= 60 and (not gpt_flags or _social_source_for_cine))
     _realish_clip_count_for_cine = sum(1 for s in signal_scores if int(s) <= 45)
     _most_clips_realish_for_cine = (len(signal_scores) >= 3 and _realish_clip_count_for_cine >= 2)
     _dino_scores_for_cine = [
-        float(ctx.get("dino_score", 50) or 50)
+        float(ctx.get("dino_score") if ctx.get("dino_score") is not None else 50)
         for ctx in all_signal_contexts
         if "dino_score" in ctx
     ]
