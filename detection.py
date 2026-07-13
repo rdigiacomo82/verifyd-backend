@@ -1938,7 +1938,45 @@ def run_detection_multiclip(video_path: str) -> tuple:
         (_max_bg_drift >= 30.0 or _max_flicker_cine >= 6.0 or _max_shadow_cine >= 0.70)
     )
 
-    if _cinematic_social_ai or _cinematic_social_ai_strong:
+    # Guard: do not let social-platform re-encode artifacts alone force a real TikTok/social link to AI.
+    # This only suppresses the cinematic/social override when independent confirmation is missing:
+    # GPT is neutral/refused, DINOv2 is strongly real, most clips are real-ish, and the pre-override score is below AI.
+    _social_source_for_cine = any(
+        s in str(_video_source).lower()
+        for s in ("tiktok", "instagram", "youtube", "facebook", "smvd")
+    )
+    _gpt_neutral_or_refused_for_cine = bool(gpt_refused) or (45 <= int(gpt_ai_score or 50) <= 55 and not gpt_flags)
+    _realish_clip_count_for_cine = sum(1 for s in signal_scores if int(s) <= 45)
+    _most_clips_realish_for_cine = (len(signal_scores) >= 3 and _realish_clip_count_for_cine >= 2)
+    _dino_scores_for_cine = [
+        float(ctx.get("dino_score", 50) or 50)
+        for ctx in all_signal_contexts
+        if "dino_score" in ctx
+    ]
+    _dino_strong_real_for_cine = bool(_dino_scores_for_cine and min(_dino_scores_for_cine) <= 15)
+    _no_confirming_ai_model_for_cine = (
+        _gpt_neutral_or_refused_for_cine and
+        _dino_strong_real_for_cine and
+        _max_chan_cine < 0.90 and
+        combined_ai_score < 58
+    )
+    _suppress_cinematic_social_override = (
+        _social_source_for_cine and
+        _most_clips_realish_for_cine and
+        _no_confirming_ai_model_for_cine
+    )
+    if _suppress_cinematic_social_override:
+        log.info(
+            "CINEMATIC_SOCIAL_AI guard: skipped override for social re-encode "
+            "(source=%s clips=%s realish=%d gpt=%d refused=%s dino_min=%.1f "
+            "chan_corr=%.3f combined=%.1f)",
+            _video_source, signal_scores, _realish_clip_count_for_cine,
+            gpt_ai_score, gpt_refused,
+            min(_dino_scores_for_cine) if _dino_scores_for_cine else 50.0,
+            _max_chan_cine, combined_ai_score
+        )
+
+    if (_cinematic_social_ai or _cinematic_social_ai_strong) and not _suppress_cinematic_social_override:
         old_combined = combined_ai_score
         combined_ai_score = max(combined_ai_score, 66.0)
         mode = "cinematic/social AI forensic override"
