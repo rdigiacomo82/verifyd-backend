@@ -1511,6 +1511,20 @@ def _build_physics_summary(ctx: dict) -> str:
         )
         lines.append("")
 
+    # GEMINI_PHOTO_COMPOSITE_CONTEXT_V2
+    try:
+        if ctx.get("photo_ai_social_composite") or ctx.get("gemini_photo_composite_guard"):
+            hints.append(
+                "GEMINI / AI STILL-PHOTO COMPOSITE REVIEW: Inspect the full still image, not only faces. "
+                "AI-edited phone-style photos often keep realistic skin, hair, grain, and background texture while inserting impossible objects. "
+                "Look for floating food, sauce, confetti, props, animals, signs, or novelty objects with no believable contact point; "
+                "objects resting on people without weight, pressure, grip, deformation, or matching shadows; "
+                "oversized/misplaced animals or food; inconsistent scale, lighting, edges, reflections, and contact shadows. "
+                "Do not score as Real merely because the people and background look photographic. "
+                "If an inserted object/animal/food/prop is physically implausible, score generator_artifacts, physics_violations, and scene_staging high."
+            )
+    except Exception:
+        pass
     if hints:
         lines.append("VISUAL INSPECTION PRIORITIES:")
         for h in hints:
@@ -1560,6 +1574,50 @@ def gpt_vision_score_with_context(frames_b64: list, physics_context: dict) -> di
     content_type    = physics_context.get("content_type", "cinematic")
     physics_summary = _build_physics_summary(physics_context)
     result          = analyze_frames_with_gpt(frames_b64, physics_summary, content_type)
+    # GEMINI_PHOTO_COMPOSITE_GPT_GUARD_V2
+    try:
+        if physics_context.get("photo_ai_social_composite") or physics_context.get("gemini_photo_composite_guard"):
+            _scores = result.get("scores", {}) or {}
+            _flags = result.get("flags", []) or []
+            if not isinstance(_flags, list):
+                _flags = [str(_flags)]
+
+            _ai_prob = int(result.get("ai_probability", 50) or 50)
+            _flat = physics_context.get("flat_noise", physics_context.get("flat_region_noise", None))
+            _corr = physics_context.get("chan_corr", physics_context.get("channel_correlation", None))
+            _signal = int(physics_context.get("signal_score", physics_context.get("signal_ai_score", 0)) or 0)
+
+            try:
+                _flat = float(_flat) if _flat is not None else None
+            except Exception:
+                _flat = None
+            try:
+                _corr = float(_corr) if _corr is not None else None
+            except Exception:
+                _corr = None
+
+            _dim_hits = sum(
+                1 for k in ("generator_artifacts", "physics_violations", "scene_staging", "lighting_coherence", "background_realism", "text_objects")
+                if int(_scores.get(k, 0) or 0) >= 6
+            )
+            _strong_forensic = (
+                (_flat is not None and _flat <= 0.65 and _corr is not None and _corr >= 0.90)
+                or _signal >= 50
+            )
+
+            if _ai_prob >= 60 or _dim_hits >= 2 or _strong_forensic:
+                _old = _ai_prob
+                result["ai_probability"] = max(_ai_prob, 72 if (_ai_prob >= 60 or _dim_hits >= 2) else 68)
+                result["generator_guess"] = "Unknown-AI"
+                if "gemini_photo_composite_guard" not in _flags:
+                    _flags.insert(0, "gemini_photo_composite_guard")
+                result["flags"] = _flags
+                log.info(
+                    "GEMINI_PHOTO_COMPOSITE_GPT_GUARD_V2: ai_prob %d->%d hits=%d signal=%d flat=%s corr=%s",
+                    _old, result["ai_probability"], _dim_hits, _signal, _flat, _corr
+                )
+    except Exception as _e:
+        log.warning("GEMINI_PHOTO_COMPOSITE_GPT_GUARD_V2 skipped: %s", _e)
 
     # AI_SOURCE_PROVENANCE_PATCH: enforce direct source/caption/filename evidence after GPT.
     # This protects against photorealistic AI frames being visually scored as real.
