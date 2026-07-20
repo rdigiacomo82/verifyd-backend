@@ -2371,6 +2371,78 @@ def run_detection_multiclip(video_path: str) -> tuple:
         signal_context["viral_ai_reel_pattern"] = True
 
     combined_ai_score = max(0.0, min(100.0, combined_ai_score))
+    # VERIFYD_SURREAL_ANIMAL_OBJECT_VIDEO_FINAL_GUARD_V3
+    # Prevent AI-edited animal/object/person clips from certifying as REAL when fake camera texture hides synthesis.
+    # This catches cases where low-level noise looks real but GPT/forensics show an AI composite or staged insert.
+    try:
+        _vfyd_scores = gpt_result.get("scores", {}) if isinstance(gpt_result, dict) else {}
+        _vfyd_flags = gpt_result.get("flags", []) if isinstance(gpt_result, dict) else []
+        if not isinstance(_vfyd_flags, list):
+            _vfyd_flags = [str(_vfyd_flags)]
+        _vfyd_flags_text = " ".join(str(x).lower() for x in _vfyd_flags)
+        _vfyd_gen = str(gpt_result.get("generator_guess", "") if isinstance(gpt_result, dict) else "").lower()
+
+        _vfyd_ctxs = []
+        if isinstance(signal_context, dict):
+            _vfyd_ctxs.append(signal_context)
+        if isinstance(all_signal_contexts, list):
+            _vfyd_ctxs.extend([c for c in all_signal_contexts if isinstance(c, dict)])
+
+        def _vfyd_ctx_max_v3(*names, default=0.0):
+            vals = []
+            for c in _vfyd_ctxs:
+                for name in names:
+                    if name in c and c.get(name) is not None:
+                        try:
+                            vals.append(float(c.get(name)))
+                        except Exception:
+                            pass
+            return max(vals) if vals else default
+
+        _vfyd_chan = _vfyd_ctx_max_v3("chan_corr", "channel_corr", default=0.0)
+        _vfyd_shadow = _vfyd_ctx_max_v3("shadow_drift", default=0.0)
+        _vfyd_omni = _vfyd_ctx_max_v3("omni_flow_entropy", "omni_ent", default=0.0)
+        _vfyd_tcv = _vfyd_ctx_max_v3("tcv", "temporal_consistency_var", "temporal_coherence_var", default=0.0)
+        _vfyd_pre_heavy = _vfyd_ctx_max_v3("pre_heavy_score", default=0.0)
+
+        _vfyd_scene = int(_vfyd_scores.get("scene_staging", 0) or 0)
+        _vfyd_phys = int(_vfyd_scores.get("physics_violations", 0) or 0)
+        _vfyd_genart = int(_vfyd_scores.get("generator_artifacts", 0) or 0)
+        _vfyd_light = int(_vfyd_scores.get("lighting_coherence", 0) or 0)
+        _vfyd_color = int(_vfyd_scores.get("color_naturalism", 0) or 0)
+
+        _vfyd_semantic_ai = (
+            "unknown-ai" in _vfyd_gen or
+            "surreal_animal_object_composite_guard" in _vfyd_flags_text or
+            _vfyd_scene >= 7 or
+            _vfyd_phys >= 7 or
+            _vfyd_genart >= 7 or
+            (_vfyd_light >= 8 and _vfyd_color >= 8)
+        )
+
+        _vfyd_forensic_ai = (
+            _vfyd_chan >= 0.94 and (
+                _vfyd_shadow >= 0.80 or
+                _vfyd_omni >= 3.60 or
+                _vfyd_tcv >= 300.0 or
+                _vfyd_pre_heavy >= 35.0
+            )
+        )
+
+        # For these surreal object/animal videos, GPT may be only moderate, but Unknown-AI + high channel lock + shadow/omni/TCV is enough to avoid REAL.
+        if _vfyd_semantic_ai and _vfyd_forensic_ai and int(gpt_ai_score or 0) >= 45 and combined_ai_score < 65:
+            _old_combined = combined_ai_score
+            combined_ai_score = 65.0
+            mode = "surreal animal/object composite guard"
+            if isinstance(gpt_result, dict):
+                gpt_result["flags"] = list(dict.fromkeys(["surreal_animal_object_composite_guard"] + _vfyd_flags))
+            log.info(
+                "VERIFYD_SURREAL_ANIMAL_OBJECT_VIDEO_FINAL_GUARD_V3: combined %.1f->%.1f gpt=%s chan=%.3f shadow=%.3f omni=%.3f tcv=%.2f pre_heavy=%.1f scene=%s phys=%s gen=%s",
+                _old_combined, combined_ai_score, gpt_ai_score, _vfyd_chan, _vfyd_shadow, _vfyd_omni, _vfyd_tcv, _vfyd_pre_heavy, _vfyd_scene, _vfyd_phys, _vfyd_gen
+            )
+    except Exception as _e:
+        log.warning("VERIFYD_SURREAL_ANIMAL_OBJECT_VIDEO_FINAL_GUARD_V3 skipped: %s", _e)
+
     authenticity = 100 - int(round(combined_ai_score))
     authenticity = max(0, min(100, authenticity))
 

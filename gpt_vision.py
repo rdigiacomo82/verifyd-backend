@@ -1511,6 +1511,18 @@ def _build_physics_summary(ctx: dict) -> str:
         )
         lines.append("")
 
+    # VERIFYD_SURREAL_ANIMAL_OBJECT_PROMPT_V2
+    try:
+        hints.append(
+            "SURREAL ANIMAL / OBJECT INSERTION CHECK: Inspect for AI-edited phone-style scenes where the people/background look real "
+            "but an animal, snake, food item, prop, costume, sign, or object is inserted with impossible contact, scale, grip, shadow, pressure, or deformation. "
+            "Examples include a large snake wrapped around a person without realistic weight/contact behavior, floating food, floating objects, oversized props, "
+            "or novelty objects placed on people without believable shadows or physical interaction. Do not score as Real solely because skin, hair, background, "
+            "camera noise, or JPEG grain look photographic. If the inserted animal/object is physically implausible, raise physics_violations, scene_staging, "
+            "lighting_coherence, and generator_artifacts."
+        )
+    except Exception:
+        pass
     if hints:
         lines.append("VISUAL INSPECTION PRIORITIES:")
         for h in hints:
@@ -1560,6 +1572,80 @@ def gpt_vision_score_with_context(frames_b64: list, physics_context: dict) -> di
     content_type    = physics_context.get("content_type", "cinematic")
     physics_summary = _build_physics_summary(physics_context)
     result          = analyze_frames_with_gpt(frames_b64, physics_summary, content_type)
+    # VERIFYD_SURREAL_ANIMAL_OBJECT_GPT_GUARD_V2
+    # Gemini/AI edits can preserve realistic people/backgrounds while inserting an impossible animal/object.
+    # Lift GPT out of REAL/low-undetermined when visual staging plus forensic signals indicate AI-composite risk.
+    try:
+        _scores_v2 = result.get("scores", {}) or {}
+        _flags_v2 = result.get("flags", []) or result.get("top_flags", []) or []
+        if not isinstance(_flags_v2, list):
+            _flags_v2 = [str(_flags_v2)]
+
+        _ai_v2 = int(result.get("ai_probability", 50) or 50)
+        _gen_v2 = str(result.get("generator_guess", "") or "").lower()
+        _ct_v2 = str(physics_context.get("content_type", content_type) or "").lower()
+
+        def _vfyd_float_v2(*names, default=None):
+            for name in names:
+                if name in physics_context and physics_context.get(name) is not None:
+                    try:
+                        return float(physics_context.get(name))
+                    except Exception:
+                        pass
+            return default
+
+        _flat_v2 = _vfyd_float_v2("flat_noise", "flat_region_noise", default=None)
+        _corr_v2 = _vfyd_float_v2("chan_corr", "channel_correlation", default=None)
+        _shadow_v2 = _vfyd_float_v2("shadow_drift", default=0.0)
+        _omni_v2 = _vfyd_float_v2("omni_flow_entropy", "omni_ent", default=0.0)
+        _nfloor_v2 = _vfyd_float_v2("noise_floor", default=None)
+
+        _scene_v2 = int(_scores_v2.get("scene_staging", 0) or 0)
+        _phys_v2 = int(_scores_v2.get("physics_violations", 0) or 0)
+        _light_v2 = int(_scores_v2.get("lighting_coherence", 0) or 0)
+        _color_v2 = int(_scores_v2.get("color_naturalism", 0) or 0)
+        _genart_v2 = int(_scores_v2.get("generator_artifacts", 0) or 0)
+
+        _forensic_photo_v2 = (
+            _flat_v2 is not None and _flat_v2 <= 0.55 and
+            _corr_v2 is not None and _corr_v2 >= 0.94
+        )
+        _forensic_video_v2 = (
+            _corr_v2 is not None and _corr_v2 >= 0.94 and
+            (
+                (_shadow_v2 is not None and _shadow_v2 >= 0.80) or
+                (_omni_v2 is not None and _omni_v2 >= 3.60) or
+                (_nfloor_v2 is not None and _nfloor_v2 <= 0.70)
+            )
+        )
+
+        _semantic_v2 = (
+            "unknown-ai" in _gen_v2 or
+            _scene_v2 >= 7 or
+            _phys_v2 >= 7 or
+            _genart_v2 >= 7 or
+            (_light_v2 >= 8 and _color_v2 >= 8)
+        )
+
+        if (_forensic_photo_v2 or _forensic_video_v2) and _semantic_v2:
+            _old_v2 = _ai_v2
+            _target_v2 = 72 if (_scene_v2 >= 7 or _phys_v2 >= 7 or _genart_v2 >= 7) else 68
+            result["ai_probability"] = max(_ai_v2, _target_v2)
+            result["generator_guess"] = "Unknown-AI"
+            if "surreal_animal_object_composite_guard" not in _flags_v2:
+                _flags_v2.insert(0, "surreal_animal_object_composite_guard")
+            result["flags"] = _flags_v2[:8]
+            result["reasoning"] = (
+                "The scene contains forensic and/or visual indicators of an AI-generated or AI-edited animal/object composite. "
+                "Realistic camera grain or lifelike people/backgrounds should not override impossible animal/object contact, scale, grip, shadow, or staging. "
+                + str(result.get("reasoning", ""))
+            )[:700]
+            log.info(
+                "VERIFYD_SURREAL_ANIMAL_OBJECT_GPT_GUARD_V2: ai_prob %d->%d ct=%s flat=%s corr=%s shadow=%s omni=%s scene=%s phys=%s gen=%s",
+                _old_v2, result["ai_probability"], _ct_v2, _flat_v2, _corr_v2, _shadow_v2, _omni_v2, _scene_v2, _phys_v2, _gen_v2
+            )
+    except Exception as _e:
+        log.warning("VERIFYD_SURREAL_ANIMAL_OBJECT_GPT_GUARD_V2 skipped: %s", _e)
 
     # AI_SOURCE_PROVENANCE_PATCH: enforce direct source/caption/filename evidence after GPT.
     # This protects against photorealistic AI frames being visually scored as real.
