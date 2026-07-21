@@ -2443,6 +2443,76 @@ def run_detection_multiclip(video_path: str) -> tuple:
     except Exception as _e:
         log.warning("VERIFYD_SURREAL_ANIMAL_OBJECT_VIDEO_FINAL_GUARD_V3 skipped: %s", _e)
 
+    # VERIFYD_TWITTER_SOCIAL_FORENSIC_OVERRIDE_V1
+    # X/Twitter link parity guard:
+    # Some AI social videos are downloaded from X as platform/Lavf MP4s and then normalized.
+    # GPT/DINO can under-call these as real because faces/background/noise look phone-like.
+    # When multiple forensic render signals agree, keep link analysis close to manual upload analysis.
+    try:
+        _tw_ctxs = all_signal_contexts or []
+        _tw_source = str(_video_source or signal_context.get("source", "") or "").lower()
+        _tw_is_x = any(s in _tw_source for s in ("twitter", "x.com", "t.co"))
+
+        def _tw_float(ctx, *names, default=0.0):
+            for name in names:
+                try:
+                    val = ctx.get(name, None)
+                    if val is not None:
+                        return float(val)
+                except Exception:
+                    pass
+            return default
+
+        _tw_chan_vals = [_tw_float(ctx, "chan_corr", "channel_corr") for ctx in _tw_ctxs]
+        _tw_all_high_chan = bool(_tw_chan_vals) and all(c >= 0.90 for c in _tw_chan_vals if c > 0)
+        _tw_max_chan = max(_tw_chan_vals or [0.0])
+        _tw_max_shadow = max([_tw_float(ctx, "shadow_drift") for ctx in _tw_ctxs] or [0.0])
+        _tw_max_omni = max([_tw_float(ctx, "omni_flow_ent", "omni_ent", "omni_flow_entropy") for ctx in _tw_ctxs] or [0.0])
+        _tw_max_edge_cov = max([_tw_float(ctx, "edge_cov", "edge_cov_var") for ctx in _tw_ctxs] or [0.0])
+        _tw_max_tcv = max([_tw_float(ctx, "tcv", "temporal_consistency_var", "temporal_coherence_var") for ctx in _tw_ctxs] or [0.0])
+        _tw_max_dct = max([_tw_float(ctx, "dct", "dct_score") for ctx in _tw_ctxs] or [0.0])
+        _tw_max_pre_heavy = max(
+            [int(ctx.get("pre_heavy_score", score) or score) for score, ctx, _pct in valid]
+            or [signal_ai_score]
+        )
+
+        _tw_votes = 0
+        _tw_votes += 1 if _tw_all_high_chan else 0
+        _tw_votes += 1 if _tw_max_shadow >= 0.82 else 0
+        _tw_votes += 1 if _tw_max_omni >= 3.80 else 0
+        _tw_votes += 1 if _tw_max_edge_cov >= 1.45 else 0
+        _tw_votes += 1 if _tw_max_tcv >= 150.0 else 0
+        _tw_votes += 1 if _tw_max_dct >= 13.0 else 0
+        _tw_votes += 1 if _tw_max_pre_heavy >= 40 else 0
+
+        _tw_lavf_flag = bool(override and ov_label == "LAVF_AI_PIPELINE")
+        _tw_social_render_ai = (
+            _tw_is_x and
+            _tw_lavf_flag and
+            _tw_all_high_chan and
+            _tw_max_pre_heavy >= 40 and
+            _tw_votes >= 5 and
+            combined_ai_score < 65
+        )
+
+        if _tw_social_render_ai:
+            _old_combined = combined_ai_score
+            combined_ai_score = 65.0
+            mode = "X/Twitter social forensic AI override"
+            if isinstance(gpt_result, dict):
+                _existing_flags = gpt_result.get("flags", []) or []
+                if not isinstance(_existing_flags, list):
+                    _existing_flags = [str(_existing_flags)]
+                gpt_result["flags"] = list(dict.fromkeys(["twitter_social_forensic_ai_pattern"] + _existing_flags))
+            log.info(
+                "VERIFYD_TWITTER_SOCIAL_FORENSIC_OVERRIDE_V1: combined %.1f->%.1f source=%s lavf=%s chan_all=%s chan_max=%.3f shadow=%.3f omni=%.3f edge_cov=%.3f tcv=%.2f dct=%.2f pre_heavy=%d votes=%d gpt=%d",
+                _old_combined, combined_ai_score, _tw_source, _tw_lavf_flag, _tw_all_high_chan,
+                _tw_max_chan, _tw_max_shadow, _tw_max_omni, _tw_max_edge_cov, _tw_max_tcv,
+                _tw_max_dct, _tw_max_pre_heavy, _tw_votes, gpt_ai_score
+            )
+    except Exception as _e:
+        log.warning("VERIFYD_TWITTER_SOCIAL_FORENSIC_OVERRIDE_V1 skipped: %s", _e)
+
     authenticity = 100 - int(round(combined_ai_score))
     authenticity = max(0, min(100, authenticity))
 
