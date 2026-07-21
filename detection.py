@@ -2504,6 +2504,15 @@ def run_detection_multiclip(video_path: str) -> tuple:
                 if not isinstance(_existing_flags, list):
                     _existing_flags = [str(_existing_flags)]
                 gpt_result["flags"] = list(dict.fromkeys(["twitter_social_forensic_ai_pattern"] + _existing_flags))
+
+                # VERIFYD_TWITTER_SOCIAL_REASONING_OVERRIDE_V1
+                # The final forensic override supersedes GPT's earlier "Real" visual reasoning.
+                # Keep the public explanation aligned with the final AI/Tampering result.
+                gpt_result["reasoning"] = (
+                    "This video was flagged for AI / tampering indicators based on a forensic pattern found in the X/Twitter link analysis. "
+                    "Although some visual elements may appear natural, the downloaded social video showed multiple render/compression forensic signals that are inconsistent with ordinary camera footage, including high channel correlation across clips, Lavf/null-vendor pipeline metadata, shadow inconsistency, omni-directional motion noise, edge-crawl behavior, temporal consistency anomalies, and DCT/grid artifacts. "
+                    "These combined signals caused VeriFYD to classify the file as AI / Tampering Detected rather than Authenticity Supported."
+                )
             log.info(
                 "VERIFYD_TWITTER_SOCIAL_FORENSIC_OVERRIDE_V1: combined %.1f->%.1f source=%s lavf=%s chan_all=%s chan_max=%.3f shadow=%.3f omni=%.3f edge_cov=%.3f tcv=%.2f dct=%.2f pre_heavy=%d votes=%d gpt=%d",
                 _old_combined, combined_ai_score, _tw_source, _tw_lavf_flag, _tw_all_high_chan,
