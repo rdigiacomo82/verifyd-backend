@@ -90,7 +90,10 @@ def _normalize_social_video_for_detection(path: str, source: str = "") -> None:
     closer to upload analysis.
     """
     src = str(source or "").lower()
-    if not any(s in src for s in ("tiktok", "instagram", "facebook", "fb.watch", "youtube", "smvd")):
+    # VERIFYD_X_TWITTER_LINK_NORMALIZE_V1
+    # Include Twitter/X yt-dlp downloads in social normalization so link analysis
+    # matches manual upload analysis of the same social video content.
+    if not any(s in src for s in ("tiktok", "instagram", "facebook", "fb.watch", "youtube", "smvd", "twitter", "x.com", "t.co")):
         return
     if not path or not os.path.exists(path):
         return
@@ -125,10 +128,12 @@ def _normalize_social_video_for_detection(path: str, source: str = "") -> None:
                 height = int(stream.get("height") or 0)
                 break
 
+        _is_x_twitter = any(s in src for s in ("twitter", "x.com", "t.co"))
         needs_normalize = (
             codec in ("hevc", "h265", "bytevc1") or
             width > 720 or
-            (height > 1280 and height > width)
+            (height > 1280 and height > width) or
+            (_is_x_twitter and height > width and width >= 540)
         )
 
         if not needs_normalize:
@@ -140,12 +145,13 @@ def _normalize_social_video_for_detection(path: str, source: str = "") -> None:
 
         tmp_out = path + ".h264norm.mp4"
 
+        _target_width = 320 if _is_x_twitter else 576
         cmd = [
             FFMPEG_BIN, "-y",
             "-i", path,
             "-map", "0:v:0",
             "-map", "0:a?",
-            "-vf", "scale='min(iw,576)':-2",
+            "-vf", f"scale='min(iw,{_target_width})':-2",
             "-c:v", "libx264",
             "-preset", "ultrafast",
             "-crf", "24",
@@ -737,11 +743,16 @@ def download_video_ytdlp(url: str, output_path: str) -> None:
                 _src = ("tiktok" if "tiktok.com" in _u else
                         "instagram" if "instagram.com" in _u else
                         "facebook" if "facebook.com" in _u or "fb.watch" in _u else
-                        "youtube" if "youtube.com" in _u or "youtu.be" in _u else "unknown")
+                        "youtube" if "youtube.com" in _u or "youtu.be" in _u else
+                        "twitter" if "twitter.com" in _u or "x.com" in _u or "t.co" in _u else "unknown")
                 _scyd = output_path.replace(".mp4", ".meta.json")
                 with open(_scyd, "w") as _sfyd:
                     _ydj.dump({"aigc_label_type": 0, "source": _src}, _sfyd)
                 log.info("yt-dlp: wrote source sidecar source=%s", _src)
+                try:
+                    _normalize_social_video_for_detection(output_path, _src)
+                except Exception as _norm_e:
+                    log.warning("yt-dlp: social normalize failed source=%s err=%s", _src, _norm_e)
             except Exception as _sce:
                 log.warning("yt-dlp: sidecar write failed: %s", _sce)
     except yt_dlp.utils.DownloadError as e:
