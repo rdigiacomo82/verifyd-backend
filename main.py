@@ -6290,3 +6290,14 @@ except Exception as exc:
     print(f"[trust-message] routes not enabled: {exc}")
 # --- End VeriFYD Trust Message routes ---
 
+# VERIFYD_MAIL_SHIELD_ROUTE_V1
+# Additive Mail Shield MVP route registration.
+# This is intentionally isolated from the existing VeriFYD detection pipeline.
+try:
+    from mail_shield import router as mail_shield_router
+    app.include_router(mail_shield_router)
+except Exception as _mail_shield_route_error:
+    import logging as _verifyd_mail_shield_logging
+    _verifyd_mail_shield_logging.getLogger("verifyd.mail_shield").warning(
+        "Mail Shield route registration skipped: %s", _mail_shield_route_error
+    )
