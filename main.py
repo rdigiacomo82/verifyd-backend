@@ -14,6 +14,7 @@
 
 from fastapi import FastAPI, UploadFile, File, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 import os, uuid, requests, tempfile, logging, hashlib
 from contextlib import asynccontextmanager
@@ -212,6 +213,10 @@ async def lifespan(app: FastAPI):
     # Shutdown (add cleanup here if needed)
 
 app = FastAPI(title="VeriFYD", lifespan=lifespan)
+
+# VERIFYD_MAIL_SHIELD_STATIC_ICONS_V1
+# Public static assets for Microsoft Outlook add-in validation icons.
+app.mount("/static", StaticFiles(directory="static"), name="static")
 # Directories are created on import inside config.py — no makedirs needed here
 
 # ─────────────────────────────────────────────
