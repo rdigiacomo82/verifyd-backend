@@ -2522,6 +2522,78 @@ def run_detection_multiclip(video_path: str) -> tuple:
     except Exception as _e:
         log.warning("VERIFYD_TWITTER_SOCIAL_FORENSIC_OVERRIDE_V1 skipped: %s", _e)
 
+    # VERIFYD_REAL_SOCIAL_TRAFFIC_GUARD_V1
+    # Social re-encoding and handheld vehicle/road footage can mimic the
+    # temporal signatures used by the cinematic/animal hard overrides. Apply
+    # this last, after those overrides and the viral reel guard, so ordinary
+    # traffic/person footage is not immediately raised back to AI.
+    _social_source = any(
+        token in str(_video_source or "").lower()
+        for token in ("twitter", "x.com", "instagram", "tiktok", "facebook")
+    )
+    _gpt_text = " ".join(
+        [str(gpt_reasoning or "")]
+        + [str(flag) for flag in (gpt_flags or [])]
+    ).lower()
+    _ordinary_road_terms = (
+        "traffic", "road", "roadside", "street", "intersection", "parking lot",
+        "car", "cars", "vehicle", "vehicles", "pedestrian", "people", "person",
+    )
+    _fantasy_event_terms = (
+        "bull", "ram ", "animal", "wildlife", "creature", "collapse", "explosion",
+        "destruction", "impossible", "morphing", "deformed", "generated watermark",
+    )
+    _ordinary_road_scene = any(term in _gpt_text for term in _ordinary_road_terms)
+    _fantasy_event_scene = any(term in _gpt_text for term in _fantasy_event_terms)
+
+    _guard_ctxs = all_signal_contexts or []
+    _guard_skin = max(
+        [float(ctx.get("skin_ratio", ctx.get("skin", 0.0)) or 0.0) for ctx in _guard_ctxs]
+        or [0.0]
+    )
+    _guard_deepfake = max(
+        [float(ctx.get("deepfake_score", ctx.get("deepfake", 0.0)) or 0.0) for ctx in _guard_ctxs]
+        or [0.0]
+    )
+    _guard_dino = max(
+        [float(ctx.get("dino_score", ctx.get("dinov2_score", 0.0)) or 0.0) for ctx in _guard_ctxs]
+        or [0.0]
+    )
+    _guard_scores = gpt_result.get("scores", {}) or {}
+    _guard_physics = int(_guard_scores.get("physics_violations", 10) or 10)
+    _guard_generator = int(_guard_scores.get("generator_artifacts", 10) or 10)
+    _explicit_ai_source = bool(
+        override and str(ov_label or "").upper() not in ("", "REAL", "LAVF_AI_PIPELINE")
+    )
+
+    _real_social_traffic_guard = (
+        _social_source
+        and _ordinary_road_scene
+        and not _fantasy_event_scene
+        and not _explicit_ai_source
+        and _guard_skin <= 0.20
+        and _guard_deepfake <= 12.0
+        and _guard_dino <= 8.0
+        and _guard_physics <= 7
+        and _guard_generator <= 7
+        and gpt_ai_score < 80
+    )
+
+    if _real_social_traffic_guard and combined_ai_score > 42.0:
+        _guard_old_combined = combined_ai_score
+        combined_ai_score = 42.0
+        mode = "real social traffic/person guard"
+        log.info(
+            "REAL_SOCIAL_TRAFFIC_GUARD: ordinary handheld road/person scene; "
+            "suppressed cinematic/animal overrides (source=%s skin=%.3f "
+            "deepfake=%.1f dino=%.1f physics=%d generator=%d gpt=%d) "
+            "combined %.1f→%.1f",
+            _video_source, _guard_skin, _guard_deepfake, _guard_dino,
+            _guard_physics, _guard_generator, gpt_ai_score,
+            _guard_old_combined, combined_ai_score,
+        )
+
+    combined_ai_score = max(0.0, min(100.0, combined_ai_score))
     authenticity = 100 - int(round(combined_ai_score))
     authenticity = max(0, min(100, authenticity))
 
