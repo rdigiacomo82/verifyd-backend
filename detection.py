@@ -440,9 +440,20 @@ def _check_metadata_override(video_path: str) -> tuple:
                 s.get("tags", {}).get("handler_name", "").lower()
                 for s in data.get("streams", [])
             )
-            if "google" in _handler_names or "youtube" in _handler_names:
-                log.info("METADATA: Lavf+Google handler detected → YouTube re-encode pipeline, NOT AI — suppressing LAVF flag")
-                return False, 0, None, "YouTube re-encode (Google handler_name)"
+            # VERIFYD_TWITTER_REAL_VIDEO_GUARD_V2
+            # Lavf/null-vendor metadata is written by legitimate social muxers too.
+            # Never turn a known YouTube or Twitter delivery mux into AI provenance.
+            _known_social_mux = any(
+                token in _handler_names
+                for token in ("google", "youtube", "twitter-vork", "twitter")
+            )
+            if _known_social_mux:
+                log.info(
+                    "METADATA: known social Lavf handler detected (%s) → "
+                    "normal platform re-encode, suppressing LAVF AI flag",
+                    _handler_names,
+                )
+                return False, 0, None, "Known social-platform re-encode handler"
             log.info("METADATA: Lavf encoder + null vendor_id detected (AI pipeline fingerprint — soft signal, see LAVF_CHAN_CORR boost)")
             log.info("METADATA: LAVF_AI_PIPELINE soft flag set — will boost if all clips CHAN_CORR>0.90")
             return True, 20, "LAVF_AI_PIPELINE", "Lavf encoder + null vendor fingerprint (AI pipeline soft signal)"
@@ -2593,6 +2604,61 @@ def run_detection_multiclip(video_path: str) -> tuple:
             _guard_old_combined, combined_ai_score,
         )
 
+    # VERIFYD_TWITTER_REAL_VIDEO_GUARD_V2
+    # Protect ordinary Twitter/X road and vehicle footage when every sampled
+    # clip and DINO independently lean real. This intentionally does not trust
+    # platform compression metadata, nor let a single GPT semantic false alarm
+    # override multi-clip forensic consensus.
+    _v2_source = str(_video_source or "").lower()
+    _v2_is_twitter = "twitter" in _v2_source or "x.com" in _v2_source
+    _v2_clip_max = max(signal_scores or [signal_ai_score])
+    _v2_clip_min = min(signal_scores or [signal_ai_score])
+    _v2_ctxs = all_signal_contexts or []
+    _v2_dino = max(
+        [float(ctx.get("dino_score", ctx.get("dinov2_score", 0.0)) or 0.0)
+         for ctx in _v2_ctxs] or [0.0]
+    )
+    _v2_real_optics_votes = sum(
+        1 for ctx in _v2_ctxs
+        if 0.0 < float(ctx.get("hf_kurtosis", 999.0) or 999.0) <= 20.0
+    )
+    _v2_physical_edge_votes = sum(
+        1 for ctx in _v2_ctxs
+        if float(ctx.get("edge_mvar", ctx.get("edge_motion_variance", 0.0)) or 0.0) >= 0.08
+    )
+    _v2_natural_depth_votes = sum(
+        1 for ctx in _v2_ctxs
+        if float(ctx.get("fg_bg_components", ctx.get("fg_bg", 99.0)) or 99.0) <= 2.0
+    )
+    _v2_real_vote_groups = sum((
+        _v2_real_optics_votes >= n_clips,
+        _v2_physical_edge_votes >= n_clips,
+        _v2_natural_depth_votes >= n_clips,
+    ))
+    _v2_forensic_consensus = (
+        _v2_is_twitter
+        and n_clips >= 2
+        and signal_ai_score <= 45
+        and _v2_clip_max <= 50
+        and _v2_clip_min <= 45
+        and _v2_dino <= 8.0
+        and _v2_real_vote_groups >= 2
+        and _ordinary_road_scene
+        and not _fantasy_event_scene
+        and not _explicit_ai_source
+    )
+    if _v2_forensic_consensus and combined_ai_score > 42.0:
+        _v2_old = combined_ai_score
+        combined_ai_score = 42.0
+        mode = "twitter real-video forensic consensus guard"
+        log.info(
+            "TWITTER_REAL_VIDEO_GUARD_V2: multi-clip real consensus; "
+            "signal=%d clips=%s dino=%.1f real_vote_groups=%d gpt=%d "
+            "combined %.1f→%.1f",
+            signal_ai_score, signal_scores, _v2_dino, _v2_real_vote_groups,
+            gpt_ai_score, _v2_old, combined_ai_score,
+        )
+
     combined_ai_score = max(0.0, min(100.0, combined_ai_score))
     authenticity = 100 - int(round(combined_ai_score))
     authenticity = max(0, min(100, authenticity))
@@ -2677,5 +2743,8 @@ def run_detection_multiclip(video_path: str) -> tuple:
         detail["blend_mode"] = mode
 
     return authenticity, label, detail
+
+
+
 
 
