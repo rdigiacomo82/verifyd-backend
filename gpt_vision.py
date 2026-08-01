@@ -1019,29 +1019,29 @@ def _build_physics_summary(ctx: dict) -> str:
     min_vert_flow  = ctx.get("min_vert_flow")
     upward_frac    = ctx.get("upward_frac", 0)
 
+    # VERIFYD_GPT_REAL_SOCIAL_VISION_GUARD_V1
+    # Global optical flow measures image motion, not gravity. Handheld tilt/pan,
+    # road grade, vehicle suspension, parallax, stabilization and scene cuts can
+    # all produce strong upward flow in completely real footage.
     if min_vert_flow is not None and min_vert_flow < -5.0 and upward_frac > 0.15:
         hints.append(
-            f"🚨 DEFINITIVE GRAVITY VIOLATION (peak_upward={min_vert_flow:.1f}, "
-            f"{upward_frac*100:.0f}% of frames show upward motion). "
-            "A person, object, or subject is moving UPWARD against gravity — "
-            "look for someone rising on a slide, floating up a hill, or ascending "
-            "against a surface they should be descending. This is physically impossible "
-            "and is one of the strongest AI generation artifacts. "
-            "→ Score physics_violations 9-10 IMMEDIATELY. This overrides all other signals."
-        )
-    elif vert_flow is not None and vert_flow < -1.5:
-        hints.append(
-            f"⚠ GRAVITY VIOLATION likely (avg_upward_flow={vert_flow:.2f}, "
-            f"{upward_frac*100:.0f}% frames upward). "
-            "Look for subjects or objects moving against gravity — rising on inclines, "
-            "floating upward, or reversing natural trajectories. "
-            "→ If confirmed: score physics_violations 8-10."
+            f"⚠ STRONG UPWARD IMAGE FLOW (peak={min_vert_flow:.1f}, "
+            f"{upward_frac*100:.0f}% of frames). This is an inspection clue only, "
+            "NOT proof of a gravity violation. First distinguish global camera motion "
+            "(handheld tilt/pan, stabilization, hills, vehicle suspension, parallax or "
+            "cuts) from persistent subject-relative motion. Score physics_violations "
+            "8-10 only if the supplied frames visibly show a specific object or subject "
+            "rising contrary to stable environmental reference points and physical "
+            "contact. State that exact visible violation in reasoning. Otherwise do not "
+            "raise the score from optical flow alone."
         )
     elif vert_flow is not None and vert_flow < -0.5:
         hints.append(
-            f"⚠ Possible upward motion detected (vert_flow={vert_flow:.2f}). "
-            "Check whether any subject moves against gravity. "
-            "→ If confirmed: score physics_violations 7-9."
+            f"⚠ Upward image flow measured (average={vert_flow:.2f}, "
+            f"{upward_frac*100:.0f}% of frames). Treat this only as a request to inspect "
+            "the frames. Ordinary camera/vehicle motion and perspective can cause it. "
+            "Do not increase physics_violations unless a localized, visually specific, "
+            "physically impossible trajectory persists across frames."
         )
 
     if sat_std is not None and sat_std < 3.0:
@@ -1191,7 +1191,28 @@ def _build_physics_summary(ctx: dict) -> str:
     # animal renders. Key tells are different from human deepfakes.
     avg_noise = ctx.get("avg_noise", 999)
     is_low_noise = avg_noise is not None and avg_noise < 300
-    if content_type in ("cinematic", "action") and not is_person and skin_ratio < 0.15:
+    # VERIFYD_GPT_REAL_SOCIAL_VISION_GUARD_V1
+    # Low human-skin coverage is not evidence that a scene contains wildlife.
+    # Require affirmative upstream animal semantics before adding the specialist
+    # wildlife rubric. Generic road, vehicle, machinery, landscape, fire and storm
+    # footage must remain under the ordinary action/cinematic rubric.
+    _animal_context_text = " ".join(str(ctx.get(k, "")) for k in (
+        "detected_objects", "object_labels", "semantic_labels", "content_labels",
+        "scene_description", "caption", "subject_type",
+    )).lower()
+    _animal_terms = (
+        "animal", "wildlife", "pet", "dog", "cat", "horse", "bull", "ram",
+        "goat", "deer", "elk", "moose", "bear", "bird", "snake", "creature",
+    )
+    _animal_affirmatively_detected = bool(
+        ctx.get("animal_detected")
+        or ctx.get("wildlife_detected")
+        or str(content_type).lower() in ("animal", "wildlife", "pet")
+        or any(term in _animal_context_text for term in _animal_terms)
+    )
+    if (_animal_affirmatively_detected and content_type in
+            ("cinematic", "action", "animal", "wildlife", "pet") and
+            not is_person and skin_ratio < 0.15):
         hints.append(
             "🚨 WILDLIFE/NATURE SCENE — TREAT AS AI UNTIL PROVEN REAL:\n"
             "AI-generated wildlife videos are among the most viral fake content on "
@@ -1495,11 +1516,22 @@ def _build_physics_summary(ctx: dict) -> str:
     except Exception:
         pass
 
-    if ctx.get("social_reencode_guard"):
+    # VERIFYD_GPT_REAL_SOCIAL_VISION_GUARD_V1
+    _social_source_text = " ".join(str(ctx.get(k, "")) for k in (
+        "source", "social_reencode_source", "source_url", "video_source",
+    )).lower()
+    _known_social_reencode = bool(
+        ctx.get("social_reencode_guard")
+        or any(token in _social_source_text for token in (
+            "twitter", "x.com", "tiktok", "instagram", "facebook", "fb.watch",
+            "youtube", "youtu.be", "smvd",
+        ))
+    )
+    if _known_social_reencode:
         lines.append("SOCIAL RE-ENCODE REAL-VIDEO REVIEW:")
         lines.append(
             "This input came from a social-platform link/re-encode with no platform AIGC label. "
-            "Do not treat TikTok/Instagram/Facebook compression as AI evidence. "
+            "Do not treat Twitter/X, TikTok, Instagram, Facebook, or YouTube compression as AI evidence. "
             "Blockiness, DCT grids, edge crawl, low flat-region noise, shadow drift, missing device metadata, "
             "and social-media transcode artifacts can occur in real phone videos."
         )
@@ -1508,6 +1540,13 @@ def _build_physics_summary(ctx: dict) -> str:
             "morphing face/hands/text, unstable anatomy, garbled/morphing text, AI watermark/source label, "
             "or a genuinely staged complete viral AI event pattern. For ordinary selfie/person/kitchen/social footage, "
             "score conservatively toward Real or Undetermined."
+        )
+        lines.append(
+            "For ordinary road, traffic, pedestrian, machinery, and vehicle footage, unusual vehicle geometry, "
+            "an uncommon event, handheld panning, suspension movement, hills, reflections, or dramatic framing "
+            "are not AI evidence. Do not choose Unknown-AI merely because the event looks surprising. A "
+            "physics_violations score above 7 requires a specific visible impossible interaction or trajectory "
+            "that can be named and located across the supplied frames."
         )
         lines.append("")
 
