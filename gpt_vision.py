@@ -53,6 +53,8 @@ log = logging.getLogger("verifyd.gpt_vision")
 # ─────────────────────────────────────────────────────────────
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 GPT_MODEL      = os.environ.get("VERIFYD_GPT_MODEL", "gpt-4o")
+GPT_MINI_MODEL = os.environ.get("VERIFYD_GPT_MINI_MODEL", "gpt-4o-mini")
+GPT_MINI_ENABLED = os.environ.get("VERIFYD_GPT_MINI_ENABLED", "true").strip().lower() in ("1", "true", "yes", "on")
 MAX_FRAMES     = 8           # increased from 6
 FRAME_QUALITY  = 85          # increased from 80
 MAX_DIMENSION  = 768         # increased from 512
@@ -608,7 +610,8 @@ Respond ONLY with this exact JSON — no markdown, no preamble, no extra text:
 #  GPT-4o Analysis
 # ─────────────────────────────────────────────────────────────
 def analyze_frames_with_gpt(frames_b64: list, physics_summary: str = "",
-                             content_type: str = "cinematic") -> dict:
+                             content_type: str = "cinematic",
+                             model: str | None = None) -> dict:
     """
     Send frames to GPT-4o for 12-dimension rubric scoring.
     Returns dict: ai_probability, scores, reasoning, flags, generator_guess.
@@ -651,7 +654,7 @@ def analyze_frames_with_gpt(frames_b64: list, physics_summary: str = "",
             })
 
         payload = {
-            "model":       GPT_MODEL,
+            "model":       model or GPT_MODEL,
             "messages":    [{"role": "user", "content": content}],
             "max_tokens":  500,         # reduced from 800 — typical response is 260-310 tokens, 500 gives 60% buffer
             "temperature": 0.1,
@@ -1574,6 +1577,86 @@ def _build_physics_summary(ctx: dict) -> str:
     return "\n".join(lines)
 
 
+
+# VERIFYD_GPT_MINI_EASY_CASE_ROUTER_V1
+def _vfyd_mini_easy_case(physics_context: dict) -> tuple[bool, str]:
+    """Return True only for ordinary, non-conflicting footage safe for mini triage."""
+    ctx = physics_context or {}
+    content_type = str(ctx.get("content_type", "") or "").strip().lower()
+
+    if not GPT_MINI_ENABLED:
+        return False, "disabled"
+
+    hard_flags = (
+        "ai_source_detected",
+        "ai_source_generator",
+        "viral_ai_reel_candidate",
+        "generic_mobile_filename",
+        "short_vertical_social_video",
+        "social_reencode_guard",
+        "youtube_signal_unreliable",
+        "surreal_animal_object_candidate",
+        "animal_object_candidate",
+        "possible_composite",
+    )
+    if any(bool(ctx.get(name)) for name in hard_flags):
+        return False, "risk_flag"
+
+    # Event, action, cinematic, crowd, animal and unknown footage stays on full GPT.
+    hard_content = {
+        "action", "animal", "cinematic", "crowd", "event", "sports",
+        "wildlife", "unknown", "",
+    }
+    if content_type in hard_content:
+        return False, f"content:{content_type or 'unknown'}"
+
+    try:
+        if float(ctx.get("deepfake_score", 0) or 0) >= 25:
+            return False, "deepfake_signal"
+    except Exception:
+        return False, "invalid_deepfake_signal"
+
+    # Only routine, visually simple categories enter the inexpensive first pass.
+    easy_content = {
+        "portrait", "selfie", "single_subject", "talking_head", "static",
+        "document", "screen", "landscape", "product",
+    }
+    if content_type not in easy_content:
+        return False, f"content:{content_type}"
+
+    return True, f"easy:{content_type}"
+
+
+def _vfyd_mini_requires_full_gpt(result: dict) -> tuple[bool, str]:
+    """Escalate ambiguous or suspicious mini results; mini never decides hard cases."""
+    if not result or not result.get("available", False):
+        return True, "mini_unavailable"
+    if result.get("gpt_refused"):
+        return True, "mini_refused"
+
+    try:
+        score_value = result.get("ai_probability", 50)
+score = int(50 if score_value is None else score_value)
+    except Exception:
+        return True, "invalid_score"
+
+    # The middle band is uncertain. Full GPT reviews it.
+    if 25 <= score <= 75:
+        return True, f"ambiguous:{score}"
+
+    generator = str(result.get("generator_guess", "") or "").strip().lower()
+    if generator in {"unknown-ai", "manipulated"}:
+        return True, f"generator:{generator}"
+
+    flags = result.get("flags", []) or result.get("top_flags", []) or []
+    flag_text = " ".join(str(item).lower() for item in flags)
+    suspicious = ("impossible", "morph", "artifact", "staged", "deepfake", "composite")
+    if any(term in flag_text for term in suspicious):
+        return True, "suspicious_flag"
+
+    return False, f"confident:{score}"
+
+
 # ─────────────────────────────────────────────────────────────
 #  Public interface
 # ─────────────────────────────────────────────────────────────
@@ -1610,7 +1693,31 @@ def gpt_vision_score_with_context(frames_b64: list, physics_context: dict) -> di
 
     content_type    = physics_context.get("content_type", "cinematic")
     physics_summary = _build_physics_summary(physics_context)
-    result          = analyze_frames_with_gpt(frames_b64, physics_summary, content_type)
+
+    _use_mini, _route_reason = _vfyd_mini_easy_case(physics_context)
+    if _use_mini:
+        log.info("GPT_MODEL_ROUTE: model=%s reason=%s", GPT_MINI_MODEL, _route_reason)
+        result = analyze_frames_with_gpt(
+            frames_b64, physics_summary, content_type, model=GPT_MINI_MODEL
+        )
+        _escalate, _escalate_reason = _vfyd_mini_requires_full_gpt(result)
+        if _escalate:
+            log.info(
+                "GPT_MODEL_ROUTE: escalating %s -> %s reason=%s",
+                GPT_MINI_MODEL, GPT_MODEL, _escalate_reason,
+            )
+            result = analyze_frames_with_gpt(
+                frames_b64, physics_summary, content_type, model=GPT_MODEL
+            )
+            result["model_route"] = f"mini_escalated:{_escalate_reason}"
+        else:
+            result["model_route"] = f"mini_easy:{_route_reason}"
+    else:
+        log.info("GPT_MODEL_ROUTE: model=%s reason=%s", GPT_MODEL, _route_reason)
+        result = analyze_frames_with_gpt(
+            frames_b64, physics_summary, content_type, model=GPT_MODEL
+        )
+        result["model_route"] = f"full:{_route_reason}"
     # VERIFYD_SURREAL_ANIMAL_OBJECT_GPT_GUARD_V2
     # Gemini/AI edits can preserve realistic people/backgrounds while inserting an impossible animal/object.
     # Lift GPT out of REAL/low-undetermined when visual staging plus forensic signals indicate AI-composite risk.
