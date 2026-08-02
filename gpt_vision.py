@@ -1636,7 +1636,7 @@ def _vfyd_mini_requires_full_gpt(result: dict) -> tuple[bool, str]:
 
     try:
         score_value = result.get("ai_probability", 50)
-score = int(50 if score_value is None else score_value)
+        score = int(50 if score_value is None else score_value)
     except Exception:
         return True, "invalid_score"
 
