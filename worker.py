@@ -1135,7 +1135,7 @@ def process_link_job(job_id: str, video_url: str, email: str, double_count: bool
     """Background job: download and analyze a video from a URL."""
     from detection import run_detection_multiclip
     from video import download_video_ytdlp
-    from database import insert_certificate, increment_user_uses
+    from database import insert_certificate, increment_user_uses, update_certificate_hashes
 
     r = _get_redis()
     LABEL_UI = {
@@ -1148,6 +1148,7 @@ def process_link_job(job_id: str, video_url: str, email: str, double_count: bool
         download_video_ytdlp(video_url, tmp_path)
         if not os.path.exists(tmp_path):
             raise RuntimeError(f"Download produced no file: {video_url}")
+        sha256 = _sha256_file(tmp_path)
         try:
             from database import get_or_create_user
             get_or_create_user(email)
@@ -1158,7 +1159,7 @@ def process_link_job(job_id: str, video_url: str, email: str, double_count: bool
         uses = 2 if double_count else 1
         for _ in range(uses):
             increment_user_uses(email)
-        insert_certificate(cert_id=job_id, email=email, original_file=video_url, label=label, authenticity=authenticity, ai_score=detail["ai_score"], sha256=None)
+        insert_certificate(cert_id=job_id, email=email, original_file=video_url, label=label, authenticity=authenticity, ai_score=detail["ai_score"], sha256=sha256)
         try:
             update_certificate_hashes(job_id, original_sha256=sha256)
         except Exception as hash_e:

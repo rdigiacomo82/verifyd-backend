@@ -384,11 +384,9 @@ def _check_metadata_override(video_path: str) -> tuple:
         log.warning("METADATA: AI source provenance check error: %s", e)
 
     # 1. Check sidecar file written by SMVD TikTok downloader
-    sidecar = video_path.replace(".mp4", ".meta.json")
-    if os.path.exists(sidecar):
+    meta = _vfyd_load_sidecar(video_path)
+    if meta:
         try:
-            with open(sidecar) as sf:
-                meta = _json.load(sf)
             aigc = int(meta.get("aigc_label_type", 0))
             log.info("METADATA: sidecar aigc_label_type=%d source=%s", aigc, meta.get("source", "?"))
             if aigc == 2:
@@ -597,15 +595,7 @@ def run_detection(video_path: str) -> tuple:
 
     # ── Combine ───────────────────────────────────────────────
     # Read video source from sidecar — needed for YouTube clash->real suppression
-    import os as _os_rd, json as _jsc_rd
-    _sidecar_rd = video_path.replace(".mp4", ".meta.json").replace(".MOV", ".meta.json")
-    _video_source = ""
-    if _os_rd.path.exists(_sidecar_rd):
-        try:
-            with open(_sidecar_rd) as _sf_rd:
-                _video_source = _jsc_rd.load(_sf_rd).get("source", "")
-        except Exception:
-            pass
+    _video_source = _vfyd_load_sidecar(video_path).get("source", "")
 
     gpt_failed = (
         not gpt_available or
@@ -1207,17 +1197,7 @@ def run_detection_multiclip(video_path: str) -> tuple:
 
     # Inject video source into all contexts so NPR compression guard can use it
     # Source is read from the sidecar file written by the downloader
-    import os as _os
-    _sidecar = video_path.replace(".mp4", ".meta.json").replace(".MOV", ".meta.json")
-    _video_source = ""
-    if _os.path.exists(_sidecar):
-        try:
-            import json as _jsc
-            with open(_sidecar) as _sf:
-                _smeta = _jsc.load(_sf)
-            _video_source = _smeta.get("source", "")
-        except Exception:
-            pass
+    _video_source = _vfyd_load_sidecar(video_path).get("source", "")
     if _video_source:
         for _ctx in all_signal_contexts:
             _ctx["source"] = _video_source
