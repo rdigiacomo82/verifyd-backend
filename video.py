@@ -1039,15 +1039,29 @@ def extract_clips_for_detection(video_path: str) -> list:
         offsets = [0.10, 0.45, 0.80]
 
     def _extract_one(offset_pct):
-        start_sec = int(duration * offset_pct) if duration > 0 else 0
+        # VERIFYD_SOCIAL_LINK_SAMPLING_PARITY_V1
+        # Treat configured offsets as clip centers. Re-encode instead of stream-copying:
+        # keyframe-aligned copies can begin early, retain source timestamps, and produce
+        # variable 9-12 second samples from social-platform renditions.
+        clip_duration = 8.0
+        center_sec = (duration * offset_pct) if duration > 0 else clip_duration / 2.0
+        start_sec = max(0.0, center_sec - clip_duration / 2.0)
+        if duration > clip_duration:
+            start_sec = min(start_sec, duration - clip_duration)
         out_path = os.path.join(TMP_DIR, f"{uuid.uuid4()}.mp4")
         cmd = [
             FFMPEG_BIN, "-y",
-            "-ss", str(start_sec),
+            "-ss", f"{start_sec:.3f}",
             "-i", video_path,
-            "-t", "6",
-            "-c", "copy",       # stream copy — file already normalized to 720p by worker.py
-            "-an",              # video only — audio detection runs on full file
+            "-t", f"{clip_duration:.1f}",
+            "-map", "0:v:0",
+            "-vf", "scale=320:-2:flags=lanczos,fps=30",
+            "-c:v", "libx264",
+            "-preset", "ultrafast",
+            "-crf", "24",
+            "-pix_fmt", "yuv420p",
+            "-an",              # audio detection runs once on the untouched full file
+            "-avoid_negative_ts", "make_zero",
             out_path,
         ]
         r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -1055,8 +1069,11 @@ def extract_clips_for_detection(video_path: str) -> list:
             log.error("extract_clips: ffmpeg failed at offset %.0f%%: %s",
                       offset_pct * 100, r.stderr.decode()[-200:])
             return None, offset_pct
-        log.info("extract_clips: clip at %.0f%% (t=%.0fs) → %s",
-                 offset_pct * 100, start_sec, out_path)
+        log.info(
+            "extract_clips: canonical clip center=%.0f%% start=%.3fs duration=%.1fs "
+            "format=320px/30fps/h264 → %s",
+            offset_pct * 100, start_sec, clip_duration, out_path,
+        )
         return out_path, offset_pct
 
     # Extract all clips in parallel

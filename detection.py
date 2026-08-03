@@ -1008,7 +1008,7 @@ def run_detection_multiclip(video_path: str) -> tuple:
                     codec = context.get("codec", "")
                     _video_source = context.get("source", "")
                     _is_social_source = any(s in _video_source.lower()
-                                            for s in ("tiktok", "smvd", "instagram", "youtube"))
+                                            for s in ("tiktok", "smvd", "instagram", "youtube", "twitter", "x.com", "t.co"))
                     is_social_compressed = (
                         noise_level < 600 or           # Low noise = over-compressed
                         "h264" in str(codec).lower() or # H.264 from social platforms
@@ -1294,7 +1294,7 @@ def run_detection_multiclip(video_path: str) -> tuple:
     # even on real phone videos. Pass this to GPT and the final override guard.
     _social_reencode_source_v2 = any(
         s in str(_video_source).lower()
-        for s in ("tiktok", "instagram", "facebook", "fb.watch", "youtube", "smvd")
+        for s in ("tiktok", "instagram", "facebook", "fb.watch", "youtube", "smvd", "twitter", "x.com", "t.co")
     )
     if _social_reencode_source_v2:
         signal_context["social_reencode_guard"] = True
@@ -1420,12 +1420,13 @@ def run_detection_multiclip(video_path: str) -> tuple:
         # since that addresses a different problem (insufficient pixels for reliable analysis).
         _is_youtube = "youtube" in _video_source.lower()
         _is_instagram = "instagram" in _video_source.lower()
+        _is_twitter = any(s in _video_source.lower() for s in ("twitter", "x.com", "t.co"))
         # Instagram re-encodes all videos to VP9 at 540p, creating compression
         # noise that mimics real camera grain — same problem as YouTube H264.
         # Suppress real_dominant and clash->real for Instagram sources.
         _youtube_signal_unreliable = (
             signal_context.get("youtube_lowres_adjusted", False) or
-            _is_youtube or _is_instagram
+            _is_youtube or _is_instagram or _is_twitter
         )
 
         clash_real   = (signal_ai_score < 50 and gpt_ai_score > 50 and gpt_ai_score < 75
@@ -1959,7 +1960,7 @@ def run_detection_multiclip(video_path: str) -> tuple:
     # GPT is neutral/refused, DINOv2 is strongly real, most clips are real-ish, and the pre-override score is below AI.
     _social_source_for_cine = any(
         s in str(_video_source).lower()
-        for s in ("tiktok", "instagram", "youtube", "facebook", "smvd")
+        for s in ("tiktok", "instagram", "youtube", "facebook", "smvd", "twitter", "x.com", "t.co")
     )
     _gpt_neutral_or_refused_for_cine = bool(gpt_refused) or (45 <= int(gpt_ai_score or 50) <= 60 and (not gpt_flags or _social_source_for_cine))
     _realish_clip_count_for_cine = sum(1 for s in signal_scores if int(s) <= 45)
