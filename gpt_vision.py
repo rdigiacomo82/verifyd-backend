@@ -1611,7 +1611,7 @@ def _vfyd_mini_easy_case(physics_context: dict) -> tuple[bool, str]:
         return False, f"content:{content_type or 'unknown'}"
 
     try:
-        if float(ctx.get("deepfake_score", 0) or 0) >= 25:
+        if float(ctx.get("deepfake_score", 0) or 0) >= 40:
             return False, "deepfake_signal"
     except Exception:
         return False, "invalid_deepfake_signal"
