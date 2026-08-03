@@ -21,7 +21,10 @@
 import logging
 import os
 from detector    import detect_ai
-from gpt_vision  import gpt_vision_score_with_context, extract_key_frames
+from gpt_vision  import (
+    gpt_vision_score_with_context, extract_key_frames,
+    reconcile_x_forensic_explanation,
+)
 
 # AI_SOURCE_PROVENANCE_PATCH: explicit AI generator/source text detector
 try:
@@ -2440,6 +2443,7 @@ def run_detection_multiclip(video_path: str) -> tuple:
     # Some AI social videos are downloaded from X as platform/Lavf MP4s and then normalized.
     # GPT/DINO can under-call these as real because faces/background/noise look phone-like.
     # When multiple forensic render signals agree, keep link analysis close to manual upload analysis.
+    _tw_explanation_context = None
     try:
         _tw_ctxs = all_signal_contexts or []
         _tw_source = str(_video_source or signal_context.get("source", "") or "").lower()
@@ -2526,14 +2530,30 @@ def run_detection_multiclip(video_path: str) -> tuple:
                     _existing_flags = [str(_existing_flags)]
                 gpt_result["flags"] = list(dict.fromkeys(["twitter_social_forensic_ai_pattern"] + _existing_flags))
 
-                # VERIFYD_TWITTER_SOCIAL_REASONING_OVERRIDE_V1
-                # The final forensic override supersedes GPT's earlier "Real" visual reasoning.
-                # Keep the public explanation aligned with the final AI/Tampering result.
-                gpt_result["reasoning"] = (
-                    "This video was flagged for AI / tampering indicators based on a forensic pattern found in the X/Twitter link analysis. "
-                    "Although some visual elements may appear natural, the downloaded social video showed multiple render/compression forensic signals that are inconsistent with ordinary camera footage, including high channel correlation across clips, Lavf/null-vendor pipeline metadata, shadow inconsistency, omni-directional motion noise, edge-crawl behavior, temporal consistency anomalies, and DCT/grid artifacts. "
-                    "These combined signals caused VeriFYD to classify the file as AI / Tampering Detected rather than Authenticity Supported."
+                # VERIFYD_X_RESULT_AWARE_EXPLANATION_V1
+                # Save only the evidence that actually triggered this final override.
+                # The result-aware GPT call runs after every later guard and the final
+                # label are settled, so its prose cannot disagree with the result card.
+                _tw_fallback_reasoning = (
+                    "Although the scene looks visually realistic, the X/Twitter analysis found a persistent forensic pattern across separate portions of the video. "
+                    "Unusually high color-channel correlation and repeated NPR/render-grid evidence appeared in all three samples, while abnormal multidirectional motion appeared in multiple samples. "
+                    "Because these independent indicators persisted across the video, they outweighed the realistic surface appearance and resulted in an AI / tampering classification."
                 )
+                gpt_result["reasoning"] = _tw_fallback_reasoning
+                _tw_explanation_context = {
+                    "legacy_override": bool(_tw_social_render_ai),
+                    "cross_clip_override": bool(_tw_cross_clip_render_ai),
+                    "channel_correlation": [round(v, 4) for v in _tw_valid_chan_vals],
+                    "npr_scores": [round(v, 1) for v in _tw_npr_vals],
+                    "omnidirectional_motion_votes": sum(1 for o in _tw_omni_vals if o >= 3.50),
+                    "shadow_drift_max": round(_tw_max_shadow, 3),
+                    "edge_crawl_max": round(_tw_max_edge_cov, 3),
+                    "temporal_consistency_max": round(_tw_max_tcv, 2),
+                    "dct_grid_max": round(_tw_max_dct, 2),
+                    "original_gpt_probability": int(gpt_ai_score or 0),
+                    "original_gpt_reasoning": str(gpt_reasoning or "")[:600],
+                    "fallback_reasoning": _tw_fallback_reasoning,
+                }
             log.info(
                 "VERIFYD_TWITTER_SOCIAL_FORENSIC_OVERRIDE_V1: combined %.1f->%.1f source=%s lavf=%s legacy=%s cross_clip=%s chan_all=%s chan_max=%.3f npr=%s omni_votes=%d shadow=%.3f omni=%.3f edge_cov=%.3f tcv=%.2f dct=%.2f pre_heavy=%d votes=%d gpt=%d",
                 _old_combined, combined_ai_score, _tw_source, _tw_lavf_flag,
@@ -2698,6 +2718,46 @@ def run_detection_multiclip(video_path: str) -> tuple:
                     _agg_ctx[_k] = min(_agg_ctx.get(_k, 999), _v)
                 else:
                     _agg_ctx[_k] = max(_agg_ctx.get(_k, 0), _v)
+
+    # VERIFYD_X_RESULT_AWARE_EXPLANATION_V1
+    # This extra, text-only GPT call is intentionally limited to a finalized
+    # X/Twitter forensic override whose AI result conflicts with the original
+    # visual GPT conclusion. No other video path pays the latency or cost.
+    _result_aware_reasoning = None
+    if (
+        label == "AI"
+        and mode == "X/Twitter social forensic AI override"
+        and isinstance(_tw_explanation_context, dict)
+    ):
+        _old_gpt_text = str(gpt_reasoning or "").lower()
+        _contradictory_real_conclusion = any(
+            phrase in _old_gpt_text
+            for phrase in (
+                "genuine camera footage", "genuine footage", "authentic camera",
+                "ordinary camera footage", "consistent with real", "appears real",
+                "appears genuine", "suggesting genuine", "no ai artifacts",
+            )
+        )
+        if int(gpt_ai_score if gpt_ai_score is not None else 50) < 45 or _contradictory_real_conclusion:
+            try:
+                _result_aware_reasoning = reconcile_x_forensic_explanation(
+                    final_label=label,
+                    authenticity=authenticity,
+                    ai_score=int(round(combined_ai_score)),
+                    content_type=content_type,
+                    evidence=_tw_explanation_context,
+                )
+            except Exception as _e:
+                log.warning("VERIFYD_X_RESULT_AWARE_EXPLANATION_V1 failed: %s", _e)
+
+        # Always use the evidence-specific fallback for this override if GPT is
+        # unavailable, refuses, or fails the consistency validator.
+        if not _result_aware_reasoning:
+            _result_aware_reasoning = _tw_explanation_context.get("fallback_reasoning")
+        if _result_aware_reasoning:
+            gpt_reasoning = _result_aware_reasoning
+            gpt_result["reasoning"] = _result_aware_reasoning
+            gpt_flags = gpt_result.get("flags", gpt_flags)
 
     # ── Content-aware reasoning ───────────────────────────────
     user_reasoning = _build_content_aware_reasoning(

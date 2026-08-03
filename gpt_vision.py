@@ -876,6 +876,100 @@ def analyze_frames_with_gpt(frames_b64: list, physics_summary: str = "",
         }
 
 
+def reconcile_x_forensic_explanation(
+    final_label: str,
+    authenticity: int,
+    ai_score: int,
+    content_type: str,
+    evidence: dict,
+) -> str | None:
+    """Write result-aware prose only for the X forensic AI override.
+
+    The caller owns scope and final classification. This function cannot change
+    a score or label; it only explains the supplied settled result. A strict
+    validator rejects prose that concludes the footage is genuine/authentic.
+    """
+    if not OPENAI_API_KEY or str(final_label).upper() != "AI":
+        return None
+
+    try:
+        import json
+        import urllib.request
+
+        safe_evidence = {
+            "cross_clip_override": bool(evidence.get("cross_clip_override")),
+            "channel_correlation": evidence.get("channel_correlation", []),
+            "npr_scores": evidence.get("npr_scores", []),
+            "omnidirectional_motion_votes": evidence.get("omnidirectional_motion_votes", 0),
+            "shadow_drift_max": evidence.get("shadow_drift_max", 0),
+            "edge_crawl_max": evidence.get("edge_crawl_max", 0),
+            "temporal_consistency_max": evidence.get("temporal_consistency_max", 0),
+            "dct_grid_max": evidence.get("dct_grid_max", 0),
+            "original_gpt_probability": evidence.get("original_gpt_probability", 50),
+        }
+        prompt = (
+            "Write a concise 2-3 sentence explanation for a finalized VeriFYD video result. "
+            "The settled classification is AI / Tampering Detected and is authoritative; "
+            "do not change, question, or repeat the scores. Explain specifically how the "
+            "persistent cross-clip forensic evidence outweighed the realistic appearance "
+            "and the earlier visual-model assessment. Mention only supplied evidence, use "
+            "plain language, and do not claim or imply that the footage is genuine, authentic, "
+            "natural camera footage, or free of AI artifacts. Return only the explanation.\n\n"
+            f"Content type: {content_type or 'video'}\n"
+            f"Final label: {final_label}\n"
+            f"Authenticity: {int(authenticity)}\n"
+            f"AI/manipulation: {int(ai_score)}\n"
+            f"Forensic evidence: {json.dumps(safe_evidence, sort_keys=True)}"
+        )
+        payload = {
+            "model": os.environ.get("VERIFYD_GPT_EXPLANATION_MODEL", GPT_MINI_MODEL),
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 220,
+            "temperature": 0.15,
+        }
+        req = urllib.request.Request(
+            "https://api.openai.com/v1/chat/completions",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {OPENAI_API_KEY}",
+            },
+            method="POST",
+        )
+        with _gpt_semaphore:
+            with urllib.request.urlopen(req, timeout=35) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        explanation = str(data["choices"][0]["message"]["content"]).strip()
+        if explanation.startswith("```"):
+            explanation = explanation.strip("`").strip()
+
+        lowered = explanation.lower()
+        forbidden = (
+            "genuine camera footage", "genuine footage", "authentic camera footage",
+            "appears authentic", "appears genuine", "suggesting genuine",
+            "consistent with real camera", "no ai artifacts", "no signs of ai",
+            "free of ai artifacts", "classified as real",
+        )
+        if not (100 <= len(explanation) <= 900):
+            log.warning("result-aware explanation rejected: invalid length=%d", len(explanation))
+            return None
+        if any(phrase in lowered for phrase in forbidden):
+            log.warning("result-aware explanation rejected: contradicts final AI label")
+            return None
+        if not any(term in lowered for term in ("forensic", "correlation", "render", "motion", "cross-clip", "sample")):
+            log.warning("result-aware explanation rejected: supplied evidence not referenced")
+            return None
+
+        log.info(
+            "VERIFYD_X_RESULT_AWARE_EXPLANATION_V1: generated model=%s chars=%d",
+            payload["model"], len(explanation),
+        )
+        return explanation
+    except Exception as e:
+        log.warning("result-aware X explanation unavailable: %s", e)
+        return None
+
+
 def _unavailable_result(reason: str) -> dict:
     return {
         "ai_probability":  50,
