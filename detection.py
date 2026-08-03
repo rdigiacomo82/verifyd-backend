@@ -2456,11 +2456,32 @@ def run_detection_multiclip(video_path: str) -> tuple:
             return default
 
         _tw_chan_vals = [_tw_float(ctx, "chan_corr", "channel_corr") for ctx in _tw_ctxs]
-        _tw_all_high_chan = bool(_tw_chan_vals) and all(c >= 0.90 for c in _tw_chan_vals if c > 0)
+        _tw_valid_chan_vals = [c for c in _tw_chan_vals if c > 0]
+        _tw_all_high_chan = bool(_tw_valid_chan_vals) and all(c >= 0.90 for c in _tw_valid_chan_vals)
         _tw_max_chan = max(_tw_chan_vals or [0.0])
         _tw_max_shadow = max([_tw_float(ctx, "shadow_drift") for ctx in _tw_ctxs] or [0.0])
-        _tw_max_omni = max([_tw_float(ctx, "omni_flow_ent", "omni_ent", "omni_flow_entropy") for ctx in _tw_ctxs] or [0.0])
+        _tw_omni_vals = [
+            _tw_float(ctx, "omni_flow_ent", "omni_ent", "omni_flow_entropy")
+            for ctx in _tw_ctxs
+        ]
+        _tw_max_omni = max(_tw_omni_vals or [0.0])
         _tw_max_edge_cov = max([_tw_float(ctx, "edge_cov", "edge_cov_var") for ctx in _tw_ctxs] or [0.0])
+
+        # VERIFYD_TWITTER_CROSS_CLIP_RENDER_CONSENSUS_V1
+        # Social transcoding can manufacture any one of these measurements, so
+        # require the same independent render pattern across all three canonical
+        # samples. This catches long-form generated action footage even when GPT,
+        # DINOv2 and face-oriented deepfake models are fooled by synthetic grain.
+        _tw_npr_vals = [_tw_float(ctx, "npr_score") for ctx in _tw_ctxs]
+        _tw_all_very_high_chan = (
+            len(_tw_valid_chan_vals) >= 3 and
+            all(c >= 0.94 for c in _tw_valid_chan_vals)
+        )
+        _tw_persistent_npr = (
+            len(_tw_npr_vals) >= 3 and
+            sum(1 for n in _tw_npr_vals if n >= 38.0) >= 3
+        )
+        _tw_repeated_omni = sum(1 for o in _tw_omni_vals if o >= 3.50) >= 2
         _tw_max_tcv = max([_tw_float(ctx, "tcv", "temporal_consistency_var", "temporal_coherence_var") for ctx in _tw_ctxs] or [0.0])
         _tw_max_dct = max([_tw_float(ctx, "dct", "dct_score") for ctx in _tw_ctxs] or [0.0])
         _tw_max_pre_heavy = max(
@@ -2486,8 +2507,16 @@ def run_detection_multiclip(video_path: str) -> tuple:
             _tw_votes >= 5 and
             combined_ai_score < 65
         )
+        _tw_cross_clip_render_ai = (
+            _tw_is_x and
+            len(_tw_ctxs) >= 3 and
+            _tw_all_very_high_chan and
+            _tw_persistent_npr and
+            _tw_repeated_omni and
+            combined_ai_score < 65
+        )
 
-        if _tw_social_render_ai:
+        if _tw_social_render_ai or _tw_cross_clip_render_ai:
             _old_combined = combined_ai_score
             combined_ai_score = 65.0
             mode = "X/Twitter social forensic AI override"
@@ -2506,10 +2535,13 @@ def run_detection_multiclip(video_path: str) -> tuple:
                     "These combined signals caused VeriFYD to classify the file as AI / Tampering Detected rather than Authenticity Supported."
                 )
             log.info(
-                "VERIFYD_TWITTER_SOCIAL_FORENSIC_OVERRIDE_V1: combined %.1f->%.1f source=%s lavf=%s chan_all=%s chan_max=%.3f shadow=%.3f omni=%.3f edge_cov=%.3f tcv=%.2f dct=%.2f pre_heavy=%d votes=%d gpt=%d",
-                _old_combined, combined_ai_score, _tw_source, _tw_lavf_flag, _tw_all_high_chan,
-                _tw_max_chan, _tw_max_shadow, _tw_max_omni, _tw_max_edge_cov, _tw_max_tcv,
-                _tw_max_dct, _tw_max_pre_heavy, _tw_votes, gpt_ai_score
+                "VERIFYD_TWITTER_SOCIAL_FORENSIC_OVERRIDE_V1: combined %.1f->%.1f source=%s lavf=%s legacy=%s cross_clip=%s chan_all=%s chan_max=%.3f npr=%s omni_votes=%d shadow=%.3f omni=%.3f edge_cov=%.3f tcv=%.2f dct=%.2f pre_heavy=%d votes=%d gpt=%d",
+                _old_combined, combined_ai_score, _tw_source, _tw_lavf_flag,
+                _tw_social_render_ai, _tw_cross_clip_render_ai, _tw_all_high_chan,
+                _tw_max_chan, [round(n, 1) for n in _tw_npr_vals],
+                sum(1 for o in _tw_omni_vals if o >= 3.50), _tw_max_shadow,
+                _tw_max_omni, _tw_max_edge_cov, _tw_max_tcv, _tw_max_dct,
+                _tw_max_pre_heavy, _tw_votes, gpt_ai_score
             )
     except Exception as _e:
         log.warning("VERIFYD_TWITTER_SOCIAL_FORENSIC_OVERRIDE_V1 skipped: %s", _e)
