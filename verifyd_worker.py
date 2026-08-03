@@ -9,6 +9,7 @@ isolation/timeouts without downloading and constructing DINOv2 for each job.
 import logging
 import os
 import sys
+import time
 
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper())
@@ -39,6 +40,42 @@ def _preload_dinov2() -> bool:
         return False
 
 
+# VERIFYD_DEEPFAKE_PERSISTENT_WORKER_WARMUP_V1
+def _preload_deepfake() -> bool:
+    """Load the existing deepfake detector cache in the long-lived RQ parent."""
+    if os.getenv("VERIFYD_PRELOAD_DEEPFAKE", "1").strip().lower() in {
+        "0", "false", "no", "off"
+    }:
+        log.info("Deepfake parent preload disabled by VERIFYD_PRELOAD_DEEPFAKE")
+        return False
+
+    started = time.perf_counter()
+    try:
+        import deepfake_detector
+
+        loaded = bool(deepfake_detector._load_model())
+        elapsed = time.perf_counter() - started
+        if loaded:
+            log.info(
+                "Deepfake model preloaded once in RQ parent pid=%s duration=%.2fs",
+                os.getpid(), elapsed,
+            )
+        else:
+            log.warning(
+                "Deepfake preload unavailable after %.2fs; jobs will continue normally",
+                elapsed,
+            )
+        return loaded
+    except Exception:
+        # Warmup must never prevent the queue worker from starting. The detector
+        # retains its existing graceful-degradation behavior inside each job.
+        log.exception(
+            "Deepfake parent preload failed after %.2fs; starting worker normally",
+            time.perf_counter() - started,
+        )
+        return False
+
+
 def main() -> int:
     from redis import Redis
     from rq import Queue, Worker
@@ -53,6 +90,7 @@ def main() -> int:
         queue_names = ["verifyd"]
 
     _preload_dinov2()
+    _preload_deepfake()
 
     connection = Redis.from_url(redis_url)
     queues = [Queue(name, connection=connection) for name in queue_names]
