@@ -2185,8 +2185,23 @@ def run_detection_multiclip(video_path: str) -> tuple:
     _bull_signal_votes += 1 if _max_flicker_bull >= 4.0 else 0
     _bull_signal_votes += 1 if _max_dct_bull >= 9.0 else 0
 
+    # VERIFYD_REAL_SOCIAL_FALSE_POSITIVE_GUARD_V3
+    # Require actual animal/collision semantics before the bull-specific hard override.
+    # Tan buildings/rubble can inflate the HSV skin proxy and handheld pans can mimic
+    # motion/bg-drift/omni signatures after social-platform re-encoding.
+    _bull_semantic_text = " ".join(
+        [str(gpt_reasoning or "")] + [str(f) for f in (gpt_flags or [])]
+    ).lower()
+    _bull_semantic_terms = (
+        "bull", "ram ", "ramming", "goat", "deer", "elk", "moose", "horse",
+        "bear", "cow", "bison", "elephant", "animal", "wildlife", "predator",
+        "collision", "impact", "charges", "charging", "horns", "hooves",
+    )
+    _bull_semantic_match = any(term in _bull_semantic_text for term in _bull_semantic_terms)
+
     _bull_collision_ai = (
         _bull_action_content and
+        _bull_semantic_match and
         _max_motion_bull >= 18.0 and
         _max_bg_bull >= 40.0 and
         _max_chan_bull >= 0.90 and
@@ -2265,8 +2280,17 @@ def run_detection_multiclip(video_path: str) -> tuple:
     _robust_votes += 1 if _robust_flicker >= 4.0 else 0
     _robust_votes += 1 if _robust_dct >= 9.0 else 0
 
+    # Generic robust override now requires independent semantic/model confirmation.
+    # Transport/re-encode artifacts alone are not enough to force AI.
+    _robust_semantic_or_model_confirm = (
+        _bull_semantic_match or
+        (not gpt_failed and gpt_ai_score >= 55) or
+        _robust_pre_heavy >= 55
+    )
+
     _robust_cinematic_action_ai = (
         _robust_action_content and
+        _robust_semantic_or_model_confirm and
         _robust_motion >= 18.0 and
         _robust_bg >= 38.0 and
         _robust_chan >= 0.90 and
@@ -2636,6 +2660,44 @@ def run_detection_multiclip(video_path: str) -> tuple:
             _guard_physics, _guard_generator, gpt_ai_score,
             _guard_old_combined, combined_ai_score,
         )
+
+    # VERIFYD_SOCIAL_REAL_FORENSIC_CONSENSUS_V3
+    # Final safety valve for genuine social-platform footage after all hard AI
+    # overrides. Requires independent REAL agreement; explicit AI provenance wins.
+    _v3_source = str(_video_source or "").lower()
+    _v3_is_social = any(tok in _v3_source for tok in (
+        "tiktok", "instagram", "facebook", "fb.watch", "youtube", "youtu.be",
+        "twitter", "x.com", "t.co", "smvd"
+    ))
+    _v3_ctxs = all_signal_contexts or []
+    _v3_clip_max = max(signal_scores or [signal_ai_score])
+    _v3_realish_clips = sum(1 for sc in (signal_scores or [signal_ai_score]) if int(sc) <= 45)
+    _v3_dino_vals = [float(ctx.get("dino_score", ctx.get("dinov2_score", 50.0)) or 50.0) for ctx in _v3_ctxs if ("dino_score" in ctx or "dinov2_score" in ctx)]
+    _v3_deepfake_vals = [float(ctx.get("deepfake_score", ctx.get("deepfake", 50.0)) or 50.0) for ctx in _v3_ctxs if ("deepfake_score" in ctx or "deepfake" in ctx)]
+    _v3_dino_real = (not _v3_dino_vals) or min(_v3_dino_vals) <= 15.0
+    _v3_deepfake_real = (not _v3_deepfake_vals) or min(_v3_deepfake_vals) <= 25.0
+    _v3_real_optics_votes = sum(1 for ctx in _v3_ctxs if 0.0 < float(ctx.get("hf_kurtosis", 999.0) or 999.0) <= 20.0)
+    _v3_physical_edge_votes = sum(1 for ctx in _v3_ctxs if float(ctx.get("edge_mean_var", ctx.get("edge_mvar", 0.0)) or 0.0) >= 0.08)
+    _v3_scores = gpt_result.get("scores", {}) or {}
+    _v3_generator_guess = str(gpt_result.get("generator_guess", "") or "").lower()
+    _v3_gpt_physics = int(_v3_scores.get("physics_violations", 5) or 5)
+    _v3_gpt_temporal = int(_v3_scores.get("temporal_stability", 5) or 5)
+    _v3_gpt_generator = int(_v3_scores.get("generator_artifacts", 5) or 5)
+    _v3_gpt_real = (not gpt_failed and gpt_ai_score <= 45 and ("real" in _v3_generator_guess or (_v3_gpt_physics <= 5 and _v3_gpt_temporal <= 5 and _v3_gpt_generator <= 5)))
+    _v3_explicit_ai_source = bool(override and str(ov_label or "").upper() not in ("", "REAL", "LAVF_AI_PIPELINE"))
+    _v3_real_forensic_consensus = (
+        _v3_is_social and not _v3_explicit_ai_source and n_clips >= 2 and
+        signal_ai_score <= 40 and _v3_clip_max <= 50 and
+        _v3_realish_clips >= max(2, n_clips - 1) and _v3_gpt_real and
+        _v3_dino_real and _v3_deepfake_real and
+        _v3_real_optics_votes >= max(1, n_clips - 1) and
+        _v3_physical_edge_votes >= max(1, n_clips - 1)
+    )
+    if _v3_real_forensic_consensus and combined_ai_score > 42.0:
+        _v3_old = combined_ai_score
+        combined_ai_score = 42.0
+        mode = "social real-video forensic consensus guard v3"
+        log.info("SOCIAL_REAL_FORENSIC_CONSENSUS_V3: capped false-positive hard overrides; source=%s signal=%d clips=%s gpt=%d generator=%s combined %.1f→%.1f", _video_source, signal_ai_score, signal_scores, gpt_ai_score, _v3_generator_guess or "unknown", _v3_old, combined_ai_score)
 
     # VERIFYD_TWITTER_REAL_VIDEO_GUARD_V2
     # Protect ordinary Twitter/X road and vehicle footage when every sampled
