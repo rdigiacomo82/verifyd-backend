@@ -1168,6 +1168,20 @@ def run_detection_multiclip(video_path: str) -> tuple:
                 _ctx["deepfake_signals"] = df_signals
                 if df_signals.get("available") and df_score > 0:
                     df_contribution = get_deepfake_contribution(df_score, _score, _ct)
+
+                    # VERIFYD_SHORT_ACTION_TEMPORAL_GUARD_V1
+                    # Face-oriented deepfake models can score a fully synthetic
+                    # action scene as "real" when the rendered face itself is clean.
+                    # For action/cinematic footage, low DeepfakeDetector scores are
+                    # therefore neutral evidence rather than proof of camera origin.
+                    if _ct in ("action", "cinematic") and df_contribution < 0:
+                        log.info(
+                            "DeepfakeDetector @%.0f%%: negative contribution %+d suppressed "
+                            "for %s whole-scene generative risk",
+                            _pct * 100, df_contribution, _ct,
+                        )
+                        df_contribution = 0
+
                     _ctx["deepfake_contribution"] = df_contribution
                     if df_contribution != 0:
                         log.info(
@@ -1796,6 +1810,91 @@ def run_detection_multiclip(video_path: str) -> tuple:
             )
         else:
             log.info("Hybrid flag set but all clips agree (%s) — no clamping applied", signal_scores)
+
+    # ── Short portrait action temporal AI guard ──────────────────
+    # VERIFYD_SHORT_ACTION_TEMPORAL_GUARD_V1
+    #
+    # Modern generative video can look convincingly photographic frame-by-frame,
+    # especially after social-media recompression or VeriFYD canonicalization.
+    # In short vertical action clips, require a narrow multi-signal temporal
+    # composite before overriding a low GPT / low blended score.
+    #
+    # video.py uses one canonical clip for videos under 12 seconds, so n_clips==1
+    # is used here as a conservative short-form proxy.
+    def _sat_float(_ctx, *keys, default=0.0):
+        for _key in keys:
+            try:
+                _val = _ctx.get(_key)
+                if _val is not None:
+                    return float(_val)
+            except Exception:
+                pass
+        return float(default)
+
+    _short_action_ctxs = all_signal_contexts or []
+    _short_action_trigger = False
+    _short_action_details = {}
+
+    if n_clips == 1 and content_type in ("action", "cinematic") and _short_action_ctxs:
+        _sa_ctx = _short_action_ctxs[0]
+
+        _sa_portrait = bool(_sa_ctx.get("portrait", False))
+        _sa_sync = _sat_float(_sa_ctx, "motion_sync", default=1.0)
+        _sa_tcv = _sat_float(_sa_ctx, "tcv", default=0.0)
+        _sa_chan = _sat_float(
+            _sa_ctx,
+            "channel_corr",
+            "chan_corr",
+            "channel_correlation",
+            "inter_channel_corr",
+            default=0.0,
+        )
+        _sa_motion = _sat_float(_sa_ctx, "motion", "avg_motion", default=0.0)
+
+        # Production miss 581d8cb2...:
+        # action=True, portrait=True, sync=.052, TCV=2470,
+        # channel correlation=.8987, motion=23.7.
+        #
+        # Thresholds intentionally leave margin around that case while still
+        # requiring all independent measurements to agree.
+        _short_action_trigger = (
+            _sa_portrait
+            and _sa_motion >= 15.0
+            and _sa_sync <= 0.065
+            and _sa_tcv >= 1500.0
+            and _sa_chan >= 0.885
+        )
+
+        _short_action_details = {
+            "portrait": _sa_portrait,
+            "motion": _sa_motion,
+            "motion_sync": _sa_sync,
+            "tcv": _sa_tcv,
+            "channel_corr": _sa_chan,
+        }
+
+    if _short_action_trigger:
+        old_combined = combined_ai_score
+
+        # Do not allow the ordinary both-real fusion path to certify a clip
+        # when an independent, high-risk temporal composite has fired.
+        combined_ai_score = max(combined_ai_score, 55.0)
+        mode = "short-action-temporal-guard"
+
+        log.warning(
+            "SHORT_ACTION_TEMPORAL_GUARD: portrait=%s motion=%.2f "
+            "motion_sync=%.3f tcv=%.2f chan_corr=%.4f "
+            "gpt=%d signal=%d combined %.1f→%.1f",
+            _short_action_details.get("portrait"),
+            _short_action_details.get("motion", 0.0),
+            _short_action_details.get("motion_sync", 1.0),
+            _short_action_details.get("tcv", 0.0),
+            _short_action_details.get("channel_corr", 0.0),
+            gpt_ai_score,
+            signal_ai_score,
+            old_combined,
+            combined_ai_score,
+        )
 
     # ── Device-recorded / screen-recorded AI override ─────────────
     # Real Android/iPhone metadata is strong evidence that a device recorded the
