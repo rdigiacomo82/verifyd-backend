@@ -121,6 +121,23 @@ def analyze_orthogonal_photo(image_path: str) -> Dict:
     try:
         image = cv2.imread(image_path)
 
+        if image is not None:
+            try:
+                from photo_detector import _extract_active_photo_content
+                image, _canvas_info = _extract_active_photo_content(image)
+
+                if _canvas_info.get("canvas_detected", False):
+                    log.info(
+                        "ORTHO_PHOTO_SHADOW: using active photo content "
+                        "after canvas crop fraction=%.3f",
+                        _canvas_info.get("canvas_fraction", 0.0),
+                    )
+            except Exception as _canvas_exc:
+                log.debug(
+                    "ORTHO_PHOTO_SHADOW: canvas crop unavailable: %s",
+                    _canvas_exc,
+                )
+
         if image is None:
             result = _empty_result("image could not be decoded by OpenCV")
             log.info(
