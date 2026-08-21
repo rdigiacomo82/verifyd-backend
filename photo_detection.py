@@ -287,6 +287,39 @@ def run_photo_detection(image_path: str) -> tuple:
     log.info("Photo signal score: %d  content_type: %s",
              signal_score, signal_context.get("content_type", "photo"))
 
+    # ========================================================
+    # VERIFYD_ORTHOGONAL_PHOTO_SHADOW_V1
+    #
+    # DINOv2 representation-space forensic telemetry.
+    # Shadow mode only: this result MUST NOT alter combined,
+    # authenticity, label, thresholds, GPT weighting or
+    # certificate behavior.
+    # ========================================================
+    ortho_photo = {
+        "available": False,
+        "enabled": False,
+        "ai_score": 0,
+        "contribution": 0,
+        "classification_enabled": False,
+    }
+
+    try:
+        from orthogonal_photo_detector import (
+            analyze_orthogonal_photo,
+            orthogonal_photo_shadow_enabled,
+        )
+
+        if orthogonal_photo_shadow_enabled():
+            ortho_photo = analyze_orthogonal_photo(
+                image_path
+            )
+
+    except Exception as _ortho_exc:
+        log.warning(
+            "ORTHO_PHOTO_SHADOW: skipped after error: %s",
+            _ortho_exc,
+        )
+
     # ── Engine 2: GPT-4o vision ──────────────────────────────
     frames = _extract_photo_frames(image_path)
     if not frames:
@@ -498,6 +531,14 @@ def run_photo_detection(image_path: str) -> tuple:
         "metadata":           signal_context.get("metadata", {}),
         "threshold_real":     THRESHOLD_REAL,
         "threshold_undet":    THRESHOLD_UNDETERMINED,
+
+        # VERIFYD_ORTHOGONAL_PHOTO_SHADOW_V1
+        # Observability only. Never used in V1 scoring.
+        "orthogonal_photo":   ortho_photo,
+        "orthogonal_photo_available": ortho_photo.get(
+            "available", False
+        ),
+        "orthogonal_photo_contribution": 0,
     }
 
     return authenticity, label, detail
