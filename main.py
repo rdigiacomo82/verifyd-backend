@@ -6306,3 +6306,13 @@ except Exception as _mail_shield_route_error:
     _verifyd_mail_shield_logging.getLogger("verifyd.mail_shield").warning(
         "Mail Shield route registration skipped: %s", _mail_shield_route_error
     )
+
+
+# VERIFYD_LENS_CLOUD_ROUTER_V04
+try:
+    from lens_cloud import router as lens_cloud_router
+    app.include_router(lens_cloud_router)
+    print("[verifyd-lens] cloud routes enabled")
+except Exception as exc:
+    print(f"[verifyd-lens] cloud routes not enabled: {exc}")
+
