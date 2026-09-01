@@ -116,6 +116,24 @@ def init_db() -> None:
             )
         """)
 
+        # ── VeriFYD Lens Purchases ───────────────────────────
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS lens_purchases (
+                id                  SERIAL PRIMARY KEY,
+                paypal_order_id     TEXT UNIQUE NOT NULL,
+                paypal_capture_id   TEXT UNIQUE,
+                buyer_email         TEXT NOT NULL DEFAULT '',
+                product_id          TEXT NOT NULL DEFAULT 'verifyd_lens_beta',
+                amount              TEXT NOT NULL DEFAULT '1.00',
+                currency            TEXT NOT NULL DEFAULT 'USD',
+                status              TEXT NOT NULL DEFAULT 'CREATED',
+                entitlement_token   TEXT UNIQUE,
+                created_at          TEXT NOT NULL,
+                completed_at        TEXT,
+                activated_at        TEXT
+            )
+        """)
+
         # ── OTP Verification ─────────────────────────────────
         cur.execute("""
             CREATE TABLE IF NOT EXISTS email_otp (
@@ -1119,4 +1137,3 @@ def save_trust_desk_package_to_vault(
         "verification_report": verification_report,
         "message": "Trust Desk package saved to VeriFYD Vault for future reference.",
     }
-
