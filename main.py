@@ -4234,6 +4234,180 @@ async def lens_activate(request: Request):
 
 
 # ─────────────────────────────────────────────
+# VeriFYD Lens — gated installer delivery
+# ─────────────────────────────────────────────
+
+@app.post("/lens/download-status")
+async def lens_download_status(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid_json"}, status_code=400)
+
+    entitlement_token = str(body.get("entitlement_token") or "").strip()
+    if not entitlement_token:
+        return JSONResponse({"error": "entitlement_token_required"}, status_code=400)
+
+    purchase = get_lens_entitlement(entitlement_token)
+    if not purchase:
+        return JSONResponse({"error": "lens_entitlement_not_found"}, status_code=404)
+
+    try:
+        from storage import get_lens_installer_info
+        installer = get_lens_installer_info()
+    except Exception:
+        log.exception("Lens installer status lookup failed")
+        return JSONResponse(
+            {
+                "entitled": True,
+                "installer_available": False,
+                "error": "installer_status_unavailable",
+                "message": "Your purchase is verified, but installer status is temporarily unavailable.",
+            },
+            status_code=503,
+        )
+
+    available = bool(installer.get("available"))
+    return JSONResponse({
+        "entitled": True,
+        "purchase_status": purchase.get("status", ""),
+        "buyer_email": purchase.get("buyer_email", ""),
+        "activated": bool(purchase.get("activated_at")),
+        "installer_available": available,
+        "installer": {
+            "filename": installer.get("filename", "VeriFYD_Lens_Setup.exe"),
+            "version": installer.get("version", ""),
+            "size_bytes": installer.get("size_bytes", 0),
+            "last_modified": installer.get("last_modified", ""),
+        },
+        "download_endpoint": f"{BASE_URL}/lens/download" if available else "",
+        "message": (
+            "VeriFYD Lens is ready to download."
+            if available
+            else "Your purchase is verified. The VeriFYD Lens installer is not yet available."
+        ),
+    })
+
+
+@app.post("/lens/download")
+async def lens_download(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid_json"}, status_code=400)
+
+    entitlement_token = str(body.get("entitlement_token") or "").strip()
+    if not entitlement_token:
+        return JSONResponse({"error": "entitlement_token_required"}, status_code=400)
+
+    purchase = get_lens_entitlement(entitlement_token)
+    if not purchase:
+        return JSONResponse({"error": "lens_entitlement_not_found"}, status_code=404)
+
+    try:
+        from storage import get_lens_installer_info, get_lens_installer_download_url
+
+        installer = get_lens_installer_info()
+        if not installer.get("available"):
+            return JSONResponse(
+                {
+                    "error": "lens_installer_not_available",
+                    "message": "Your purchase is verified, but the VeriFYD Lens installer is not yet available.",
+                },
+                status_code=404,
+            )
+
+        download_url = get_lens_installer_download_url(expires=600)
+
+        log.info(
+            "Lens installer URL issued: email=%s version=%s",
+            purchase.get("buyer_email", ""),
+            installer.get("version", ""),
+        )
+
+        return JSONResponse({
+            "status": "READY",
+            "filename": installer.get("filename", "VeriFYD_Lens_Setup.exe"),
+            "version": installer.get("version", ""),
+            "expires_in": 600,
+            "download_url": download_url,
+        })
+
+    except FileNotFoundError:
+        return JSONResponse({"error": "lens_installer_not_available"}, status_code=404)
+    except Exception as exc:
+        log.exception("Lens installer download failed")
+        return JSONResponse(
+            {"error": "lens_download_failed", "message": str(exc)[:160]},
+            status_code=500,
+        )
+
+
+@app.post("/admin/lens/upload-installer")
+async def admin_lens_upload_installer(
+    file: UploadFile = File(...),
+    key: str = Form(...),
+    version: str = Form(""),
+):
+    if not _is_admin(key):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    filename = os.path.basename(file.filename or "")
+    if os.path.splitext(filename)[1].lower() != ".exe":
+        return JSONResponse({"error": "installer_must_be_exe"}, status_code=415)
+
+    max_bytes = 250 * 1024 * 1024
+    tmp_path = os.path.join(
+        tempfile.gettempdir(),
+        f"verifyd_lens_installer_{uuid.uuid4()}.exe",
+    )
+
+    bytes_written = 0
+    try:
+        with open(tmp_path, "wb") as out:
+            while chunk := await file.read(1024 * 1024):
+                bytes_written += len(chunk)
+                if bytes_written > max_bytes:
+                    return JSONResponse(
+                        {"error": "installer_too_large", "max_mb": 250},
+                        status_code=413,
+                    )
+                out.write(chunk)
+
+        if bytes_written < 1024:
+            return JSONResponse({"error": "installer_file_too_small"}, status_code=400)
+
+        from storage import upload_lens_installer
+        installer = upload_lens_installer(tmp_path, version=version)
+
+        log.info(
+            "Admin uploaded Lens installer: version=%s size=%s",
+            installer.get("version", ""),
+            installer.get("size_bytes", 0),
+        )
+
+        return JSONResponse({
+            "status": "uploaded",
+            "installer": installer,
+        })
+
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except Exception as exc:
+        log.exception("Admin Lens installer upload failed")
+        return JSONResponse(
+            {"error": "lens_installer_upload_failed", "message": str(exc)[:160]},
+            status_code=500,
+        )
+    finally:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
+
+
+# ─────────────────────────────────────────────
 #  PayPal Webhook Handler
 #
 #  Listens for subscription events from PayPal

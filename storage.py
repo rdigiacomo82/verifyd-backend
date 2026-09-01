@@ -433,6 +433,108 @@ def get_trust_desk_download_url(job_id: str, expires: int = CERT_URL_TTL) -> str
     )
 
 
+# ─────────────────────────────────────────────
+# VeriFYD Lens installer storage
+# ─────────────────────────────────────────────
+
+LENS_BUCKET = os.environ.get("R2_LENS_BUCKET", BUCKET)
+LENS_INSTALLER_KEY = "lens/releases/current/VeriFYD_Lens_Setup.exe"
+LENS_INSTALLER_FILENAME = "VeriFYD_Lens_Setup.exe"
+LENS_INSTALLER_URL_TTL = 600
+
+
+def upload_lens_installer(installer_path: str, version: str = "") -> dict:
+    installer_path = str(installer_path or "").strip()
+    version = str(version or "").strip()
+
+    if not installer_path or not os.path.isfile(installer_path):
+        raise ValueError("lens_installer_file_not_found")
+    if os.path.splitext(installer_path)[1].lower() != ".exe":
+        raise ValueError("lens_installer_must_be_exe")
+
+    client = _get_client()
+    client.upload_file(
+        installer_path,
+        LENS_BUCKET,
+        LENS_INSTALLER_KEY,
+        ExtraArgs={
+            "ContentType": "application/vnd.microsoft.portable-executable",
+            "ContentDisposition": f'attachment; filename="{LENS_INSTALLER_FILENAME}"',
+            "Metadata": {
+                "type": "verifyd_lens_installer",
+                "version": version or "unknown",
+            },
+        },
+    )
+
+    info = get_lens_installer_info()
+    log.info(
+        "storage: uploaded Lens installer → r2://%s/%s version=%s size=%s",
+        LENS_BUCKET,
+        LENS_INSTALLER_KEY,
+        version or "unknown",
+        info.get("size_bytes", 0),
+    )
+    return info
+
+
+def lens_installer_exists() -> bool:
+    try:
+        client = _get_client()
+        client.head_object(Bucket=LENS_BUCKET, Key=LENS_INSTALLER_KEY)
+        return True
+    except Exception:
+        return False
+
+
+def get_lens_installer_info() -> dict:
+    try:
+        client = _get_client()
+        head = client.head_object(Bucket=LENS_BUCKET, Key=LENS_INSTALLER_KEY)
+        metadata = head.get("Metadata") or {}
+        modified = head.get("LastModified")
+        return {
+            "available": True,
+            "filename": LENS_INSTALLER_FILENAME,
+            "version": str(metadata.get("version") or "unknown"),
+            "size_bytes": int(head.get("ContentLength") or 0),
+            "last_modified": modified.isoformat() if hasattr(modified, "isoformat") else str(modified or ""),
+        }
+    except Exception as exc:
+        log.info("storage: Lens installer not available: %s", exc)
+        return {
+            "available": False,
+            "filename": LENS_INSTALLER_FILENAME,
+            "version": "",
+            "size_bytes": 0,
+            "last_modified": "",
+        }
+
+
+def get_lens_installer_download_url(expires: int = LENS_INSTALLER_URL_TTL) -> str:
+    if not lens_installer_exists():
+        raise FileNotFoundError("lens_installer_not_available")
+
+    try:
+        expires = int(expires)
+    except Exception:
+        expires = LENS_INSTALLER_URL_TTL
+
+    expires = max(60, min(expires, 900))
+
+    client = _get_client()
+    return client.generate_presigned_url(
+        "get_object",
+        Params={
+            "Bucket": LENS_BUCKET,
+            "Key": LENS_INSTALLER_KEY,
+            "ResponseContentDisposition": f'attachment; filename="{LENS_INSTALLER_FILENAME}"',
+            "ResponseContentType": "application/vnd.microsoft.portable-executable",
+        },
+        ExpiresIn=expires,
+    )
+
+
 # ── Convenience: is R2 available? ────────────────────────────
 def r2_available() -> bool:
     return _is_configured()
