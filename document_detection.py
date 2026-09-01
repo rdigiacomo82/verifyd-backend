@@ -1758,6 +1758,8 @@ def _gpt_document_score(text: str, meta: Dict[str, Any], ext: str) -> Tuple[int,
                 "authoritative for all future-date statements. "
                 "Do not infer tampering merely because creation and modification dates differ when "
                 "their ordering is normal. "
+                "Missing author/creator metadata is common in exported or sample documents and is a "
+                "provenance limitation, not by itself evidence of AI generation or tampering. "
                 "Prefer concrete forensic evidence: explicit AI/generative producer metadata, "
                 "impossible timestamp ordering, verified future-dated metadata, structural corruption, "
                 "conflicting provenance, or multiple independent signals. "
@@ -1800,16 +1802,42 @@ def _gpt_document_score(text: str, meta: Dict[str, Any], ext: str) -> Tuple[int,
         reasoning = str(data.get("reasoning", ""))[:1200]
 
         if not verified_future_fields:
-            future_terms = ("future date", "future-dated", "in the future", "future timestamp")
+            future_terms = (
+                "future date", "future-dated", "future timestamp", "future timestamps",
+                "in the future", "future metadata", "future-dating",
+            )
             flags = [f for f in flags if not any(t in f.lower() for t in future_terms)]
-            if any(t in reasoning.lower() for t in future_terms):
-                reasoning = re.sub(
-                    r"[^.]*\b(?:future[- ]dated|future date|future timestamp|in the future)\b[^.]*\.?",
-                    "",
-                    reasoning,
-                    flags=re.I,
-                )
-                reasoning = re.sub(r"\s+", " ", reasoning).strip()
+            if reasoning and any(t in reasoning.lower() for t in future_terms):
+                sentences = re.split(r"(?<=[.!?])\s+", reasoning)
+                reasoning = " ".join(
+                    sentence for sentence in sentences
+                    if not any(t in sentence.lower() for t in future_terms)
+                ).strip()
+
+        weak_author_terms = (
+            "no author", "missing author", "lack of author",
+            "author information", "author metadata", "author details",
+        )
+        flags = [f for f in flags if not any(t in f.lower() for t in weak_author_terms)]
+
+        if reasoning and any(t in reasoning.lower() for t in weak_author_terms):
+            sentences = re.split(r"(?<=[.!?])\s+", reasoning)
+            kept = []
+            for sentence in sentences:
+                low = sentence.lower()
+                if any(t in low for t in weak_author_terms) and any(
+                    w in low for w in ("suspicion", "suspicious", "authenticity", "tamper", "ai-generated")
+                ):
+                    continue
+                kept.append(sentence)
+            reasoning = " ".join(kept).strip()
+
+        if not reasoning:
+            reasoning = (
+                "No strong semantic evidence of AI generation or material tampering was identified. "
+                "Missing authorship metadata or templated wording is treated as a provenance limitation, "
+                "not as proof of synthetic content."
+            )
 
         lower_text = (text or "").lower()
         placeholder_markers = (
