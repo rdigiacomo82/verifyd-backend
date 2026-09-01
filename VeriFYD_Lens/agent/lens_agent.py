@@ -4,7 +4,7 @@ from urllib.parse import urlparse, unquote
 from pathlib import Path
 from typing import Optional
 from concurrent.futures import ThreadPoolExecutor
-import hashlib, ipaddress, mimetypes, os, re, shutil, socket, subprocess, time, uuid
+import hashlib, ipaddress, json, mimetypes, os, re, shutil, socket, subprocess, time, uuid
 import httpx
 
 app = FastAPI(title="VeriFYD Lens Agent", version="0.4.2")
@@ -20,7 +20,41 @@ CLOUD_KEY = os.environ.get("VERIFYD_LENS_API_KEY","").strip()
 CLOUD_POLL_SECONDS = int(os.environ.get("VERIFYD_LENS_POLL_SECONDS","3"))
 CLOUD_TIMEOUT_SECONDS = int(os.environ.get("VERIFYD_LENS_CLOUD_TIMEOUT","240"))
 
+# VERIFYD_LENS_ACTIVATION_V1
+ACTIVATION_FILE = BASE / "activation.json"
+
+def _load_activation():
+    try:
+        if ACTIVATION_FILE.exists():
+            data = json.loads(ACTIVATION_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return {}
+
+def _save_activation(data):
+    BASE.mkdir(parents=True, exist_ok=True)
+    tmp = ACTIVATION_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    tmp.replace(ACTIVATION_FILE)
+
+def _activation_state():
+    data = _load_activation()
+    return {
+        "activated": bool(data.get("activated")),
+        "email": str(data.get("email") or ""),
+        "activated_at": str(data.get("activated_at") or ""),
+    }
+
+def _current_entitlement_token():
+    return str(_load_activation().get("entitlement_token") or "").strip()
+
 class UrlScanRequest(BaseModel): url: str
+
+class ActivationRequest(BaseModel):
+    email: str
+    entitlement_token: str
 def clamp(v): return max(0,min(100,int(v)))
 def classify(score): return "LOW CONCERN" if score >= 80 else "REVIEW RECOMMENDED" if score >= 50 else "HIGH CONCERN"
 
@@ -112,8 +146,13 @@ def unique_destination(directory,filename):
     raise HTTPException(500,"Could not allocate a unique destination filename.")
 
 def cloud_analyze(path,filename):
-    if not CLOUD_KEY: return {"status":"NOT_CONFIGURED","finding":"VeriFYD cloud authenticity analysis is not configured.","authenticity_score":None,"label":None}
-    headers={"X-VeriFYD-Lens-Key":CLOUD_KEY}
+    entitlement_token = _current_entitlement_token()
+    if entitlement_token:
+        headers={"X-VeriFYD-Lens-Entitlement":entitlement_token}
+    elif CLOUD_KEY:
+        headers={"X-VeriFYD-Lens-Key":CLOUD_KEY}
+    else:
+        return {"status":"NOT_CONFIGURED","finding":"VeriFYD Lens is not activated.","authenticity_score":None,"label":None}
     try:
         with path.open("rb") as fh:
             r=httpx.post(f"{CLOUD_URL}/lens/analyze",headers=headers,files={"file":(filename,fh,"application/octet-stream")},timeout=120)
@@ -170,7 +209,55 @@ def scan_worker(scan_id,url):
         SCAN_STATE[scan_id].update(status="ERROR",summary="SCAN FAILED",security_score=None,authenticity_score=None,trust_score=None,findings=[f"Lens scan failed: {type(e).__name__}: {e}"])
 
 @app.get("/health")
-def health(): return {"ok":True,"product":"VeriFYD Lens","version":"0.4.2","tagline":"Don't Download Blind.","cloud_configured":bool(CLOUD_KEY),"cloud_url":CLOUD_URL,"automatic_scan_api":True}
+def health():
+    activation = _activation_state()
+    return {
+        "ok":True,
+        "product":"VeriFYD Lens",
+        "version":"0.4.2",
+        "tagline":"Don't Download Blind.",
+        "cloud_configured":bool(CLOUD_KEY or _current_entitlement_token()),
+        "cloud_url":CLOUD_URL,
+        "automatic_scan_api":True,
+        "activated":activation["activated"],
+        "activated_email":activation["email"],
+    }
+
+@app.get("/activation/status")
+def activation_status():
+    return _activation_state()
+
+@app.post("/activation/activate")
+def activation_activate(req: ActivationRequest):
+    email = (req.email or "").strip().lower()
+    token = (req.entitlement_token or "").strip()
+
+    if not email or "@" not in email:
+        raise HTTPException(400, "A valid purchaser email is required.")
+    if not token:
+        raise HTTPException(400, "An activation token is required.")
+
+    try:
+        r = httpx.post(
+            f"{CLOUD_URL}/lens/activate",
+            json={"email": email, "entitlement_token": token},
+            timeout=30,
+        )
+        data = r.json()
+    except Exception as e:
+        raise HTTPException(503, f"Could not contact VeriFYD activation service: {type(e).__name__}")
+
+    if r.status_code >= 400 or not data.get("activated"):
+        raise HTTPException(403, "VeriFYD Lens activation could not be verified.")
+
+    _save_activation({
+        "activated": True,
+        "email": email,
+        "entitlement_token": token,
+        "activated_at": (data.get("purchase") or {}).get("activated_at") or "",
+    })
+
+    return {"ok": True, "activated": True, "email": email}
 @app.post("/scan/start")
 def start_scan(req:UrlScanRequest):
     url_findings(req.url); sid=str(uuid.uuid4())
