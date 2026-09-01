@@ -39,7 +39,10 @@ from database import (init_db, insert_certificate, increment_downloads,
                       save_certificate_to_vault, get_vault_record, get_vault_record_by_cert_id,
                       is_email_verified, create_otp, verify_otp,
                       create_api_key, get_api_key, increment_api_key_uses,
-                      revoke_api_key, list_api_keys, update_api_key_branding)
+                      revoke_api_key, list_api_keys, update_api_key_branding,
+                      create_lens_purchase, get_lens_purchase_by_order_id,
+                      complete_lens_purchase, get_lens_entitlement,
+                      activate_lens_entitlement)
 from video import clip_first_6_seconds, stamp_video, download_video_ytdlp
 
 log = logging.getLogger("verifyd.main")
@@ -3939,6 +3942,295 @@ async def analyze_link_json(request: Request, video_url: str, email: str = ""):
     # The URL cache key is stored so the worker can write the cache result.
     log.info("analyze-link-json: returning job_id=%s for frontend polling", job_id)
     return JSONResponse({"job_id": job_id, "status": "queued"})
+
+
+# ─────────────────────────────────────────────
+#  VeriFYD Lens — PayPal one-time purchase
+#  Separate from existing subscription billing.
+# ─────────────────────────────────────────────
+
+LENS_PRODUCT_ID = "verifyd_lens_beta"
+LENS_PRICE = "1.00"
+LENS_CURRENCY = "USD"
+
+
+def _lens_paypal_base_url() -> str:
+    mode = (os.environ.get("PAYPAL_MODE", "live") or "live").strip().lower()
+    return "https://api.paypal.com" if mode == "live" else "https://api.sandbox.paypal.com"
+
+
+def _lens_paypal_access_token() -> str:
+    client_id = (os.environ.get("PAYPAL_CLIENT_ID", "") or "").strip()
+    secret = (os.environ.get("PAYPAL_SECRET", "") or "").strip()
+
+    if not client_id or not secret:
+        raise RuntimeError("PayPal credentials are not configured.")
+
+    response = requests.post(
+        f"{_lens_paypal_base_url()}/v1/oauth2/token",
+        auth=(client_id, secret),
+        data={"grant_type": "client_credentials"},
+        headers={"Accept": "application/json", "Accept-Language": "en_US"},
+        timeout=15,
+    )
+
+    if response.status_code >= 400:
+        log.error(
+            "Lens PayPal OAuth failed: status=%s body=%s",
+            response.status_code,
+            response.text[:500],
+        )
+        raise RuntimeError("Unable to authenticate with PayPal.")
+
+    payload = response.json()
+    token = (payload.get("access_token") or "").strip()
+    if not token:
+        raise RuntimeError("PayPal did not return an access token.")
+    return token
+
+
+def _lens_purchase_public_payload(record: dict) -> dict:
+    record = dict(record or {})
+    return {
+        "product_id": record.get("product_id", LENS_PRODUCT_ID),
+        "amount": record.get("amount", LENS_PRICE),
+        "currency": record.get("currency", LENS_CURRENCY),
+        "status": record.get("status", ""),
+        "buyer_email": record.get("buyer_email", ""),
+        "entitlement_token": record.get("entitlement_token", ""),
+        "created_at": record.get("created_at", ""),
+        "completed_at": record.get("completed_at", ""),
+        "activated_at": record.get("activated_at", ""),
+    }
+
+
+@app.post("/lens/paypal/create-order")
+async def lens_paypal_create_order(request: Request):
+    buyer_email = ""
+    try:
+        body = await request.json()
+        buyer_email = normalize_email(str(body.get("email") or ""))
+    except Exception:
+        pass
+
+    if buyer_email and not is_valid_email(buyer_email):
+        return JSONResponse({"error": "invalid_email"}, status_code=400)
+
+    try:
+        access_token = _lens_paypal_access_token()
+
+        response = requests.post(
+            f"{_lens_paypal_base_url()}/v2/checkout/orders",
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json",
+                "PayPal-Request-Id": f"lens-create-{uuid.uuid4()}",
+            },
+            json={
+                "intent": "CAPTURE",
+                "purchase_units": [{
+                    "reference_id": LENS_PRODUCT_ID,
+                    "custom_id": LENS_PRODUCT_ID,
+                    "description": "VeriFYD Lens Beta — One-Time Introductory Purchase",
+                    "amount": {
+                        "currency_code": LENS_CURRENCY,
+                        "value": LENS_PRICE,
+                    },
+                }],
+            },
+            timeout=20,
+        )
+
+        if response.status_code not in (200, 201):
+            log.error(
+                "Lens PayPal create-order failed: status=%s body=%s",
+                response.status_code,
+                response.text[:700],
+            )
+            return JSONResponse({"error": "paypal_create_order_failed"}, status_code=502)
+
+        paypal_order = response.json()
+        order_id = (paypal_order.get("id") or "").strip()
+        if not order_id:
+            return JSONResponse({"error": "paypal_order_id_missing"}, status_code=502)
+
+        create_lens_purchase(
+            paypal_order_id=order_id,
+            buyer_email=buyer_email,
+            product_id=LENS_PRODUCT_ID,
+            amount=LENS_PRICE,
+            currency=LENS_CURRENCY,
+        )
+
+        return JSONResponse({
+            "status": "CREATED",
+            "order_id": order_id,
+            "product_id": LENS_PRODUCT_ID,
+            "amount": LENS_PRICE,
+            "currency": LENS_CURRENCY,
+        })
+
+    except RuntimeError as exc:
+        log.error("Lens PayPal create-order auth/config error: %s", exc)
+        return JSONResponse(
+            {"error": "paypal_authentication_failed", "message": str(exc)},
+            status_code=503,
+        )
+    except Exception as exc:
+        log.exception("Lens PayPal create-order failed")
+        return JSONResponse(
+            {"error": "paypal_create_order_failed", "message": str(exc)[:180]},
+            status_code=500,
+        )
+
+
+@app.post("/lens/paypal/capture-order/{order_id}")
+async def lens_paypal_capture_order(order_id: str):
+    order_id = (order_id or "").strip()
+    if not order_id:
+        return JSONResponse({"error": "order_id_required"}, status_code=400)
+
+    try:
+        existing = get_lens_purchase_by_order_id(order_id)
+        if not existing:
+            return JSONResponse({"error": "lens_purchase_not_found"}, status_code=404)
+
+        if existing.get("status") == "COMPLETED" and existing.get("entitlement_token"):
+            return JSONResponse({
+                "status": "COMPLETED",
+                "order_id": order_id,
+                "purchase": _lens_purchase_public_payload(existing),
+            })
+
+        access_token = _lens_paypal_access_token()
+
+        response = requests.post(
+            f"{_lens_paypal_base_url()}/v2/checkout/orders/{order_id}/capture",
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json",
+                "PayPal-Request-Id": f"lens-capture-{order_id}",
+            },
+            json={},
+            timeout=20,
+        )
+
+        if response.status_code not in (200, 201):
+            log.error(
+                "Lens PayPal capture failed: order=%s status=%s body=%s",
+                order_id,
+                response.status_code,
+                response.text[:700],
+            )
+            return JSONResponse({"error": "paypal_capture_failed"}, status_code=502)
+
+        payload = response.json()
+        if str(payload.get("status") or "").upper() != "COMPLETED":
+            return JSONResponse({"error": "paypal_order_not_completed"}, status_code=409)
+
+        units = payload.get("purchase_units") or []
+        if not units:
+            return JSONResponse({"error": "paypal_purchase_unit_missing"}, status_code=502)
+
+        unit = units[0] or {}
+        reference_id = str(unit.get("reference_id") or unit.get("custom_id") or "").strip()
+
+        captures = ((unit.get("payments") or {}).get("captures") or [])
+        capture = captures[0] if captures else {}
+        capture_id = str(capture.get("id") or "").strip()
+
+        amount_info = capture.get("amount") or unit.get("amount") or {}
+        captured_amount = str(amount_info.get("value") or "").strip()
+        captured_currency = str(amount_info.get("currency_code") or "").strip().upper()
+
+        if reference_id != LENS_PRODUCT_ID:
+            return JSONResponse({"error": "paypal_product_mismatch"}, status_code=409)
+
+        if captured_amount != LENS_PRICE or captured_currency != LENS_CURRENCY:
+            return JSONResponse({"error": "paypal_amount_mismatch"}, status_code=409)
+
+        if not capture_id:
+            return JSONResponse({"error": "paypal_capture_id_missing"}, status_code=502)
+
+        payer = payload.get("payer") or {}
+        buyer_email = normalize_email(
+            str(payer.get("email_address") or existing.get("buyer_email") or "")
+        )
+        if not buyer_email:
+            return JSONResponse({"error": "paypal_buyer_email_missing"}, status_code=409)
+
+        completed = complete_lens_purchase(
+            paypal_order_id=order_id,
+            paypal_capture_id=capture_id,
+            buyer_email=buyer_email,
+            amount=LENS_PRICE,
+            currency=LENS_CURRENCY,
+        )
+
+        return JSONResponse({
+            "status": "COMPLETED",
+            "order_id": order_id,
+            "purchase": _lens_purchase_public_payload(completed),
+        })
+
+    except RuntimeError as exc:
+        log.error("Lens PayPal capture auth/config error: %s", exc)
+        return JSONResponse(
+            {"error": "paypal_authentication_failed", "message": str(exc)},
+            status_code=503,
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=409)
+    except Exception as exc:
+        log.exception("Lens PayPal capture failed for order=%s", order_id)
+        return JSONResponse(
+            {"error": "paypal_capture_failed", "message": str(exc)[:180]},
+            status_code=500,
+        )
+
+
+@app.get("/lens/entitlement/{entitlement_token}")
+def lens_entitlement_status(entitlement_token: str):
+    record = get_lens_entitlement(entitlement_token)
+    if not record:
+        return JSONResponse({"error": "lens_entitlement_not_found"}, status_code=404)
+
+    safe = _lens_purchase_public_payload(record)
+    safe.pop("entitlement_token", None)
+    return JSONResponse({
+        "valid": True,
+        "entitlement_token": entitlement_token,
+        "purchase": safe,
+    })
+
+
+@app.post("/lens/activate")
+async def lens_activate(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid_json"}, status_code=400)
+
+    entitlement_token = str(body.get("entitlement_token") or "").strip()
+    buyer_email = normalize_email(str(body.get("email") or ""))
+
+    if not entitlement_token:
+        return JSONResponse({"error": "entitlement_token_required"}, status_code=400)
+    if not buyer_email or not is_valid_email(buyer_email):
+        return JSONResponse({"error": "valid_email_required"}, status_code=400)
+
+    record = activate_lens_entitlement(entitlement_token, buyer_email)
+    if not record:
+        return JSONResponse({"error": "lens_activation_failed"}, status_code=403)
+
+    safe = _lens_purchase_public_payload(record)
+    safe.pop("entitlement_token", None)
+
+    return JSONResponse({
+        "activated": True,
+        "entitlement_token": entitlement_token,
+        "purchase": safe,
+    })
 
 
 # ─────────────────────────────────────────────
