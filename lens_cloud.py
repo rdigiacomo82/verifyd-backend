@@ -17,6 +17,8 @@ from queue_helper import (
     get_job_result,
 )
 
+from database import get_lens_entitlement
+
 router = APIRouter(prefix="/lens", tags=["VeriFYD Lens"])
 
 LENS_API_KEY = os.environ.get("VERIFYD_LENS_API_KEY", "").strip()
@@ -33,11 +35,29 @@ DOCUMENT_EXTS = {
     ".txt", ".rtf", ".csv", ".odt", ".ods", ".odp", ".yaml", ".yml",
 }
 
-def _authorize(x_verifyd_lens_key: str | None):
-    if not LENS_API_KEY:
-        raise HTTPException(status_code=503, detail="Lens cloud API is not configured.")
-    if not x_verifyd_lens_key or x_verifyd_lens_key != LENS_API_KEY:
-        raise HTTPException(status_code=401, detail="Invalid Lens API key.")
+# VERIFYD_LENS_ENTITLEMENT_AUTH_V1
+def _authorize(
+    x_verifyd_lens_key: str | None,
+    x_verifyd_lens_entitlement: str | None = None,
+):
+    entitlement = (x_verifyd_lens_entitlement or "").strip()
+    if entitlement:
+        record = get_lens_entitlement(entitlement)
+        if record and str(record.get("status") or "").upper() == "COMPLETED":
+            return {
+                "auth_type": "entitlement",
+                "buyer_email": str(record.get("buyer_email") or ""),
+            }
+        raise HTTPException(status_code=401, detail="Invalid Lens entitlement.")
+
+    shared_key = (x_verifyd_lens_key or "").strip()
+    if shared_key and LENS_API_KEY and shared_key == LENS_API_KEY:
+        return {
+            "auth_type": "shared_key",
+            "buyer_email": "",
+        }
+
+    raise HTTPException(status_code=401, detail="Lens authentication is required.")
 
 def _media_type(filename: str) -> str:
     ext = Path(filename or "").suffix.lower()
@@ -52,8 +72,11 @@ def _media_type(filename: str) -> str:
     raise HTTPException(status_code=415, detail=f"Unsupported Lens file type: {ext or 'unknown'}")
 
 @router.get("/health")
-def lens_health(x_verifyd_lens_key: str | None = Header(default=None)):
-    _authorize(x_verifyd_lens_key)
+def lens_health(
+    x_verifyd_lens_key: str | None = Header(default=None),
+    x_verifyd_lens_entitlement: str | None = Header(default=None),
+):
+    _authorize(x_verifyd_lens_key, x_verifyd_lens_entitlement)
     return {
         "ok": True,
         "product": "VeriFYD Lens Cloud",
@@ -65,8 +88,9 @@ def lens_health(x_verifyd_lens_key: str | None = Header(default=None)):
 async def lens_analyze(
     file: UploadFile = File(...),
     x_verifyd_lens_key: str | None = Header(default=None),
+    x_verifyd_lens_entitlement: str | None = Header(default=None),
 ):
-    _authorize(x_verifyd_lens_key)
+    auth_context = _authorize(x_verifyd_lens_key, x_verifyd_lens_entitlement)
 
     filename = os.path.basename(file.filename or "lens-upload.bin")
     media_type = _media_type(filename)
@@ -88,7 +112,11 @@ async def lens_analyze(
                     raise HTTPException(status_code=413, detail="Lens cloud upload exceeds configured size limit.")
                 out.write(chunk)
 
-        tracking_email = f"lens_{job_id[:12]}@verifyd-enterprise.com"
+        tracking_email = (
+            auth_context.get("buyer_email")
+            if auth_context.get("auth_type") == "entitlement" and auth_context.get("buyer_email")
+            else f"lens_{job_id[:12]}@verifyd-enterprise.com"
+        )
 
         if media_type == "video":
             enqueue_upload(job_id, raw_path, filename, tracking_email, suppress_email=True)
@@ -127,8 +155,9 @@ async def lens_analyze(
 def lens_job(
     job_id: str,
     x_verifyd_lens_key: str | None = Header(default=None),
+    x_verifyd_lens_entitlement: str | None = Header(default=None),
 ):
-    _authorize(x_verifyd_lens_key)
+    _authorize(x_verifyd_lens_key, x_verifyd_lens_entitlement)
     result = get_job_result(job_id) or {}
 
     lifecycle = str(
