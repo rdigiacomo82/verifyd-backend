@@ -1706,10 +1706,39 @@ def _text_stats_score(text: str) -> Tuple[int, List[str], Dict[str, Any]]:
 
 
 def _gpt_document_score(text: str, meta: Dict[str, Any], ext: str) -> Tuple[int, str, List[str], bool]:
-    """Use OpenAI if configured. Safe fallback returns unavailable."""
+    """Use OpenAI if configured, with deterministic metadata/date guardrails."""
     api_key = os.environ.get("OPENAI_API_KEY", "")
     if not api_key:
         return 50, "GPT document analysis unavailable: OPENAI_API_KEY not set.", [], False
+
+    md = dict(meta.get("metadata") or {})
+
+    # VERIFYD_DOCUMENT_REASONING_DATE_GUARD_V1
+    created_raw = _metadata_lookup(
+        md, ("creationdate", "created", "create_date", "creation-date", "datecreated")
+    )
+    modified_raw = _metadata_lookup(
+        md, ("moddate", "modified", "modifydate", "lastmodified", "date")
+    )
+    created_dt = _parse_any_date(created_raw)
+    modified_dt = _parse_any_date(modified_raw)
+    now_utc = datetime.utcnow().replace(microsecond=0)
+
+    verified_future_fields: List[str] = []
+    if created_dt and created_dt > now_utc:
+        verified_future_fields.append("creation")
+    if modified_dt and modified_dt > now_utc:
+        verified_future_fields.append("modification")
+
+    date_context = {
+        "analysis_current_utc": now_utc.isoformat() + "Z",
+        "created_raw": created_raw or "",
+        "modified_raw": modified_raw or "",
+        "created_parsed": created_dt.isoformat() if created_dt else "",
+        "modified_parsed": modified_dt.isoformat() if modified_dt else "",
+        "verified_future_timestamp": bool(verified_future_fields),
+        "verified_future_fields": verified_future_fields,
+    }
 
     try:
         from openai import OpenAI
@@ -1717,22 +1746,49 @@ def _gpt_document_score(text: str, meta: Dict[str, Any], ext: str) -> Tuple[int,
         prompt = {
             "task": "Document authenticity analysis",
             "instructions": (
-                "Return JSON only. Estimate probability this document text/metadata was AI-generated, "
-                "synthetically assembled, or materially tampered. Do not judge whether claims are true unless internal inconsistencies are present. "
-                "Use 0=confident authentic human/original, 100=confident AI/generated/tampered."
+                "Return JSON only. Estimate probability the document is AI-generated, "
+                "synthetically assembled, or materially tampered. Use 0=strong authenticity support "
+                "and 100=strong AI/generated/tampering evidence. "
+                "Do not treat ordinary editing, export/conversion, templates, boilerplate, forms, "
+                "Lorem ipsum, repeated placeholder text, repetitive table rows, or generic wording "
+                "as proof of AI generation. They may indicate templated or sample content but are "
+                "not, by themselves, authenticity failures. "
+                "Do not claim a creation or modification timestamp is in the future unless "
+                "date_context.verified_future_timestamp is true. The supplied date_context is "
+                "authoritative for all future-date statements. "
+                "Do not infer tampering merely because creation and modification dates differ when "
+                "their ordering is normal. "
+                "Prefer concrete forensic evidence: explicit AI/generative producer metadata, "
+                "impossible timestamp ordering, verified future-dated metadata, structural corruption, "
+                "conflicting provenance, or multiple independent signals. "
+                "If evidence is only stylistic/repetitive/placeholder text, keep probability near "
+                "neutral or authenticity-supporting unless additional independent evidence exists. "
+                "Reasoning must match the numeric probability and distinguish templated/placeholder "
+                "content from AI-generated content."
             ),
             "file_type": ext,
-            "metadata": meta.get("metadata", {}),
+            "metadata": md,
+            "date_context": date_context,
             "pages": meta.get("pages", 0),
             "embedded_images": meta.get("embedded_images", 0),
             "text_excerpt": _clip_text(text),
-            "schema": {"ai_probability": "integer 0-100", "flags": ["short strings"], "reasoning": "one concise paragraph"},
+            "schema": {
+                "ai_probability": "integer 0-100",
+                "flags": ["short evidence statements"],
+                "reasoning": "one concise paragraph grounded only in supplied evidence",
+            },
         }
         resp = client.chat.completions.create(
             model=os.environ.get("OPENAI_TEXT_MODEL", "gpt-4o-mini"),
             temperature=0,
             messages=[
-                {"role": "system", "content": "You are a forensic document authentication analyst. Return strict JSON."},
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a forensic document authentication analyst. Return strict JSON. "
+                        "Never override verified date_context with your own calendar assumptions."
+                    ),
+                },
                 {"role": "user", "content": json.dumps(prompt)},
             ],
         )
@@ -1742,11 +1798,40 @@ def _gpt_document_score(text: str, meta: Dict[str, Any], ext: str) -> Tuple[int,
         score = max(0, min(100, _safe_int(data.get("ai_probability", 50), 50)))
         flags = [str(x) for x in data.get("flags", [])][:8]
         reasoning = str(data.get("reasoning", ""))[:1200]
+
+        if not verified_future_fields:
+            future_terms = ("future date", "future-dated", "in the future", "future timestamp")
+            flags = [f for f in flags if not any(t in f.lower() for t in future_terms)]
+            if any(t in reasoning.lower() for t in future_terms):
+                reasoning = re.sub(
+                    r"[^.]*\b(?:future[- ]dated|future date|future timestamp|in the future)\b[^.]*\.?",
+                    "",
+                    reasoning,
+                    flags=re.I,
+                )
+                reasoning = re.sub(r"\s+", " ", reasoning).strip()
+
+        lower_text = (text or "").lower()
+        placeholder_markers = (
+            "lorem ipsum", "placeholder", "sample document", "sample file", "dummy pdf"
+        )
+        placeholder_like = any(m in lower_text for m in placeholder_markers)
+        md_joined = " ".join(str(v).lower() for v in md.values() if v is not None)
+        explicit_ai_metadata = any(k in md_joined for k in AI_PRODUCER_KEYWORDS)
+
+        if placeholder_like and not explicit_ai_metadata and not verified_future_fields:
+            score = min(score, 55)
+            if not reasoning:
+                reasoning = (
+                    "The document contains placeholder or sample text. That can explain repetitive "
+                    "language and uniform structure, but it is not by itself evidence of AI generation "
+                    "or material tampering."
+                )
+
         return score, reasoning, flags, True
     except Exception as e:
         log.warning("GPT document analysis failed: %s", e)
         return 50, f"GPT document analysis failed: {str(e)[:120]}", [], False
-
 
 def _label_from_ai_score(ai_score: int) -> Tuple[int, str]:
     authenticity = 100 - int(round(ai_score))
