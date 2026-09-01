@@ -434,6 +434,237 @@ def reset_period_uses(email: str) -> None:
 
 
 # ─────────────────────────────────────────────────────────────
+#  VeriFYD Lens purchase / entitlement operations
+# ─────────────────────────────────────────────────────────────
+
+def _generate_lens_entitlement_token() -> str:
+    """Generate a cryptographically strong Lens entitlement token."""
+    import secrets
+    return "vfyd_lens_" + secrets.token_urlsafe(24)
+
+
+def create_lens_purchase(
+    paypal_order_id: str,
+    buyer_email: str = "",
+    product_id: str = "verifyd_lens_beta",
+    amount: str = "1.00",
+    currency: str = "USD",
+) -> dict:
+    """Create or return the pending Lens purchase for a PayPal order."""
+    paypal_order_id = (paypal_order_id or "").strip()
+    if not paypal_order_id:
+        raise ValueError("paypal_order_id required")
+
+    buyer_email = (buyer_email or "").strip().lower()
+    product_id = (product_id or "verifyd_lens_beta").strip()
+    amount = str(amount or "1.00").strip()
+    currency = (currency or "USD").strip().upper()
+    now = datetime.now(timezone.utc).isoformat()
+
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO lens_purchases (
+                paypal_order_id, buyer_email, product_id, amount,
+                currency, status, created_at
+            )
+            VALUES (%s, %s, %s, %s, %s, 'CREATED', %s)
+            ON CONFLICT (paypal_order_id) DO NOTHING
+            RETURNING *
+            """,
+            (paypal_order_id, buyer_email, product_id, amount, currency, now),
+        )
+        row = cur.fetchone()
+
+        if not row:
+            cur.execute(
+                "SELECT * FROM lens_purchases WHERE paypal_order_id = %s",
+                (paypal_order_id,),
+            )
+            row = cur.fetchone()
+
+    if not row:
+        raise RuntimeError("lens_purchase_create_failed")
+
+    return dict(row)
+
+
+def get_lens_purchase_by_order_id(paypal_order_id: str) -> Optional[dict]:
+    paypal_order_id = (paypal_order_id or "").strip()
+    if not paypal_order_id:
+        return None
+
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT * FROM lens_purchases WHERE paypal_order_id = %s",
+            (paypal_order_id,),
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+
+def complete_lens_purchase(
+    paypal_order_id: str,
+    paypal_capture_id: str,
+    buyer_email: str,
+    amount: str = "1.00",
+    currency: str = "USD",
+) -> dict:
+    """Mark a verified PayPal Lens purchase completed and issue entitlement.
+
+    Repeated calls with the same PayPal order/capture pair are safe. A different
+    capture ID cannot be attached to an already-completed order.
+    """
+    paypal_order_id = (paypal_order_id or "").strip()
+    paypal_capture_id = (paypal_capture_id or "").strip()
+    buyer_email = (buyer_email or "").strip().lower()
+    amount = str(amount or "").strip()
+    currency = (currency or "").strip().upper()
+
+    if not paypal_order_id:
+        raise ValueError("paypal_order_id required")
+    if not paypal_capture_id:
+        raise ValueError("paypal_capture_id required")
+    if not buyer_email:
+        raise ValueError("buyer_email required")
+
+    existing = get_lens_purchase_by_order_id(paypal_order_id)
+    if not existing:
+        raise ValueError("lens_purchase_not_found")
+
+    if existing.get("status") == "COMPLETED":
+        existing_capture = (existing.get("paypal_capture_id") or "").strip()
+        if existing_capture and existing_capture != paypal_capture_id:
+            raise ValueError("paypal_order_already_completed_with_different_capture")
+        return existing
+
+    entitlement_token = existing.get("entitlement_token") or _generate_lens_entitlement_token()
+    now = datetime.now(timezone.utc).isoformat()
+
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            UPDATE lens_purchases
+            SET paypal_capture_id = %s,
+                buyer_email = %s,
+                amount = %s,
+                currency = %s,
+                status = 'COMPLETED',
+                entitlement_token = COALESCE(entitlement_token, %s),
+                completed_at = COALESCE(completed_at, %s)
+            WHERE paypal_order_id = %s
+            RETURNING *
+            """,
+            (
+                paypal_capture_id,
+                buyer_email,
+                amount,
+                currency,
+                entitlement_token,
+                now,
+                paypal_order_id,
+            ),
+        )
+        row = cur.fetchone()
+
+    if not row:
+        raise RuntimeError("lens_purchase_complete_failed")
+
+    log.info(
+        "Lens purchase completed order=%s capture=%s email=%s",
+        paypal_order_id,
+        paypal_capture_id,
+        buyer_email,
+    )
+    return dict(row)
+
+
+def get_lens_entitlement(entitlement_token: str) -> Optional[dict]:
+    entitlement_token = (entitlement_token or "").strip()
+    if not entitlement_token:
+        return None
+
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT *
+            FROM lens_purchases
+            WHERE entitlement_token = %s
+              AND status = 'COMPLETED'
+            """,
+            (entitlement_token,),
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+
+def get_lens_entitlements_by_email(buyer_email: str) -> list:
+    buyer_email = (buyer_email or "").strip().lower()
+    if not buyer_email:
+        return []
+
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT *
+            FROM lens_purchases
+            WHERE buyer_email = %s
+              AND status = 'COMPLETED'
+            ORDER BY completed_at DESC NULLS LAST, id DESC
+            """,
+            (buyer_email,),
+        )
+        return [dict(row) for row in cur.fetchall()]
+
+
+def activate_lens_entitlement(
+    entitlement_token: str,
+    buyer_email: str = "",
+) -> Optional[dict]:
+    """Mark a completed Lens entitlement activated.
+
+    If buyer_email is supplied, it must match the purchase. Repeated activation
+    calls preserve the original activation timestamp.
+    """
+    entitlement_token = (entitlement_token or "").strip()
+    buyer_email = (buyer_email or "").strip().lower()
+
+    if not entitlement_token:
+        return None
+
+    existing = get_lens_entitlement(entitlement_token)
+    if not existing:
+        return None
+
+    stored_email = (existing.get("buyer_email") or "").strip().lower()
+    if buyer_email and stored_email and buyer_email != stored_email:
+        return None
+
+    now = datetime.now(timezone.utc).isoformat()
+
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            UPDATE lens_purchases
+            SET activated_at = COALESCE(activated_at, %s)
+            WHERE entitlement_token = %s
+              AND status = 'COMPLETED'
+            RETURNING *
+            """,
+            (now, entitlement_token),
+        )
+        row = cur.fetchone()
+
+    return dict(row) if row else None
+
+
+# ─────────────────────────────────────────────────────────────
 #  Certificate operations
 # ─────────────────────────────────────────────────────────────
 
