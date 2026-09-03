@@ -1,5 +1,1 @@
-async function render(){const{lastResult}=await chrome.storage.local.get("lastResult");if(!lastResult)return;
-document.getElementById("status").textContent=lastResult.summary||lastResult.status||"Ready";
-document.getElementById("score").textContent=Number.isFinite(lastResult.trust_score)?`${lastResult.trust_score}/100`:"";
-document.getElementById("details").textContent=(lastResult.findings||[]).join(" • ")||"No additional findings.";}
-document.getElementById("open").addEventListener("click",()=>chrome.tabs.create({url:chrome.runtime.getURL("result.html")}));render();
+async function r(){const d=await chrome.storage.local.get({automaticProtection:true,lastResult:null});auto.checked=d.automaticProtection!==false;if(d.lastResult)status.textContent=d.lastResult.summary||d.lastResult.status}auto.onchange=()=>chrome.storage.local.set({automaticProtection:auto.checked});open.onclick=()=>chrome.tabs.create({url:chrome.runtime.getURL("result.html")});r();
