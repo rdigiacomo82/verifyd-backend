@@ -731,13 +731,19 @@ def detect_ai_photo(image_path: str) -> Tuple[int, dict]:
     elif avg_sat > 110:
         ai_score += 4
 
-    # Noise: AI images are very clean
+    # VERIFYD_PHOTO_HIGH_ELA_SOCIAL_V2
+    # `noise` is global grayscale variance (scene contrast), NOT a sensor-noise
+    # measurement. Keep the low-variance AI-clean hint, but never reward high
+    # global variance as "real camera grain". Real/synthetic sensor-noise evidence
+    # is handled by flat_noise/PRNU instead.
     if noise < 100:
         ai_score += 8
-        log.info("NOISE %.1f → very low noise, AI-clean → +8", noise)
+        log.info("NOISE %.1f → very low global variance, AI-clean hint → +8", noise)
     elif noise > 2000:
-        ai_score -= 6
-        log.info("NOISE %.1f → strong real camera grain → -6", noise)
+        log.info(
+            "NOISE %.1f → high scene variance; neutral (not treated as camera grain)",
+            noise,
+        )
 
     # Metadata adjustment
     ai_score += meta_adjustment
@@ -846,7 +852,29 @@ def detect_ai_photo(image_path: str) -> Tuple[int, dict]:
             ela_score <= 22 and
             _aspect <= 1.85
         )
-        if photo_ai_social_composite or photo_ai_social_composite_alt:
+
+        # VERIFYD_PHOTO_HIGH_ELA_SOCIAL_V2
+        # Modern photorealistic generated/group images can have the opposite
+        # compression fingerprint from the original "clean ELA" social rule.
+        # Require several independent conditions so no-EXIF or ELA alone can
+        # never force an AI result.
+        photo_ai_social_high_ela = (
+            no_camera_metadata and
+            _large_or_social_canvas and
+            content_type == "portrait" and
+            skin_ratio >= 0.12 and
+            0.82 <= chan_corr <= 0.94 and
+            0.65 <= flat_noise <= 1.35 and
+            90 <= avg_sat <= 145 and
+            ela_score >= 45 and
+            _aspect <= 1.90
+        )
+
+        if (
+            photo_ai_social_composite or
+            photo_ai_social_composite_alt or
+            photo_ai_social_high_ela
+        ):
             old_score = ai_score
             ai_score = max(ai_score, 72)
             log.info(
@@ -857,9 +885,24 @@ def detect_ai_photo(image_path: str) -> Tuple[int, dict]:
                 flat_noise, avg_sat, noise, hf_kurt, tex_var, ela_score,
                 old_score, ai_score,
             )
+            if photo_ai_social_high_ela:
+                log.info(
+                    "PHOTO_HIGH_ELA_SOCIAL_V2 fired: no_camera_meta=%s "
+                    "portrait=%s skin=%.3f aspect=%.2f chan_corr=%.3f "
+                    "flat=%.3f sat=%.1f ela=%.1f",
+                    no_camera_metadata,
+                    content_type == "portrait",
+                    skin_ratio,
+                    _aspect,
+                    chan_corr,
+                    flat_noise,
+                    avg_sat,
+                    ela_score,
+                )
     except Exception as _social_patch_exc:
         photo_ai_social_composite = False
         photo_ai_social_composite_alt = False
+        photo_ai_social_high_ela = False
         log.debug("PHOTO_SOCIAL_AI_COMPOSITE check skipped: %s", _social_patch_exc)
 
     log.info(
@@ -894,8 +937,22 @@ def detect_ai_photo(image_path: str) -> Tuple[int, dict]:
         "signal_score":  ai_score,
         "source":        "photo_upload",
         "no_camera_metadata": bool(locals().get("no_camera_metadata", False)),
-        "photo_ai_social_composite": bool(locals().get("photo_ai_social_composite", False) or locals().get("photo_ai_social_composite_alt", False)),
-        "photo_ai_social_composite_reason": "no-EXIF social/poster people image with high channel-lock, borderline PRNU, clean ELA, staged composition, and generated-image texture signals" if (locals().get("photo_ai_social_composite", False) or locals().get("photo_ai_social_composite_alt", False)) else "",
+        "photo_ai_social_composite": bool(
+            locals().get("photo_ai_social_composite", False) or
+            locals().get("photo_ai_social_composite_alt", False) or
+            locals().get("photo_ai_social_high_ela", False)
+        ),
+        "photo_ai_social_high_ela": bool(locals().get("photo_ai_social_high_ela", False)),
+        "photo_ai_social_composite_reason": (
+            "no-EXIF social/portrait image matched a multi-signal synthetic-composite "
+            "signature (channel-lock/PRNU/saturation plus compression or texture evidence)"
+            if (
+                locals().get("photo_ai_social_composite", False) or
+                locals().get("photo_ai_social_composite_alt", False) or
+                locals().get("photo_ai_social_high_ela", False)
+            )
+            else ""
+        ),
     }
 
     # ── HEIC temp file cleanup ───────────────────────────────
