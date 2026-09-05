@@ -16,7 +16,7 @@ from fastapi import FastAPI, UploadFile, File, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
-import os, uuid, requests, tempfile, logging, hashlib
+import os, uuid, requests, tempfile, logging, hashlib, hmac
 from contextlib import asynccontextmanager
 
 from detection import run_detection   # returns (authenticity, label, detail)
@@ -47,8 +47,9 @@ from video import clip_first_6_seconds, stamp_video, download_video_ytdlp
 
 log = logging.getLogger("verifyd.main")
 
-# Admin key — set ADMIN_KEY env var on Render; falls back to default for local dev
-_ADMIN_KEY = os.environ.get("ADMIN_KEY", "Honda6915")
+# Admin key — must be explicitly configured via ADMIN_KEY environment variable
+# VERIFYD_ADMIN_KEY_FAIL_CLOSED_V1
+_ADMIN_KEY = os.environ.get("ADMIN_KEY", "").strip()
 
 def _cleanup_old_files(max_age_hours: float = 2.0) -> None:
     """
@@ -70,9 +71,15 @@ def _cleanup_old_files(max_age_hours: float = 2.0) -> None:
 
 
 def _is_admin(key: str) -> bool:
-    """Check admin key — supports both URL-encoded and raw forms."""
-    key = (key or "").strip()
-    return key == _ADMIN_KEY or key == _ADMIN_KEY.replace("#", "%23")
+    """Fail closed unless ADMIN_KEY is explicitly configured."""
+    configured = (_ADMIN_KEY or "").strip()
+    supplied = (key or "").strip()
+    if not configured or not supplied:
+        return False
+    return (
+        hmac.compare_digest(supplied, configured)
+        or hmac.compare_digest(supplied, configured.replace("#", "%23"))
+    )
 
 
 # ─────────────────────────────────────────────
