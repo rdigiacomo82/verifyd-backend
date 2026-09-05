@@ -13,6 +13,12 @@ try:
 except Exception:
     scan_static_security = None
 
+# VERIFYD_LENS_YARA_INTEGRATION_V1
+try:
+    from lens_yara import scan_file as scan_yara_security
+except Exception:
+    scan_yara_security = None
+
 app = FastAPI(title="VeriFYD Lens Agent", version="0.4.2")
 BASE = Path.home() / "VeriFYD" / "Lens"
 QUARANTINE = BASE / "Quarantine"
@@ -304,6 +310,14 @@ def scan_worker(scan_id,url):
             if any("File type mismatch" in x for x in findings): score-=18
         sha=sha256_file(q); findings.append(f"SHA-256 fingerprint created: {sha[:16]}…")
         SCAN_STATE[scan_id].update(status="SECURITY_SCANNING",summary="SECURITY SCANNING",sha256=sha,size_bytes=q.stat().st_size,quarantine_path=str(q),findings=findings)
+        # VERIFYD_LENS_YARA_INTEGRATION_V1 — additive; fail-open; authenticity pipeline untouched.
+        if scan_yara_security is not None:
+            yara_security=scan_yara_security(q)
+        else:
+            yara_security={"engine":"verifyd_yara_x_v1","engine_label":"YARA-X unavailable","status":"UNAVAILABLE","score_delta":0,"hard_block":False,"matches":[],"match_count":0,"rule_count":0,"rule_files":[],"finding":"YARA-X security inspection was unavailable; existing security checks continued.","details":{}}
+        score+=int(yara_security.get("score_delta",0) or 0)
+        if yara_security.get("finding"):
+            findings.append(yara_security.get("finding"))
         # VERIFYD_LENS_STATIC_SECURITY_V1 — additive; authenticity pipeline untouched.
         if scan_static_security is not None:
             static_security=scan_static_security(q,filename)
@@ -313,10 +327,10 @@ def scan_worker(scan_id,url):
         endpoint_av=endpoint_av_scan(q); score+=endpoint_av.get("score_delta",0); findings.append(endpoint_av["finding"])
         defender=endpoint_av  # backward-compatible internal alias for existing result fields
         if not q.exists():
-            SCAN_STATE[scan_id].update(status="BLOCKED",summary="HIGH CONCERN",security_score=clamp(score),trust_score=clamp(score),authenticity_score=None,defender_status=defender["status"],defender_method=defender.get("method"),security_provider=defender.get("provider") or "Microsoft Defender",av_status=defender["status"],av_method=defender.get("method"),static_security_status=static_security.get("status"),static_security_engine=static_security.get("engine"),static_security_details=static_security.get("details"),findings=findings+["The quarantined file is no longer present after security scanning."],recommended_action="block"); return
-        if static_security.get("hard_block"):
-            SCAN_STATE[scan_id].update(status="BLOCKED",summary="HIGH CONCERN",security_score=clamp(score),trust_score=clamp(score),authenticity_score=None,defender_status=defender["status"],defender_method=defender.get("method"),security_provider=defender.get("provider") or "Microsoft Defender",av_status=defender["status"],av_method=defender.get("method"),static_security_status=static_security.get("status"),static_security_engine=static_security.get("engine"),static_security_details=static_security.get("details"),findings=findings,sha256=sha,size_bytes=q.stat().st_size,quarantine_path=str(q),recommended_action="block"); return
-        SCAN_STATE[scan_id].update(status="AUTHENTICITY_SCANNING",summary="AUTHENTICITY SCANNING",security_score=clamp(score),trust_score=clamp(score),defender_status=defender["status"],defender_method=defender.get("method"),security_provider=defender.get("provider") or "Microsoft Defender",av_status=defender["status"],av_method=defender.get("method"),static_security_status=static_security.get("status"),static_security_engine=static_security.get("engine"),static_security_details=static_security.get("details"),findings=findings)
+            SCAN_STATE[scan_id].update(status="BLOCKED",summary="HIGH CONCERN",security_score=clamp(score),trust_score=clamp(score),authenticity_score=None,defender_status=defender["status"],defender_method=defender.get("method"),security_provider=defender.get("provider") or "Microsoft Defender",av_status=defender["status"],av_method=defender.get("method"),static_security_status=static_security.get("status"),static_security_engine=static_security.get("engine"),static_security_details=static_security.get("details"),yara_status=yara_security.get("status"),yara_engine=yara_security.get("engine"),yara_rule_count=yara_security.get("rule_count"),yara_match_count=yara_security.get("match_count"),yara_matches=yara_security.get("matches"),yara_details=yara_security.get("details"),findings=findings+["The quarantined file is no longer present after security scanning."],recommended_action="block"); return
+        if static_security.get("hard_block") or yara_security.get("hard_block"):
+            SCAN_STATE[scan_id].update(status="BLOCKED",summary="HIGH CONCERN",security_score=clamp(score),trust_score=clamp(score),authenticity_score=None,defender_status=defender["status"],defender_method=defender.get("method"),security_provider=defender.get("provider") or "Microsoft Defender",av_status=defender["status"],av_method=defender.get("method"),static_security_status=static_security.get("status"),static_security_engine=static_security.get("engine"),static_security_details=static_security.get("details"),yara_status=yara_security.get("status"),yara_engine=yara_security.get("engine"),yara_rule_count=yara_security.get("rule_count"),yara_match_count=yara_security.get("match_count"),yara_matches=yara_security.get("matches"),yara_details=yara_security.get("details"),findings=findings,sha256=sha,size_bytes=q.stat().st_size,quarantine_path=str(q),recommended_action="block"); return
+        SCAN_STATE[scan_id].update(status="AUTHENTICITY_SCANNING",summary="AUTHENTICITY SCANNING",security_score=clamp(score),trust_score=clamp(score),defender_status=defender["status"],defender_method=defender.get("method"),security_provider=defender.get("provider") or "Microsoft Defender",av_status=defender["status"],av_method=defender.get("method"),static_security_status=static_security.get("status"),static_security_engine=static_security.get("engine"),static_security_details=static_security.get("details"),yara_status=yara_security.get("status"),yara_engine=yara_security.get("engine"),yara_rule_count=yara_security.get("rule_count"),yara_match_count=yara_security.get("match_count"),yara_matches=yara_security.get("matches"),yara_details=yara_security.get("details"),findings=findings)
         cloud=cloud_analyze(q,filename); findings.append(cloud["finding"])
         auth=cloud.get("authenticity_score"); label=cloud.get("label")
         if label: findings.append(f"VeriFYD authenticity verdict: {label}")
