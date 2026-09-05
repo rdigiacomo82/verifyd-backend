@@ -7,6 +7,12 @@ from concurrent.futures import ThreadPoolExecutor
 import hashlib, ipaddress, json, mimetypes, os, re, shutil, socket, subprocess, time, uuid
 import httpx
 
+# VERIFYD_LENS_STATIC_SECURITY_V1
+try:
+    from lens_security import scan_static_security
+except Exception:
+    scan_static_security = None
+
 app = FastAPI(title="VeriFYD Lens Agent", version="0.4.2")
 BASE = Path.home() / "VeriFYD" / "Lens"
 QUARANTINE = BASE / "Quarantine"
@@ -192,16 +198,24 @@ def scan_worker(scan_id,url):
             if any("File type mismatch" in x for x in findings): score-=18
         sha=sha256_file(q); findings.append(f"SHA-256 fingerprint created: {sha[:16]}…")
         SCAN_STATE[scan_id].update(status="SECURITY_SCANNING",summary="SECURITY SCANNING",sha256=sha,size_bytes=q.stat().st_size,quarantine_path=str(q),findings=findings)
+        # VERIFYD_LENS_STATIC_SECURITY_V1 — additive; authenticity pipeline untouched.
+        if scan_static_security is not None:
+            static_security=scan_static_security(q,filename)
+        else:
+            static_security={"engine":"verifyd_static_v1","status":"UNAVAILABLE","score_delta":0,"hard_block":False,"findings":["VeriFYD static security inspection was unavailable; existing security checks continued."],"details":{}}
+        score+=int(static_security.get("score_delta",0) or 0);findings.extend(list(static_security.get("findings") or []))
         defender=defender_scan(q); score+=defender.get("score_delta",0); findings.append(defender["finding"])
         if not q.exists():
-            SCAN_STATE[scan_id].update(status="BLOCKED",summary="HIGH CONCERN",security_score=clamp(score),trust_score=clamp(score),authenticity_score=None,defender_status=defender["status"],defender_method=defender.get("method"),findings=findings+["The quarantined file is no longer present after security scanning."],recommended_action="block"); return
-        SCAN_STATE[scan_id].update(status="AUTHENTICITY_SCANNING",summary="AUTHENTICITY SCANNING",security_score=clamp(score),trust_score=clamp(score),defender_status=defender["status"],defender_method=defender.get("method"),findings=findings)
+            SCAN_STATE[scan_id].update(status="BLOCKED",summary="HIGH CONCERN",security_score=clamp(score),trust_score=clamp(score),authenticity_score=None,defender_status=defender["status"],defender_method=defender.get("method"),static_security_status=static_security.get("status"),static_security_engine=static_security.get("engine"),static_security_details=static_security.get("details"),findings=findings+["The quarantined file is no longer present after security scanning."],recommended_action="block"); return
+        if static_security.get("hard_block"):
+            SCAN_STATE[scan_id].update(status="BLOCKED",summary="HIGH CONCERN",security_score=clamp(score),trust_score=clamp(score),authenticity_score=None,defender_status=defender["status"],defender_method=defender.get("method"),static_security_status=static_security.get("status"),static_security_engine=static_security.get("engine"),static_security_details=static_security.get("details"),findings=findings,sha256=sha,size_bytes=q.stat().st_size,quarantine_path=str(q),recommended_action="block"); return
+        SCAN_STATE[scan_id].update(status="AUTHENTICITY_SCANNING",summary="AUTHENTICITY SCANNING",security_score=clamp(score),trust_score=clamp(score),defender_status=defender["status"],defender_method=defender.get("method"),static_security_status=static_security.get("status"),static_security_engine=static_security.get("engine"),static_security_details=static_security.get("details"),findings=findings)
         cloud=cloud_analyze(q,filename); findings.append(cloud["finding"])
         auth=cloud.get("authenticity_score"); label=cloud.get("label")
         if label: findings.append(f"VeriFYD authenticity verdict: {label}")
         if isinstance(auth,(int,float)): findings.append(f"VeriFYD authenticity score: {int(round(auth))}/100")
         score=clamp(score)
-        SCAN_STATE[scan_id].update(status="QUARANTINED",summary=classify(score),security_score=score,authenticity_score=auth,trust_score=score,authenticity_label=label,authenticity_reasoning=cloud.get("reasoning") or "",cloud_status=cloud.get("status"),media_type=cloud.get("media_type"),findings=findings,sha256=sha,size_bytes=q.stat().st_size,defender_status=defender["status"],defender_method=defender.get("method"),recommended_action="release" if score>=80 else "review" if score>=50 else "block")
+        SCAN_STATE[scan_id].update(status="QUARANTINED",summary=classify(score),security_score=score,authenticity_score=auth,trust_score=score,authenticity_label=label,authenticity_reasoning=cloud.get("reasoning") or "",cloud_status=cloud.get("status"),media_type=cloud.get("media_type"),findings=findings,sha256=sha,size_bytes=q.stat().st_size,defender_status=defender["status"],defender_method=defender.get("method"),static_security_status=static_security.get("status"),static_security_engine=static_security.get("engine"),static_security_details=static_security.get("details"),recommended_action="release" if score>=80 else "review" if score>=50 else "block")
     except Exception as e:
         if q and q.exists():
             try:q.unlink()
