@@ -137,6 +137,112 @@ def defender_scan(path):
         fb=ps_defender(path); fb["mpcmdrun_exit"]=cp.returncode; return fb
     except Exception: return ps_defender(path)
 
+# VERIFYD_LENS_ENDPOINT_AV_V1
+def find_symantec_doscan():
+    # Return Symantec Endpoint Protection DoScan.exe when installed.
+    pf = Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
+    root = pf / "Symantec" / "Symantec Endpoint Protection"
+
+    stable = root / "DoScan.exe"
+    if stable.exists():
+        return stable
+
+    try:
+        candidates = sorted(
+            root.glob("*/Bin64/DoScan.exe"),
+            key=lambda p: str(p).lower(),
+            reverse=True,
+        )
+        if candidates:
+            return candidates[0]
+    except Exception:
+        pass
+
+    return None
+
+
+def symantec_scan(path):
+    # Broadcom says rc=0 means scan completed, not necessarily no detections.
+    exe = find_symantec_doscan()
+    if not exe:
+        return {
+            "provider": "Symantec Endpoint Protection",
+            "status": "UNAVAILABLE",
+            "score_delta": 0,
+            "finding": "Symantec Endpoint Protection scanner was not found.",
+            "method": "DoScan",
+            "detail": "",
+        }
+
+    try:
+        cp = subprocess.run(
+            [str(exe), "/ScanFile", str(path), "/Sync"],
+            capture_output=True,
+            text=True,
+            timeout=240,
+        )
+        out = ((cp.stdout or "") + "\n" + (cp.stderr or "")).strip()
+
+        if cp.returncode == 0:
+            return {
+                "provider": "Symantec Endpoint Protection",
+                "status": "SCAN_COMPLETED",
+                "score_delta": 0,
+                "finding": "Symantec Endpoint Protection completed an antivirus scan of the quarantined file.",
+                "method": "DoScan /ScanFile /Sync",
+                "detail": out[-1000:],
+                "exit_code": 0,
+            }
+
+        if cp.returncode == 2:
+            return {
+                "provider": "Symantec Endpoint Protection",
+                "status": "BUSY",
+                "score_delta": 0,
+                "finding": "Symantec Endpoint Protection was already running another command-line scan; Lens continued with its other security checks.",
+                "method": "DoScan /ScanFile /Sync",
+                "detail": out[-1000:],
+                "exit_code": cp.returncode,
+            }
+
+        return {
+            "provider": "Symantec Endpoint Protection",
+            "status": "UNAVAILABLE",
+            "score_delta": 0,
+            "finding": f"Symantec Endpoint Protection could not complete a reliable scan (exit {cp.returncode}); Lens continued with its other security checks.",
+            "method": "DoScan /ScanFile /Sync",
+            "detail": out[-1000:],
+            "exit_code": cp.returncode,
+        }
+    except subprocess.TimeoutExpired:
+        return {
+            "provider": "Symantec Endpoint Protection",
+            "status": "TIMEOUT",
+            "score_delta": 0,
+            "finding": "Symantec Endpoint Protection scan timed out; Lens continued with its other security checks.",
+            "method": "DoScan /ScanFile /Sync",
+            "detail": "TimeoutExpired",
+        }
+    except Exception as exc:
+        return {
+            "provider": "Symantec Endpoint Protection",
+            "status": "UNAVAILABLE",
+            "score_delta": 0,
+            "finding": f"Symantec Endpoint Protection scan was unavailable ({type(exc).__name__}); Lens continued with its other security checks.",
+            "method": "DoScan /ScanFile /Sync",
+            "detail": type(exc).__name__,
+        }
+
+
+def endpoint_av_scan(path):
+    # Prefer Symantec when installed; otherwise preserve Defender behavior.
+    if find_symantec_doscan():
+        return symantec_scan(path)
+
+    result = dict(defender_scan(path))
+    result.setdefault("provider", "Microsoft Defender")
+    return result
+
 def content_type_check(filename,ct):
     expected,_=mimetypes.guess_type(filename); actual=(ct or "").split(";")[0].strip().lower()
     if expected and actual and actual not in {"application/octet-stream",expected.lower()} and not (expected.startswith("text/") and actual.startswith("text/")):
@@ -204,18 +310,19 @@ def scan_worker(scan_id,url):
         else:
             static_security={"engine":"verifyd_static_v1","status":"UNAVAILABLE","score_delta":0,"hard_block":False,"findings":["VeriFYD static security inspection was unavailable; existing security checks continued."],"details":{}}
         score+=int(static_security.get("score_delta",0) or 0);findings.extend(list(static_security.get("findings") or []))
-        defender=defender_scan(q); score+=defender.get("score_delta",0); findings.append(defender["finding"])
+        endpoint_av=endpoint_av_scan(q); score+=endpoint_av.get("score_delta",0); findings.append(endpoint_av["finding"])
+        defender=endpoint_av  # backward-compatible internal alias for existing result fields
         if not q.exists():
-            SCAN_STATE[scan_id].update(status="BLOCKED",summary="HIGH CONCERN",security_score=clamp(score),trust_score=clamp(score),authenticity_score=None,defender_status=defender["status"],defender_method=defender.get("method"),static_security_status=static_security.get("status"),static_security_engine=static_security.get("engine"),static_security_details=static_security.get("details"),findings=findings+["The quarantined file is no longer present after security scanning."],recommended_action="block"); return
+            SCAN_STATE[scan_id].update(status="BLOCKED",summary="HIGH CONCERN",security_score=clamp(score),trust_score=clamp(score),authenticity_score=None,defender_status=defender["status"],defender_method=defender.get("method"),security_provider=defender.get("provider") or "Microsoft Defender",av_status=defender["status"],av_method=defender.get("method"),static_security_status=static_security.get("status"),static_security_engine=static_security.get("engine"),static_security_details=static_security.get("details"),findings=findings+["The quarantined file is no longer present after security scanning."],recommended_action="block"); return
         if static_security.get("hard_block"):
-            SCAN_STATE[scan_id].update(status="BLOCKED",summary="HIGH CONCERN",security_score=clamp(score),trust_score=clamp(score),authenticity_score=None,defender_status=defender["status"],defender_method=defender.get("method"),static_security_status=static_security.get("status"),static_security_engine=static_security.get("engine"),static_security_details=static_security.get("details"),findings=findings,sha256=sha,size_bytes=q.stat().st_size,quarantine_path=str(q),recommended_action="block"); return
-        SCAN_STATE[scan_id].update(status="AUTHENTICITY_SCANNING",summary="AUTHENTICITY SCANNING",security_score=clamp(score),trust_score=clamp(score),defender_status=defender["status"],defender_method=defender.get("method"),static_security_status=static_security.get("status"),static_security_engine=static_security.get("engine"),static_security_details=static_security.get("details"),findings=findings)
+            SCAN_STATE[scan_id].update(status="BLOCKED",summary="HIGH CONCERN",security_score=clamp(score),trust_score=clamp(score),authenticity_score=None,defender_status=defender["status"],defender_method=defender.get("method"),security_provider=defender.get("provider") or "Microsoft Defender",av_status=defender["status"],av_method=defender.get("method"),static_security_status=static_security.get("status"),static_security_engine=static_security.get("engine"),static_security_details=static_security.get("details"),findings=findings,sha256=sha,size_bytes=q.stat().st_size,quarantine_path=str(q),recommended_action="block"); return
+        SCAN_STATE[scan_id].update(status="AUTHENTICITY_SCANNING",summary="AUTHENTICITY SCANNING",security_score=clamp(score),trust_score=clamp(score),defender_status=defender["status"],defender_method=defender.get("method"),security_provider=defender.get("provider") or "Microsoft Defender",av_status=defender["status"],av_method=defender.get("method"),static_security_status=static_security.get("status"),static_security_engine=static_security.get("engine"),static_security_details=static_security.get("details"),findings=findings)
         cloud=cloud_analyze(q,filename); findings.append(cloud["finding"])
         auth=cloud.get("authenticity_score"); label=cloud.get("label")
         if label: findings.append(f"VeriFYD authenticity verdict: {label}")
         if isinstance(auth,(int,float)): findings.append(f"VeriFYD authenticity score: {int(round(auth))}/100")
         score=clamp(score)
-        SCAN_STATE[scan_id].update(status="QUARANTINED",summary=classify(score),security_score=score,authenticity_score=auth,trust_score=score,authenticity_label=label,authenticity_reasoning=cloud.get("reasoning") or "",cloud_status=cloud.get("status"),media_type=cloud.get("media_type"),findings=findings,sha256=sha,size_bytes=q.stat().st_size,defender_status=defender["status"],defender_method=defender.get("method"),static_security_status=static_security.get("status"),static_security_engine=static_security.get("engine"),static_security_details=static_security.get("details"),recommended_action="release" if score>=80 else "review" if score>=50 else "block")
+        SCAN_STATE[scan_id].update(status="QUARANTINED",summary=classify(score),security_score=score,authenticity_score=auth,trust_score=score,authenticity_label=label,authenticity_reasoning=cloud.get("reasoning") or "",cloud_status=cloud.get("status"),media_type=cloud.get("media_type"),findings=findings,sha256=sha,size_bytes=q.stat().st_size,defender_status=defender["status"],defender_method=defender.get("method"),security_provider=defender.get("provider") or "Microsoft Defender",av_status=defender["status"],av_method=defender.get("method"),static_security_status=static_security.get("status"),static_security_engine=static_security.get("engine"),static_security_details=static_security.get("details"),recommended_action="release" if score>=80 else "review" if score>=50 else "block")
     except Exception as e:
         if q and q.exists():
             try:q.unlink()
