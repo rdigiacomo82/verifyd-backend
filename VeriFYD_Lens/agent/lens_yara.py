@@ -8,6 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, List
 import os
+import sys
 import time
 
 ENGINE_ID = "verifyd_yara_x_v1"
@@ -25,7 +26,16 @@ def _agent_dir() -> Path:
 
 
 def _default_rules_root() -> Path:
-    # lens_yara.py lives in VeriFYD_Lens/agent, so parent is VeriFYD_Lens.
+    # VERIFYD_LENS_YARA_PACKAGING_FIX_V1
+    # Source layout:
+    #   VeriFYD_Lens/agent/lens_yara.py -> VeriFYD_Lens/rules
+    # PyInstaller onefile layout with --add-data "..\\rules;rules":
+    #   sys._MEIPASS/rules
+    frozen_root = getattr(sys, "_MEIPASS", None)
+    if frozen_root:
+        candidate = Path(frozen_root) / "rules"
+        if candidate.exists():
+            return candidate
     return _agent_dir().parent / "rules"
 
 

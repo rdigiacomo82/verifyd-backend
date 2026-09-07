@@ -471,3 +471,6 @@ def verifyd_release_confirm(scan_id: str):
     rec["released_path"] = "user-selected"
     return {"ok": True, "status": "RELEASED"}
 
+if __name__ == '__main__':
+    import uvicorn
+    uvicorn.run(app, host='127.0.0.1', port=8765)
