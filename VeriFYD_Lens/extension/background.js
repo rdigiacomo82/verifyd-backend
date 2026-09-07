@@ -1,5 +1,5 @@
 const AGENT = "http://127.0.0.1:8765";
-const REQUIRED_AGENT_VERSION = "0.4.2";
+const REQUIRED_AGENT_VERSION = "0.4.6";
 
 async function settings() {
   return await chrome.storage.local.get({ automaticProtection: true });
