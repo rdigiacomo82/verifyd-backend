@@ -2,11 +2,11 @@
 
 
 a = Analysis(
-    ['lens_agent_server.py'],
+    ['lens_agent.py'],
     pathex=[],
     binaries=[],
-    datas=[],
-    hiddenimports=['uvicorn.logging', 'uvicorn.loops.auto', 'uvicorn.protocols.http.auto', 'uvicorn.protocols.websockets.auto', 'uvicorn.lifespan.on'],
+    datas=[('../rules', 'rules')],
+    hiddenimports=[],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

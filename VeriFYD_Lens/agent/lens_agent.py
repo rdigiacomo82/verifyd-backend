@@ -473,4 +473,14 @@ def verifyd_release_confirm(scan_id: str):
 
 if __name__ == '__main__':
     import uvicorn
-    uvicorn.run(app, host='127.0.0.1', port=8765)
+    # VERIFYD_LENS_NO_CONSOLE_UVICORN_LOGGING_V1
+    # Windowed PyInstaller builds do not have a normal stderr/stdout stream.
+    # Disable Uvicorn's default logging config so runw.exe does not crash while
+    # trying to detect console color support.
+    uvicorn.run(
+        app,
+        host='127.0.0.1',
+        port=8765,
+        log_config=None,
+        access_log=False,
+    )
