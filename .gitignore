@@ -15,3 +15,95 @@ ffmpeg.zip
 .env
 *.log_local_backups/
 /_local_backups/
+# VeriFYD Lens local/build artifacts
+VeriFYD_Lens/agent/build/
+VeriFYD_Lens/agent/dist/
+installer_output/
+installer_test/
+installer_test_av/
+lens_installer_package/
+Lens/
+
+# VeriFYD Lens generated packages/backups
+*.bak
+*.zip
+*.patch
+*.log
+*.tmp
+*.pyc
+__pycache__/
+*.spec.before_*.bak
+*.py.before_*.bak
+*.js.before_*.bak
+*.html.before_*.bak
+*.json.before_*.bak
+*.iss.before_*.bak
+
+# Local/generated patch helpers
+apply_*_patch.py
+apply_*_v1.py
+apply_*_v2.py
+fix_*_patch.py
+fix_yara_metadata_fallback.py
+fix_no_console_uvicorn_logging.py
+append_phase2c_rules.py
+
+# Local Lens runtime data
+VeriFYD/Lens/
+*/Quarantine/
+activation.json
+agent_startup_log.txt
+
+# PyInstaller/Inno generated metadata
+*.toc
+*.pkg
+*.manifest
+warn-*.txt
+xref-*.html
+# VeriFYD generated extraction folders and historical local packages
+VeriFYD_Document_Reasoning_Date_Fix_v1/
+VeriFYD_Document_Reasoning_Quality_v2*/
+VeriFYD_Lens_Chrome_Web_Store_v*/
+VeriFYD_Lens_Extension_v*/
+VeriFYD_Lens_Phase*/
+VeriFYD_Lens_backup_v*/
+VeriFYD_Lens_result_hotfix_v*/
+VeriFYD_Lens_result_js_hotfix_v*/
+VeriFYD_Lens_v*/
+VeriFYD_Phase2A_YARA_*/
+VeriFYD_Lens_Edge_Store/
+VeriFYD_Lens_Store_Submission/
+VeriFYD_Lens_Installer_Build_Package/
+VeriFYD_Lens/extension_backup_v01/
+chrome_045_validation/
+
+# Root-level duplicate extension/export files
+/background.js
+/manifest.json
+/result.html
+/result.js
+/result_save_anywhere.js
+
+# Generated local patch/helper scripts and scratch files
+apply_*.py
+fix_*.py
+verifyd_*_patch*.py
+*_context.txt
+twitter_guard_diff.txt
+detection_patched.py
+create_chrome_reviewer_entitlement.bat
+compare_lens_agent_activation.py
+
+# Accidental shell typo files
+VeriFYD_Lens/agent/copy
+VeriFYD_Lens/agent/curl
+VeriFYD_Lens/agent/dir
+/tatus
+
+# Marketplace/local screenshot exports
+marketplace-icon-*.png
+marketplace-screenshot*.png
+# Remaining known local leftovers
+VeriFYD_Lens/extension/result_before_v*_*.js
+detection.py.bak_*
+/tatus*
