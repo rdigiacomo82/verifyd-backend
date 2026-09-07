@@ -8,6 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, List
 import os
+import re
 import sys
 import time
 
@@ -17,6 +18,7 @@ _DEFAULT_SCAN_TIMEOUT_SECONDS = 10
 _RULES = None
 _RULE_COUNT = 0
 _RULE_FILES: List[str] = []
+_RULE_META: Dict[str, Dict[str, str]] = {}
 _INIT_ERROR = ""
 _INITIALIZED = False
 
@@ -70,6 +72,28 @@ def _empty_result(status: str, finding: str = "") -> Dict[str, Any]:
     }
 
 
+def _parse_rule_metadata(source: str) -> Dict[str, Dict[str, str]]:
+    """Best-effort parser for rule meta fields, used when yara-x match metadata is not exposed."""
+    parsed: Dict[str, Dict[str, str]] = {}
+    rule_re = re.compile(r"rule\s+([A-Za-z0-9_]+)\s*\{(.*?)\n\}", re.S)
+    meta_re = re.compile(r"\bmeta\s*:(.*?)(?:\n\s*strings\s*:|\n\s*condition\s*:)", re.S)
+    kv_re = re.compile(r"^\s*([A-Za-z0-9_]+)\s*=\s*\"(.*?)\"\s*$", re.M)
+
+    for m in rule_re.finditer(source):
+        rule_name = m.group(1)
+        body = m.group(2)
+        meta_match = meta_re.search(body)
+        if not meta_match:
+            continue
+        meta: Dict[str, str] = {}
+        for key, value in kv_re.findall(meta_match.group(1)):
+            meta[key] = value
+        if meta:
+            parsed[rule_name] = meta
+
+    return parsed
+
+
 def _load_rule_files(root: Path) -> List[Path]:
     if not root.exists():
         return []
@@ -81,7 +105,7 @@ def _load_rule_files(root: Path) -> List[Path]:
 
 def initialize(force: bool = False) -> Dict[str, Any]:
     """Compile and cache YARA-X rules. Safe to call repeatedly."""
-    global _RULES, _RULE_COUNT, _RULE_FILES, _INIT_ERROR, _INITIALIZED
+    global _RULES, _RULE_COUNT, _RULE_FILES, _RULE_META, _INIT_ERROR, _INITIALIZED
 
     if _INITIALIZED and not force:
         if _INIT_ERROR:
@@ -98,6 +122,7 @@ def initialize(force: bool = False) -> Dict[str, Any]:
     _RULES = None
     _RULE_COUNT = 0
     _RULE_FILES = []
+    _RULE_META = {}
     _INIT_ERROR = ""
     _INITIALIZED = True
 
@@ -138,6 +163,9 @@ def initialize(force: bool = False) -> Dict[str, Any]:
         # Phase 2A pack uses globally unique rule names to avoid namespace issues.
         _RULES = yara_x.compile("\n\n".join(source_parts))
         _RULE_COUNT = sum(1 for text in source_parts for line in text.splitlines() if line.strip().startswith("rule "))
+        _RULE_META = {}
+        for text in source_parts:
+            _RULE_META.update(_parse_rule_metadata(text))
         return {
             "engine": ENGINE_ID,
             "engine_label": _engine_label(),
@@ -168,6 +196,9 @@ def _normalize_match(match: Any) -> Dict[str, Any]:
                     meta[str(key)] = val
         except Exception:
             meta = {}
+
+    if not meta and identifier in _RULE_META:
+        meta = dict(_RULE_META.get(identifier) or {})
 
     severity = str(meta.get("severity") or "INFO").upper()
     category = str(meta.get("category") or "signature")
