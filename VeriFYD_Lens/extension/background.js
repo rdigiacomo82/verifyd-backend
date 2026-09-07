@@ -56,7 +56,7 @@ async function menu() {
   chrome.contextMenus.create({
     id: "verifyd-quarantine-scan",
     title: "Quarantine & analyze with VeriFYD Lens",
-    contexts: ["link"]
+    contexts: ["link", "page", "selection"]
   });
 }
 
@@ -70,17 +70,37 @@ chrome.runtime.onInstalled.addListener(async () => {
 
 chrome.runtime.onStartup.addListener(menu);
 
-chrome.contextMenus.onClicked.addListener(async (info) => {
-  if (info.menuItemId !== "verifyd-quarantine-scan" || !info.linkUrl) return;
+chrome.contextMenus.onClicked.addListener(async (info, tab) => {
+  if (info.menuItemId !== "verifyd-quarantine-scan") return;
+
+  const targetUrl =
+    info.linkUrl ||
+    info.srcUrl ||
+    info.pageUrl ||
+    (tab && tab.url) ||
+    "";
+
+  if (!/^https?:\/\//i.test(targetUrl)) {
+    await chrome.storage.local.set({
+      lastResult: {
+        status: "ERROR",
+        summary: "NO SCANNABLE URL",
+        source: targetUrl || "No URL detected",
+        findings: ["Right-click target did not provide an http/https URL for VeriFYD Lens to scan."]
+      }
+    });
+    await chrome.tabs.create({ url: chrome.runtime.getURL("result.html") });
+    return;
+  }
 
   try {
-    await start(info.linkUrl, null, "manual");
+    await start(targetUrl, null, "manual");
   } catch (error) {
     await chrome.storage.local.set({
       lastResult: {
         status: "ERROR",
         summary: "SCAN FAILED",
-        source: info.linkUrl,
+        source: targetUrl,
         findings: [String(error.message || error)]
       }
     });
