@@ -19,7 +19,7 @@ try:
 except Exception:
     scan_yara_security = None
 
-app = FastAPI(title="VeriFYD Lens Agent", version="0.4.2")
+app = FastAPI(title="VeriFYD Lens Agent", version="0.4.6")
 BASE = Path.home() / "VeriFYD" / "Lens"
 QUARANTINE = BASE / "Quarantine"
 DOWNLOADS = Path.home() / "Downloads"
@@ -296,8 +296,8 @@ def scan_worker(scan_id,url):
     try:
         score,findings=url_findings(url); filename=filename_from_url(url)
         q=unique_destination(QUARANTINE,f"{scan_id[:8]}_{filename}")
-        SCAN_STATE[scan_id].update(status="DOWNLOADING",summary="DOWNLOADING",filename=filename,findings=findings+["Downloading into VeriFYD Lens quarantine…"])
-        with httpx.stream("GET",url,headers={"User-Agent":"VeriFYD-Lens/0.4.2","Accept":"*/*"},follow_redirects=True,timeout=httpx.Timeout(30.0,read=120.0)) as r:
+        SCAN_STATE[scan_id].update(status="DOWNLOADING",summary="DOWNLOADING",filename=filename,findings=findings+["Downloading into VeriFYD Lens quarantine..."])
+        with httpx.stream("GET",url,headers={"User-Agent":"VeriFYD-Lens/0.4.6","Accept":"*/*"},follow_redirects=True,timeout=httpx.Timeout(30.0,read=120.0)) as r:
             r.raise_for_status(); resolve_public_host(urlparse(str(r.url)).hostname or "")
             if r.headers.get("content-length") and int(r.headers["content-length"])>MAX_DOWNLOAD_BYTES: raise RuntimeError("File exceeds the 250 MB MVP limit.")
             total=0
@@ -308,9 +308,9 @@ def scan_worker(scan_id,url):
                     f.write(chunk)
             findings+=content_type_check(filename,r.headers.get("content-type",""))
             if any("File type mismatch" in x for x in findings): score-=18
-        sha=sha256_file(q); findings.append(f"SHA-256 fingerprint created: {sha[:16]}…")
+        sha=sha256_file(q); findings.append(f"SHA-256 fingerprint created: {sha[:16]}...")
         SCAN_STATE[scan_id].update(status="SECURITY_SCANNING",summary="SECURITY SCANNING",sha256=sha,size_bytes=q.stat().st_size,quarantine_path=str(q),findings=findings)
-        # VERIFYD_LENS_YARA_INTEGRATION_V1 — additive; fail-open; authenticity pipeline untouched.
+        # VERIFYD_LENS_YARA_INTEGRATION_V1 - additive; fail-open; authenticity pipeline untouched.
         if scan_yara_security is not None:
             yara_security=scan_yara_security(q)
         else:
@@ -318,7 +318,7 @@ def scan_worker(scan_id,url):
         score+=int(yara_security.get("score_delta",0) or 0)
         if yara_security.get("finding"):
             findings.append(yara_security.get("finding"))
-        # VERIFYD_LENS_STATIC_SECURITY_V1 — additive; authenticity pipeline untouched.
+        # VERIFYD_LENS_STATIC_SECURITY_V1 - additive; authenticity pipeline untouched.
         if scan_static_security is not None:
             static_security=scan_static_security(q,filename)
         else:
@@ -349,7 +349,7 @@ def health():
     return {
         "ok":True,
         "product":"VeriFYD Lens",
-        "version":"0.4.2",
+        "version":"0.4.6",
         "tagline":"Don't Download Blind.",
         "cloud_configured":bool(CLOUD_KEY or _current_entitlement_token()),
         "cloud_url":CLOUD_URL,
