@@ -1,0 +1,14 @@
+{
+  "product": "VeriFYD Lens",
+  "tagline": "Don't Download Blind.",
+  "fields": [
+    "summary",
+    "security_score",
+    "authenticity_score",
+    "trust_score",
+    "findings",
+    "sha256",
+    "source",
+    "recommended_action"
+  ]
+}

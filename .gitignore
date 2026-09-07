@@ -107,3 +107,5 @@ marketplace-screenshot*.png
 VeriFYD_Lens/extension/result_before_v*_*.js
 detection.py.bak_*
 /tatus*
+# Local duplicate source copies
+/lens_security.py
