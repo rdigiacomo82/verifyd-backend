@@ -74,7 +74,69 @@ def safe_filename(name):
     name=unquote(name or "").strip().replace("\\","_").replace("/","_")
     name=re.sub(r'[<>:"|?*\x00-\x1f]',"_",name).rstrip(". ")
     return name[:180] or "download.bin"
-def filename_from_url(url): return safe_filename(Path(unquote(urlparse(url).path)).name or "download.bin")
+def filename_from_url(url):
+    return safe_filename(Path(unquote(urlparse(url).path)).name or "download.bin")
+
+def _extension_from_content_type(ct):
+    ct = (ct or "").split(";")[0].strip().lower()
+    mapping = {
+        "image/jpeg": ".jpg",
+        "image/jpg": ".jpg",
+        "image/png": ".png",
+        "image/webp": ".webp",
+        "image/gif": ".gif",
+        "image/heic": ".heic",
+        "image/heif": ".heif",
+        "application/pdf": ".pdf",
+        "video/mp4": ".mp4",
+        "video/quicktime": ".mov",
+        "audio/mpeg": ".mp3",
+        "audio/mp3": ".mp3",
+        "audio/wav": ".wav",
+        "audio/x-wav": ".wav",
+        "audio/mp4": ".m4a",
+        "application/zip": ".zip",
+    }
+    return mapping.get(ct) or mimetypes.guess_extension(ct) or ""
+
+def _extension_from_magic(path):
+    try:
+        head = Path(path).read_bytes()[:16]
+    except Exception:
+        return ""
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png"
+    if head.startswith(b"\xff\xd8\xff"):
+        return ".jpg"
+    if head.startswith(b"%PDF-"):
+        return ".pdf"
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return ".webp"
+    if len(head) >= 12 and head[4:8] == b"ftyp":
+        return ".mp4"
+    return ""
+
+def normalize_lens_filename(filename, content_type="", path=None):
+    # VERIFYD_LENS_EXTENSION_NORMALIZATION_V1
+    name = safe_filename(filename or "download")
+    suffix = Path(name).suffix.lower()
+    stem = Path(name).stem.lower()
+
+    if suffix and suffix != ".bin":
+        return name
+
+    ext = _extension_from_content_type(content_type)
+    if not ext and path is not None:
+        ext = _extension_from_magic(path)
+
+    if not ext:
+        return name
+
+    if suffix == ".bin":
+        name = name[:-4]
+
+    return safe_filename(f"{name}{ext}")
+
 
 def resolve_public_host(host):
     if not host: raise HTTPException(400,"URL has no hostname.")
@@ -306,7 +368,15 @@ def scan_worker(scan_id,url):
                     total+=len(chunk)
                     if total>MAX_DOWNLOAD_BYTES: raise RuntimeError("File exceeds the 250 MB MVP limit.")
                     f.write(chunk)
-            findings+=content_type_check(filename,r.headers.get("content-type",""))
+            response_content_type = r.headers.get("content-type","")
+            normalized_filename = normalize_lens_filename(filename, response_content_type, q)
+            if normalized_filename != filename:
+                old_q = q
+                filename = normalized_filename
+                q = unique_destination(QUARANTINE, f"{scan_id[:8]}_{filename}")
+                shutil.move(str(old_q), str(q))
+                SCAN_STATE[scan_id].update(filename=filename, quarantine_path=str(q))
+            findings+=content_type_check(filename,response_content_type)
             if any("File type mismatch" in x for x in findings): score-=18
         sha=sha256_file(q); findings.append(f"SHA-256 fingerprint created: {sha[:16]}...")
         SCAN_STATE[scan_id].update(status="SECURITY_SCANNING",summary="SECURITY SCANNING",sha256=sha,size_bytes=q.stat().st_size,quarantine_path=str(q),findings=findings)
