@@ -401,6 +401,11 @@ def scan_worker(scan_id,url):
         if static_security.get("hard_block") or yara_security.get("hard_block"):
             SCAN_STATE[scan_id].update(status="BLOCKED",summary="HIGH CONCERN",security_score=clamp(score),trust_score=clamp(score),authenticity_score=None,defender_status=defender["status"],defender_method=defender.get("method"),security_provider=defender.get("provider") or "Microsoft Defender",av_status=defender["status"],av_method=defender.get("method"),static_security_status=static_security.get("status"),static_security_engine=static_security.get("engine"),static_security_details=static_security.get("details"),yara_status=yara_security.get("status"),yara_engine=yara_security.get("engine"),yara_rule_count=yara_security.get("rule_count"),yara_match_count=yara_security.get("match_count"),yara_matches=yara_security.get("matches"),yara_details=yara_security.get("details"),findings=findings,sha256=sha,size_bytes=q.stat().st_size,quarantine_path=str(q),recommended_action="block"); return
         SCAN_STATE[scan_id].update(status="AUTHENTICITY_SCANNING",summary="AUTHENTICITY SCANNING",security_score=clamp(score),trust_score=clamp(score),defender_status=defender["status"],defender_method=defender.get("method"),security_provider=defender.get("provider") or "Microsoft Defender",av_status=defender["status"],av_method=defender.get("method"),static_security_status=static_security.get("status"),static_security_engine=static_security.get("engine"),static_security_details=static_security.get("details"),yara_status=yara_security.get("status"),yara_engine=yara_security.get("engine"),yara_rule_count=yara_security.get("rule_count"),yara_match_count=yara_security.get("match_count"),yara_matches=yara_security.get("matches"),yara_details=yara_security.get("details"),findings=findings)
+        # VERIFYD_LENS_PRE_CLOUD_MAGIC_NORMALIZATION_V1
+        cloud_filename = normalize_lens_filename(filename, response_content_type, q)
+        if cloud_filename != filename:
+            findings.append(f"Detected file signature; using {cloud_filename} for VeriFYD cloud analysis.")
+            filename = cloud_filename
         cloud=cloud_analyze(q,filename); findings.append(cloud["finding"])
         auth=cloud.get("authenticity_score"); label=cloud.get("label")
         if label: findings.append(f"VeriFYD authenticity verdict: {label}")
