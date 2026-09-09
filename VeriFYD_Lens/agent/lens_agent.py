@@ -126,6 +126,12 @@ def normalize_lens_filename(filename, content_type="", path=None):
         return name
 
     ext = _extension_from_content_type(content_type)
+
+    # VERIFYD_LENS_IGNORE_GENERIC_BIN_CONTENT_TYPE_V1
+    # Some legitimate downloads return application/octet-stream and map to .bin.
+    # Treat .bin as non-decisive so magic-byte detection can recover .pdf/.png/.jpg/etc.
+    if ext == ".bin":
+        ext = ""
     if not ext and path is not None:
         ext = _extension_from_magic(path)
 
