@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "VeriFYD Lens",
-  "version": "0.4.6",
+  "version": "0.4.7",
   "description": "Don't Download Blind. VeriFYD Lens pauses supported downloads and analyzes a protected copy for security, authenticity, and trust.",
   "permissions": [
     "storage",
