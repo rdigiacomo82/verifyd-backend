@@ -20,7 +20,7 @@ except Exception:
     scan_yara_security = None
     initialize_yara_security = None
 
-app = FastAPI(title="VeriFYD Lens Agent", version="0.4.6")
+app = FastAPI(title="VeriFYD Lens Agent", version="0.4.7")
 BASE = Path.home() / "VeriFYD" / "Lens"
 QUARANTINE = BASE / "Quarantine"
 DOWNLOADS = Path.home() / "Downloads"
@@ -366,7 +366,7 @@ def scan_worker(scan_id,url):
         score,findings=url_findings(url); filename=filename_from_url(url)
         q=unique_destination(QUARANTINE,f"{scan_id[:8]}_{filename}")
         SCAN_STATE[scan_id].update(status="DOWNLOADING",summary="DOWNLOADING",filename=filename,findings=findings+["Downloading into VeriFYD Lens quarantine..."])
-        with httpx.stream("GET",url,headers={"User-Agent":"VeriFYD-Lens/0.4.6","Accept":"*/*"},follow_redirects=True,timeout=httpx.Timeout(30.0,read=120.0)) as r:
+        with httpx.stream("GET",url,headers={"User-Agent":"VeriFYD-Lens/0.4.7","Accept":"*/*"},follow_redirects=True,timeout=httpx.Timeout(30.0,read=120.0)) as r:
             r.raise_for_status(); resolve_public_host(urlparse(str(r.url)).hostname or "")
             if r.headers.get("content-length") and int(r.headers["content-length"])>MAX_DOWNLOAD_BYTES: raise RuntimeError("File exceeds the 250 MB MVP limit.")
             total=0
@@ -434,7 +434,7 @@ def health():
     return {
         "ok":True,
         "product":"VeriFYD Lens",
-        "version":"0.4.6",
+        "version":"0.4.7",
         "tagline":"Don't Download Blind.",
         "cloud_configured":bool(CLOUD_KEY or _current_entitlement_token()),
         "cloud_url":CLOUD_URL,

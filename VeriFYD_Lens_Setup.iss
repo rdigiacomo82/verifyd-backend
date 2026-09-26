@@ -1,6 +1,6 @@
 ; VeriFYD Lens Windows Installer
 #define MyAppName "VeriFYD Lens"
-#define MyAppVersion "0.4.6"
+#define MyAppVersion "0.4.7"
 #define MyAppPublisher "Data By Design LLC"
 
 [Setup]
