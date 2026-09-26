@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "policy": {
+    "production_requires_license_review": true,
+    "production_requires_compile_test": true,
+    "production_requires_false_positive_review": true,
+    "auto_enable_imported_rules": false
+  },
+  "sources": [
+    {
+      "id": "tenable_yara_rules",
+      "name": "Tenable YARA Rules",
+      "repository": "https://github.com/tenable/yara-rules.git",
+      "license": "BSD-3-Clause",
+      "status": "candidate",
+      "allowed_for_candidate_ingestion": true,
+      "target_packs": [
+        "malware_generic",
+        "suspicious_scripts",
+        "documents"
+      ],
+      "notes": "Permissive source. Rules still require syntax, quality, and false-positive review before production."
+    },
+    {
+      "id": "intezer_yara_rules",
+      "name": "Intezer YARA Rules",
+      "repository": "https://github.com/intezer/yara-rules.git",
+      "license": "MIT",
+      "status": "candidate",
+      "allowed_for_candidate_ingestion": true,
+      "target_packs": [
+        "malware_generic"
+      ],
+      "notes": "Permissive source. Preserve attribution/license notices and vet individual rules."
+    },
+    {
+      "id": "elastic_protections_artifacts",
+      "name": "Elastic protections-artifacts",
+      "repository": "https://github.com/elastic/protections-artifacts.git",
+      "license": "Elastic-License-2.0",
+      "status": "hold",
+      "allowed_for_candidate_ingestion": false,
+      "target_packs": [],
+      "notes": "Keep separate pending license/use review and technical compatibility review."
+    },
+    {
+      "id": "yara_rules_rules",
+      "name": "Yara-Rules/rules",
+      "repository": "https://github.com/Yara-Rules/rules.git",
+      "license": "GPL-2.0",
+      "status": "hold",
+      "allowed_for_candidate_ingestion": false,
+      "target_packs": [],
+      "notes": "Do not bundle into commercial production without explicit GPL distribution review."
+    }
+  ]
+}
