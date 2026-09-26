@@ -1,0 +1,7 @@
+{
+  "namespace": "verifyd_core",
+  "enabled": true,
+  "trusted": true,
+  "allow_includes": false,
+  "description": "Initial VeriFYD-owned Phase 2A validation rules"
+}

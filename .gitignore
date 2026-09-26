@@ -109,3 +109,10 @@ detection.py.bak_*
 /tatus*
 # Local duplicate source copies
 /lens_security.py
+
+# VeriFYD local development artifacts
+__pycache__/
+*.pyc
+.venv/
+VeriFYD_Phase2A_YARAX/
+chrome_store_staging_v0_4_7/
