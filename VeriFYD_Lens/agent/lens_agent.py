@@ -386,20 +386,23 @@ def scan_worker(scan_id,url):
             if any("File type mismatch" in x for x in findings): score-=18
         sha=sha256_file(q); findings.append(f"SHA-256 fingerprint created: {sha[:16]}...")
         SCAN_STATE[scan_id].update(status="SECURITY_SCANNING",summary="SECURITY SCANNING",sha256=sha,size_bytes=q.stat().st_size,quarantine_path=str(q),findings=findings)
-        # VERIFYD_LENS_YARA_INTEGRATION_V1 - additive; fail-open; authenticity pipeline untouched.
-        if scan_yara_security is not None:
-            yara_security=scan_yara_security(q)
-        else:
-            yara_security={"engine":"verifyd_yara_x_v1","engine_label":"YARA-X unavailable","status":"UNAVAILABLE","score_delta":0,"hard_block":False,"matches":[],"match_count":0,"rule_count":0,"rule_files":[],"finding":"YARA-X security inspection was unavailable; existing security checks continued.","details":{}}
-        score+=int(yara_security.get("score_delta",0) or 0)
-        if yara_security.get("finding"):
-            findings.append(yara_security.get("finding"))
-        # VERIFYD_LENS_STATIC_SECURITY_V1 - additive; authenticity pipeline untouched.
+        # VERIFYD_LENS_STATIC_SECURITY_V1 - local static analysis first.
         if scan_static_security is not None:
             static_security=scan_static_security(q,filename)
         else:
             static_security={"engine":"verifyd_static_v1","status":"UNAVAILABLE","score_delta":0,"hard_block":False,"findings":["VeriFYD static security inspection was unavailable; existing security checks continued."],"details":{}}
         score+=int(static_security.get("score_delta",0) or 0);findings.extend(list(static_security.get("findings") or []))
+
+        # VERIFYD_LENS_SHARED_YARA_PHASE2A2 - shared core engine after static analysis.
+        if scan_yara_security is not None:
+            yara_security=scan_yara_security(q)
+        else:
+            yara_security={"engine":"verifyd_yara_x_shared_v1","engine_label":"YARA-X unavailable","status":"UNAVAILABLE","score_delta":0,"hard_block":False,"matches":[],"match_count":0,"rule_count":0,"rule_files":[],"finding":"YARA-X security inspection was unavailable; existing security checks continued.","details":{}}
+        score+=int(yara_security.get("score_delta",0) or 0)
+        if yara_security.get("finding"):
+            findings.append(yara_security.get("finding"))
+
+        # Endpoint antivirus remains the final local malware stage.
         endpoint_av=endpoint_av_scan(q); score+=endpoint_av.get("score_delta",0); findings.append(endpoint_av["finding"])
         defender=endpoint_av  # backward-compatible internal alias for existing result fields
         if not q.exists():

@@ -3,9 +3,9 @@
 
 a = Analysis(
     ['lens_agent.py'],
-    pathex=[],
+    pathex=['../..'],
     binaries=[],
-    datas=[('../rules', 'rules')],
+    datas=[('../../rules', 'rules')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import importlib.metadata
 import threading
 import time
 from pathlib import Path
@@ -89,7 +90,7 @@ class YaraXEngine:
             last_error = self._last_load_error
         backend_version = None
         try:
-            backend_version = getattr(self._backend(), "__version__", None)
+            backend_version = getattr(self._backend(), "__version__", None) or importlib.metadata.version("yara-x")
         except Exception:
             pass
         return {
@@ -174,7 +175,7 @@ class YaraXEngine:
             status = YaraStatus.COMPLETED_WITH_MATCHES if normalized else YaraStatus.COMPLETED_NO_MATCHES
             return YaraScanResult(
                 status=status,
-                engine_version=getattr(backend, "__version__", None),
+                engine_version=getattr(backend, "__version__", None) or importlib.metadata.version("yara-x"),
                 ruleset=bundle.info,
                 scan_duration_ms=elapsed_ms,
                 match_count=len(normalized),
@@ -194,7 +195,7 @@ class YaraXEngine:
             if timeout_type and isinstance(exc, timeout_type):
                 return YaraScanResult(
                     status=YaraStatus.TIMEOUT,
-                    engine_version=getattr(backend, "__version__", None),
+                    engine_version=getattr(backend, "__version__", None) or importlib.metadata.version("yara-x"),
                     ruleset=bundle.info,
                     errors=(f"YARA-X scan exceeded {self.timeout_seconds}s timeout",),
                 )
@@ -204,7 +205,7 @@ class YaraXEngine:
                 status = YaraStatus.SCAN_ERROR
             return YaraScanResult(
                 status=status,
-                engine_version=getattr(backend, "__version__", None) if backend else None,
+                engine_version=(getattr(backend, "__version__", None) or importlib.metadata.version("yara-x")) if backend else None,
                 ruleset=bundle.info,
                 errors=(f"{type(exc).__name__}: {exc}",),
             )
