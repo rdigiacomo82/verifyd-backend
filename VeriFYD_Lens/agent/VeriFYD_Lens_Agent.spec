@@ -1,12 +1,15 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from PyInstaller.utils.hooks import collect_all
+_yx_datas, _yx_binaries, _yx_hiddenimports = collect_all("yara_x")
+
 
 a = Analysis(
     ['lens_agent.py'],
     pathex=['../..'],
-    binaries=[],
-    datas=[('../../rules', 'rules')],
-    hiddenimports=[],
+    binaries=_yx_binaries,
+    datas=[('../../rules', 'rules')] + _yx_datas,
+    hiddenimports=_yx_hiddenimports + ["yara_x"],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

@@ -15,9 +15,10 @@ except Exception:
 
 # VERIFYD_LENS_YARA_INTEGRATION_V1
 try:
-    from lens_yara import scan_file as scan_yara_security
+    from lens_yara import scan_file as scan_yara_security, initialize as initialize_yara_security
 except Exception:
     scan_yara_security = None
+    initialize_yara_security = None
 
 app = FastAPI(title="VeriFYD Lens Agent", version="0.4.6")
 BASE = Path.home() / "VeriFYD" / "Lens"
@@ -441,6 +442,43 @@ def health():
         "activated":activation["activated"],
         "activated_email":activation["email"],
     }
+
+# VERIFYD_LENS_YARA_HEALTH_PHASE2A3
+@app.get("/health/yara")
+def health_yara():
+    if initialize_yara_security is None:
+        return {
+            "ok": False,
+            "engine": "YARA-X",
+            "status": "UNAVAILABLE",
+            "error": "Lens YARA adapter could not be imported.",
+        }
+
+    try:
+        result = initialize_yara_security()
+        health = result.get("health") or {}
+        ruleset = health.get("ruleset") or {}
+        return {
+            "ok": bool(result.get("status") == "READY" and health.get("available")),
+            "adapter": result.get("engine"),
+            "engine": health.get("engine") or "YARA-X",
+            "engine_version": health.get("engine_version"),
+            "status": result.get("status"),
+            "ruleset_version": ruleset.get("version"),
+            "ruleset_sha256": ruleset.get("sha256"),
+            "rules_loaded": ruleset.get("rules_loaded", 0),
+            "rule_files_loaded": ruleset.get("rule_files_loaded", 0),
+            "namespaces": ruleset.get("namespaces") or [],
+            "compile_warnings": ruleset.get("compile_warnings", 0),
+            "last_load_error": health.get("last_load_error"),
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "engine": "YARA-X",
+            "status": "ERROR",
+            "error": f"{type(exc).__name__}: {str(exc)[:240]}",
+        }
 
 @app.get("/activation/status")
 def activation_status():
