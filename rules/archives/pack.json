@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "id": "archives",
+  "namespace": "archives",
+  "enabled": false,
+  "trusted": false,
+  "allow_includes": false,
+  "version": "0",
+  "source": {
+    "name": "UNASSIGNED",
+    "type": "curated_third_party",
+    "url": ""
+  },
+  "license": {
+    "id": "UNASSIGNED",
+    "redistribution": "Do not enable until source and license are reviewed"
+  },
+  "description": "Archive and container indicators",
+  "categories": [
+    "archives",
+    "containers"
+  ],
+  "default_severity": "medium",
+  "last_reviewed": null
+}

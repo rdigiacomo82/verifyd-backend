@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "id": "suspicious_scripts",
+  "namespace": "suspicious_scripts",
+  "enabled": false,
+  "trusted": false,
+  "allow_includes": false,
+  "version": "0",
+  "source": {
+    "name": "UNASSIGNED",
+    "type": "curated_third_party",
+    "url": ""
+  },
+  "license": {
+    "id": "UNASSIGNED",
+    "redistribution": "Do not enable until source and license are reviewed"
+  },
+  "description": "Suspicious script and LOLBin indicators",
+  "categories": [
+    "scripts",
+    "lolbin"
+  ],
+  "default_severity": "medium",
+  "last_reviewed": null
+}

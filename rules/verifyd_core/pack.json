@@ -1,7 +1,26 @@
 {
+  "schema_version": 1,
+  "id": "verifyd_core",
   "namespace": "verifyd_core",
   "enabled": true,
   "trusted": true,
   "allow_includes": false,
-  "description": "Initial VeriFYD-owned Phase 2A validation rules"
+  "version": "2026.09.26",
+  "source": {
+    "name": "VeriFYD",
+    "type": "first_party",
+    "url": "https://vfvid.com"
+  },
+  "license": {
+    "id": "PROPRIETARY",
+    "redistribution": "VeriFYD-owned rules"
+  },
+  "description": "VeriFYD-owned security rules used by the shared YARA-X engine.",
+  "categories": [
+    "validation",
+    "scripts",
+    "documents"
+  ],
+  "default_severity": "informational",
+  "last_reviewed": "2026-09-26"
 }

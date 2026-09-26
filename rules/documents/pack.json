@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "id": "documents",
+  "namespace": "documents",
+  "enabled": false,
+  "trusted": false,
+  "allow_includes": false,
+  "version": "0",
+  "source": {
+    "name": "UNASSIGNED",
+    "type": "curated_third_party",
+    "url": ""
+  },
+  "license": {
+    "id": "UNASSIGNED",
+    "redistribution": "Do not enable until source and license are reviewed"
+  },
+  "description": "Document-focused exploit and active-content indicators",
+  "categories": [
+    "documents"
+  ],
+  "default_severity": "medium",
+  "last_reviewed": null
+}
