@@ -44,5 +44,21 @@ Filename: "{app}\VeriFYD_Lens_Activate.exe"; Description: "Activate VeriFYD Lens
 
 [UninstallRun]
 Filename: "{cmd}"; Parameters: "/C taskkill /IM VeriFYD_Lens_Agent.exe /F >nul 2>&1"; Flags: runhidden; RunOnceId: "StopLensAgent"
-
+[Code]
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  ResultCode: Integer;
+begin
+  if CurStep = ssInstall then
+  begin
+    Exec(
+      ExpandConstant('{cmd}'),
+      '/C taskkill /IM VeriFYD_Lens_Agent.exe /F >nul 2>&1',
+      '',
+      SW_HIDE,
+      ewWaitUntilTerminated,
+      ResultCode
+    );
+  end;
+end;
 
