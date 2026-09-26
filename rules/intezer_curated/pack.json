@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "id": "intezer_curated",
+  "namespace": "intezer_curated",
+  "enabled": true,
+  "trusted": false,
+  "allow_includes": false,
+  "version": "2026.09.26",
+  "source": {
+    "name": "Intezer YARA Rules",
+    "type": "curated_third_party",
+    "url": "https://github.com/intezer/yara-rules.git"
+  },
+  "license": {
+    "id": "MIT",
+    "redistribution": "Upstream license retained in UPSTREAM_LICENSE.txt"
+  },
+  "description": "Phase 2B.7 curated external YARA subset. Disabled pending final regression and promotion.",
+  "categories": [
+    "malware"
+  ],
+  "default_severity": "high",
+  "last_reviewed": "2026-09-26",
+  "promotion_status": "production_enabled",
+  "promotion_note": "Enabled after Phase 2B.7 compile and benign regression PASS."
+}
