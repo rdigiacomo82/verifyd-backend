@@ -1,6 +1,7 @@
 # ============================================================
-# VeriFYD Trust Voice — Phase 2A Signaling
+# VeriFYD Trust Voice — Signaling + WebRTC Negotiation
 # VERIFYD_TRUST_VOICE_SIGNALING_V1
+# VERIFYD_TRUST_VOICE_WEBRTC_V1
 #
 # Adds authenticated beta signaling only:
 #   - email OTP session login for existing VeriFYD Identities
@@ -8,11 +9,13 @@
 #   - online/offline presence
 #   - incoming call invite
 #   - answer / decline / end signaling
+#   - authenticated WebRTC offer / answer / ICE relay
 #
 # IMPORTANT:
 #   - Disabled unless VERIFYD_TRUST_VOICE_SIGNALING_ENABLED=1
 #   - Requires VERIFYD_TRUST_VOICE_SESSION_SECRET
-#   - Does NOT transport microphone/audio
+#   - Does NOT transport microphone/audio through the backend
+#   - WebRTC media remains browser-to-browser where network conditions permit
 #   - Does NOT alter existing tables
 #   - Presence/call state is in-memory beta state only
 # ============================================================
@@ -43,10 +46,12 @@ log = logging.getLogger("verifyd.trust_voice.signaling")
 
 router = APIRouter(prefix="/trust-voice", tags=["Trust Voice Signaling"])
 
-FEATURE_VERSION = "0.2.0"
+FEATURE_VERSION = "0.3.0"
 SESSION_TTL_SECONDS = 30 * 60
 INVITE_TTL_SECONDS = 45
 CALL_COOLDOWN_SECONDS = 3
+MAX_WEBRTC_SDP_BYTES = 128 * 1024
+MAX_WEBRTC_ICE_BYTES = 32 * 1024
 
 _connections: Dict[str, Set[WebSocket]] = defaultdict(set)
 _connection_meta: Dict[int, Dict[str, Any]] = {}
@@ -67,6 +72,24 @@ class SessionVerifyRequest(BaseModel):
 def _enabled() -> bool:
     value = (os.environ.get("VERIFYD_TRUST_VOICE_SIGNALING_ENABLED", "") or "").strip().lower()
     return value in {"1", "true", "yes", "on"}
+
+
+def _webrtc_enabled() -> bool:
+    value = (os.environ.get("VERIFYD_TRUST_VOICE_WEBRTC_ENABLED", "") or "").strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
+def _json_size_bytes(value: Any) -> int:
+    try:
+        return len(
+            json.dumps(
+                value,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8")
+        )
+    except Exception:
+        return MAX_WEBRTC_SDP_BYTES + 1
 
 
 def _require_enabled() -> None:
@@ -293,7 +316,8 @@ def signaling_health():
         "status": "ok",
         "feature": "trust_voice_signaling",
         "version": FEATURE_VERSION,
-        "audio_transport": "not_enabled",
+        "audio_transport": "webrtc_peer_to_peer_beta" if _webrtc_enabled() else "not_enabled",
+        "webrtc_signaling": "enabled" if _webrtc_enabled() else "disabled",
         "presence_store": "memory_beta",
     }
 
@@ -420,7 +444,8 @@ async def signaling_ws(websocket: WebSocket, token: str = Query(default="")):
         {
             "type": "session_ready",
             "identity": _public_identity(identity),
-            "audio_transport": "not_enabled",
+            "audio_transport": "webrtc_peer_to_peer_beta" if _webrtc_enabled() else "not_enabled",
+            "webrtc_signaling": "enabled" if _webrtc_enabled() else "disabled",
         },
     )
 
@@ -509,6 +534,226 @@ async def signaling_ws(websocket: WebSocket, token: str = Query(default="")):
                 )
                 continue
 
+            if msg_type in {"webrtc_offer", "webrtc_answer", "webrtc_ice"}:
+                if not _webrtc_enabled():
+                    await _send(
+                        websocket,
+                        {
+                            "type": "error",
+                            "error": "webrtc_not_enabled",
+                        },
+                    )
+                    continue
+
+                call_id = str(message.get("call_id", "")).strip()
+
+                if not call_id:
+                    await _send(
+                        websocket,
+                        {
+                            "type": "error",
+                            "error": "call_id_required",
+                        },
+                    )
+                    continue
+
+                async with _state_lock:
+                    call = dict(_active_calls.get(call_id, {}))
+
+                if not call:
+                    await _send(
+                        websocket,
+                        {
+                            "type": "error",
+                            "error": "call_not_found",
+                        },
+                    )
+                    continue
+
+                caller_id = call.get("caller_id")
+                callee_id = call.get("callee_id")
+
+                if identity_id not in {caller_id, callee_id}:
+                    await _send(
+                        websocket,
+                        {
+                            "type": "error",
+                            "error": "not_call_participant",
+                        },
+                    )
+                    continue
+
+                # WebRTC negotiation is only valid after the recipient
+                # has answered the authenticated Trust Voice call.
+                if call.get("state") != "answered":
+                    await _send(
+                        websocket,
+                        {
+                            "type": "error",
+                            "error": "invalid_call_state",
+                        },
+                    )
+                    continue
+
+                # Initial beta uses deterministic negotiation:
+                # caller creates offer, callee creates answer.
+                if msg_type == "webrtc_offer" and identity_id != caller_id:
+                    await _send(
+                        websocket,
+                        {
+                            "type": "error",
+                            "error": "offer_must_come_from_caller",
+                        },
+                    )
+                    continue
+
+                if msg_type == "webrtc_answer" and identity_id != callee_id:
+                    await _send(
+                        websocket,
+                        {
+                            "type": "error",
+                            "error": "answer_must_come_from_callee",
+                        },
+                    )
+                    continue
+
+                peer_id = (
+                    callee_id
+                    if identity_id == caller_id
+                    else caller_id
+                )
+
+                # ----------------------------------------------------
+                # SDP OFFER / ANSWER
+                # ----------------------------------------------------
+
+                if msg_type in {"webrtc_offer", "webrtc_answer"}:
+                    sdp = message.get("sdp")
+
+                    expected_type = (
+                        "offer"
+                        if msg_type == "webrtc_offer"
+                        else "answer"
+                    )
+
+                    if not isinstance(sdp, dict):
+                        await _send(
+                            websocket,
+                            {
+                                "type": "error",
+                                "error": "invalid_webrtc_sdp",
+                            },
+                        )
+                        continue
+
+                    sdp_type = str(
+                        sdp.get("type", "")
+                    ).strip().lower()
+
+                    sdp_body = sdp.get("sdp")
+
+                    if (
+                        sdp_type != expected_type
+                        or not isinstance(sdp_body, str)
+                        or not sdp_body.strip()
+                    ):
+                        await _send(
+                            websocket,
+                            {
+                                "type": "error",
+                                "error": "invalid_webrtc_sdp",
+                            },
+                        )
+                        continue
+
+                    if _json_size_bytes(sdp) > MAX_WEBRTC_SDP_BYTES:
+                        await _send(
+                            websocket,
+                            {
+                                "type": "error",
+                                "error": "webrtc_sdp_too_large",
+                            },
+                        )
+                        continue
+
+                    delivered = await _send_to_identity(
+                        peer_id,
+                        {
+                            "type": msg_type,
+                            "call_id": call_id,
+                            "sdp": sdp,
+                        },
+                    )
+
+                    if delivered == 0:
+                        await _send(
+                            websocket,
+                            {
+                                "type": "error",
+                                "error": "webrtc_peer_unavailable",
+                            },
+                        )
+
+                    continue
+
+                # ----------------------------------------------------
+                # ICE CANDIDATE
+                # ----------------------------------------------------
+
+                candidate = message.get("candidate")
+
+                if not isinstance(candidate, dict):
+                    await _send(
+                        websocket,
+                        {
+                            "type": "error",
+                            "error": "invalid_webrtc_candidate",
+                        },
+                    )
+                    continue
+
+                candidate_line = candidate.get("candidate")
+
+                if not isinstance(candidate_line, str):
+                    await _send(
+                        websocket,
+                        {
+                            "type": "error",
+                            "error": "invalid_webrtc_candidate",
+                        },
+                    )
+                    continue
+
+                if _json_size_bytes(candidate) > MAX_WEBRTC_ICE_BYTES:
+                    await _send(
+                        websocket,
+                        {
+                            "type": "error",
+                            "error": "webrtc_candidate_too_large",
+                        },
+                    )
+                    continue
+
+                delivered = await _send_to_identity(
+                    peer_id,
+                    {
+                        "type": "webrtc_ice",
+                        "call_id": call_id,
+                        "candidate": candidate,
+                    },
+                )
+
+                if delivered == 0:
+                    await _send(
+                        websocket,
+                        {
+                            "type": "error",
+                            "error": "webrtc_peer_unavailable",
+                        },
+                    )
+
+                continue
+
             if msg_type in {"call_answer", "call_decline", "call_end"}:
                 call_id = str(message.get("call_id", "")).strip()
                 if not call_id:
@@ -591,6 +836,9 @@ async def signaling_ws(websocket: WebSocket, token: str = Query(default="")):
                         "call_answer",
                         "call_decline",
                         "call_end",
+                        "webrtc_offer",
+                        "webrtc_answer",
+                        "webrtc_ice",
                     ],
                 },
             )
