@@ -45,6 +45,7 @@ from database import (init_db, insert_certificate, increment_downloads,
                       activate_lens_entitlement)
 from video import clip_first_6_seconds, stamp_video, download_video_ytdlp
 from trust_voice_identity import router as trust_voice_identity_router
+from trust_voice_signaling import router as trust_voice_signaling_router
 
 log = logging.getLogger("verifyd.main")
 
@@ -227,6 +228,9 @@ app = FastAPI(title="VeriFYD", lifespan=lifespan)
 
 # VERIFYD_TRUST_VOICE_IDENTITY_MVP_V1
 app.include_router(trust_voice_identity_router)
+
+# VERIFYD_TRUST_VOICE_SIGNALING_V1
+app.include_router(trust_voice_signaling_router)
 
 # VERIFYD_MAIL_SHIELD_STATIC_ICONS_V1
 # Public static assets for Microsoft Outlook add-in validation icons.
