@@ -41,6 +41,7 @@ from pydantic import BaseModel, Field
 
 from database import create_otp, get_db, is_valid_email, verify_otp
 from emailer import send_otp_email
+from trust_voice_permissions import call_permission_decision
 
 log = logging.getLogger("verifyd.trust_voice.signaling")
 
@@ -483,6 +484,28 @@ async def signaling_ws(websocket: WebSocket, token: str = Query(default="")):
                 target = _identity_by_handle(target_handle)
                 if not target:
                     await _send(websocket, {"type": "call_failed", "reason": "handle_not_found"})
+                    continue
+
+                allowed, permission_reason = call_permission_decision(
+                    caller=identity,
+                    callee=target,
+                )
+
+                if not allowed:
+                    log.info(
+                        "Trust Voice call denied caller_id=%s callee_id=%s reason=%s",
+                        identity_id,
+                        target["id"],
+                        permission_reason,
+                    )
+
+                    await _send(
+                        websocket,
+                        {
+                            "type": "call_failed",
+                            "reason": "not_allowed",
+                        },
+                    )
                     continue
 
                 if not await _presence(target["id"]):
