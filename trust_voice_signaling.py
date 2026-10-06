@@ -2,6 +2,7 @@
 # VeriFYD Trust Voice — Signaling + WebRTC Negotiation
 # VERIFYD_TRUST_VOICE_SIGNALING_V1
 # VERIFYD_TRUST_VOICE_WEBRTC_V1
+# VERIFYD_TRUST_VOICE_MESSAGE_NOTIFY_V1
 #
 # Adds authenticated beta signaling only:
 #   - email OTP session login for existing VeriFYD Identities
@@ -47,7 +48,7 @@ log = logging.getLogger("verifyd.trust_voice.signaling")
 
 router = APIRouter(prefix="/trust-voice", tags=["Trust Voice Signaling"])
 
-FEATURE_VERSION = "0.3.0"
+FEATURE_VERSION = "0.3.1"
 SESSION_TTL_SECONDS = 30 * 60
 INVITE_TTL_SECONDS = 45
 CALL_COOLDOWN_SECONDS = 3
@@ -244,6 +245,28 @@ async def _send_to_identity(identity_id: str, payload: dict) -> int:
         except Exception:
             pass
     return sent
+
+
+async def notify_message_created(
+    recipient_identity_id: str,
+    conversation_id: str,
+    message_id: str,
+    sender: dict,
+    created_at: str,
+) -> int:
+    # Best-effort realtime notification only. PostgreSQL/HTTP remains
+    # authoritative and a delivery failure must never fail the stored message.
+    return await _send_to_identity(
+        recipient_identity_id,
+        {
+            "type": "message_created",
+            "conversation_id": conversation_id,
+            "message_id": message_id,
+            "message_type": "text",
+            "sender": sender,
+            "created_at": created_at,
+        },
+    )
 
 
 async def _presence(identity_id: str) -> bool:

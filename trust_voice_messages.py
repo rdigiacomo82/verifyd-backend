@@ -1,6 +1,7 @@
 # ============================================================
 # VeriFYD Trust Voice — Direct Messaging Foundation
 # VERIFYD_TRUST_VOICE_MESSAGES_V1
+# VERIFYD_TRUST_VOICE_MESSAGE_NOTIFY_V1
 #
 # Phase 1 provides authenticated 1:1 text messaging only:
 #   - isolated messaging tables
@@ -27,7 +28,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Literal, Optional, Tuple
 
-from fastapi import APIRouter, Header, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from database import get_db
@@ -38,6 +39,7 @@ from trust_voice_signaling import (
     _normalize_handle,
     _public_identity,
     _verify_token,
+    notify_message_created,
 )
 
 
@@ -46,7 +48,7 @@ router = APIRouter(
     tags=["Trust Voice Messages"],
 )
 
-FEATURE_VERSION = "0.1.0"
+FEATURE_VERSION = "0.2.0"
 
 ALLOWED_MESSAGE_PRIVACY = {
     "anyone",
@@ -716,7 +718,7 @@ def messages_health():
         "enabled": _enabled(),
         "message_types": ["text"],
         "attachments": "not_enabled",
-        "realtime_notifications": "not_enabled",
+        "realtime_notifications": "websocket_best_effort_beta",
     }
 
 
@@ -1099,6 +1101,7 @@ def list_messages(
 def send_text_message(
     conversation_id: str,
     payload: TextMessageCreate,
+    background_tasks: BackgroundTasks,
     authorization: Optional[str] = Header(default=None),
 ):
     _require_enabled()
@@ -1174,13 +1177,28 @@ def send_text_message(
         )
         row = dict(cur.fetchone())
 
+    message_payload = _message_payload(
+        row,
+        identity["id"],
+        _other_member.get("last_read_at"),
+    )
+
+    # Realtime delivery is intentionally best-effort. The database write above
+    # is authoritative; an offline recipient receives the message on the next
+    # HTTP inbox refresh. Starlette runs this async BackgroundTask after the
+    # response path completes, keeping WebSocket delivery off the sync DB path.
+    background_tasks.add_task(
+        notify_message_created,
+        recipient_identity_id=str(other_identity["id"]),
+        conversation_id=conversation_id,
+        message_id=message_id,
+        sender=_public_contact(identity),
+        created_at=now,
+    )
+
     return {
         "ok": True,
-        "message": _message_payload(
-            row,
-            identity["id"],
-            _other_member.get("last_read_at"),
-        ),
+        "message": message_payload,
     }
 
 
