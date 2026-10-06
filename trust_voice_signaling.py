@@ -48,7 +48,7 @@ log = logging.getLogger("verifyd.trust_voice.signaling")
 
 router = APIRouter(prefix="/trust-voice", tags=["Trust Voice Signaling"])
 
-FEATURE_VERSION = "0.3.1"
+FEATURE_VERSION = "0.3.2"
 SESSION_TTL_SECONDS = 30 * 60
 INVITE_TTL_SECONDS = 45
 CALL_COOLDOWN_SECONDS = 3
@@ -253,16 +253,22 @@ async def notify_message_created(
     message_id: str,
     sender: dict,
     created_at: str,
+    message_type: str = "text",
 ) -> int:
     # Best-effort realtime notification only. PostgreSQL/HTTP remains
     # authoritative and a delivery failure must never fail the stored message.
+    safe_message_type = (
+        message_type
+        if message_type in {"text", "attachment"}
+        else "text"
+    )
     return await _send_to_identity(
         recipient_identity_id,
         {
             "type": "message_created",
             "conversation_id": conversation_id,
             "message_id": message_id,
-            "message_type": "text",
+            "message_type": safe_message_type,
             "sender": sender,
             "created_at": created_at,
         },

@@ -48,7 +48,7 @@ router = APIRouter(
     tags=["Trust Voice Messages"],
 )
 
-FEATURE_VERSION = "0.2.0"
+FEATURE_VERSION = "0.2.1"
 
 ALLOWED_MESSAGE_PRIVACY = {
     "anyone",
@@ -711,13 +711,29 @@ def _conversation_payload(
 
 @router.get("/messages/health")
 def messages_health():
+    attachments_enabled = (
+        os.environ.get(
+            "VERIFYD_TRUST_VOICE_ATTACHMENTS_ENABLED",
+            "",
+        )
+        or ""
+    ).strip().lower() in {"1", "true", "yes", "on"}
+
     return {
         "status": "ok",
         "feature": "trust_voice_messages",
         "version": FEATURE_VERSION,
         "enabled": _enabled(),
-        "message_types": ["text"],
-        "attachments": "not_enabled",
+        "message_types": (
+            ["text", "attachment"]
+            if attachments_enabled
+            else ["text"]
+        ),
+        "attachments": (
+            "private_transport_beta"
+            if attachments_enabled
+            else "not_enabled"
+        ),
         "realtime_notifications": "websocket_best_effort_beta",
     }
 
