@@ -26,6 +26,9 @@ import os
 import re
 import tempfile
 import uuid
+
+import boto3
+from botocore.config import Config
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -33,7 +36,6 @@ from fastapi import APIRouter, BackgroundTasks, File, Header, HTTPException, Upl
 from fastapi.responses import StreamingResponse
 
 from database import get_db
-from storage import _get_client, r2_available
 from trust_voice_messages import (
     _identity_from_bearer,
     _other_direct_member,
@@ -52,14 +54,36 @@ router = APIRouter(
     tags=["Trust Voice Attachments"],
 )
 
-FEATURE_VERSION = "0.1.0"
+FEATURE_VERSION = "0.1.1"
 
 DEFAULT_MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
 ABSOLUTE_MAX_ATTACHMENT_BYTES = 100 * 1024 * 1024
+
+# Dedicated Trust Voice R2 credentials.
+# The account ID may reuse the existing R2_ACCOUNT_ID when the private
+# Trust Voice bucket lives in the same Cloudflare account.
+TRUST_VOICE_ACCOUNT_ID = (
+    os.environ.get("R2_TRUST_VOICE_ACCOUNT_ID", "")
+    or os.environ.get("R2_ACCOUNT_ID", "")
+    or ""
+).strip()
+TRUST_VOICE_ACCESS_KEY_ID = (
+    os.environ.get("R2_TRUST_VOICE_ACCESS_KEY_ID", "")
+    or ""
+).strip()
+TRUST_VOICE_SECRET_KEY = (
+    os.environ.get("R2_TRUST_VOICE_SECRET_KEY", "")
+    or ""
+).strip()
 TRUST_VOICE_BUCKET = (
     os.environ.get("R2_TRUST_VOICE_BUCKET", "")
     or ""
 ).strip()
+TRUST_VOICE_ENDPOINT = (
+    f"https://{TRUST_VOICE_ACCOUNT_ID}.r2.cloudflarestorage.com"
+    if TRUST_VOICE_ACCOUNT_ID
+    else ""
+)
 
 PHOTO_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif"}
 VIDEO_EXTENSIONS = {
@@ -110,11 +134,28 @@ def _require_enabled() -> None:
 
 
 def _storage_configured() -> bool:
-    # Existing VeriFYD R2 credentials may be reused, but Trust Voice
-    # attachments require a separate non-public bucket.
     return bool(
-        TRUST_VOICE_BUCKET
-        and r2_available()
+        TRUST_VOICE_ACCOUNT_ID
+        and TRUST_VOICE_ACCESS_KEY_ID
+        and TRUST_VOICE_SECRET_KEY
+        and TRUST_VOICE_BUCKET
+        and TRUST_VOICE_ENDPOINT
+    )
+
+
+def _get_attachment_client():
+    if not _storage_configured():
+        raise RuntimeError(
+            "Trust Voice private R2 storage is not fully configured."
+        )
+
+    return boto3.client(
+        "s3",
+        endpoint_url=TRUST_VOICE_ENDPOINT,
+        aws_access_key_id=TRUST_VOICE_ACCESS_KEY_ID,
+        aws_secret_access_key=TRUST_VOICE_SECRET_KEY,
+        config=Config(signature_version="s3v4"),
+        region_name="auto",
     )
 
 
@@ -306,7 +347,7 @@ def _require_attachment_member(
 def _delete_r2_quietly(storage_key: str) -> None:
     try:
         if storage_key and _storage_configured():
-            _get_client().delete_object(
+            _get_attachment_client().delete_object(
                 Bucket=TRUST_VOICE_BUCKET,
                 Key=storage_key,
             )
@@ -327,6 +368,11 @@ def attachments_health():
         "enabled": _enabled(),
         "storage": (
             "private_r2_configured"
+            if _storage_configured()
+            else "not_configured"
+        ),
+        "credential_mode": (
+            "dedicated_bucket_token"
             if _storage_configured()
             else "not_configured"
         ),
@@ -444,7 +490,7 @@ async def send_attachment(
         )
 
         try:
-            client = _get_client()
+            client = _get_attachment_client()
             client.upload_file(
                 temp_path,
                 TRUST_VOICE_BUCKET,
@@ -696,7 +742,7 @@ def download_attachment(
         )
 
     try:
-        obj = _get_client().get_object(
+        obj = _get_attachment_client().get_object(
             Bucket=TRUST_VOICE_BUCKET,
             Key=row["storage_key"],
         )
