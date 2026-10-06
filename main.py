@@ -48,6 +48,7 @@ from trust_voice_identity import router as trust_voice_identity_router
 from trust_voice_signaling import router as trust_voice_signaling_router
 from trust_voice_profile_media import router as trust_voice_profile_media_router
 from trust_voice_trust_circle import router as trust_voice_trust_circle_router
+from trust_voice_messages import router as trust_voice_messages_router
 
 log = logging.getLogger("verifyd.main")
 
@@ -238,6 +239,9 @@ app.include_router(trust_voice_signaling_router)
 app.include_router(trust_voice_profile_media_router)
 # VERIFYD_TRUST_VOICE_TRUST_CIRCLE_API_V1
 app.include_router(trust_voice_trust_circle_router)
+
+# VERIFYD_TRUST_VOICE_MESSAGES_V1
+app.include_router(trust_voice_messages_router)
 
 # VERIFYD_MAIL_SHIELD_STATIC_ICONS_V1
 # Public static assets for Microsoft Outlook add-in validation icons.
