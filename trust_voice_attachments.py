@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import mimetypes
 import os
 import re
 import tempfile
@@ -45,6 +44,10 @@ from trust_voice_messages import (
     ensure_message_schema,
 )
 from trust_voice_signaling import notify_message_created
+from trust_voice_attachment_validation import (
+    AttachmentContentError,
+    validate_attachment_content,
+)
 
 
 log = logging.getLogger("verifyd.trust_voice.attachments")
@@ -54,7 +57,7 @@ router = APIRouter(
     tags=["Trust Voice Attachments"],
 )
 
-FEATURE_VERSION = "0.1.1"
+FEATURE_VERSION = "0.1.2"
 
 DEFAULT_MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
 ABSOLUTE_MAX_ATTACHMENT_BYTES = 100 * 1024 * 1024
@@ -203,41 +206,6 @@ def _extension(value: str) -> str:
     return os.path.splitext(value or "")[1].lower()
 
 
-def _media_category(
-    ext: str,
-    supplied_content_type: str = "",
-) -> str:
-    # .webm is the only currently ambiguous allowed extension because it
-    # may contain audio-only or video. For other extensions, use the
-    # extension classification so a spoofed client MIME type cannot change
-    # future analysis routing.
-    if ext == ".webm":
-        mime = (supplied_content_type or "").strip().lower()
-        if mime.startswith("audio/"):
-            return "audio"
-        return "video"
-
-    if ext in PHOTO_EXTENSIONS:
-        return "photo"
-    if ext in AUDIO_EXTENSIONS:
-        return "audio"
-    if ext in VIDEO_EXTENSIONS:
-        return "video"
-    if ext in DOCUMENT_EXTENSIONS:
-        return "document"
-    return "unknown"
-
-
-def _content_type(filename: str, supplied: Optional[str]) -> str:
-    supplied = (supplied or "").strip().lower()
-    guessed, _ = mimetypes.guess_type(filename)
-
-    if supplied and supplied != "application/octet-stream":
-        return supplied[:120]
-
-    return (guessed or "application/octet-stream")[:120]
-
-
 def ensure_attachment_schema() -> None:
     ensure_message_schema()
 
@@ -377,6 +345,7 @@ def attachments_health():
             else "not_configured"
         ),
         "max_attachment_bytes": _max_attachment_bytes(),
+        "content_validation": "signature_and_container_v1",
         "authenticity_analysis": "not_enabled",
         "malware_scanning": "not_enabled",
     }
@@ -430,11 +399,6 @@ async def send_attachment(
             },
         )
 
-    content_type = _content_type(safe_name, file.content_type)
-    category = _media_category(
-        ext,
-        file.content_type or "",
-    )
     max_bytes = _max_attachment_bytes()
 
     attachment_id = "tvatt_" + uuid.uuid4().hex
@@ -480,6 +444,30 @@ async def send_attachment(
                     "message": "The attachment is empty.",
                 },
             )
+
+        try:
+            validated_content = validate_attachment_content(
+                temp_path,
+                extension=ext,
+                supplied_content_type=file.content_type or "",
+            )
+        except AttachmentContentError as exc:
+            raise HTTPException(
+                status_code=415,
+                detail={
+                    "error": exc.code,
+                    "message": exc.message,
+                },
+            )
+
+        content_type = str(
+            validated_content.get("content_type")
+            or "application/octet-stream"
+        )
+        category = str(
+            validated_content.get("media_category")
+            or "unknown"
+        )
 
         sha256 = digest.hexdigest()
 
