@@ -3,22 +3,23 @@
 # VERIFYD_TRUST_VOICE_MESSAGES_V1
 # VERIFYD_TRUST_VOICE_MESSAGE_NOTIFY_V1
 #
-# Phase 1 provides authenticated 1:1 text messaging only:
+# Authenticated 1:1 Trust Voice messaging:
 #   - isolated messaging tables
 #   - message privacy settings
 #   - direct conversations between Trust Voice identities
-#   - durable text messages
-#   - conversation/message listing
+#   - durable text and attachment messages
+#   - lightweight conversation summaries
+#   - cursor-paginated message history
+#   - batched sender + attachment metadata hydration
 #   - mark-read support
+#   - best-effort WebSocket message notifications
 #
 # IMPORTANT:
 #   - Disabled unless VERIFYD_TRUST_VOICE_MESSAGES_ENABLED=1
 #   - Uses the existing Trust Voice bearer/session token
 #   - Reuses Trust Circle membership for "trust_circle" privacy
-#   - Does NOT modify existing VeriFYD or Trust Voice tables
-#   - Does NOT add attachments yet
-#   - Does NOT add WebSocket message notifications yet
 #   - Does NOT expose email addresses
+#   - Does NOT fetch attachment file bytes from R2 while listing messages
 # ============================================================
 
 from __future__ import annotations
@@ -48,7 +49,7 @@ router = APIRouter(
     tags=["Trust Voice Messages"],
 )
 
-FEATURE_VERSION = "0.2.1"
+FEATURE_VERSION = "0.3.0"
 
 ALLOWED_MESSAGE_PRIVACY = {
     "anyone",
@@ -59,6 +60,7 @@ ALLOWED_MESSAGE_PRIVACY = {
 
 DEFAULT_MESSAGE_PRIVACY = "trust_circle"
 MAX_MESSAGE_LENGTH = 4000
+_message_schema_ready = False
 
 
 class DirectConversationCreate(BaseModel):
@@ -208,11 +210,16 @@ def _identity_from_bearer(
 
 def ensure_message_schema() -> None:
     """
-    Create only the isolated Trust Voice messaging tables.
+    Create only the isolated Trust Voice messaging tables and indexes.
 
-    Safe and idempotent. Existing VeriFYD and Trust Voice tables are not
-    altered by this function.
+    Safe and idempotent. The DDL is performed once per application process
+    instead of on every message request.
     """
+
+    global _message_schema_ready
+
+    if _message_schema_ready:
+        return
 
     with get_db() as conn:
         cur = conn.cursor()
@@ -307,6 +314,33 @@ def ensure_message_schema() -> None:
             """
         )
 
+        # Performance indexes for active conversation history/unread lookups.
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS
+            idx_verifyd_voice_messages_active_created
+            ON verifyd_voice_messages (
+                conversation_id,
+                created_at DESC
+            )
+            WHERE deleted_at IS NULL
+            """
+        )
+
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS
+            idx_verifyd_voice_messages_active_sender_created
+            ON verifyd_voice_messages (
+                conversation_id,
+                sender_identity_id,
+                created_at DESC
+            )
+            WHERE deleted_at IS NULL
+            """
+        )
+
+    _message_schema_ready = True
 
 def _direct_key(
     identity_a: str,
@@ -614,6 +648,214 @@ def _unread_count(
     return int(row.get("unread_count") or 0)
 
 
+def _attachments_enabled() -> bool:
+    value = (
+        os.environ.get(
+            "VERIFYD_TRUST_VOICE_ATTACHMENTS_ENABLED",
+            "",
+        )
+        or ""
+    ).strip().lower()
+
+    return value in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _public_attachment_metadata(
+    row: dict,
+) -> dict:
+    """
+    Public, lightweight attachment metadata only.
+
+    No R2 storage key or file bytes are returned here.
+    """
+    attachment_id = str(
+        row.get("attachment_id")
+        or ""
+    )
+
+    return {
+        "attachment_id": attachment_id,
+        "message_id": row.get("message_id"),
+        "conversation_id": row.get("conversation_id"),
+        "filename": row.get("filename") or "",
+        "extension": row.get("extension") or "",
+        "media_category": row.get("media_category") or "unknown",
+        "content_type": (
+            row.get("content_type")
+            or "application/octet-stream"
+        ),
+        "size_bytes": int(
+            row.get("size_bytes")
+            or 0
+        ),
+        "sha256": row.get("sha256") or "",
+        "analysis_status": (
+            row.get("analysis_status")
+            or "not_started"
+        ),
+        "malware_status": (
+            row.get("malware_status")
+            or "not_scanned"
+        ),
+        "download_url": (
+            f"/trust-voice/attachments/"
+            f"{attachment_id}/download"
+        ),
+        "created_at": row.get("created_at") or "",
+    }
+
+
+def _attachment_metadata_by_message_ids(
+    message_ids: list[str],
+) -> dict[str, dict]:
+    """
+    Batch-fetch attachment metadata for one message page.
+
+    The actual private R2 object is never retrieved by this helper.
+    """
+    if (
+        not message_ids
+        or not _attachments_enabled()
+    ):
+        return {}
+
+    with get_db() as conn:
+        cur = conn.cursor()
+
+        # Attachment transport may be enabled before its schema has been
+        # initialized. Avoid turning message history into a server error.
+        cur.execute(
+            """
+            SELECT to_regclass(
+                'verifyd_voice_attachments'
+            ) AS table_name
+            """
+        )
+        table_check = cur.fetchone() or {}
+
+        if not table_check.get("table_name"):
+            return {}
+
+        cur.execute(
+            """
+            SELECT
+                attachment_id,
+                message_id,
+                conversation_id,
+                filename,
+                extension,
+                media_category,
+                content_type,
+                size_bytes,
+                sha256,
+                analysis_status,
+                malware_status,
+                created_at
+            FROM verifyd_voice_attachments
+            WHERE message_id = ANY(%s)
+            """,
+            (message_ids,),
+        )
+
+        rows = cur.fetchall() or []
+
+    return {
+        str(row["message_id"]): _public_attachment_metadata(
+            dict(row)
+        )
+        for row in rows
+    }
+
+
+def _message_payload_fast(
+    row: dict,
+    viewer_identity: dict,
+    other_identity: dict,
+    other_last_read_at: Optional[str] = None,
+    attachment: Optional[dict] = None,
+) -> dict:
+    """
+    Serialize one direct-conversation message without querying the sender.
+
+    Both possible sender identities are already known for a 1:1 conversation,
+    eliminating the old identity-query-per-message pattern.
+    """
+    viewer_identity_id = str(
+        viewer_identity.get("id")
+        or ""
+    )
+
+    sender_identity_id = str(
+        row.get("sender_identity_id")
+        or ""
+    )
+
+    is_mine = (
+        sender_identity_id
+        == viewer_identity_id
+    )
+
+    sender_identity = (
+        viewer_identity
+        if is_mine
+        else other_identity
+    )
+
+    sender_public = (
+        _public_contact(sender_identity)
+        if sender_identity
+        else {
+            "identity_id": sender_identity_id,
+            "handle": "",
+            "display_name": "",
+            "display_emoji": "",
+            "display_label": "",
+            "verification": {
+                "email_verified": False,
+                "identity_verified": False,
+                "organization_verified": False,
+                "level": "unknown",
+            },
+            "profile_media_url": "",
+        }
+    )
+
+    read_by_recipient = None
+
+    if is_mine:
+        created_at = str(
+            row.get("created_at")
+            or ""
+        )
+
+        read_by_recipient = _timestamp_gte(
+            other_last_read_at,
+            created_at,
+        )
+
+    payload = {
+        "message_id": row.get("message_id"),
+        "conversation_id": row.get("conversation_id"),
+        "message_type": row.get("message_type") or "text",
+        "body": row.get("body") or "",
+        "sender": sender_public,
+        "is_mine": is_mine,
+        "read_by_recipient": read_by_recipient,
+        "created_at": row.get("created_at") or "",
+        "edited_at": row.get("edited_at"),
+    }
+
+    if attachment:
+        payload["attachment"] = attachment
+
+    return payload
+
+
 def _message_payload(
     row: dict,
     viewer_identity_id: str,
@@ -711,13 +953,7 @@ def _conversation_payload(
 
 @router.get("/messages/health")
 def messages_health():
-    attachments_enabled = (
-        os.environ.get(
-            "VERIFYD_TRUST_VOICE_ATTACHMENTS_ENABLED",
-            "",
-        )
-        or ""
-    ).strip().lower() in {"1", "true", "yes", "on"}
+    attachments_enabled = _attachments_enabled()
 
     return {
         "status": "ok",
@@ -735,6 +971,11 @@ def messages_health():
             else "not_enabled"
         ),
         "realtime_notifications": "websocket_best_effort_beta",
+        "conversation_summaries": "batched_v1",
+        "message_pagination": "cursor_v1",
+        "attachment_hydration": "inline_metadata_v1",
+        "message_sender_hydration": "two_party_cached_v1",
+        "schema_init": "once_per_process_v1",
     }
 
 
@@ -961,36 +1202,298 @@ def open_direct_conversation(
 def list_conversations(
     authorization: Optional[str] = Header(default=None),
 ):
+    """
+    Lightweight inbox/conversation summaries.
+
+    Performance v0.3:
+      - fixed number of database queries instead of N+1 hydration
+      - empty conversations are excluded from the Messages inbox
+      - unread totals are calculated in one grouped query
+      - only latest attachment metadata is hydrated
+    """
     _require_enabled()
 
     identity = _identity_from_bearer(authorization)
     ensure_message_schema()
 
+    viewer_identity_id = str(identity["id"])
+
     with get_db() as conn:
         cur = conn.cursor()
+
+        # Conversations for this viewer that actually contain at least
+        # one non-deleted message. This prevents empty Trust Circle
+        # conversations from appearing as "No messages yet".
         cur.execute(
             """
-            SELECT c.*
+            SELECT
+                c.*,
+                vm.last_read_at AS viewer_last_read_at
             FROM verifyd_voice_conversations c
-            INNER JOIN verifyd_voice_conversation_members m
-                ON m.conversation_id = c.conversation_id
-            WHERE m.identity_id = %s
+            INNER JOIN verifyd_voice_conversation_members vm
+                ON vm.conversation_id = c.conversation_id
+            WHERE vm.identity_id = %s
+              AND EXISTS (
+                  SELECT 1
+                  FROM verifyd_voice_messages msg
+                  WHERE msg.conversation_id = c.conversation_id
+                    AND msg.deleted_at IS NULL
+              )
             ORDER BY c.updated_at DESC
             """,
-            (identity["id"],),
+            (viewer_identity_id,),
         )
-        rows = cur.fetchall() or []
 
-    conversations = [
-        _conversation_payload(
-            dict(row),
-            identity["id"],
+        conversation_rows = [
+            dict(row)
+            for row in (cur.fetchall() or [])
+        ]
+
+        if not conversation_rows:
+            return {
+                "count": 0,
+                "total_unread": 0,
+                "unread_conversation_count": 0,
+                "conversations": [],
+            }
+
+        conversation_ids = [
+            str(row["conversation_id"])
+            for row in conversation_rows
+        ]
+
+        # Fetch every member for all returned conversations in one query.
+        cur.execute(
+            """
+            SELECT
+                conversation_id,
+                identity_id,
+                joined_at,
+                last_read_at
+            FROM verifyd_voice_conversation_members
+            WHERE conversation_id = ANY(%s)
+            """,
+            (conversation_ids,),
         )
-        for row in rows
+
+        member_rows = [
+            dict(row)
+            for row in (cur.fetchall() or [])
+        ]
+
+        other_member_by_conversation = {}
+
+        for member in member_rows:
+            if (
+                str(member.get("identity_id") or "")
+                != viewer_identity_id
+            ):
+                other_member_by_conversation[
+                    str(member["conversation_id"])
+                ] = member
+
+        other_identity_ids = list({
+            str(member.get("identity_id") or "")
+            for member in other_member_by_conversation.values()
+            if member.get("identity_id")
+        })
+
+        # Fetch all other participant identities in one query.
+        identity_by_id = {}
+
+        if other_identity_ids:
+            cur.execute(
+                """
+                SELECT *
+                FROM verifyd_identities
+                WHERE id = ANY(%s)
+                  AND status = 'active'
+                """,
+                (other_identity_ids,),
+            )
+
+            identity_by_id = {
+                str(row["id"]): dict(row)
+                for row in (cur.fetchall() or [])
+            }
+
+        # Fetch the latest message for every conversation in one query.
+        cur.execute(
+            """
+            SELECT DISTINCT ON (conversation_id)
+                *
+            FROM verifyd_voice_messages
+            WHERE conversation_id = ANY(%s)
+              AND deleted_at IS NULL
+            ORDER BY
+                conversation_id,
+                created_at DESC
+            """,
+            (conversation_ids,),
+        )
+
+        latest_by_conversation = {
+            str(row["conversation_id"]): dict(row)
+            for row in (cur.fetchall() or [])
+        }
+
+        # Calculate unread counts for all conversations in one query.
+        cur.execute(
+            """
+            SELECT
+                msg.conversation_id,
+                COUNT(*) AS unread_count
+            FROM verifyd_voice_messages msg
+            INNER JOIN verifyd_voice_conversation_members vm
+                ON vm.conversation_id = msg.conversation_id
+               AND vm.identity_id = %s
+            WHERE msg.conversation_id = ANY(%s)
+              AND msg.sender_identity_id <> %s
+              AND msg.deleted_at IS NULL
+              AND (
+                  vm.last_read_at IS NULL
+                  OR msg.created_at::timestamptz >
+                     vm.last_read_at::timestamptz
+              )
+            GROUP BY msg.conversation_id
+            """,
+            (
+                viewer_identity_id,
+                conversation_ids,
+                viewer_identity_id,
+            ),
+        )
+
+        unread_by_conversation = {
+            str(row["conversation_id"]): int(
+                row.get("unread_count")
+                or 0
+            )
+            for row in (cur.fetchall() or [])
+        }
+
+    # Only latest-message attachment metadata is needed for the inbox.
+    latest_message_ids = [
+        str(row["message_id"])
+        for row in latest_by_conversation.values()
+        if row.get("message_id")
     ]
+
+    attachment_by_message_id = (
+        _attachment_metadata_by_message_ids(
+            latest_message_ids
+        )
+    )
+
+    conversations = []
+
+    for conversation in conversation_rows:
+        conversation_id = str(
+            conversation["conversation_id"]
+        )
+
+        other_member = (
+            other_member_by_conversation.get(
+                conversation_id
+            )
+        )
+
+        if not other_member:
+            continue
+
+        other_identity = identity_by_id.get(
+            str(
+                other_member.get("identity_id")
+                or ""
+            )
+        )
+
+        if not other_identity:
+            continue
+
+        latest_message = (
+            latest_by_conversation.get(
+                conversation_id
+            )
+        )
+
+        unread_count = (
+            unread_by_conversation.get(
+                conversation_id,
+                0,
+            )
+        )
+
+        last_message_payload = None
+
+        if latest_message:
+            message_id = str(
+                latest_message.get("message_id")
+                or ""
+            )
+
+            last_message_payload = (
+                _message_payload_fast(
+                    latest_message,
+                    identity,
+                    other_identity,
+                    other_member.get("last_read_at"),
+                    attachment=(
+                        attachment_by_message_id.get(
+                            message_id
+                        )
+                    ),
+                )
+            )
+
+        conversations.append(
+            {
+                "conversation_id": conversation_id,
+                "conversation_type": (
+                    conversation.get(
+                        "conversation_type"
+                    )
+                    or "direct"
+                ),
+                "other": _public_contact(
+                    other_identity
+                ),
+                "unread_count": unread_count,
+                "last_message": last_message_payload,
+                "created_at": (
+                    conversation.get("created_at")
+                    or ""
+                ),
+                "updated_at": (
+                    conversation.get("updated_at")
+                    or ""
+                ),
+            }
+        )
+
+    total_unread = sum(
+        int(
+            conversation.get("unread_count")
+            or 0
+        )
+        for conversation in conversations
+    )
+
+    unread_conversation_count = sum(
+        1
+        for conversation in conversations
+        if int(
+            conversation.get("unread_count")
+            or 0
+        ) > 0
+    )
 
     return {
         "count": len(conversations),
+        "total_unread": total_unread,
+        "unread_conversation_count": (
+            unread_conversation_count
+        ),
         "conversations": conversations,
     }
 
@@ -1033,6 +1536,15 @@ def list_messages(
     limit: int = Query(default=50, ge=1, le=100),
     before: Optional[str] = Query(default=None, max_length=80),
 ):
+    """
+    Cursor-paginated conversation history.
+
+    Performance v0.3:
+      - no identity query per message
+      - attachment metadata is batch-hydrated for the page
+      - one extra row is fetched to calculate has_more accurately
+      - actual R2 file bytes are never fetched here
+    """
     _require_enabled()
 
     identity = _identity_from_bearer(authorization)
@@ -1043,12 +1555,13 @@ def list_messages(
         identity["id"],
     )
 
-    other_member, _other_identity = _other_direct_member(
+    other_member, other_identity = _other_direct_member(
         conversation_id,
         identity["id"],
     )
 
     before = _validate_before_cursor(before)
+    fetch_limit = limit + 1
 
     with get_db() as conn:
         cur = conn.cursor()
@@ -1067,7 +1580,7 @@ def list_messages(
                 (
                     conversation_id,
                     before,
-                    limit,
+                    fetch_limit,
                 ),
             )
         else:
@@ -1082,34 +1595,75 @@ def list_messages(
                 """,
                 (
                     conversation_id,
-                    limit,
+                    fetch_limit,
                 ),
             )
 
-        rows = cur.fetchall() or []
+        rows = [
+            dict(row)
+            for row in (cur.fetchall() or [])
+        ]
 
-    rows = list(reversed(rows))
+    has_more = len(rows) > limit
+    page_rows = rows[:limit]
 
-    messages = [
-        _message_payload(
-            dict(row),
-            identity["id"],
-            other_member.get("last_read_at"),
-        )
-        for row in rows
+    message_ids = [
+        str(row["message_id"])
+        for row in page_rows
+        if row.get("message_id")
     ]
 
-    next_before = (
-        messages[0]["created_at"]
-        if len(messages) == limit and messages
-        else None
+    attachment_by_message_id = (
+        _attachment_metadata_by_message_ids(
+            message_ids
+        )
     )
+
+    messages_desc = []
+
+    for row in page_rows:
+        message_id = str(
+            row.get("message_id")
+            or ""
+        )
+
+        messages_desc.append(
+            _message_payload_fast(
+                row,
+                identity,
+                other_identity,
+                other_member.get("last_read_at"),
+                attachment=(
+                    attachment_by_message_id.get(
+                        message_id
+                    )
+                ),
+            )
+        )
+
+    # Preserve the historical response order for frontend compatibility.
+    # page_rows is newest -> oldest; the response remains oldest -> newest.
+    messages = list(
+        reversed(messages_desc)
+    )
+
+    next_before = None
+
+    if has_more and page_rows:
+        # The final row in the DESC query is the oldest row in this page
+        # and therefore becomes the cursor for the next older page.
+        next_before = str(
+            page_rows[-1].get("created_at")
+            or ""
+        )
 
     return {
         "conversation_id": conversation_id,
         "count": len(messages),
         "messages": messages,
+        "has_more": has_more,
         "next_before": next_before,
+        "page_size": limit,
     }
 
 
