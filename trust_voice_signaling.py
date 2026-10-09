@@ -35,7 +35,7 @@ import secrets
 import time
 import uuid
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional, Set
 
 from fastapi import (
@@ -56,11 +56,11 @@ log = logging.getLogger("verifyd.trust_voice.signaling")
 
 router = APIRouter(prefix="/trust-voice", tags=["Trust Voice Signaling"])
 
-FEATURE_VERSION = "0.4.0"
+FEATURE_VERSION = "0.5.0"
 
 # Trust Voice sessions are persistent and server-revocable.
 # New sessions do not expire based on elapsed time.
-INVITE_TTL_SECONDS = 45
+INVITE_TTL_SECONDS = 30
 CALL_COOLDOWN_SECONDS = 3
 MAX_WEBRTC_SDP_BYTES = 128 * 1024
 MAX_WEBRTC_ICE_BYTES = 32 * 1024
@@ -71,6 +71,8 @@ _active_calls: Dict[str, Dict[str, Any]] = {}
 _last_invite_at: Dict[str, float] = {}
 _state_lock = asyncio.Lock()
 _persistent_session_schema_ready = False
+_call_history_schema_ready = False
+_call_expiry_tasks: Dict[str, asyncio.Task] = {}
 
 
 class SessionCodeRequest(BaseModel):
@@ -214,6 +216,284 @@ def _now_iso() -> str:
     return datetime.now(
         timezone.utc
     ).isoformat()
+
+
+def ensure_call_history_schema() -> None:
+    """
+    Create the durable Trust Voice call-history table.
+
+    Safe/idempotent. The table stores call outcomes separately from the
+    in-memory WebSocket call state so missed calls survive refreshes,
+    reconnects, and server restarts.
+    """
+    global _call_history_schema_ready
+
+    if _call_history_schema_ready:
+        return
+
+    now = _now_iso()
+    stale_cutoff = (
+        datetime.now(timezone.utc)
+        - timedelta(seconds=INVITE_TTL_SECONDS)
+    ).isoformat()
+
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS verifyd_voice_calls (
+                call_id                TEXT PRIMARY KEY,
+                caller_identity_id     TEXT NOT NULL,
+                callee_identity_id     TEXT NOT NULL,
+                call_type              TEXT NOT NULL DEFAULT 'audio',
+                status                 TEXT NOT NULL,
+                started_at             TEXT NOT NULL,
+                answered_at            TEXT,
+                ended_at               TEXT,
+                missed_at              TEXT,
+                missed_seen_at         TEXT,
+                ended_reason           TEXT
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_verifyd_voice_calls_callee_missed
+            ON verifyd_voice_calls (
+                callee_identity_id,
+                status,
+                missed_at DESC
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_verifyd_voice_calls_caller_started
+            ON verifyd_voice_calls (
+                caller_identity_id,
+                started_at DESC
+            )
+            """
+        )
+
+        # Recovery safety: if the service restarted while a call was ringing,
+        # convert any stale "ringing" row into a durable missed call.
+        cur.execute(
+            """
+            UPDATE verifyd_voice_calls
+            SET
+                status = 'missed',
+                ended_at = COALESCE(ended_at, %s),
+                missed_at = COALESCE(missed_at, %s),
+                ended_reason = COALESCE(
+                    ended_reason,
+                    'server_recovery_timeout'
+                )
+            WHERE status = 'ringing'
+              AND started_at::timestamptz <= %s::timestamptz
+            """,
+            (
+                now,
+                now,
+                stale_cutoff,
+            ),
+        )
+
+    _call_history_schema_ready = True
+
+
+def _create_call_history(
+    call_id: str,
+    caller_identity_id: str,
+    callee_identity_id: str,
+    call_type: str = "audio",
+) -> None:
+    ensure_call_history_schema()
+
+    now = _now_iso()
+
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO verifyd_voice_calls (
+                call_id,
+                caller_identity_id,
+                callee_identity_id,
+                call_type,
+                status,
+                started_at,
+                answered_at,
+                ended_at,
+                missed_at,
+                missed_seen_at,
+                ended_reason
+            )
+            VALUES (
+                %s, %s, %s, %s, 'ringing', %s,
+                NULL, NULL, NULL, NULL, NULL
+            )
+            ON CONFLICT (call_id) DO NOTHING
+            """,
+            (
+                call_id,
+                caller_identity_id,
+                callee_identity_id,
+                call_type,
+                now,
+            ),
+        )
+
+
+def _record_call_answered(call_id: str) -> None:
+    ensure_call_history_schema()
+
+    now = _now_iso()
+
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            UPDATE verifyd_voice_calls
+            SET
+                status = 'answered',
+                answered_at = COALESCE(answered_at, %s),
+                ended_reason = NULL
+            WHERE call_id = %s
+              AND status = 'ringing'
+            """,
+            (
+                now,
+                call_id,
+            ),
+        )
+
+
+def _record_call_terminal(
+    call_id: str,
+    status: str,
+    reason: str,
+) -> str:
+    """
+    Persist a terminal call state and return its terminal timestamp.
+
+    Internal callers use only trusted status values:
+    missed, declined, ended, canceled, failed.
+    """
+    ensure_call_history_schema()
+
+    now = _now_iso()
+    missed_at = now if status == "missed" else None
+
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            UPDATE verifyd_voice_calls
+            SET
+                status = %s,
+                ended_at = COALESCE(ended_at, %s),
+                missed_at = CASE
+                    WHEN %s IS NOT NULL
+                    THEN COALESCE(missed_at, %s)
+                    ELSE missed_at
+                END,
+                ended_reason = %s
+            WHERE call_id = %s
+              AND status NOT IN (
+                  'missed',
+                  'declined',
+                  'ended',
+                  'canceled',
+                  'failed'
+              )
+            """,
+            (
+                status,
+                now,
+                missed_at,
+                missed_at,
+                reason,
+                call_id,
+            ),
+        )
+
+    return now
+
+
+def _cancel_call_expiry(call_id: str) -> None:
+    task = _call_expiry_tasks.pop(call_id, None)
+
+    if task and not task.done():
+        task.cancel()
+
+
+async def _expire_unanswered_call(call_id: str) -> None:
+    try:
+        await asyncio.sleep(INVITE_TTL_SECONDS)
+    except asyncio.CancelledError:
+        return
+
+    async with _state_lock:
+        call = dict(_active_calls.get(call_id, {}))
+
+        if not call or call.get("state") != "ringing":
+            return
+
+        _active_calls.pop(call_id, None)
+
+    caller_id = str(call.get("caller_id") or "")
+    callee_id = str(call.get("callee_id") or "")
+    missed_at = _record_call_terminal(
+        call_id,
+        "missed",
+        "no_answer",
+    )
+
+    caller_identity = (
+        _identity_by_id(caller_id)
+        if caller_id
+        else None
+    )
+
+    await _send_to_identity(
+        caller_id,
+        {
+            "type": "call_no_answer",
+            "call_id": call_id,
+            "reason": "no_answer",
+        },
+    )
+
+    await _send_to_identity(
+        callee_id,
+        {
+            "type": "call_missed",
+            "call_id": call_id,
+            "caller": (
+                _public_identity(caller_identity)
+                if caller_identity
+                else None
+            ),
+            "missed_at": missed_at,
+        },
+    )
+
+
+def _schedule_call_expiry(call_id: str) -> None:
+    _cancel_call_expiry(call_id)
+
+    task = asyncio.create_task(
+        _expire_unanswered_call(call_id)
+    )
+    _call_expiry_tasks[call_id] = task
+
+    def _cleanup(done_task: asyncio.Task) -> None:
+        current = _call_expiry_tasks.get(call_id)
+        if current is done_task:
+            _call_expiry_tasks.pop(call_id, None)
+
+    task.add_done_callback(_cleanup)
 
 
 def ensure_persistent_session_schema() -> None:
@@ -775,91 +1055,106 @@ async def _register(
         }
 
 
-async def _unregister(
-    identity_id: str,
-    ws: WebSocket,
-) -> None:
+async def _unregister(identity_id: str, ws: WebSocket) -> None:
     async with _state_lock:
-        if (
-            identity_id
-            in _connections
-        ):
-            _connections[
-                identity_id
-            ].discard(
-                ws
-            )
+        if identity_id in _connections:
+            _connections[identity_id].discard(ws)
+            if not _connections[identity_id]:
+                _connections.pop(identity_id, None)
 
-            if not _connections[
-                identity_id
-            ]:
-                _connections.pop(
-                    identity_id,
-                    None,
-                )
+        _connection_meta.pop(id(ws), None)
 
-        _connection_meta.pop(
-            id(ws),
-            None,
-        )
-
-        # End any active calls involving this identity.
+        # Only tear down calls if this identity has no remaining live
+        # Trust Voice socket on another tab/device.
+        identity_still_online = bool(_connections.get(identity_id))
         affected = []
 
-        for (
-            call_id,
-            call,
-        ) in list(
-            _active_calls.items()
-        ):
-            if (
-                identity_id
-                in {
-                    call.get(
-                        "caller_id"
-                    ),
-                    call.get(
-                        "callee_id"
-                    ),
-                }
-            ):
-                affected.append(
-                    (
-                        call_id,
-                        dict(call),
-                    )
-                )
+        if not identity_still_online:
+            for call_id, call in list(_active_calls.items()):
+                if identity_id in {
+                    call.get("caller_id"),
+                    call.get("callee_id"),
+                }:
+                    affected.append((call_id, dict(call)))
+                    _active_calls.pop(call_id, None)
 
-                _active_calls.pop(
-                    call_id,
-                    None,
-                )
+    for call_id, call in affected:
+        _cancel_call_expiry(call_id)
 
-    for (
-        call_id,
-        call,
-    ) in affected:
+        caller_id = str(call.get("caller_id") or "")
+        callee_id = str(call.get("callee_id") or "")
+        call_state = str(call.get("state") or "")
+
         peer_id = (
-            call["callee_id"]
-            if (
-                identity_id
-                == call["caller_id"]
-            )
-            else call["caller_id"]
+            callee_id
+            if identity_id == caller_id
+            else caller_id
+        )
+
+        if call_state == "ringing":
+            if identity_id == callee_id:
+                # Recipient disappeared while ringing: make it a missed call.
+                missed_at = _record_call_terminal(
+                    call_id,
+                    "missed",
+                    "callee_disconnected",
+                )
+
+                await _send_to_identity(
+                    caller_id,
+                    {
+                        "type": "call_no_answer",
+                        "call_id": call_id,
+                        "reason": "callee_disconnected",
+                    },
+                )
+
+                caller_identity = _identity_by_id(caller_id)
+
+                await _send_to_identity(
+                    callee_id,
+                    {
+                        "type": "call_missed",
+                        "call_id": call_id,
+                        "caller": (
+                            _public_identity(caller_identity)
+                            if caller_identity
+                            else None
+                        ),
+                        "missed_at": missed_at,
+                    },
+                )
+            else:
+                # Caller left before the recipient answered.
+                _record_call_terminal(
+                    call_id,
+                    "canceled",
+                    "caller_disconnected",
+                )
+
+                await _send_to_identity(
+                    peer_id,
+                    {
+                        "type": "call_ended",
+                        "call_id": call_id,
+                        "reason": "caller_disconnected",
+                    },
+                )
+
+            continue
+
+        _record_call_terminal(
+            call_id,
+            "ended",
+            "peer_disconnected",
         )
 
         await _send_to_identity(
             peer_id,
             {
-                "type": (
-                    "call_ended"
-                ),
-                "call_id": (
-                    call_id
-                ),
-                "reason": (
-                    "peer_disconnected"
-                ),
+                "type": "call_ended",
+                "call_id": call_id,
+                "reason": "peer_disconnected",
             },
         )
 
@@ -930,6 +1225,7 @@ def signaling_health():
     _require_enabled()
     _secret()
     ensure_persistent_session_schema()
+    ensure_call_history_schema()
 
     return {
         "status": "ok",
@@ -961,6 +1257,9 @@ def signaling_health():
         "legacy_session_support": (
             "temporary"
         ),
+        "ring_timeout_seconds": INVITE_TTL_SECONDS,
+        "call_history": "postgresql_v1",
+        "missed_calls": "durable_v1",
         "presence_store": (
             "memory_beta"
         ),
@@ -1295,6 +1594,226 @@ def revoke_all_sessions(
         "revoked_count": (
             revoked_count
         ),
+    }
+
+
+
+def _identity_from_http_authorization(
+    authorization: Optional[str],
+) -> dict:
+    token = _token_from_authorization(authorization)
+    payload = _verify_token(token)
+
+    identity = _identity_by_id(
+        str(payload.get("identity_id") or "")
+    )
+
+    if not identity:
+        raise HTTPException(
+            status_code=401,
+            detail={"error": "identity_not_found"},
+        )
+
+    return identity
+
+
+def _public_call_identity(identity: Optional[dict]) -> Optional[dict]:
+    if not identity:
+        return None
+
+    public = _public_identity(identity)
+    public["profile_media_url"] = (
+        f"/trust-voice/profile-media/{identity['id']}"
+    )
+    return public
+
+
+@router.get("/calls/summary")
+def call_summary(
+    authorization: Optional[str] = Header(default=None),
+):
+    _require_enabled()
+
+    identity = _identity_from_http_authorization(
+        authorization
+    )
+    ensure_call_history_schema()
+
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT COUNT(*) AS unread_missed_count
+            FROM verifyd_voice_calls
+            WHERE callee_identity_id = %s
+              AND status = 'missed'
+              AND missed_seen_at IS NULL
+            """,
+            (
+                identity["id"],
+            ),
+        )
+        row = cur.fetchone() or {}
+
+    return {
+        "unread_missed_count": int(
+            row.get("unread_missed_count") or 0
+        ),
+    }
+
+
+@router.get("/calls/missed")
+def list_missed_calls(
+    authorization: Optional[str] = Header(default=None),
+    limit: int = Query(default=20, ge=1, le=100),
+):
+    _require_enabled()
+
+    identity = _identity_from_http_authorization(
+        authorization
+    )
+    ensure_call_history_schema()
+
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT *
+            FROM verifyd_voice_calls
+            WHERE callee_identity_id = %s
+              AND status = 'missed'
+            ORDER BY missed_at DESC NULLS LAST
+            LIMIT %s
+            """,
+            (
+                identity["id"],
+                limit,
+            ),
+        )
+        rows = [
+            dict(row)
+            for row in (cur.fetchall() or [])
+        ]
+
+        cur.execute(
+            """
+            SELECT COUNT(*) AS unread_missed_count
+            FROM verifyd_voice_calls
+            WHERE callee_identity_id = %s
+              AND status = 'missed'
+              AND missed_seen_at IS NULL
+            """,
+            (
+                identity["id"],
+            ),
+        )
+        unread_row = cur.fetchone() or {}
+
+    calls = []
+
+    for row in rows:
+        caller = _identity_by_id(
+            str(row.get("caller_identity_id") or "")
+        )
+
+        calls.append(
+            {
+                "call_id": row.get("call_id"),
+                "call_type": row.get("call_type") or "audio",
+                "status": "missed",
+                "caller": _public_call_identity(caller),
+                "started_at": row.get("started_at") or "",
+                "ended_at": row.get("ended_at"),
+                "missed_at": row.get("missed_at"),
+                "seen": bool(row.get("missed_seen_at")),
+            }
+        )
+
+    return {
+        "count": len(calls),
+        "unread_missed_count": int(
+            unread_row.get("unread_missed_count") or 0
+        ),
+        "calls": calls,
+    }
+
+
+@router.post("/calls/{call_id}/read")
+def mark_missed_call_read(
+    call_id: str,
+    authorization: Optional[str] = Header(default=None),
+):
+    _require_enabled()
+
+    identity = _identity_from_http_authorization(
+        authorization
+    )
+    ensure_call_history_schema()
+    now = _now_iso()
+
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            UPDATE verifyd_voice_calls
+            SET missed_seen_at = COALESCE(missed_seen_at, %s)
+            WHERE call_id = %s
+              AND callee_identity_id = %s
+              AND status = 'missed'
+            """,
+            (
+                now,
+                call_id,
+                identity["id"],
+            ),
+        )
+
+        if cur.rowcount == 0:
+            raise HTTPException(
+                status_code=404,
+                detail={"error": "missed_call_not_found"},
+            )
+
+    return {
+        "ok": True,
+        "call_id": call_id,
+        "read": True,
+    }
+
+
+@router.post("/calls/missed/read-all")
+def mark_all_missed_calls_read(
+    authorization: Optional[str] = Header(default=None),
+):
+    _require_enabled()
+
+    identity = _identity_from_http_authorization(
+        authorization
+    )
+    ensure_call_history_schema()
+    now = _now_iso()
+
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            UPDATE verifyd_voice_calls
+            SET missed_seen_at = %s
+            WHERE callee_identity_id = %s
+              AND status = 'missed'
+              AND missed_seen_at IS NULL
+            """,
+            (
+                now,
+                identity["id"],
+            ),
+        )
+        updated = int(cur.rowcount or 0)
+
+    return {
+        "ok": True,
+        "updated": updated,
+        "unread_missed_count": 0,
     }
 
 
@@ -1693,6 +2212,14 @@ async def signaling_ws(
                     )
 
                     continue
+
+                _create_call_history(
+                    call_id=call_id,
+                    caller_identity_id=identity_id,
+                    callee_identity_id=str(target["id"]),
+                    call_type="audio",
+                )
+                _schedule_call_expiry(call_id)
 
                 await _send(
                     websocket,
@@ -2239,6 +2766,9 @@ async def signaling_ws(
                                 "answered"
                             )
 
+                    _cancel_call_expiry(call_id)
+                    _record_call_answered(call_id)
+
                     await _send_to_identity(
                         caller_id,
                         {
@@ -2297,6 +2827,13 @@ async def signaling_ws(
                             None,
                         )
 
+                    _cancel_call_expiry(call_id)
+                    _record_call_terminal(
+                        call_id,
+                        "declined",
+                        "declined",
+                    )
+
                     await _send_to_identity(
                         caller_id,
                         {
@@ -2331,6 +2868,21 @@ async def signaling_ws(
                         _active_calls.pop(
                             call_id,
                             None,
+                        )
+
+                    _cancel_call_expiry(call_id)
+
+                    if call.get("state") == "ringing":
+                        _record_call_terminal(
+                            call_id,
+                            "canceled",
+                            "ended_before_answer",
+                        )
+                    else:
+                        _record_call_terminal(
+                            call_id,
+                            "ended",
+                            "ended",
                         )
 
                     await _send_to_identity(
