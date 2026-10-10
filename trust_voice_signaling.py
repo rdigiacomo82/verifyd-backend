@@ -56,12 +56,13 @@ log = logging.getLogger("verifyd.trust_voice.signaling")
 
 router = APIRouter(prefix="/trust-voice", tags=["Trust Voice Signaling"])
 
-FEATURE_VERSION = "0.5.0"
+FEATURE_VERSION = "0.6.0"
 
 # Trust Voice sessions are persistent and server-revocable.
 # New sessions do not expire based on elapsed time.
 INVITE_TTL_SECONDS = 30
 CALL_COOLDOWN_SECONDS = 3
+ALLOWED_CALL_TYPES = {"audio", "video"}
 MAX_WEBRTC_SDP_BYTES = 128 * 1024
 MAX_WEBRTC_ICE_BYTES = 32 * 1024
 
@@ -1260,6 +1261,12 @@ def signaling_health():
         "ring_timeout_seconds": INVITE_TTL_SECONDS,
         "call_history": "postgresql_v1",
         "missed_calls": "durable_v1",
+        "supported_call_types": ["audio", "video"],
+        "video_calling": (
+            "webrtc_one_to_one_v1"
+            if _webrtc_enabled()
+            else "not_enabled"
+        ),
         "presence_store": (
             "memory_beta"
         ),
@@ -1940,6 +1947,10 @@ async def signaling_ws(
                 if _webrtc_enabled()
                 else "disabled"
             ),
+            "supported_call_types": [
+                "audio",
+                "video",
+            ],
         },
     )
 
@@ -1997,6 +2008,28 @@ async def signaling_ws(
                         )
                     )
                 )
+
+                call_type = str(
+                    message.get(
+                        "call_type",
+                        "audio",
+                    )
+                    or "audio"
+                ).strip().lower()
+
+                if call_type not in ALLOWED_CALL_TYPES:
+                    await _send(
+                        websocket,
+                        {
+                            "type": "error",
+                            "error": "invalid_call_type",
+                            "allowed_call_types": [
+                                "audio",
+                                "video",
+                            ],
+                        },
+                    )
+                    continue
 
                 if not target_handle:
                     await _send(
@@ -2160,6 +2193,9 @@ async def signaling_ws(
                     "state": (
                         "ringing"
                     ),
+                    "call_type": (
+                        call_type
+                    ),
                     "created_at": (
                         time.time()
                     ),
@@ -2187,6 +2223,9 @@ async def signaling_ws(
                             ),
                             "expires_in_seconds": (
                                 INVITE_TTL_SECONDS
+                            ),
+                            "call_type": (
+                                call_type
                             ),
                         },
                     )
@@ -2217,7 +2256,7 @@ async def signaling_ws(
                     call_id=call_id,
                     caller_identity_id=identity_id,
                     callee_identity_id=str(target["id"]),
-                    call_type="audio",
+                    call_type=call_type,
                 )
                 _schedule_call_expiry(call_id)
 
@@ -2234,6 +2273,9 @@ async def signaling_ws(
                             _public_identity(
                                 target
                             )
+                        ),
+                        "call_type": (
+                            call_type
                         ),
                     },
                 )
