@@ -56,7 +56,7 @@ log = logging.getLogger("verifyd.trust_voice.signaling")
 
 router = APIRouter(prefix="/trust-voice", tags=["Trust Voice Signaling"])
 
-FEATURE_VERSION = "0.6.0"
+FEATURE_VERSION = "0.7.0"
 
 # Trust Voice sessions are persistent and server-revocable.
 # New sessions do not expire based on elapsed time.
@@ -1267,6 +1267,15 @@ def signaling_health():
             if _webrtc_enabled()
             else "not_enabled"
         ),
+        "call_control_signaling": (
+            "media_state_recording_consent_v1"
+        ),
+        "recording_transport": (
+            "browser_local_only"
+        ),
+        "recording_consent": (
+            "peer_required_v1"
+        ),
         "presence_store": (
             "memory_beta"
         ),
@@ -1950,6 +1959,14 @@ async def signaling_ws(
             "supported_call_types": [
                 "audio",
                 "video",
+            ],
+            "call_control_events": [
+                "call_media_state",
+                "recording_request",
+                "recording_response",
+                "recording_started",
+                "recording_stop",
+                "recording_stopped",
             ],
         },
     )
@@ -2683,6 +2700,584 @@ async def signaling_ws(
                 continue
 
             if msg_type in {
+                "call_media_state",
+                "recording_request",
+                "recording_response",
+                "recording_started",
+                "recording_stop",
+                "recording_stopped",
+            }:
+                call_id = str(
+                    message.get(
+                        "call_id",
+                        "",
+                    )
+                ).strip()
+
+                if not call_id:
+                    await _send(
+                        websocket,
+                        {
+                            "type": "error",
+                            "error": "call_id_required",
+                        },
+                    )
+                    continue
+
+                async with _state_lock:
+                    call = dict(
+                        _active_calls.get(
+                            call_id,
+                            {},
+                        )
+                    )
+
+                if not call:
+                    await _send(
+                        websocket,
+                        {
+                            "type": "error",
+                            "error": "call_not_found",
+                        },
+                    )
+                    continue
+
+                caller_id = str(
+                    call.get("caller_id")
+                    or ""
+                )
+                callee_id = str(
+                    call.get("callee_id")
+                    or ""
+                )
+
+                if identity_id not in {
+                    caller_id,
+                    callee_id,
+                }:
+                    await _send(
+                        websocket,
+                        {
+                            "type": "error",
+                            "error": "not_call_participant",
+                        },
+                    )
+                    continue
+
+                if call.get("state") != "answered":
+                    await _send(
+                        websocket,
+                        {
+                            "type": "error",
+                            "error": "invalid_call_state",
+                        },
+                    )
+                    continue
+
+                peer_id = (
+                    callee_id
+                    if identity_id == caller_id
+                    else caller_id
+                )
+
+                if msg_type == "call_media_state":
+                    relay = {
+                        "type": "call_media_state",
+                        "call_id": call_id,
+                    }
+
+                    state_supplied = False
+
+                    if "video_enabled" in message:
+                        video_enabled = message.get(
+                            "video_enabled"
+                        )
+                        if not isinstance(
+                            video_enabled,
+                            bool,
+                        ):
+                            await _send(
+                                websocket,
+                                {
+                                    "type": "error",
+                                    "error": (
+                                        "invalid_media_state"
+                                    ),
+                                },
+                            )
+                            continue
+
+                        relay["video_enabled"] = (
+                            video_enabled
+                        )
+                        state_supplied = True
+
+                    if "audio_enabled" in message:
+                        audio_enabled = message.get(
+                            "audio_enabled"
+                        )
+                        if not isinstance(
+                            audio_enabled,
+                            bool,
+                        ):
+                            await _send(
+                                websocket,
+                                {
+                                    "type": "error",
+                                    "error": (
+                                        "invalid_media_state"
+                                    ),
+                                },
+                            )
+                            continue
+
+                        relay["audio_enabled"] = (
+                            audio_enabled
+                        )
+                        state_supplied = True
+
+                    if not state_supplied:
+                        await _send(
+                            websocket,
+                            {
+                                "type": "error",
+                                "error": (
+                                    "media_state_required"
+                                ),
+                            },
+                        )
+                        continue
+
+                    delivered = (
+                        await _send_to_identity(
+                            peer_id,
+                            relay,
+                        )
+                    )
+
+                    if delivered == 0:
+                        await _send(
+                            websocket,
+                            {
+                                "type": "error",
+                                "error": (
+                                    "control_peer_unavailable"
+                                ),
+                            },
+                        )
+
+                    continue
+
+                if msg_type == "recording_request":
+                    request_error = None
+
+                    async with _state_lock:
+                        live_call = (
+                            _active_calls.get(
+                                call_id
+                            )
+                        )
+
+                        if (
+                            not live_call
+                            or live_call.get(
+                                "state"
+                            )
+                            != "answered"
+                        ):
+                            request_error = (
+                                "invalid_call_state"
+                            )
+                        elif live_call.get(
+                            "recording_active_by_id"
+                        ):
+                            request_error = (
+                                "recording_already_active"
+                            )
+                        else:
+                            pending_requester = (
+                                live_call.get(
+                                    "recording_requester_id"
+                                )
+                            )
+
+                            if (
+                                pending_requester
+                                and pending_requester
+                                != identity_id
+                            ):
+                                request_error = (
+                                    "recording_request_pending"
+                                )
+                            else:
+                                live_call[
+                                    "recording_requester_id"
+                                ] = identity_id
+                                live_call[
+                                    "recording_consent_by_id"
+                                ] = None
+                                live_call[
+                                    "recording_consent_granted"
+                                ] = False
+
+                    if request_error:
+                        await _send(
+                            websocket,
+                            {
+                                "type": "error",
+                                "error": request_error,
+                            },
+                        )
+                        continue
+
+                    await _send_to_identity(
+                        peer_id,
+                        {
+                            "type": "recording_request",
+                            "call_id": call_id,
+                            "requester": (
+                                _public_identity(
+                                    identity
+                                )
+                            ),
+                        },
+                    )
+
+                    continue
+
+                if msg_type == "recording_response":
+                    allowed = message.get(
+                        "allowed"
+                    )
+
+                    if not isinstance(
+                        allowed,
+                        bool,
+                    ):
+                        await _send(
+                            websocket,
+                            {
+                                "type": "error",
+                                "error": (
+                                    "recording_response_required"
+                                ),
+                            },
+                        )
+                        continue
+
+                    response_error = None
+                    requester_id = ""
+
+                    async with _state_lock:
+                        live_call = (
+                            _active_calls.get(
+                                call_id
+                            )
+                        )
+
+                        if (
+                            not live_call
+                            or live_call.get(
+                                "state"
+                            )
+                            != "answered"
+                        ):
+                            response_error = (
+                                "invalid_call_state"
+                            )
+                        else:
+                            requester_id = str(
+                                live_call.get(
+                                    "recording_requester_id"
+                                )
+                                or ""
+                            )
+
+                            if (
+                                not requester_id
+                                or requester_id
+                                == identity_id
+                            ):
+                                response_error = (
+                                    "invalid_recording_response"
+                                )
+                            elif allowed:
+                                live_call[
+                                    "recording_consent_by_id"
+                                ] = identity_id
+                                live_call[
+                                    "recording_consent_granted"
+                                ] = True
+                            else:
+                                live_call[
+                                    "recording_requester_id"
+                                ] = None
+                                live_call[
+                                    "recording_consent_by_id"
+                                ] = None
+                                live_call[
+                                    "recording_consent_granted"
+                                ] = False
+
+                    if response_error:
+                        await _send(
+                            websocket,
+                            {
+                                "type": "error",
+                                "error": response_error,
+                            },
+                        )
+                        continue
+
+                    await _send_to_identity(
+                        requester_id,
+                        {
+                            "type": (
+                                "recording_response"
+                            ),
+                            "call_id": call_id,
+                            "allowed": allowed,
+                            "responder": (
+                                _public_identity(
+                                    identity
+                                )
+                            ),
+                        },
+                    )
+
+                    continue
+
+                if msg_type == "recording_started":
+                    start_error = None
+
+                    async with _state_lock:
+                        live_call = (
+                            _active_calls.get(
+                                call_id
+                            )
+                        )
+
+                        if (
+                            not live_call
+                            or live_call.get(
+                                "state"
+                            )
+                            != "answered"
+                        ):
+                            start_error = (
+                                "invalid_call_state"
+                            )
+                        elif (
+                            live_call.get(
+                                "recording_requester_id"
+                            )
+                            != identity_id
+                            or not live_call.get(
+                                "recording_consent_granted"
+                            )
+                        ):
+                            start_error = (
+                                "recording_consent_required"
+                            )
+                        elif live_call.get(
+                            "recording_active_by_id"
+                        ):
+                            start_error = (
+                                "recording_already_active"
+                            )
+                        else:
+                            live_call[
+                                "recording_active_by_id"
+                            ] = identity_id
+
+                    if start_error:
+                        await _send(
+                            websocket,
+                            {
+                                "type": "error",
+                                "error": start_error,
+                            },
+                        )
+                        continue
+
+                    await _send_to_identity(
+                        peer_id,
+                        {
+                            "type": "recording_started",
+                            "call_id": call_id,
+                            "recorder": (
+                                _public_identity(
+                                    identity
+                                )
+                            ),
+                        },
+                    )
+
+                    continue
+
+                if msg_type == "recording_stop":
+                    stop_error = None
+                    active_recorder_id = ""
+
+                    async with _state_lock:
+                        live_call = (
+                            _active_calls.get(
+                                call_id
+                            )
+                        )
+
+                        if (
+                            not live_call
+                            or live_call.get(
+                                "state"
+                            )
+                            != "answered"
+                        ):
+                            stop_error = (
+                                "invalid_call_state"
+                            )
+                        else:
+                            active_recorder_id = str(
+                                live_call.get(
+                                    "recording_active_by_id"
+                                )
+                                or ""
+                            )
+
+                            if not active_recorder_id:
+                                stop_error = (
+                                    "recording_not_active"
+                                )
+                            elif (
+                                active_recorder_id
+                                == identity_id
+                            ):
+                                live_call[
+                                    "recording_active_by_id"
+                                ] = None
+                                live_call[
+                                    "recording_requester_id"
+                                ] = None
+                                live_call[
+                                    "recording_consent_by_id"
+                                ] = None
+                                live_call[
+                                    "recording_consent_granted"
+                                ] = False
+
+                    if stop_error:
+                        await _send(
+                            websocket,
+                            {
+                                "type": "error",
+                                "error": stop_error,
+                            },
+                        )
+                        continue
+
+                    if (
+                        active_recorder_id
+                        == identity_id
+                    ):
+                        await _send_to_identity(
+                            peer_id,
+                            {
+                                "type": (
+                                    "recording_stopped"
+                                ),
+                                "call_id": call_id,
+                                "stopped_by": (
+                                    _public_identity(
+                                        identity
+                                    )
+                                ),
+                            },
+                        )
+                    else:
+                        await _send_to_identity(
+                            active_recorder_id,
+                            {
+                                "type": "recording_stop",
+                                "call_id": call_id,
+                                "requested_by": (
+                                    _public_identity(
+                                        identity
+                                    )
+                                ),
+                            },
+                        )
+
+                    continue
+
+                if msg_type == "recording_stopped":
+                    stopped_error = None
+
+                    async with _state_lock:
+                        live_call = (
+                            _active_calls.get(
+                                call_id
+                            )
+                        )
+
+                        if (
+                            not live_call
+                            or live_call.get(
+                                "state"
+                            )
+                            != "answered"
+                        ):
+                            stopped_error = (
+                                "invalid_call_state"
+                            )
+                        elif (
+                            live_call.get(
+                                "recording_active_by_id"
+                            )
+                            != identity_id
+                        ):
+                            stopped_error = (
+                                "not_recording_owner"
+                            )
+                        else:
+                            live_call[
+                                "recording_active_by_id"
+                            ] = None
+                            live_call[
+                                "recording_requester_id"
+                            ] = None
+                            live_call[
+                                "recording_consent_by_id"
+                            ] = None
+                            live_call[
+                                "recording_consent_granted"
+                            ] = False
+
+                    if stopped_error:
+                        await _send(
+                            websocket,
+                            {
+                                "type": "error",
+                                "error": stopped_error,
+                            },
+                        )
+                        continue
+
+                    await _send_to_identity(
+                        peer_id,
+                        {
+                            "type": "recording_stopped",
+                            "call_id": call_id,
+                            "stopped_by": (
+                                _public_identity(
+                                    identity
+                                )
+                            ),
+                        },
+                    )
+
+                    continue
+
+            if msg_type in {
                 "call_answer",
                 "call_decline",
                 "call_end",
@@ -2977,6 +3572,12 @@ async def signaling_ws(
                         "webrtc_offer",
                         "webrtc_answer",
                         "webrtc_ice",
+                        "call_media_state",
+                        "recording_request",
+                        "recording_response",
+                        "recording_started",
+                        "recording_stop",
+                        "recording_stopped",
                     ],
                 },
             )
