@@ -49,7 +49,7 @@ router = APIRouter(
     tags=["Trust Voice Messages"],
 )
 
-FEATURE_VERSION = "0.3.0"
+FEATURE_VERSION = "0.3.1"
 
 ALLOWED_MESSAGE_PRIVACY = {
     "anyone",
@@ -976,6 +976,7 @@ def messages_health():
         "attachment_hydration": "inline_metadata_v1",
         "message_sender_hydration": "two_party_cached_v1",
         "schema_init": "once_per_process_v1",
+        "conversation_scope": "direct_only_v1",
     }
 
 
@@ -1233,6 +1234,7 @@ def list_conversations(
             INNER JOIN verifyd_voice_conversation_members vm
                 ON vm.conversation_id = c.conversation_id
             WHERE vm.identity_id = %s
+              AND c.conversation_type = 'direct'
               AND EXISTS (
                   SELECT 1
                   FROM verifyd_voice_messages msg
@@ -1515,7 +1517,11 @@ def get_conversation(
 
     conversation = _conversation_row(conversation_id)
 
-    if not conversation:
+    if (
+        not conversation
+        or str(conversation.get("conversation_type") or "direct")
+        != "direct"
+    ):
         raise HTTPException(
             status_code=404,
             detail={"error": "conversation_not_found"},
@@ -1554,6 +1560,18 @@ def list_messages(
         conversation_id,
         identity["id"],
     )
+
+    conversation = _conversation_row(conversation_id)
+
+    if (
+        not conversation
+        or str(conversation.get("conversation_type") or "direct")
+        != "direct"
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "conversation_not_found"},
+        )
 
     other_member, other_identity = _other_direct_member(
         conversation_id,
@@ -1683,6 +1701,18 @@ def send_text_message(
         conversation_id,
         identity["id"],
     )
+
+    conversation = _conversation_row(conversation_id)
+
+    if (
+        not conversation
+        or str(conversation.get("conversation_type") or "direct")
+        != "direct"
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "conversation_not_found"},
+        )
 
     _other_member, other_identity = _other_direct_member(
         conversation_id,
