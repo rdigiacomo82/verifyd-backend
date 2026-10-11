@@ -49,6 +49,7 @@ from trust_voice_signaling import router as trust_voice_signaling_router
 from trust_voice_profile_media import router as trust_voice_profile_media_router
 from trust_voice_trust_circle import router as trust_voice_trust_circle_router
 from trust_voice_messages import router as trust_voice_messages_router
+from trust_voice_groups import router as trust_voice_groups_router
 from trust_voice_attachments import router as trust_voice_attachments_router
 from trust_voice_attachment_analysis import router as trust_voice_attachment_analysis_router
 
@@ -244,6 +245,9 @@ app.include_router(trust_voice_trust_circle_router)
 
 # VERIFYD_TRUST_VOICE_MESSAGES_V1
 app.include_router(trust_voice_messages_router)
+
+# VERIFYD_TRUST_VOICE_GROUPS_V1
+app.include_router(trust_voice_groups_router)
 
 # VERIFYD_TRUST_VOICE_ATTACHMENTS_V1
 app.include_router(trust_voice_attachments_router)
