@@ -31,7 +31,7 @@ from trust_voice_signaling import _identity_by_id, _send_to_identity
 log = logging.getLogger('verifyd.trust_voice.group_video')
 router = APIRouter(prefix='/trust-voice', tags=['Trust Voice Group Video'])
 
-FEATURE_VERSION = '0.1.0'
+FEATURE_VERSION = '0.1.1'
 DEFAULT_SESSION_MINUTES = 120
 DEFAULT_TOKEN_MINUTES = 60
 DEFAULT_EMPTY_TIMEOUT_SECONDS = 300
@@ -44,6 +44,17 @@ def _enabled() -> bool:
 
 def _livekit_url() -> str:
     return (os.environ.get('LIVEKIT_URL', '') or '').strip()
+
+
+def _livekit_api_url() -> str:
+    # Browsers connect to LiveKit over ws:// or wss://.
+    # The backend RoomService API is HTTP/Twirp.
+    url = _livekit_url()
+    if url.startswith('wss://'):
+        return 'https://' + url[len('wss://'):]
+    if url.startswith('ws://'):
+        return 'http://' + url[len('ws://'):]
+    return url
 
 
 def _livekit_key() -> str:
@@ -217,7 +228,11 @@ def _connection(identity: dict, session: dict, owner_identity_id: str) -> dict:
 
 async def _room_exists(room_name: str) -> bool:
     try:
-        async with api.LiveKitAPI() as lkapi:
+        async with api.LiveKitAPI(
+            _livekit_api_url(),
+            api_key=_livekit_key(),
+            api_secret=_livekit_secret(),
+        ) as lkapi:
             response = await lkapi.room.list_rooms(ListRoomsRequest(names=[room_name]))
         return any(str(room.name) == room_name for room in response.rooms)
     except Exception:
@@ -227,7 +242,11 @@ async def _room_exists(room_name: str) -> bool:
 
 async def _create_room(room_name: str) -> None:
     try:
-        async with api.LiveKitAPI() as lkapi:
+        async with api.LiveKitAPI(
+            _livekit_api_url(),
+            api_key=_livekit_key(),
+            api_secret=_livekit_secret(),
+        ) as lkapi:
             await lkapi.room.create_room(CreateRoomRequest(
                 name=room_name,
                 empty_timeout=_empty_timeout_seconds(),
@@ -242,7 +261,11 @@ async def _delete_room_quietly(room_name: str) -> None:
     if not room_name:
         return
     try:
-        async with api.LiveKitAPI() as lkapi:
+        async with api.LiveKitAPI(
+            _livekit_api_url(),
+            api_key=_livekit_key(),
+            api_secret=_livekit_secret(),
+        ) as lkapi:
             await lkapi.room.delete_room(DeleteRoomRequest(room=room_name))
     except Exception:
         log.warning('LiveKit room delete failed', exc_info=True)
@@ -265,6 +288,7 @@ def group_video_health():
         'enabled':_enabled(),
         'configured':_configured(),
         'transport':'livekit_sfu_v1',
+        'server_api_transport':'https_normalized_v1',
         'membership_authorization':'trust_voice_group_member_v1',
         'session_store':'postgresql_v1',
         'room_identity':'opaque_v1',
