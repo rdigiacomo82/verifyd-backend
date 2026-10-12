@@ -15,12 +15,16 @@ import logging
 import re
 import random
 import string
+import atexit
+import threading
 from datetime import datetime, timezone, timedelta
 from contextlib import contextmanager
 from typing import Optional
 
 import psycopg2
 import psycopg2.extras
+import psycopg2.extensions
+import psycopg2.pool
 
 log = logging.getLogger("verifyd.db")
 
@@ -41,18 +45,206 @@ OTP_EXPIRY_MINUTES = 10
 MAX_OTP_ATTEMPTS   = 5
 
 
+# VERIFYD_DATABASE_POOL_V1
+# Reuse PostgreSQL/TLS sessions instead of opening a brand-new encrypted
+# connection for every get_db() call. Existing callers and transaction
+# semantics remain unchanged.
+
+def _db_env_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int((os.environ.get(name, str(default)) or "").strip())
+    except Exception:
+        value = default
+    return max(minimum, min(value, maximum))
+
+
+def _db_env_float(
+    name: str,
+    default: float,
+    minimum: float,
+    maximum: float,
+) -> float:
+    try:
+        value = float((os.environ.get(name, str(default)) or "").strip())
+    except Exception:
+        value = default
+    return max(minimum, min(value, maximum))
+
+
+DB_POOL_MIN = _db_env_int(
+    "VERIFYD_DB_POOL_MIN",
+    1,
+    1,
+    20,
+)
+DB_POOL_MAX = _db_env_int(
+    "VERIFYD_DB_POOL_MAX",
+    10,
+    DB_POOL_MIN,
+    50,
+)
+DB_POOL_WAIT_SECONDS = _db_env_float(
+    "VERIFYD_DB_POOL_WAIT_SECONDS",
+    3.0,
+    0.25,
+    15.0,
+)
+DB_CONNECT_TIMEOUT_SECONDS = _db_env_int(
+    "VERIFYD_DB_CONNECT_TIMEOUT_SECONDS",
+    5,
+    2,
+    30,
+)
+
+_db_pool = None
+_db_pool_lock = threading.Lock()
+_db_pool_gate = threading.BoundedSemaphore(DB_POOL_MAX)
+
+
+def _create_db_pool():
+    if not DATABASE_URL:
+        raise RuntimeError("DATABASE_URL is not configured")
+
+    pool = psycopg2.pool.ThreadedConnectionPool(
+        minconn=DB_POOL_MIN,
+        maxconn=DB_POOL_MAX,
+        dsn=DATABASE_URL,
+        cursor_factory=psycopg2.extras.RealDictCursor,
+        connect_timeout=DB_CONNECT_TIMEOUT_SECONDS,
+        application_name="verifyd-backend",
+        keepalives=1,
+        keepalives_idle=30,
+        keepalives_interval=10,
+        keepalives_count=3,
+    )
+
+    log.info(
+        "PostgreSQL connection pool initialized min=%d max=%d wait=%.2fs",
+        DB_POOL_MIN,
+        DB_POOL_MAX,
+        DB_POOL_WAIT_SECONDS,
+    )
+    return pool
+
+
+def _get_db_pool():
+    global _db_pool
+
+    if _db_pool is not None:
+        return _db_pool
+
+    with _db_pool_lock:
+        if _db_pool is None:
+            _db_pool = _create_db_pool()
+
+    return _db_pool
+
+
+def close_db_pool() -> None:
+    global _db_pool
+
+    with _db_pool_lock:
+        pool = _db_pool
+        _db_pool = None
+
+    if pool is not None:
+        try:
+            pool.closeall()
+            log.info("PostgreSQL connection pool closed")
+        except Exception:
+            log.exception("Unable to close PostgreSQL connection pool")
+
+
+def get_db_pool_status() -> dict:
+    """Lightweight diagnostics; does not expose credentials."""
+    return {
+        "configured": bool(DATABASE_URL),
+        "initialized": _db_pool is not None,
+        "pool_type": "psycopg2_threaded_v1",
+        "min_connections": DB_POOL_MIN,
+        "max_connections": DB_POOL_MAX,
+        "wait_seconds": DB_POOL_WAIT_SECONDS,
+        "connect_timeout_seconds": DB_CONNECT_TIMEOUT_SECONDS,
+    }
+
+
+atexit.register(close_db_pool)
+
+
 @contextmanager
 def get_db():
-    """Yield a psycopg2 connection with RealDictCursor (rows behave like dicts)."""
-    conn = psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
+    """
+    Yield a pooled psycopg2 connection with RealDictCursor rows.
+
+    Existing behavior is preserved:
+      - successful context => commit
+      - exception => rollback and re-raise
+      - caller does not own/close the physical connection
+
+    The physical PostgreSQL/TLS connection is returned to the process-local
+    ThreadedConnectionPool for reuse.
+    """
+    acquired = _db_pool_gate.acquire(
+        timeout=DB_POOL_WAIT_SECONDS
+    )
+    if not acquired:
+        raise psycopg2.pool.PoolError(
+            "PostgreSQL connection pool exhausted"
+        )
+
+    conn = None
+    discard = False
+
     try:
+        pool = _get_db_pool()
+        conn = pool.getconn()
+
+        if conn is None or conn.closed:
+            discard = True
+            raise psycopg2.OperationalError(
+                "Pooled PostgreSQL connection is closed"
+            )
+
         yield conn
         conn.commit()
+
     except Exception:
-        conn.rollback()
+        if conn is not None and not conn.closed:
+            try:
+                conn.rollback()
+            except Exception:
+                discard = True
         raise
+
     finally:
-        conn.close()
+        try:
+            if conn is not None:
+                try:
+                    if conn.closed:
+                        discard = True
+                    elif (
+                        conn.get_transaction_status()
+                        == psycopg2.extensions.TRANSACTION_STATUS_UNKNOWN
+                    ):
+                        discard = True
+                except Exception:
+                    discard = True
+
+                try:
+                    _get_db_pool().putconn(
+                        conn,
+                        close=discard,
+                    )
+                except Exception:
+                    log.exception(
+                        "Unable to return PostgreSQL connection to pool"
+                    )
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+        finally:
+            _db_pool_gate.release()
 
 
 def init_db() -> None:
