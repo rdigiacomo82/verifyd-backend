@@ -27,11 +27,12 @@ from trust_voice_groups import (
 )
 from trust_voice_messages import _identity_from_bearer, _public_contact
 from trust_voice_signaling import _identity_by_id, _send_to_identity
+from trust_voice_group_video_recording import enforce_recording_join_policy
 
 log = logging.getLogger('verifyd.trust_voice.group_video')
 router = APIRouter(prefix='/trust-voice', tags=['Trust Voice Group Video'])
 
-FEATURE_VERSION = '0.1.1'
+FEATURE_VERSION = '0.1.2'
 DEFAULT_SESSION_MINUTES = 120
 DEFAULT_TOKEN_MINUTES = 60
 DEFAULT_EMPTY_TIMEOUT_SECONDS = 300
@@ -326,6 +327,11 @@ async def video_start(conversation_id: str, background_tasks: BackgroundTasks, a
 
     existing = _active_session(conversation_id)
     if existing and await _room_exists(str(existing.get('room_name') or '')):
+        enforce_recording_join_policy(
+            conversation_id,
+            str(existing.get('session_id') or ''),
+            identity_id,
+        )
         return {
             'ok':True,
             'created':False,
@@ -387,6 +393,13 @@ async def video_join(conversation_id: str, authorization: Optional[str] = Header
     if not await _room_exists(str(session.get('room_name') or '')):
         _mark_ended(str(session.get('session_id') or ''), None, 'room_closed')
         raise HTTPException(status_code=409, detail={'error':'no_active_group_video','message':'This group video call has ended.'})
+
+    enforce_recording_join_policy(
+        conversation_id,
+        str(session.get('session_id') or ''),
+        str(identity['id']),
+    )
+
     return {
         'ok':True,
         'session':_public_session(session),

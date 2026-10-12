@@ -18,13 +18,21 @@ from database import get_db
 from trust_voice_groups import _group_member_rows, ensure_group_schema
 from trust_voice_messages import _identity_from_bearer, _public_contact
 from trust_voice_signaling import _identity_by_id
+from trust_voice_group_video_recording import (
+    ensure_recording_schema,
+    handle_group_room_finished_recording,
+    handle_group_video_recording_presence,
+    handle_livekit_recording_webhook,
+    recording_count_for_session,
+    recording_history_for_session,
+)
 
 router = APIRouter(
     prefix="/trust-voice",
     tags=["Trust Voice Group Video History"],
 )
 
-FEATURE_VERSION = "0.1.0"
+FEATURE_VERSION = "0.1.1"
 _schema_ready = False
 
 
@@ -133,6 +141,7 @@ def ensure_schema() -> None:
             """
         )
 
+    ensure_recording_schema()
     _schema_ready = True
 
 
@@ -509,6 +518,11 @@ async def livekit_webhook(
                 participant_identity,
                 event_time,
             )
+            await handle_group_video_recording_presence(
+                session,
+                participant_identity,
+                True,
+            )
 
     elif event_type in {
         "participant_left",
@@ -524,9 +538,24 @@ async def livekit_webhook(
                 participant_identity,
                 event_time,
             )
+            await handle_group_video_recording_presence(
+                session,
+                participant_identity,
+                False,
+            )
 
     elif event_type == "room_finished" and session:
         _room_finished(session, event_time)
+        await handle_group_room_finished_recording(
+            session,
+            event_time,
+        )
+
+    await handle_livekit_recording_webhook(
+        event,
+        event_type,
+        event_time,
+    )
 
     _remember_webhook(event_id, event_type)
 
@@ -646,6 +675,9 @@ def group_video_history(
                 "participant_peak": int(
                     row.get("peak_participant_count") or 0
                 ),
+                "recording_count": recording_count_for_session(
+                    str(row.get("session_id") or "")
+                ),
             }
         )
 
@@ -744,4 +776,7 @@ def group_video_history_detail(
             ),
         },
         "participants": participants,
+        "recordings": recording_history_for_session(
+            session_id
+        ),
     }

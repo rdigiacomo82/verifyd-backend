@@ -52,6 +52,7 @@ from trust_voice_messages import router as trust_voice_messages_router
 from trust_voice_groups import router as trust_voice_groups_router
 from trust_voice_group_video import router as trust_voice_group_video_router
 from trust_voice_group_video_history import router as trust_voice_group_video_history_router
+from trust_voice_group_video_recording import router as trust_voice_group_video_recording_router
 from trust_voice_attachments import router as trust_voice_attachments_router
 from trust_voice_attachment_analysis import router as trust_voice_attachment_analysis_router
 
@@ -256,6 +257,9 @@ app.include_router(trust_voice_group_video_router)
 
 # VERIFYD_TRUST_VOICE_GROUP_VIDEO_HISTORY_V1
 app.include_router(trust_voice_group_video_history_router)
+
+# VERIFYD_TRUST_VOICE_GROUP_VIDEO_RECORDING_V1
+app.include_router(trust_voice_group_video_recording_router)
 
 # VERIFYD_TRUST_VOICE_ATTACHMENTS_V1
 app.include_router(trust_voice_attachments_router)
