@@ -37,7 +37,7 @@ router = APIRouter(
     tags=["Trust Voice Group Video Recording"],
 )
 
-FEATURE_VERSION = "0.1.2"
+FEATURE_VERSION = "0.1.3"
 _schema_ready = False
 
 OPEN_STATUSES = {
@@ -814,10 +814,13 @@ async def _connected_identity_ids(
         api_key=_livekit_key(),
         api_secret=_livekit_secret(),
     ) as lkapi:
-        response = await lkapi.room.list_participants(
-            api.ListParticipantsRequest(
-                room=room_name
-            )
+        response = await asyncio.wait_for(
+            lkapi.room.list_participants(
+                api.ListParticipantsRequest(
+                    room=room_name
+                )
+            ),
+            timeout=5,
         )
 
     result = []
@@ -1033,7 +1036,7 @@ async def _list_livekit_egress(
             lkapi.egress.list_egress(
                 request
             ),
-            timeout=10,
+            timeout=4,
         )
     return list(
         getattr(response, "items", None)
@@ -1606,7 +1609,7 @@ async def _reconcile_until_settled(
                 exc_info=True,
             )
 
-        await asyncio.sleep(3)
+        await asyncio.sleep(5)
 
 
 async def _begin_recording_background(
@@ -2782,7 +2785,10 @@ def recording_health():
         "token_reuse_protection": "livekit_remove_participant_v1",
         "start_completion": "bounded_background_egress_v2",
         "stop_completion": "bounded_background_finalize_v2",
-        "reconciliation": "webhook_plus_http_status_plus_r2_v2",
+        "reconciliation": "webhook_plus_background_plus_r2_v3",
+        "status_path": "postgres_only_v1",
+        "participant_lookup_timeout_seconds": 5,
+        "livekit_list_timeout_seconds": 4,
         "terminal_status_visibility": "latest_recording_v1",
         "start_api_timeout_seconds": _start_api_timeout_seconds(),
         "stop_api_timeout_seconds": _stop_api_timeout_seconds(),
@@ -2794,10 +2800,17 @@ def recording_health():
 @router.get(
     "/groups/{conversation_id}/video/recording/status"
 )
-async def recording_status(
+def recording_status(
     conversation_id: str,
     authorization: Optional[str] = Header(default=None),
 ):
+    """
+    Fast, database-only authoritative status.
+
+    Never call LiveKit or R2 from this hot polling path. Three or more clients
+    may poll this route concurrently; external reconciliation belongs only in
+    the single background recording task and signed LiveKit webhooks.
+    """
     identity = _identity_from_bearer(
         authorization
     )
@@ -2824,28 +2837,6 @@ async def recording_status(
     recording = _latest_recording(
         str(session.get("session_id") or "")
     )
-
-    if recording and str(
-        recording.get("status") or ""
-    ) in {"starting", "stopping"}:
-        try:
-            recording = await _reconcile_recording_once(
-                recording,
-                source="http_status",
-                notify=True,
-            )
-        except Exception:
-            log.warning(
-                "Recording status reconciliation failed: recording_id=%s",
-                recording.get("recording_id") or "",
-                exc_info=True,
-            )
-            recording = (
-                _recording_by_id(
-                    str(recording.get("recording_id") or "")
-                )
-                or recording
-            )
 
     consent = (
         _consent_row(
@@ -3285,6 +3276,7 @@ async def recording_consent(
             ),
         }
 
+    transitioned_to_ready = False
     with get_db() as conn:
         cur = conn.cursor()
         cur.execute(
@@ -3292,38 +3284,45 @@ async def recording_consent(
             UPDATE verifyd_voice_group_video_recordings
             SET
                 status = 'ready',
-                ready_at = COALESCE(ready_at, %s)
+                ready_at = COALESCE(ready_at, %s),
+                status_updated_at = %s
             WHERE recording_id = %s
               AND status = 'consent_pending'
+            RETURNING recording_id
             """,
             (
+                _now_iso(),
                 _now_iso(),
                 recording_id,
             ),
         )
+        transitioned_to_ready = bool(
+            cur.fetchone()
+        )
 
-    await _notify_group(
-        conversation_id,
-        {
-            "type": "group_video_recording_ready",
-            "group_id": conversation_id,
-            "recording": _public_recording(
-                _recording_by_id(recording_id)
-            ),
-        },
-    )
-
-    # The final required Allow returns immediately in READY state.
-    # LiveKit Egress startup happens after the response so the approving
-    # participant never sits on a long-running consent request.
     ready_recording = (
         _recording_by_id(recording_id)
         or recording
     )
-    background_tasks.add_task(
-        _begin_recording_background,
-        recording_id,
-    )
+
+    # Only the request that atomically transitions consent_pending -> ready
+    # may schedule Egress startup. Repeated taps / retries must never create
+    # duplicate background start/reconciliation loops.
+    if transitioned_to_ready:
+        await _notify_group(
+            conversation_id,
+            {
+                "type": "group_video_recording_ready",
+                "group_id": conversation_id,
+                "recording": _public_recording(
+                    ready_recording
+                ),
+            },
+        )
+        background_tasks.add_task(
+            _begin_recording_background,
+            recording_id,
+        )
     return {
         "ok": True,
         "ready": True,

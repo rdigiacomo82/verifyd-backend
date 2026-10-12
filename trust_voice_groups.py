@@ -35,7 +35,8 @@ from trust_voice_signaling import (
 
 router = APIRouter(prefix='/trust-voice', tags=['Trust Voice Groups'])
 
-FEATURE_VERSION = '0.1.0'
+FEATURE_VERSION = '0.1.1'
+_group_schema_ready = False
 MAX_GROUP_MEMBERS = 25
 MAX_GROUP_NAME_LENGTH = 60
 
@@ -67,6 +68,18 @@ def _clean_group_name(value: str) -> str:
 
 
 def ensure_group_schema() -> None:
+    """
+    Initialize the group tables/indexes once per application process.
+
+    Group list/detail/message endpoints are hot paths, especially on mobile.
+    Re-running CREATE TABLE / CREATE INDEX DDL on every request adds avoidable
+    PostgreSQL catalog work and lock coordination.
+    """
+    global _group_schema_ready
+
+    if _group_schema_ready:
+        return
+
     ensure_message_schema()
     with get_db() as conn:
         cur = conn.cursor()
@@ -87,6 +100,8 @@ def ensure_group_schema() -> None:
             CREATE INDEX IF NOT EXISTS idx_verifyd_voice_groups_updated
             ON verifyd_voice_groups (updated_at DESC)
         ''')
+
+    _group_schema_ready = True
 
 
 def _group_row(conversation_id: str) -> Optional[dict]:
@@ -235,6 +250,7 @@ def groups_health():
         'membership_store': 'postgresql_v1',
         'membership_source': 'trust_circle_owner_add_v1',
         'realtime_notifications': 'message_created_best_effort_v1',
+        'schema_init': 'once_per_process_v1',
         'attachments': 'deferred',
         'max_group_members': MAX_GROUP_MEMBERS,
         'group_video_ready': 'membership_foundation_v1',
