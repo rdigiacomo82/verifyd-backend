@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import os
@@ -36,7 +37,7 @@ router = APIRouter(
     tags=["Trust Voice Group Video Recording"],
 )
 
-FEATURE_VERSION = "0.1.1"
+FEATURE_VERSION = "0.1.2"
 _schema_ready = False
 
 OPEN_STATUSES = {
@@ -64,6 +65,73 @@ def _now() -> datetime:
 
 def _now_iso() -> str:
     return _now().isoformat()
+
+
+def _env_int(
+    name: str,
+    default: int,
+    minimum: int,
+    maximum: int,
+) -> int:
+    try:
+        value = int(
+            (os.environ.get(name, str(default)) or "").strip()
+        )
+    except Exception:
+        value = default
+    return max(minimum, min(value, maximum))
+
+
+def _start_api_timeout_seconds() -> int:
+    return _env_int(
+        "VERIFYD_TRUST_VOICE_GROUP_RECORDING_START_TIMEOUT_SECONDS",
+        45,
+        15,
+        120,
+    )
+
+
+def _stop_api_timeout_seconds() -> int:
+    return _env_int(
+        "VERIFYD_TRUST_VOICE_GROUP_RECORDING_STOP_TIMEOUT_SECONDS",
+        30,
+        10,
+        120,
+    )
+
+
+def _finalize_timeout_seconds() -> int:
+    return _env_int(
+        "VERIFYD_TRUST_VOICE_GROUP_RECORDING_FINALIZE_TIMEOUT_SECONDS",
+        90,
+        30,
+        300,
+    )
+
+
+def _parse_iso(value: Optional[str]) -> Optional[datetime]:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(
+            raw.replace("Z", "+00:00")
+        )
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _seconds_since(value: Optional[str]) -> Optional[float]:
+    dt = _parse_iso(value)
+    if not dt:
+        return None
+    return max(
+        0.0,
+        (_now() - dt).total_seconds(),
+    )
 
 
 def _enabled() -> bool:
@@ -259,6 +327,27 @@ def ensure_recording_schema() -> None:
 
         cur.execute(
             """
+            ALTER TABLE verifyd_voice_group_video_recordings
+            ADD COLUMN IF NOT EXISTS status_updated_at TEXT
+            """
+        )
+
+        cur.execute(
+            """
+            UPDATE verifyd_voice_group_video_recordings
+            SET status_updated_at = COALESCE(
+                status_updated_at,
+                ended_at,
+                started_at,
+                ready_at,
+                requested_at
+            )
+            WHERE status_updated_at IS NULL
+            """
+        )
+
+        cur.execute(
+            """
             CREATE UNIQUE INDEX IF NOT EXISTS
             uq_verifyd_voice_group_video_open_recording
             ON verifyd_voice_group_video_recordings (session_id)
@@ -408,6 +497,26 @@ def _open_recording(session_id: str) -> Optional[dict]:
     return dict(row) if row else None
 
 
+def _latest_recording(
+    session_id: str,
+) -> Optional[dict]:
+    ensure_recording_schema()
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT *
+            FROM verifyd_voice_group_video_recordings
+            WHERE session_id = %s
+            ORDER BY requested_at DESC
+            LIMIT 1
+            """,
+            (session_id,),
+        )
+        row = cur.fetchone()
+    return dict(row) if row else None
+
+
 def _public_recording(
     recording: Optional[dict],
 ) -> Optional[dict]:
@@ -450,6 +559,13 @@ def _public_recording(
             recording.get("ended_at"),
         ),
         "stop_reason": recording.get("stop_reason"),
+        "egress_status": (
+            int(recording.get("egress_status"))
+            if recording.get("egress_status") is not None
+            else None
+        ),
+        "error": recording.get("error_text") or None,
+        "status_updated_at": recording.get("status_updated_at"),
         "file_size_bytes": (
             int(recording.get("file_size_bytes") or 0)
             if recording.get("file_size_bytes") is not None
@@ -774,7 +890,6 @@ async def _start_livekit_egress(
         api_key=_livekit_key(),
         api_secret=_livekit_secret(),
     ) as lkapi:
-        # Current API on LiveKit Cloud.
         if (
             hasattr(api, "StartEgressRequest")
             and hasattr(api, "TemplateSource")
@@ -804,11 +919,13 @@ async def _start_livekit_egress(
                     s3=s3
                 ),
             )
-            return await lkapi.egress.start_egress(
-                request
+            return await asyncio.wait_for(
+                lkapi.egress.start_egress(
+                    request
+                ),
+                timeout=_start_api_timeout_seconds(),
             )
 
-        # Compatibility fallback for earlier SDKs.
         request = api.RoomCompositeEgressRequest(
             room_name=room_name,
             layout="grid",
@@ -822,10 +939,11 @@ async def _start_livekit_egress(
                 )
             ],
         )
-        return (
-            await lkapi.egress.start_room_composite_egress(
+        return await asyncio.wait_for(
+            lkapi.egress.start_room_composite_egress(
                 request
-            )
+            ),
+            timeout=_start_api_timeout_seconds(),
         )
 
 
@@ -837,17 +955,663 @@ async def _stop_livekit_egress(
         api_key=_livekit_key(),
         api_secret=_livekit_secret(),
     ) as lkapi:
-        return await lkapi.egress.stop_egress(
-            api.StopEgressRequest(
+        return await asyncio.wait_for(
+            lkapi.egress.stop_egress(
+                api.StopEgressRequest(
+                    egress_id=egress_id
+                )
+            ),
+            timeout=_stop_api_timeout_seconds(),
+        )
+
+
+def _egress_status_name(status: int) -> str:
+    return {
+        0: "STARTING",
+        1: "ACTIVE",
+        2: "ENDING",
+        3: "COMPLETE",
+        4: "FAILED",
+        5: "ABORTED",
+        6: "LIMIT_REACHED",
+    }.get(int(status or 0), f"UNKNOWN_{status}")
+
+
+def _egress_file_size(info) -> Optional[int]:
+    try:
+        results = list(
+            getattr(info, "file_results", None)
+            or []
+        )
+        if results:
+            return int(
+                getattr(results[0], "size", 0)
+                or 0
+            )
+    except Exception:
+        return None
+    return None
+
+
+def _r2_object_metadata(
+    storage_key: str,
+) -> Optional[dict]:
+    if not storage_key:
+        return None
+    try:
+        obj = _r2_client().head_object(
+            Bucket=_r2_bucket(),
+            Key=storage_key,
+        )
+        return {
+            "size": int(
+                obj.get("ContentLength") or 0
+            ),
+            "etag": str(
+                obj.get("ETag") or ""
+            ),
+        }
+    except Exception:
+        return None
+
+
+async def _list_livekit_egress(
+    *,
+    egress_id: str = "",
+    room_name: str = "",
+):
+    request = api.ListEgressRequest(
+        egress_id=egress_id or "",
+        room_name=room_name or "",
+    )
+    async with api.LiveKitAPI(
+        _livekit_api_url(),
+        api_key=_livekit_key(),
+        api_secret=_livekit_secret(),
+    ) as lkapi:
+        response = await asyncio.wait_for(
+            lkapi.egress.list_egress(
+                request
+            ),
+            timeout=10,
+        )
+    return list(
+        getattr(response, "items", None)
+        or []
+    )
+
+
+async def _mark_complete_from_storage(
+    recording: dict,
+    *,
+    source: str,
+    notify: bool,
+) -> dict:
+    recording_id = str(
+        recording.get("recording_id") or ""
+    )
+    metadata = await asyncio.to_thread(
+        _r2_object_metadata,
+        str(recording.get("storage_key") or ""),
+    )
+    if not metadata:
+        return recording
+
+    now = _now_iso()
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            UPDATE verifyd_voice_group_video_recordings
+            SET
+                status = 'complete',
+                ended_at = COALESCE(ended_at, %s),
+                file_size_bytes = COALESCE(%s, file_size_bytes),
+                error_text = NULL,
+                status_updated_at = %s
+            WHERE recording_id = %s
+              AND status NOT IN (
+                  'complete',
+                  'declined',
+                  'canceled'
+              )
+            """,
+            (
+                now,
+                metadata.get("size"),
+                now,
+                recording_id,
+            ),
+        )
+
+    current = (
+        _recording_by_id(recording_id)
+        or recording
+    )
+    log.info(
+        "Group recording reconciled from R2: recording_id=%s "
+        "source=%s size=%s",
+        recording_id,
+        source,
+        metadata.get("size"),
+    )
+
+    if notify:
+        await _notify_group(
+            str(current.get("conversation_id") or ""),
+            {
+                "type": "group_video_recording_ended",
+                "group_id": current.get("conversation_id") or "",
+                "recording": _public_recording(
+                    current
+                ),
+            },
+        )
+
+    return current
+
+
+async def _apply_egress_info(
+    recording_id: str,
+    info,
+    *,
+    source: str,
+    notify: bool = True,
+) -> dict:
+    current = (
+        _recording_by_id(recording_id)
+        or {}
+    )
+    if not current:
+        return {}
+
+    prior_status = str(
+        current.get("status") or ""
+    )
+    if prior_status in {
+        "complete",
+        "declined",
+        "canceled",
+    }:
+        return current
+
+    egress_id = str(
+        getattr(info, "egress_id", "") or ""
+    )
+    egress_status = int(
+        getattr(info, "status", 0) or 0
+    )
+    status_name = _egress_status_name(
+        egress_status
+    )
+    file_size = _egress_file_size(
+        info
+    )
+    error_text = str(
+        getattr(info, "error", "") or ""
+    )[:500]
+    now = _now_iso()
+
+    log.info(
+        "Group recording Egress state: recording_id=%s "
+        "egress_id=%s source=%s egress_status=%s prior_status=%s",
+        recording_id,
+        egress_id or "-",
+        source,
+        status_name,
+        prior_status,
+    )
+
+    if egress_status == 0:
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                UPDATE verifyd_voice_group_video_recordings
+                SET
+                    egress_id = COALESCE(NULLIF(%s, ''), egress_id),
+                    egress_status = %s,
+                    status = CASE
+                        WHEN status IN ('ready', 'consent_pending')
+                        THEN 'starting'
+                        ELSE status
+                    END,
+                    status_updated_at = CASE
+                        WHEN status IN ('ready', 'consent_pending')
+                        THEN %s
+                        ELSE status_updated_at
+                    END
+                WHERE recording_id = %s
+                  AND status NOT IN (
+                      'complete',
+                      'failed',
+                      'declined',
+                      'canceled'
+                  )
+                """,
+                (
+                    egress_id,
+                    egress_status,
+                    now,
+                    recording_id,
+                ),
+            )
+
+    elif egress_status == 1:
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                UPDATE verifyd_voice_group_video_recordings
+                SET
+                    egress_id = COALESCE(NULLIF(%s, ''), egress_id),
+                    egress_status = %s,
+                    status = CASE
+                        WHEN status IN ('ready', 'starting')
+                        THEN 'active'
+                        ELSE status
+                    END,
+                    started_at = CASE
+                        WHEN status IN ('ready', 'starting')
+                        THEN COALESCE(started_at, %s)
+                        ELSE started_at
+                    END,
+                    status_updated_at = CASE
+                        WHEN status IN ('ready', 'starting')
+                        THEN %s
+                        ELSE status_updated_at
+                    END,
+                    error_text = NULL
+                WHERE recording_id = %s
+                  AND status NOT IN (
+                      'complete',
+                      'failed',
+                      'declined',
+                      'canceled'
+                  )
+                """,
+                (
+                    egress_id,
+                    egress_status,
+                    now,
+                    now,
+                    recording_id,
+                ),
+            )
+
+    elif egress_status == 2:
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                UPDATE verifyd_voice_group_video_recordings
+                SET
+                    egress_id = COALESCE(NULLIF(%s, ''), egress_id),
+                    egress_status = %s,
+                    status = CASE
+                        WHEN status IN ('starting', 'active')
+                        THEN 'stopping'
+                        ELSE status
+                    END,
+                    status_updated_at = CASE
+                        WHEN status IN ('starting', 'active')
+                        THEN %s
+                        ELSE status_updated_at
+                    END
+                WHERE recording_id = %s
+                  AND status NOT IN (
+                      'complete',
+                      'failed',
+                      'declined',
+                      'canceled'
+                  )
+                """,
+                (
+                    egress_id,
+                    egress_status,
+                    now,
+                    recording_id,
+                ),
+            )
+
+    elif egress_status in {3, 6}:
+        stop_reason = current.get(
+            "stop_reason"
+        )
+        if (
+            egress_status == 6
+            and not stop_reason
+        ):
+            stop_reason = "livekit_limit_reached"
+
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                UPDATE verifyd_voice_group_video_recordings
+                SET
+                    egress_id = COALESCE(NULLIF(%s, ''), egress_id),
+                    status = 'complete',
+                    ended_at = COALESCE(ended_at, %s),
+                    stop_reason = %s,
+                    error_text = NULLIF(%s, ''),
+                    egress_status = %s,
+                    file_size_bytes = COALESCE(%s, file_size_bytes),
+                    status_updated_at = %s
+                WHERE recording_id = %s
+                  AND status NOT IN (
+                      'declined',
+                      'canceled'
+                  )
+                """,
+                (
+                    egress_id,
+                    now,
+                    stop_reason,
+                    error_text,
+                    egress_status,
+                    file_size,
+                    now,
+                    recording_id,
+                ),
+            )
+
+    elif egress_status in {4, 5}:
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                UPDATE verifyd_voice_group_video_recordings
+                SET
+                    egress_id = COALESCE(NULLIF(%s, ''), egress_id),
+                    status = 'failed',
+                    ended_at = COALESCE(ended_at, %s),
+                    error_text = %s,
+                    egress_status = %s,
+                    status_updated_at = %s
+                WHERE recording_id = %s
+                  AND status NOT IN (
+                      'complete',
+                      'declined',
+                      'canceled'
+                  )
+                """,
+                (
+                    egress_id,
+                    now,
+                    error_text or (
+                        "livekit_egress_"
+                        + status_name.lower()
+                    ),
+                    egress_status,
+                    now,
+                    recording_id,
+                ),
+            )
+
+    refreshed = (
+        _recording_by_id(recording_id)
+        or current
+    )
+    new_status = str(
+        refreshed.get("status") or ""
+    )
+
+    if notify and new_status != prior_status:
+        conversation_id = str(
+            refreshed.get("conversation_id") or ""
+        )
+        if new_status == "active":
+            await _notify_group(
+                conversation_id,
+                {
+                    "type": "group_video_recording_started",
+                    "group_id": conversation_id,
+                    "recording": _public_recording(
+                        refreshed
+                    ),
+                },
+            )
+        elif new_status == "complete":
+            await _notify_group(
+                conversation_id,
+                {
+                    "type": "group_video_recording_ended",
+                    "group_id": conversation_id,
+                    "recording": _public_recording(
+                        refreshed
+                    ),
+                },
+            )
+        elif new_status == "failed":
+            await _notify_group(
+                conversation_id,
+                {
+                    "type": "group_video_recording_failed",
+                    "group_id": conversation_id,
+                    "recording": _public_recording(
+                        refreshed
+                    ),
+                },
+            )
+
+    return refreshed
+
+
+async def _reconcile_recording_once(
+    recording: dict,
+    *,
+    source: str,
+    notify: bool = True,
+) -> dict:
+    recording_id = str(
+        recording.get("recording_id") or ""
+    )
+    current = (
+        _recording_by_id(recording_id)
+        or recording
+    )
+    status = str(
+        current.get("status") or ""
+    )
+
+    if status in FINAL_STATUSES:
+        return current
+
+    if (
+        status == "stopping"
+        and current.get("storage_key")
+    ):
+        completed = await _mark_complete_from_storage(
+            current,
+            source=source,
+            notify=notify,
+        )
+        if str(
+            completed.get("status") or ""
+        ) == "complete":
+            return completed
+
+    egress_id = str(
+        current.get("egress_id") or ""
+    )
+    room_name = ""
+    session = _active_session(
+        str(current.get("conversation_id") or "")
+    )
+    if session:
+        room_name = str(
+            session.get("room_name") or ""
+        )
+
+    infos = []
+    try:
+        if egress_id:
+            infos = await _list_livekit_egress(
                 egress_id=egress_id
             )
+        elif status == "starting" and room_name:
+            infos = await _list_livekit_egress(
+                room_name=room_name
+            )
+    except Exception:
+        log.warning(
+            "Group recording Egress reconciliation lookup failed: "
+            "recording_id=%s source=%s",
+            recording_id,
+            source,
+            exc_info=True,
         )
+
+    if infos:
+        current = await _apply_egress_info(
+            recording_id,
+            infos[-1],
+            source=source,
+            notify=notify,
+        )
+        status = str(
+            current.get("status") or ""
+        )
+        if (
+            status in FINAL_STATUSES
+            or status == "active"
+        ):
+            return current
+
+    status_clock = (
+        current.get("status_updated_at")
+        or (
+            current.get("ready_at")
+            if status == "starting"
+            else current.get("started_at")
+        )
+        or current.get("requested_at")
+    )
+    elapsed = _seconds_since(
+        status_clock
+    )
+
+    if status == "starting":
+        limit = max(
+            60,
+            _start_api_timeout_seconds() + 15,
+        )
+        if (
+            elapsed is not None
+            and elapsed >= limit
+        ):
+            log.error(
+                "Group recording start timed out: recording_id=%s "
+                "elapsed=%.1f",
+                recording_id,
+                elapsed,
+            )
+            _mark_failed(
+                recording_id,
+                "egress_start_timeout",
+            )
+
+    elif status == "stopping":
+        limit = _finalize_timeout_seconds()
+        if (
+            elapsed is not None
+            and elapsed >= limit
+        ):
+            completed = await _mark_complete_from_storage(
+                current,
+                source=source + ":timeout_r2",
+                notify=notify,
+            )
+            if str(
+                completed.get("status") or ""
+            ) == "complete":
+                return completed
+
+            log.error(
+                "Group recording finalization timed out: recording_id=%s "
+                "elapsed=%.1f",
+                recording_id,
+                elapsed,
+            )
+            _mark_failed(
+                recording_id,
+                "egress_finalize_timeout",
+            )
+
+    refreshed = (
+        _recording_by_id(recording_id)
+        or current
+    )
+    if (
+        notify
+        and str(refreshed.get("status") or "") == "failed"
+        and status != "failed"
+    ):
+        await _notify_group(
+            str(refreshed.get("conversation_id") or ""),
+            {
+                "type": "group_video_recording_failed",
+                "group_id": refreshed.get("conversation_id") or "",
+                "recording": _public_recording(
+                    refreshed
+                ),
+            },
+        )
+    return refreshed
+
+
+async def _reconcile_until_settled(
+    recording_id: str,
+    *,
+    phase: str,
+) -> None:
+    max_seconds = (
+        max(60, _start_api_timeout_seconds() + 15)
+        if phase == "start"
+        else _finalize_timeout_seconds()
+    )
+    deadline = _now().timestamp() + max_seconds + 6
+
+    while _now().timestamp() < deadline:
+        recording = _recording_by_id(
+            recording_id
+        )
+        if not recording:
+            return
+
+        status = str(
+            recording.get("status") or ""
+        )
+        if status in FINAL_STATUSES:
+            return
+        if (
+            phase == "start"
+            and status == "active"
+        ):
+            return
+
+        try:
+            await _reconcile_recording_once(
+                recording,
+                source=f"background_{phase}",
+                notify=True,
+            )
+        except Exception:
+            log.warning(
+                "Group recording background reconciliation failed: "
+                "recording_id=%s phase=%s",
+                recording_id,
+                phase,
+                exc_info=True,
+            )
+
+        await asyncio.sleep(3)
 
 
 async def _begin_recording_background(
     recording_id: str,
 ) -> None:
-    # Starts LiveKit Egress after the consent response has already returned.
     try:
         await _begin_recording(
             recording_id
@@ -857,11 +1621,17 @@ async def _begin_recording_background(
             "Background LiveKit group recording start failed"
         )
 
+    await _reconcile_until_settled(
+        recording_id,
+        phase="start",
+    )
+
 
 def _mark_recording_stopping(
     recording_id: str,
     reason: str,
 ) -> dict:
+    now = _now_iso()
     with get_db() as conn:
         cur = conn.cursor()
         cur.execute(
@@ -869,27 +1639,36 @@ def _mark_recording_stopping(
             UPDATE verifyd_voice_group_video_recordings
             SET
                 status = 'stopping',
-                stop_reason = %s
+                stop_reason = %s,
+                status_updated_at = %s
             WHERE recording_id = %s
               AND status IN ('starting', 'active')
             """,
             (
                 reason,
+                now,
                 recording_id,
             ),
         )
 
-    return (
+    current = (
         _recording_by_id(recording_id)
         or {}
     )
+    log.info(
+        "Group recording stopping: recording_id=%s reason=%s "
+        "egress_id=%s",
+        recording_id,
+        reason,
+        current.get("egress_id") or "-",
+    )
+    return current
 
 
 async def _stop_recording_background(
     recording_id: str,
     prior_status: str,
 ) -> None:
-    # Requests LiveKit Egress stop after the HTTP stop response has returned.
     recording = _recording_by_id(
         recording_id
     )
@@ -900,35 +1679,48 @@ async def _stop_recording_background(
         recording.get("egress_id") or ""
     )
 
-    # If Egress is still in its startup race, _begin_recording() will observe
-    # status='stopping' after it receives the Egress ID and stop it.
-    if not egress_id:
-        return
-
-    try:
-        await _stop_livekit_egress(
-            egress_id
-        )
-    except Exception:
-        log.exception(
-            "Background LiveKit group recording stop failed"
-        )
-        with get_db() as conn:
-            cur = conn.cursor()
-            cur.execute(
-                """
-                UPDATE verifyd_voice_group_video_recordings
-                SET
-                    status = %s,
-                    error_text = 'egress_stop_failed'
-                WHERE recording_id = %s
-                  AND status = 'stopping'
-                """,
-                (
-                    prior_status,
-                    recording_id,
-                ),
+    if egress_id:
+        try:
+            info = await _stop_livekit_egress(
+                egress_id
             )
+            await _apply_egress_info(
+                recording_id,
+                info,
+                source="stop_response",
+                notify=True,
+            )
+        except Exception:
+            log.warning(
+                "LiveKit StopEgress did not settle immediately: "
+                "recording_id=%s egress_id=%s",
+                recording_id,
+                egress_id,
+                exc_info=True,
+            )
+            with get_db() as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    """
+                    UPDATE verifyd_voice_group_video_recordings
+                    SET error_text = 'egress_stop_api_pending'
+                    WHERE recording_id = %s
+                      AND status = 'stopping'
+                    """,
+                    (recording_id,),
+                )
+    else:
+        log.info(
+            "Group recording stop requested during Egress startup: "
+            "recording_id=%s prior_status=%s",
+            recording_id,
+            prior_status,
+        )
+
+    await _reconcile_until_settled(
+        recording_id,
+        phase="stop",
+    )
 
 
 async def _remove_livekit_participant(
@@ -952,6 +1744,7 @@ def _mark_failed(
     recording_id: str,
     error_text: str,
 ) -> None:
+    now = _now_iso()
     with get_db() as conn:
         cur = conn.cursor()
         cur.execute(
@@ -960,7 +1753,8 @@ def _mark_failed(
             SET
                 status = 'failed',
                 ended_at = COALESCE(ended_at, %s),
-                error_text = %s
+                error_text = %s,
+                status_updated_at = %s
             WHERE recording_id = %s
               AND status NOT IN (
                   'complete',
@@ -970,8 +1764,9 @@ def _mark_failed(
               )
             """,
             (
-                _now_iso(),
+                now,
                 str(error_text or "")[:500],
+                now,
                 recording_id,
             ),
         )
@@ -1193,7 +1988,7 @@ async def _begin_recording(
     }:
         return recording
 
-    # Claim start so duplicate consent responses cannot start twice.
+    now = _now_iso()
     with get_db() as conn:
         cur = conn.cursor()
         cur.execute(
@@ -1202,13 +1997,15 @@ async def _begin_recording(
             SET
                 status = 'starting',
                 ready_at = COALESCE(ready_at, %s),
-                error_text = NULL
+                error_text = NULL,
+                status_updated_at = %s
             WHERE recording_id = %s
               AND status IN ('consent_pending', 'ready')
             RETURNING *
             """,
             (
-                _now_iso(),
+                now,
+                now,
                 recording_id,
             ),
         )
@@ -1244,11 +2041,13 @@ async def _begin_recording(
                 SET
                     status = 'canceled',
                     ended_at = %s,
-                    stop_reason = 'room_finished'
+                    stop_reason = 'room_finished',
+                    status_updated_at = %s
                 WHERE recording_id = %s
                   AND status = 'starting'
                 """,
                 (
+                    _now_iso(),
                     _now_iso(),
                     recording_id,
                 ),
@@ -1273,11 +2072,15 @@ async def _begin_recording(
                 UPDATE verifyd_voice_group_video_recordings
                 SET
                     status = 'consent_pending',
-                    error_text = 'participant_lookup_failed'
+                    error_text = 'participant_lookup_failed',
+                    status_updated_at = %s
                 WHERE recording_id = %s
                   AND status = 'starting'
                 """,
-                (recording_id,),
+                (
+                    _now_iso(),
+                    recording_id,
+                ),
             )
         raise HTTPException(
             status_code=503,
@@ -1292,11 +2095,16 @@ async def _begin_recording(
             cur.execute(
                 """
                 UPDATE verifyd_voice_group_video_recordings
-                SET status = 'consent_pending'
+                SET
+                    status = 'consent_pending',
+                    status_updated_at = %s
                 WHERE recording_id = %s
                   AND status = 'starting'
                 """,
-                (recording_id,),
+                (
+                    _now_iso(),
+                    recording_id,
+                ),
             )
         raise HTTPException(
             status_code=409,
@@ -1311,20 +2119,39 @@ async def _begin_recording(
         requester_id,
     )
 
+    summary = _consent_summary(
+        recording_id
+    )
     pending = _pending_required_ids(
         recording_id
     )
+    log.info(
+        "Group recording consent gate: recording_id=%s connected=%s "
+        "required=%s allowed=%s pending=%s declined=%s",
+        recording_id,
+        len(connected_ids),
+        summary.get("required_count"),
+        summary.get("allowed_count"),
+        summary.get("pending_count"),
+        summary.get("declined_count"),
+    )
+
     if pending:
         with get_db() as conn:
             cur = conn.cursor()
             cur.execute(
                 """
                 UPDATE verifyd_voice_group_video_recordings
-                SET status = 'consent_pending'
+                SET
+                    status = 'consent_pending',
+                    status_updated_at = %s
                 WHERE recording_id = %s
                   AND status = 'starting'
                 """,
-                (recording_id,),
+                (
+                    _now_iso(),
+                    recording_id,
+                ),
             )
 
         waiting = (
@@ -1358,11 +2185,61 @@ async def _begin_recording(
             ),
         )
 
+    log.info(
+        "Starting LiveKit group recording: recording_id=%s "
+        "room=%s start_timeout=%ss",
+        recording_id,
+        session.get("room_name") or "",
+        _start_api_timeout_seconds(),
+    )
+
     try:
         info = await _start_livekit_egress(
             session,
             storage_key,
         )
+    except asyncio.TimeoutError as exc:
+        log.error(
+            "LiveKit StartEgress timed out: recording_id=%s",
+            recording_id,
+        )
+        try:
+            infos = await _list_livekit_egress(
+                room_name=str(
+                    session.get("room_name") or ""
+                )
+            )
+        except Exception:
+            infos = []
+
+        if infos:
+            return await _apply_egress_info(
+                recording_id,
+                infos[-1],
+                source="start_timeout_room_lookup",
+                notify=True,
+            )
+
+        _mark_failed(
+            recording_id,
+            "egress_start_timeout",
+        )
+        await _notify_group(
+            conversation_id,
+            {
+                "type": "group_video_recording_failed",
+                "group_id": conversation_id,
+                "recording": _public_recording(
+                    _recording_by_id(recording_id)
+                ),
+            },
+        )
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "group_video_recording_start_timeout"
+            },
+        ) from exc
     except Exception as exc:
         log.exception(
             "LiveKit group recording start failed"
@@ -1388,79 +2265,40 @@ async def _begin_recording(
             },
         ) from exc
 
-    egress_id = str(
-        getattr(info, "egress_id", "") or ""
-    )
-    if not egress_id:
-        _mark_failed(
-            recording_id,
-            "egress_id_missing",
-        )
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "error": "group_video_recording_start_failed"
-            },
-        )
-
-    with get_db() as conn:
-        cur = conn.cursor()
-        cur.execute(
-            """
-            UPDATE verifyd_voice_group_video_recordings
-            SET
-                egress_id = COALESCE(egress_id, %s),
-                status = CASE
-                    WHEN status = 'starting' THEN 'active'
-                    ELSE status
-                END,
-                started_at = CASE
-                    WHEN status = 'starting'
-                    THEN COALESCE(started_at, %s)
-                    ELSE started_at
-                END
-            WHERE recording_id = %s
-            """,
-            (
-                egress_id,
-                _now_iso(),
-                recording_id,
-            ),
-        )
-
-    current = (
-        _recording_by_id(recording_id)
-        or recording
+    current = await _apply_egress_info(
+        recording_id,
+        info,
+        source="start_response",
+        notify=True,
     )
 
-    # Withdrawal can race Egress startup.
     if str(current.get("status") or "") == "stopping":
-        try:
-            await _stop_livekit_egress(
-                egress_id
-            )
-        except Exception:
-            log.exception(
-                "Unable to stop newly-started egress"
-            )
-        return (
-            _recording_by_id(recording_id)
-            or current
+        egress_id = str(
+            current.get("egress_id") or ""
         )
+        if egress_id:
+            try:
+                stop_info = await _stop_livekit_egress(
+                    egress_id
+                )
+                current = await _apply_egress_info(
+                    recording_id,
+                    stop_info,
+                    source="start_stop_race",
+                    notify=True,
+                )
+            except Exception:
+                log.warning(
+                    "Unable to settle Egress after startup/stop race: "
+                    "recording_id=%s",
+                    recording_id,
+                    exc_info=True,
+                )
 
-    if str(current.get("status") or "") == "active":
-        await _notify_group(
-            conversation_id,
-            {
-                "type": "group_video_recording_started",
-                "group_id": conversation_id,
-                "recording": _public_recording(
-                    current
-                ),
-            },
-        )
-
-    return current
+    return (
+        _recording_by_id(recording_id)
+        or current
+    )
 
 
 def enforce_recording_join_policy(
@@ -1767,132 +2605,34 @@ async def handle_livekit_recording_webhook(
         info
     )
     if not recording:
+        log.warning(
+            "LiveKit Egress webhook did not match a Trust Voice recording: "
+            "event=%s egress_id=%s room=%s",
+            event_type,
+            getattr(info, "egress_id", "") or "",
+            getattr(info, "room_name", "") or "",
+        )
         return
 
     recording_id = str(
         recording.get("recording_id") or ""
     )
-    conversation_id = str(
-        recording.get("conversation_id") or ""
+    log.info(
+        "LiveKit recording webhook: recording_id=%s event=%s "
+        "egress_id=%s status=%s",
+        recording_id,
+        event_type,
+        getattr(info, "egress_id", "") or "",
+        _egress_status_name(
+            int(getattr(info, "status", 0) or 0)
+        ),
     )
-    egress_id = str(
-        getattr(info, "egress_id", "") or ""
-    )
-    egress_status = int(
-        getattr(info, "status", 0) or 0
-    )
 
-    if event_type == "egress_started":
-        with get_db() as conn:
-            cur = conn.cursor()
-            cur.execute(
-                """
-                UPDATE verifyd_voice_group_video_recordings
-                SET
-                    egress_id = COALESCE(NULLIF(%s, ''), egress_id),
-                    status = CASE
-                        WHEN status = 'starting' THEN 'active'
-                        ELSE status
-                    END,
-                    started_at = CASE
-                        WHEN status = 'starting'
-                        THEN COALESCE(started_at, %s)
-                        ELSE started_at
-                    END,
-                    egress_status = %s
-                WHERE recording_id = %s
-                """,
-                (
-                    egress_id,
-                    event_time,
-                    egress_status,
-                    recording_id,
-                ),
-            )
-        return
-
-    if event_type == "egress_updated":
-        with get_db() as conn:
-            cur = conn.cursor()
-            cur.execute(
-                """
-                UPDATE verifyd_voice_group_video_recordings
-                SET egress_status = %s
-                WHERE recording_id = %s
-                """,
-                (
-                    egress_status,
-                    recording_id,
-                ),
-            )
-        return
-
-    # LiveKit: 3 COMPLETE, 4 FAILED, 5 ABORTED, 6 LIMIT_REACHED.
-    # LIMIT_REACHED still uploads the file recorded up to the limit.
-    final_status = (
-        "complete"
-        if egress_status in {3, 6}
-        else "failed"
-    )
-    stop_reason = recording.get(
-        "stop_reason"
-    )
-    if (
-        egress_status == 6
-        and not stop_reason
-    ):
-        stop_reason = "livekit_limit_reached"
-
-    file_size = None
-    try:
-        results = list(
-            getattr(info, "file_results", None)
-            or []
-        )
-        if results:
-            file_size = int(
-                getattr(results[0], "size", 0)
-                or 0
-            )
-    except Exception:
-        file_size = None
-
-    with get_db() as conn:
-        cur = conn.cursor()
-        cur.execute(
-            """
-            UPDATE verifyd_voice_group_video_recordings
-            SET
-                egress_id = COALESCE(NULLIF(%s, ''), egress_id),
-                status = %s,
-                ended_at = COALESCE(ended_at, %s),
-                stop_reason = %s,
-                error_text = NULLIF(%s, ''),
-                egress_status = %s,
-                file_size_bytes = COALESCE(%s, file_size_bytes)
-            WHERE recording_id = %s
-            """,
-            (
-                egress_id,
-                final_status,
-                event_time,
-                stop_reason,
-                str(getattr(info, "error", "") or "")[:500],
-                egress_status,
-                file_size,
-                recording_id,
-            ),
-        )
-
-    await _notify_group(
-        conversation_id,
-        {
-            "type": "group_video_recording_ended",
-            "group_id": conversation_id,
-            "recording": _public_recording(
-                _recording_by_id(recording_id)
-            ),
-        },
+    await _apply_egress_info(
+        recording_id,
+        info,
+        source=f"webhook:{event_type}",
+        notify=True,
     )
 
 
@@ -2040,8 +2780,13 @@ def recording_health():
         "consent": "all_connected_participants_v1",
         "late_join_policy": "explicit_consent_before_join_v1",
         "token_reuse_protection": "livekit_remove_participant_v1",
-        "start_completion": "background_egress_v1",
-        "stop_completion": "background_finalize_v1",
+        "start_completion": "bounded_background_egress_v2",
+        "stop_completion": "bounded_background_finalize_v2",
+        "reconciliation": "webhook_plus_http_status_plus_r2_v2",
+        "terminal_status_visibility": "latest_recording_v1",
+        "start_api_timeout_seconds": _start_api_timeout_seconds(),
+        "stop_api_timeout_seconds": _stop_api_timeout_seconds(),
+        "finalize_timeout_seconds": _finalize_timeout_seconds(),
         "working_group_video_structure": "preserved",
     }
 
@@ -2049,7 +2794,7 @@ def recording_health():
 @router.get(
     "/groups/{conversation_id}/video/recording/status"
 )
-def recording_status(
+async def recording_status(
     conversation_id: str,
     authorization: Optional[str] = Header(default=None),
 ):
@@ -2076,9 +2821,32 @@ def recording_status(
             "consent": None,
         }
 
-    recording = _open_recording(
+    recording = _latest_recording(
         str(session.get("session_id") or "")
     )
+
+    if recording and str(
+        recording.get("status") or ""
+    ) in {"starting", "stopping"}:
+        try:
+            recording = await _reconcile_recording_once(
+                recording,
+                source="http_status",
+                notify=True,
+            )
+        except Exception:
+            log.warning(
+                "Recording status reconciliation failed: recording_id=%s",
+                recording.get("recording_id") or "",
+                exc_info=True,
+            )
+            recording = (
+                _recording_by_id(
+                    str(recording.get("recording_id") or "")
+                )
+                or recording
+            )
+
     consent = (
         _consent_row(
             str(recording.get("recording_id") or ""),
@@ -2225,6 +2993,18 @@ async def request_recording(
     )
     pending = _pending_required_ids(
         recording_id
+    )
+    request_summary = _consent_summary(
+        recording_id
+    )
+    log.info(
+        "Group recording requested: recording_id=%s connected=%s "
+        "required=%s allowed=%s pending=%s",
+        recording_id,
+        len(connected),
+        request_summary.get("required_count"),
+        request_summary.get("allowed_count"),
+        request_summary.get("pending_count"),
     )
 
     if pending:
@@ -2428,6 +3208,19 @@ async def recording_consent(
         identity_id,
         True,
         payload.allowed,
+    )
+    consent_summary = _consent_summary(
+        recording_id
+    )
+    log.info(
+        "Group recording consent response: recording_id=%s allowed=%s "
+        "required=%s allowed_count=%s pending=%s declined=%s",
+        recording_id,
+        bool(payload.allowed),
+        consent_summary.get("required_count"),
+        consent_summary.get("allowed_count"),
+        consent_summary.get("pending_count"),
+        consent_summary.get("declined_count"),
     )
 
     if not payload.allowed:
