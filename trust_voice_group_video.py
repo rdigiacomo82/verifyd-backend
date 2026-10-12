@@ -32,7 +32,7 @@ from trust_voice_group_video_recording import enforce_recording_join_policy
 log = logging.getLogger('verifyd.trust_voice.group_video')
 router = APIRouter(prefix='/trust-voice', tags=['Trust Voice Group Video'])
 
-FEATURE_VERSION = '0.1.2'
+FEATURE_VERSION = '0.1.3'
 DEFAULT_SESSION_MINUTES = 120
 DEFAULT_TOKEN_MINUTES = 60
 DEFAULT_EMPTY_TIMEOUT_SECONDS = 300
@@ -297,6 +297,7 @@ def group_video_health():
         'max_group_members':MAX_GROUP_MEMBERS,
         'session_minutes':_session_minutes(),
         'token_minutes':_token_minutes(),
+        'end_behavior':'mark_ended_then_background_room_delete_v1',
     }
 
 
@@ -425,8 +426,18 @@ async def video_end(conversation_id: str, background_tasks: BackgroundTasks, aut
             'message':'Only the person who started the video or the group owner can end it for everyone.'
         })
 
-    await _delete_room_quietly(str(session.get('room_name') or ''))
-    _mark_ended(str(session.get('session_id') or ''), identity_id, 'ended_by_member')
+    room_name = str(session.get('room_name') or '')
+
+    # End the authoritative Trust Voice session immediately. The browser
+    # should never wait on LiveKit RoomService deletion before it can leave.
+    _mark_ended(
+        str(session.get('session_id') or ''),
+        identity_id,
+        'ended_by_member',
+    )
+
+    # Notify peers first so their clients can disconnect promptly, then ask
+    # LiveKit to delete the room after this HTTP response has already returned.
     background_tasks.add_task(
         _notify_group,
         conversation_id,
@@ -438,5 +449,9 @@ async def video_end(conversation_id: str, background_tasks: BackgroundTasks, aut
             'ended_at':_now().isoformat(),
         },
         identity_id,
+    )
+    background_tasks.add_task(
+        _delete_room_quietly,
+        room_name,
     )
     return {'ok':True,'ended':True,'session_id':session.get('session_id') or ''}

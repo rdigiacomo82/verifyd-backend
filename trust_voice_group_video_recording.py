@@ -15,7 +15,7 @@ from typing import Optional
 
 import boto3
 from botocore.config import Config
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Header, HTTPException
 from fastapi.responses import StreamingResponse
 from livekit import api
 from pydantic import BaseModel
@@ -36,7 +36,7 @@ router = APIRouter(
     tags=["Trust Voice Group Video Recording"],
 )
 
-FEATURE_VERSION = "0.1.0"
+FEATURE_VERSION = "0.1.1"
 _schema_ready = False
 
 OPEN_STATUSES = {
@@ -842,6 +842,93 @@ async def _stop_livekit_egress(
                 egress_id=egress_id
             )
         )
+
+
+async def _begin_recording_background(
+    recording_id: str,
+) -> None:
+    # Starts LiveKit Egress after the consent response has already returned.
+    try:
+        await _begin_recording(
+            recording_id
+        )
+    except Exception:
+        log.exception(
+            "Background LiveKit group recording start failed"
+        )
+
+
+def _mark_recording_stopping(
+    recording_id: str,
+    reason: str,
+) -> dict:
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            UPDATE verifyd_voice_group_video_recordings
+            SET
+                status = 'stopping',
+                stop_reason = %s
+            WHERE recording_id = %s
+              AND status IN ('starting', 'active')
+            """,
+            (
+                reason,
+                recording_id,
+            ),
+        )
+
+    return (
+        _recording_by_id(recording_id)
+        or {}
+    )
+
+
+async def _stop_recording_background(
+    recording_id: str,
+    prior_status: str,
+) -> None:
+    # Requests LiveKit Egress stop after the HTTP stop response has returned.
+    recording = _recording_by_id(
+        recording_id
+    )
+    if not recording:
+        return
+
+    egress_id = str(
+        recording.get("egress_id") or ""
+    )
+
+    # If Egress is still in its startup race, _begin_recording() will observe
+    # status='stopping' after it receives the Egress ID and stop it.
+    if not egress_id:
+        return
+
+    try:
+        await _stop_livekit_egress(
+            egress_id
+        )
+    except Exception:
+        log.exception(
+            "Background LiveKit group recording stop failed"
+        )
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                UPDATE verifyd_voice_group_video_recordings
+                SET
+                    status = %s,
+                    error_text = 'egress_stop_failed'
+                WHERE recording_id = %s
+                  AND status = 'stopping'
+                """,
+                (
+                    prior_status,
+                    recording_id,
+                ),
+            )
 
 
 async def _remove_livekit_participant(
@@ -1953,6 +2040,8 @@ def recording_health():
         "consent": "all_connected_participants_v1",
         "late_join_policy": "explicit_consent_before_join_v1",
         "token_reuse_protection": "livekit_remove_participant_v1",
+        "start_completion": "background_egress_v1",
+        "stop_completion": "background_finalize_v1",
         "working_group_video_structure": "preserved",
     }
 
@@ -2025,6 +2114,7 @@ def recording_status(
 )
 async def request_recording(
     conversation_id: str,
+    background_tasks: BackgroundTasks,
     authorization: Optional[str] = Header(default=None),
 ):
     _require_recording_available()
@@ -2144,8 +2234,42 @@ async def request_recording(
             pending,
         )
     else:
-        recording = await _begin_recording(
-            recording_id
+        # Single-participant room: consent is already complete. Return READY
+        # immediately and let LiveKit Egress start after the HTTP response.
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                UPDATE verifyd_voice_group_video_recordings
+                SET
+                    status = 'ready',
+                    ready_at = COALESCE(ready_at, %s)
+                WHERE recording_id = %s
+                  AND status = 'consent_pending'
+                """,
+                (
+                    _now_iso(),
+                    recording_id,
+                ),
+            )
+
+        recording = (
+            _recording_by_id(recording_id)
+            or recording
+        )
+        await _notify_group(
+            conversation_id,
+            {
+                "type": "group_video_recording_ready",
+                "group_id": conversation_id,
+                "recording": _public_recording(
+                    recording
+                ),
+            },
+        )
+        background_tasks.add_task(
+            _begin_recording_background,
+            recording_id,
         )
 
     return {
@@ -2166,6 +2290,7 @@ async def recording_consent(
     conversation_id: str,
     recording_id: str,
     payload: RecordingConsentPayload,
+    background_tasks: BackgroundTasks,
     authorization: Optional[str] = Header(default=None),
 ):
     identity = _identity_from_bearer(
@@ -2267,9 +2392,14 @@ async def recording_consent(
                 "my_consent": False,
             }
 
-        stopping = await _stop_internal(
-            recording,
+        stopping = _mark_recording_stopping(
+            recording_id,
             "consent_withdrawn",
+        )
+        background_tasks.add_task(
+            _stop_recording_background,
+            recording_id,
+            status,
         )
         await _notify_group(
             conversation_id,
@@ -2390,15 +2520,22 @@ async def recording_consent(
         },
     )
 
-    # The final required Allow starts recording automatically.
-    started = await _begin_recording(
-        recording_id
+    # The final required Allow returns immediately in READY state.
+    # LiveKit Egress startup happens after the response so the approving
+    # participant never sits on a long-running consent request.
+    ready_recording = (
+        _recording_by_id(recording_id)
+        or recording
+    )
+    background_tasks.add_task(
+        _begin_recording_background,
+        recording_id,
     )
     return {
         "ok": True,
         "ready": True,
         "recording": _public_recording(
-            started
+            ready_recording
         ),
         "consent": _consent_summary(
             recording_id
@@ -2480,6 +2617,7 @@ async def start_recording(
 )
 async def stop_recording(
     conversation_id: str,
+    background_tasks: BackgroundTasks,
     authorization: Optional[str] = Header(default=None),
 ):
     identity = _identity_from_bearer(
@@ -2621,9 +2759,15 @@ async def stop_recording(
             },
         )
 
-    stopping = await _stop_internal(
-        recording,
+    prior_status = status
+    stopping = _mark_recording_stopping(
+        recording_id,
         "stopped_by_participant",
+    )
+    background_tasks.add_task(
+        _stop_recording_background,
+        recording_id,
+        prior_status,
     )
     await _notify_group(
         conversation_id,
