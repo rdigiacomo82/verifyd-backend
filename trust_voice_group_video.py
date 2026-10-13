@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import os
@@ -277,6 +278,20 @@ async def _notify_group(conversation_id: str, payload: dict, exclude_identity_id
         if exclude_identity_id and recipient_id == exclude_identity_id:
             continue
         await _send_to_identity(recipient_id, payload)
+
+        try:
+            from trust_voice_push import dispatch_push_for_event
+
+            await asyncio.to_thread(
+                dispatch_push_for_event,
+                recipient_id,
+                payload,
+            )
+        except Exception:
+            log.warning(
+                "Trust Voice group-video Web Push dispatch failed",
+                exc_info=True,
+            )
 
 
 @router.get('/group-video/health')

@@ -480,6 +480,42 @@ async def _expire_unanswered_call(call_id: str) -> None:
         },
     )
 
+    try:
+        from trust_voice_push import notify_identity_push
+
+        caller_public = (
+            _public_identity(caller_identity)
+            if caller_identity
+            else None
+        )
+        caller_name = (
+            str((caller_public or {}).get("display_name") or "").strip()
+            or str((caller_public or {}).get("display_label") or "").strip()
+            or str((caller_public or {}).get("handle") or "").strip()
+            or "Someone"
+        )
+        call_type = str(call.get("call_type") or "audio").strip().lower()
+
+        await asyncio.to_thread(
+            notify_identity_push,
+            callee_id,
+            notification_type="call_missed",
+            title="Missed Trust Voice call",
+            body=f"Missed {call_type} call from {caller_name}.",
+            url="/voice?missed=1",
+            tag=f"trust-voice-missed-{call_id}",
+            data={
+                "call_id": call_id,
+                "call_type": call_type,
+            },
+            ttl=3600,
+        )
+    except Exception:
+        log.warning(
+            "Trust Voice missed-call Web Push dispatch failed",
+            exc_info=True,
+        )
+
 
 def _schedule_call_expiry(call_id: str) -> None:
     _cancel_call_expiry(call_id)
@@ -967,9 +1003,9 @@ async def notify_message_created(
     created_at: str,
     message_type: str = "text",
 ) -> int:
-    # Best-effort realtime notification only.
-    # PostgreSQL/HTTP remains authoritative and a delivery
-    # failure must never fail the stored message.
+    # PostgreSQL/HTTP remains authoritative. WebSocket and Web Push are both
+    # best-effort supplemental delivery paths and must never fail the stored
+    # message.
     safe_message_type = (
         message_type
         if message_type
@@ -980,27 +1016,35 @@ async def notify_message_created(
         else "text"
     )
 
-    return await _send_to_identity(
+    event_payload = {
+        "type": "message_created",
+        "conversation_id": conversation_id,
+        "message_id": message_id,
+        "message_type": safe_message_type,
+        "sender": sender,
+        "created_at": created_at,
+    }
+
+    sent = await _send_to_identity(
         recipient_identity_id,
-        {
-            "type": (
-                "message_created"
-            ),
-            "conversation_id": (
-                conversation_id
-            ),
-            "message_id": (
-                message_id
-            ),
-            "message_type": (
-                safe_message_type
-            ),
-            "sender": sender,
-            "created_at": (
-                created_at
-            ),
-        },
+        event_payload,
     )
+
+    try:
+        from trust_voice_push import dispatch_push_for_event
+
+        await asyncio.to_thread(
+            dispatch_push_for_event,
+            recipient_identity_id,
+            event_payload,
+        )
+    except Exception:
+        log.warning(
+            "Trust Voice message Web Push dispatch failed",
+            exc_info=True,
+        )
+
+    return sent
 
 
 async def _presence(

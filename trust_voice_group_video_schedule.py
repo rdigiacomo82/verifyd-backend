@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -370,6 +371,20 @@ async def _notify_group(
             recipient_id,
             payload,
         )
+
+        try:
+            from trust_voice_push import dispatch_push_for_event
+
+            await asyncio.to_thread(
+                dispatch_push_for_event,
+                recipient_id,
+                payload,
+            )
+        except Exception:
+            log.warning(
+                "Trust Voice scheduled-meeting Web Push dispatch failed",
+                exc_info=True,
+            )
 
 
 @router.get("/group-video/schedule/health")

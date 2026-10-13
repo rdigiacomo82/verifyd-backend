@@ -86,3 +86,6 @@ yara-x==1.20.0
 
 # Trust Voice Group Video SFU
 livekit-api==1.2.1
+
+# Trust Voice browser Web Push (VAPID + encrypted payloads)
+pywebpush==2.5.0
