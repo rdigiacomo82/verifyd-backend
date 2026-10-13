@@ -56,6 +56,7 @@ from trust_voice_group_video_recording import router as trust_voice_group_video_
 from trust_voice_group_video_guest_share import router as trust_voice_group_video_guest_share_router
 from trust_voice_group_video_schedule import router as trust_voice_group_video_schedule_router
 from trust_voice_push import router as trust_voice_push_router, start_push_scheduler
+from trust_voice_calendar import router as trust_voice_calendar_router
 from trust_voice_attachments import router as trust_voice_attachments_router
 from trust_voice_attachment_analysis import router as trust_voice_attachment_analysis_router
 
@@ -273,6 +274,9 @@ app.include_router(trust_voice_group_video_schedule_router)
 
 # VERIFYD_TRUST_VOICE_PUSH_V1
 app.include_router(trust_voice_push_router)
+
+# VERIFYD_TRUST_VOICE_CALENDAR_V1
+app.include_router(trust_voice_calendar_router)
 
 # VERIFYD_TRUST_VOICE_ATTACHMENTS_V1
 app.include_router(trust_voice_attachments_router)
