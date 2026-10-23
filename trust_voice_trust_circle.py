@@ -278,6 +278,22 @@ def _identity_from_bearer(
     return identity
 
 
+@router.get("/session/whoami")
+def trust_voice_session_whoami(
+    authorization: Optional[str] = Header(default=None),
+):
+    """
+    Return the Trust Voice identity belonging to a validated
+    session. Reuses existing session authentication.
+    """
+    identity = _identity_from_bearer(authorization)
+
+    return {
+        "identity_id": str(identity["id"]),
+        "handle": str(identity.get("handle") or ""),
+    }
+
+
 def _validate_role(
     relationship_type: str,
 ) -> dict:
