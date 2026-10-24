@@ -56,7 +56,7 @@ log = logging.getLogger("verifyd.trust_voice.signaling")
 
 router = APIRouter(prefix="/trust-voice", tags=["Trust Voice Signaling"])
 
-FEATURE_VERSION = "0.7.0"
+FEATURE_VERSION = "0.7.1"
 
 # Trust Voice sessions are persistent and server-revocable.
 # New sessions do not expire based on elapsed time.
@@ -2880,6 +2880,34 @@ async def signaling_ws(
                         )
                         state_supplied = True
 
+                    # VeriFYD Circle screen share v1.
+                    #
+                    # The actual display video remains peer-to-peer over the
+                    # existing WebRTC connection. The backend relays only the
+                    # screen-share UI/control state to the other participant.
+                    if "screen_share_enabled" in message:
+                        screen_share_enabled = message.get(
+                            "screen_share_enabled"
+                        )
+                        if not isinstance(
+                            screen_share_enabled,
+                            bool,
+                        ):
+                            await _send(
+                                websocket,
+                                {
+                                    "type": "error",
+                                    "error": (
+                                        "invalid_media_state"
+                                    ),
+                                },
+                            )
+                            continue
+
+                        relay["screen_share_enabled"] = (
+                            screen_share_enabled
+                        )
+                        state_supplied = True
                     if not state_supplied:
                         await _send(
                             websocket,
