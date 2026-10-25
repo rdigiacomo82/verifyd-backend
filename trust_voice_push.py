@@ -24,7 +24,7 @@ from trust_voice_signaling import (
     _verify_token,
 )
 from trust_voice_preferences import preferred_locale_for_identity
-from trust_voice_push_localization import push_text
+from trust_voice_push_localization import localize_notification
 
 try:
     from pywebpush import WebPushException, webpush
