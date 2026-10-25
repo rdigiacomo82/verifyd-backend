@@ -98,6 +98,9 @@ def _issue_token(
             "owner_identity_hash": hashlib.sha256(
                 str(identity.get("id") or "").encode("utf-8")
             ).hexdigest()[:20],
+            "owner_livekit_identity": "tvp_" + hashlib.sha256(
+                str(identity.get("id") or "").encode("utf-8")
+            ).hexdigest()[:32],
             "role": role,
         },
         separators=(",", ":"),
