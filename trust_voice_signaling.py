@@ -2908,6 +2908,30 @@ async def signaling_ws(
                             screen_share_enabled
                         )
                         state_supplied = True
+
+                    if "screen_share_transport" in message:
+                        screen_share_transport = message.get(
+                            "screen_share_transport"
+                        )
+                        if screen_share_transport not in {
+                            "webrtc_replace_track_v1",
+                            "native_livekit_v1",
+                        }:
+                            await _send(
+                                websocket,
+                                {
+                                    "type": "error",
+                                    "error": (
+                                        "invalid_screen_share_transport"
+                                    ),
+                                },
+                            )
+                            continue
+
+                        relay["screen_share_transport"] = (
+                            screen_share_transport
+                        )
+                        state_supplied = True
                     if not state_supplied:
                         await _send(
                             websocket,
