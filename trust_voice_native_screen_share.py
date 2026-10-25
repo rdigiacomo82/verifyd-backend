@@ -112,7 +112,7 @@ def _issue_token(
         can_publish=can_publish,
         can_subscribe=role == "viewer",
         can_publish_data=False,
-        can_publish_sources=["screen_share"] if can_publish else None,
+        can_publish_sources=[api.TrackSource.SCREEN_SHARE] if can_publish else None,
     )
 
     return (
