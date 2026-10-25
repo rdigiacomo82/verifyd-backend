@@ -214,3 +214,60 @@ def push_text(locale: str, key: str, **values: Any) -> str:
         return str(template).format(**values)
     except Exception:
         return str(template)
+
+
+def localize_notification(
+    locale: str,
+    notification_type: str,
+    title: str,
+    body: str,
+) -> tuple[str, str]:
+    """Translate privacy-safe push copy while preserving dynamic names/titles."""
+    kind = str(notification_type or "").strip()
+    current_title = str(title or "")
+    current_body = str(body or "")
+
+    if kind == "message_created":
+        suffix = " sent you a message."
+        sender = current_body[:-len(suffix)] if current_body.endswith(suffix) else push_text(locale, "someone")
+        return push_text(locale, "message_title"), push_text(locale, "message_body", sender=sender)
+
+    if kind == "group_video_started":
+        marker = " started a video meeting in "
+        if marker in current_body and current_body.endswith("."):
+            starter, group = current_body[:-1].split(marker, 1)
+        else:
+            starter, group = push_text(locale, "someone"), push_text(locale, "your_group")
+        return push_text(locale, "video_title"), push_text(locale, "video_body", starter=starter, group=group)
+
+    scheduled = {
+        "group_video_schedule_created": ("scheduled_new", "scheduled_body_new", " was scheduled in "),
+        "group_video_schedule_updated": ("scheduled_updated", "scheduled_body_updated", " was updated in "),
+        "group_video_schedule_cancelled": ("scheduled_cancelled", "scheduled_body_cancelled", " was cancelled in "),
+    }
+    if kind in scheduled:
+        title_key, body_key, marker = scheduled[kind]
+        if marker in current_body and current_body.endswith("."):
+            meeting_title, group = current_body[:-1].split(marker, 1)
+        else:
+            meeting_title, group = push_text(locale, "meeting"), push_text(locale, "your_group")
+        return push_text(locale, title_key), push_text(locale, body_key, title=meeting_title, group=group)
+
+    if kind == "scheduled_meeting_reminder":
+        return push_text(locale, "reminder_title"), current_body
+
+    if kind == "meeting_results_ready":
+        recording_suffix = " summary and recording are ready."
+        summary_suffix = " meeting summary is ready."
+        if current_body.endswith(recording_suffix):
+            group = current_body[:-len(recording_suffix)]
+            return push_text(locale, "results_title"), push_text(locale, "results_recording", group=group)
+        if current_body.endswith(summary_suffix):
+            group = current_body[:-len(summary_suffix)]
+            return push_text(locale, "results_title"), push_text(locale, "results_summary", group=group)
+        return push_text(locale, "results_title"), current_body
+
+    if kind == "push_test":
+        return push_text(locale, "test_title"), push_text(locale, "test_body")
+
+    return current_title, current_body
