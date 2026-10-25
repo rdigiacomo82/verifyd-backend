@@ -37,6 +37,10 @@ FEATURE_VERSION = '0.1.3'
 DEFAULT_SESSION_MINUTES = 120
 DEFAULT_TOKEN_MINUTES = 60
 DEFAULT_EMPTY_TIMEOUT_SECONDS = 300
+# Native mobile screen sharing joins the same LiveKit room as an auxiliary
+# screen-only participant. Reserve one auxiliary slot per group member so a
+# full 25-member group can still screen-share without rejecting the publisher.
+NATIVE_SCREEN_SHARE_AUX_MULTIPLIER = 2
 _schema_ready = False
 
 
@@ -252,7 +256,7 @@ async def _create_room(room_name: str) -> None:
             await lkapi.room.create_room(CreateRoomRequest(
                 name=room_name,
                 empty_timeout=_empty_timeout_seconds(),
-                max_participants=MAX_GROUP_MEMBERS,
+                max_participants=MAX_GROUP_MEMBERS * NATIVE_SCREEN_SHARE_AUX_MULTIPLIER,
             ))
     except Exception:
         log.exception('LiveKit room create failed')
@@ -310,6 +314,7 @@ def group_video_health():
         'room_identity':'opaque_v1',
         'participant_identity':'opaque_hash_v1',
         'max_group_members':MAX_GROUP_MEMBERS,
+        'livekit_room_max_participants':MAX_GROUP_MEMBERS * NATIVE_SCREEN_SHARE_AUX_MULTIPLIER,
         'session_minutes':_session_minutes(),
         'token_minutes':_token_minutes(),
         'end_behavior':'mark_ended_then_background_room_delete_v1',
