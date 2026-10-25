@@ -115,6 +115,14 @@ def _read_preferences(identity_id: str) -> dict:
     }
 
 
+def preferred_locale_for_identity(identity_id: str) -> str:
+    """Return the account locale for server-side notifications/copy."""
+    try:
+        return str(_read_preferences(str(identity_id or ""))["preferred_locale"])
+    except Exception:
+        return DEFAULT_LOCALE
+
+
 @router.get("/preferences/health")
 def preferences_health():
     return {
