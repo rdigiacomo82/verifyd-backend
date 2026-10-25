@@ -51,6 +51,7 @@ from trust_voice_trust_circle import router as trust_voice_trust_circle_router
 from trust_voice_messages import router as trust_voice_messages_router
 from trust_voice_groups import router as trust_voice_groups_router
 from trust_voice_group_video import router as trust_voice_group_video_router
+from trust_voice_native_screen_share import router as trust_voice_native_screen_share_router
 from trust_voice_group_video_history import router as trust_voice_group_video_history_router
 from trust_voice_group_video_recording import router as trust_voice_group_video_recording_router
 from trust_voice_group_video_guest_share import router as trust_voice_group_video_guest_share_router
@@ -259,6 +260,7 @@ app.include_router(trust_voice_groups_router)
 
 # VERIFYD_TRUST_VOICE_GROUP_VIDEO_V1
 app.include_router(trust_voice_group_video_router)
+app.include_router(trust_voice_native_screen_share_router)
 
 # VERIFYD_TRUST_VOICE_GROUP_VIDEO_HISTORY_V1
 app.include_router(trust_voice_group_video_history_router)
