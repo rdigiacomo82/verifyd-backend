@@ -363,6 +363,14 @@ def notify_identity_push(
             "failed": 0,
         }
 
+    locale = preferred_locale_for_identity(str(identity_id or ""))
+    title, body = localize_notification(
+        locale,
+        notification_type,
+        title,
+        body,
+    )
+
     payload = {
         "version": "trust_voice_push_v1",
         "type": str(notification_type or "notification")[:80],
