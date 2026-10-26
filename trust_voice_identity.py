@@ -28,10 +28,12 @@ from pydantic import BaseModel, Field
 
 from database import create_otp, get_db, get_email_typo_suggestion, is_valid_email, verify_otp
 from emailer import send_otp_email
+from trust_voice_admin import router as trust_voice_admin_router
 
 log = logging.getLogger("verifyd.trust_voice.identity")
 
 router = APIRouter(prefix="/trust-voice", tags=["Trust Voice"])
+router.include_router(trust_voice_admin_router)
 
 FEATURE_VERSION = "0.1.0"
 _HANDLE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{2,23}$")
