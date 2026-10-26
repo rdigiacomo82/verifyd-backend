@@ -1,4 +1,5 @@
 """Server-authoritative Trust Voice identity blocking. A block suppresses direct contact both ways."""
+import os
 from datetime import datetime, timezone
 from typing import Optional
 from fastapi import APIRouter, Header, HTTPException
@@ -6,6 +7,13 @@ from pydantic import BaseModel, Field
 from database import get_db
 
 router = APIRouter(prefix="/trust-voice", tags=["Trust Voice Blocking"])
+
+def blocking_enabled() -> bool:
+    return os.environ.get("VERIFYD_CIRCLE_BLOCKING_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on")
+
+def require_blocking_enabled():
+    if not blocking_enabled():
+        raise HTTPException(status_code=503, detail={"error": "blocking_not_enabled"})
 
 def ensure_block_schema():
     with get_db() as conn:
@@ -20,7 +28,7 @@ def ensure_block_schema():
         cur.execute("CREATE INDEX IF NOT EXISTS idx_verifyd_voice_blocks_target ON verifyd_voice_blocks (blocked_identity_id, blocker_identity_id)")
 
 def identities_blocked(a: str, b: str) -> bool:
-    if not a or not b or a == b:
+    if not blocking_enabled() or not a or not b or a == b:
         return False
     ensure_block_schema()
     with get_db() as conn:
@@ -48,6 +56,7 @@ class BlockInput(BaseModel):
 @router.get("/blocked-users")
 def blocked_users(authorization: Optional[str]=Header(default=None)):
     identity = _actor(authorization)
+    require_blocking_enabled()
     ensure_block_schema()
     with get_db() as conn:
         cur=conn.cursor()
@@ -60,7 +69,9 @@ def blocked_users(authorization: Optional[str]=Header(default=None)):
 
 @router.post("/blocked-users")
 async def block_user(payload:BlockInput, authorization:Optional[str]=Header(default=None)):
-    actor=_actor(authorization); target=_target(payload.handle)
+    actor=_actor(authorization)
+    require_blocking_enabled()
+    target=_target(payload.handle)
     a,b=str(actor["id"]),str(target["id"])
     if a==b:
         raise HTTPException(400,detail={"error":"cannot_block_self"})
@@ -90,6 +101,7 @@ async def block_user(payload:BlockInput, authorization:Optional[str]=Header(defa
 @router.delete("/blocked-users/{handle}")
 def unblock_user(handle:str,authorization:Optional[str]=Header(default=None)):
     actor=_actor(authorization)
+    require_blocking_enabled()
     target=_target(handle)
     ensure_block_schema()
     with get_db() as conn:
