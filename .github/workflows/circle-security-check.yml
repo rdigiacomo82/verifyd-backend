@@ -1,0 +1,25 @@
+name: Circle security syntax checks
+on:
+  push:
+    branches: [fix/circle-device-management-and-blocking-v1]
+  pull_request:
+    paths:
+      - "trust_voice_blocking.py"
+      - "trust_voice_devices.py"
+      - "trust_voice_signaling.py"
+      - "trust_voice_permissions.py"
+      - "trust_voice_messages.py"
+      - "main.py"
+      - "tests/test_circle_security_regressions.py"
+jobs:
+  compile-python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Validate Python syntax
+        run: python -m py_compile trust_voice_blocking.py trust_voice_devices.py trust_voice_signaling.py trust_voice_messages.py trust_voice_permissions.py main.py
+      - name: Run isolated security regression tests
+        run: python -m unittest discover -s tests -p 'test_circle_security_regressions.py' -v

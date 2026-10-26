@@ -414,6 +414,10 @@ def _message_permission_decision(
     recipient's exact privacy setting is not exposed.
     """
 
+    from trust_voice_blocking import identities_blocked
+    if identities_blocked(str(sender.get("id") or ""), str(recipient.get("id") or "")):
+        return False, "blocked_user"
+
     settings = _settings_for_identity(
         str(recipient.get("id") or "")
     )
