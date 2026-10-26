@@ -32,8 +32,8 @@ def identities_blocked(a: str, b: str) -> bool:
         return bool(cur.fetchone())
 
 def _actor(auth):
-    from trust_voice_messages import _identity_from_bearer
-    return _identity_from_bearer(auth)
+    from trust_voice_signaling import _identity_from_http_authorization
+    return _identity_from_http_authorization(auth)
 
 def _target(handle):
     from trust_voice_signaling import _identity_by_handle, _normalize_handle
