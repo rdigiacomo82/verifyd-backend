@@ -2044,6 +2044,30 @@ async def signaling_ws(
                 )
             )
 
+            # Re-check blocks for already established call signaling, not just invitations.
+            # Reject stale queued call messages after a new block has been recorded.
+            if msg_type in {
+                "call_answer", "call_decline", "call_end",
+                "webrtc_offer", "webrtc_answer", "webrtc_ice",
+                "call_media_state", "recording_request", "recording_response",
+                "recording_started", "recording_stop", "recording_stopped",
+            }:
+                pending_call_id = str(message.get("call_id") or "")
+                if pending_call_id:
+                    async with _state_lock:
+                        pending_call = dict(_active_calls.get(pending_call_id) or {})
+                    if pending_call and identity_id in {
+                        str(pending_call.get("caller_id") or ""),
+                        str(pending_call.get("callee_id") or ""),
+                    }:
+                        from trust_voice_blocking import identities_blocked
+                        if identities_blocked(
+                            str(pending_call.get("caller_id") or ""),
+                            str(pending_call.get("callee_id") or ""),
+                        ):
+                            await _send(websocket, {"type": "error", "error": "not_allowed"})
+                            continue
+
             if msg_type == "ping":
                 await _send(
                     websocket,
