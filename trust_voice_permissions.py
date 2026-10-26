@@ -162,6 +162,10 @@ def call_permission_decision(
     result so private account settings are not exposed.
     """
 
+    from trust_voice_blocking import identities_blocked
+    if identities_blocked(str(caller.get('id') or ''), str(callee.get('id') or '')):
+        return False, 'blocked_user'
+
     # Preserve existing Trust Voice behavior until we deliberately enable
     # Trust Circle enforcement in Render.
     if not trust_circle_enabled():
