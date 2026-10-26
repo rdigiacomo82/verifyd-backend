@@ -48,11 +48,3 @@ def revoke_device(body:RevokeDevice, authorization:Optional[str]=Header(default=
 def revoke_device_delete(session_id:str,authorization:Optional[str]=Header(default=None)):
     return revoke_device(RevokeDevice(session_id=session_id),authorization)
 
-class LegacyRevokeDevice(BaseModel):
-    device_credential: str
-    target_id: str
-
-@router.post("/device-session/revoke")
-def revoke_device_compatible(body:LegacyRevokeDevice):
-    """Compatibility with the existing Horizons request. Verify its credential server-side."""
-    return revoke_device(RevokeDevice(session_id=body.target_id),"Bearer "+body.device_credential)
