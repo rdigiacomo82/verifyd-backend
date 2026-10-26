@@ -67,7 +67,7 @@ class SecurityRegressions(unittest.TestCase):
 
     def test_block_is_symmetric_and_identity_scoped(self):
         c=Cursor(rows=[{"exists":1}])
-        env=dict(get_db=lambda:Db(c),ensure_block_schema=lambda:None)
+        env=dict(get_db=lambda:Db(c),ensure_block_schema=lambda:None,blocking_enabled=lambda:True)
         ns=extract("trust_voice_blocking.py", ["identities_blocked"], env)
         self.assertTrue(ns["identities_blocked"]("alice","bob"))
         self.assertEqual(c.calls[-1][1], ("alice","bob","bob","alice"))
