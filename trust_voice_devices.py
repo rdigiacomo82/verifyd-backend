@@ -24,7 +24,7 @@ def device_sessions(authorization:Optional[str]=Header(default=None)):
         cur.execute("""SELECT session_id,created_at,last_seen_at FROM verifyd_voice_sessions
             WHERE identity_id=%s AND revoked_at IS NULL ORDER BY created_at DESC""",(identity_id,))
         rows=[dict(row) for row in (cur.fetchall() or [])]
-    return {"ok":True,"devices":[{"session_id":row["session_id"],"created_at":row["created_at"],"last_seen_at":row["last_seen_at"],"is_current":row["session_id"]==current,"name":"Signed-in device"} for row in rows],
+    return {"ok":True,"devices":[{"id":row["session_id"],"session_id":row["session_id"],"created_at":row["created_at"],"last_seen_at":row["last_seen_at"],"last_active":row["last_seen_at"],"is_current":row["session_id"]==current,"name":"Signed-in device"} for row in rows],
             "sessions":[{"session_id":row["session_id"],"created_at":row["created_at"],"last_seen_at":row["last_seen_at"],"is_current":row["session_id"]==current,"name":"Signed-in device"} for row in rows]}
 class RevokeDevice(BaseModel):
     session_id: str
@@ -47,3 +47,12 @@ def revoke_device(body:RevokeDevice, authorization:Optional[str]=Header(default=
 @router.delete("/device-sessions/{session_id}")
 def revoke_device_delete(session_id:str,authorization:Optional[str]=Header(default=None)):
     return revoke_device(RevokeDevice(session_id=session_id),authorization)
+
+class LegacyRevokeDevice(BaseModel):
+    device_credential: str
+    target_id: str
+
+@router.post("/device-session/revoke")
+def revoke_device_compatible(body:LegacyRevokeDevice):
+    """Compatibility with the existing Horizons request. Verify its credential server-side."""
+    return revoke_device(RevokeDevice(session_id=body.target_id),"Bearer "+body.device_credential)
