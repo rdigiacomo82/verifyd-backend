@@ -2042,9 +2042,14 @@ async def signaling_ws(
             # Transient database failures should not be mistaken for revocation.
             try:
                 _verify_token(token)
-            except ValueError:
-                await websocket.close(code=4401)
-                break
+            except HTTPException as exc:
+                if exc.status_code == 401:
+                    await websocket.close(code=4401)
+                    break
+                # An infrastructure error is not proof of revocation.
+                # Do not clear device credentials or forcibly sign out.
+                await _send(websocket, {"type": "error", "error": "session_check_unavailable"})
+                continue
 
             msg_type = (
                 message.get(
