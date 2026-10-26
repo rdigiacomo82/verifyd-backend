@@ -59,7 +59,7 @@ def blocked_users(authorization: Optional[str]=Header(default=None)):
     return {"ok":True,"blocked_users":[{"identity_id":r["identity_id"],"handle":"@"+str(r.get("handle") or ""),"display_name":r.get("display_name") or "","created_at":r["created_at"]} for r in rows]}
 
 @router.post("/blocked-users")
-def block_user(payload:BlockInput, authorization:Optional[str]=Header(default=None)):
+async def block_user(payload:BlockInput, authorization:Optional[str]=Header(default=None)):
     actor=_actor(authorization); target=_target(payload.handle)
     a,b=str(actor["id"]),str(target["id"])
     if a==b:
@@ -69,6 +69,22 @@ def block_user(payload:BlockInput, authorization:Optional[str]=Header(default=No
         cur=conn.cursor()
         cur.execute("""INSERT INTO verifyd_voice_blocks (blocker_identity_id,blocked_identity_id,created_at)
             VALUES (%s,%s,%s) ON CONFLICT DO NOTHING""",(a,b,datetime.now(timezone.utc).isoformat()))
+    # Terminate active same-process calls immediately, notifying both peers.
+    # Cross-worker teardown requires a distributed event bus in a later hardening pass.
+    from trust_voice_signaling import (
+        _active_calls, _state_lock, _cancel_call_expiry,
+        _record_call_terminal, _send_to_identity,
+    )
+    async with _state_lock:
+        affected = [(call_id, dict(call)) for call_id,call in list(_active_calls.items())
+            if {str(call.get("caller_id") or ""),str(call.get("callee_id") or "")} == {a,b}]
+        for call_id,_ in affected:
+            _active_calls.pop(call_id,None)
+    for call_id,call in affected:
+        _cancel_call_expiry(call_id)
+        _record_call_terminal(call_id,"ended","blocked")
+        for who in (a,b):
+            await _send_to_identity(who,{"type":"call_ended","call_id":call_id,"reason":"ended"})
     return {"ok":True,"blocked":True,"handle":"@"+str(target.get("handle") or "")}
 
 @router.delete("/blocked-users/{handle}")
