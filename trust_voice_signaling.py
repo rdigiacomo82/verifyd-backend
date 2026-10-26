@@ -2038,6 +2038,14 @@ async def signaling_ws(
                 )
                 continue
 
+            # A revoked device must not keep an established websocket alive.
+            # Transient database failures should not be mistaken for revocation.
+            try:
+                _verify_token(token)
+            except ValueError:
+                await websocket.close(code=4401)
+                break
+
             msg_type = (
                 message.get(
                     "type"
