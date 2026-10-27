@@ -1380,6 +1380,16 @@ def request_session_code(
             "message": "Use the App Review password sign-in instead of an email code.",
         })
 
+    # Dedicated SLP demonstration identity uses its own password endpoint.
+    # All ordinary users, including clinical individual accounts, still use OTP.
+    if email == "slpdemo@vfvid.com" and os.environ.get(
+        "VERIFYD_SLP_DEMO_LOGIN_ENABLED", ""
+    ).strip().lower() in {"1", "true", "yes", "on"}:
+        raise HTTPException(status_code=403, detail={
+            "error": "slp_demo_password_required",
+            "message": "Use the demo password instead of requesting an email code.",
+        })
+
     if _recent_otp_request(
         email
     ):
