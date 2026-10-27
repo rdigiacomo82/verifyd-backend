@@ -47,6 +47,7 @@ from video import clip_first_6_seconds, stamp_video, download_video_ytdlp
 from trust_voice_identity import router as trust_voice_identity_router
 from trust_voice_signaling import router as trust_voice_signaling_router
 from trust_voice_reviewer_login import router as trust_voice_reviewer_login_router
+from trust_voice_slp_demo_login import router as trust_voice_slp_demo_login_router
 from trust_voice_profile_media import router as trust_voice_profile_media_router
 from trust_voice_trust_circle import router as trust_voice_trust_circle_router
 from trust_voice_messages import router as trust_voice_messages_router
@@ -251,6 +252,7 @@ app.include_router(trust_voice_identity_router)
 # VERIFYD_TRUST_VOICE_SIGNALING_V1
 app.include_router(trust_voice_signaling_router)
 app.include_router(trust_voice_reviewer_login_router)
+app.include_router(trust_voice_slp_demo_login_router)
 
 # VERIFYD_TRUST_VOICE_PROFILE_MEDIA_V1
 app.include_router(trust_voice_profile_media_router)
