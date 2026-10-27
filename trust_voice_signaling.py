@@ -1370,6 +1370,16 @@ def request_session_code(
             },
         )
 
+    # Reviewers use an explicitly configured password sign-in. No email code
+    # is sent to the review mailbox while that feature is enabled.
+    if email == "appreview@vfvid.com" and os.environ.get(
+        "VERIFYD_APP_REVIEW_LOGIN_ENABLED", ""
+    ).strip().lower() in {"1", "true", "yes", "on"}:
+        raise HTTPException(status_code=403, detail={
+            "error": "review_password_required",
+            "message": "Use the App Review password sign-in instead of an email code.",
+        })
+
     if _recent_otp_request(
         email
     ):
