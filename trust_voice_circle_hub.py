@@ -490,6 +490,8 @@ def my_community_posts(authorization: Optional[str]=Header(default=None)):
     require_feature('VERIFYD_TRUST_VOICE_COMMUNITY_ENABLED')
     actor=_identity_from_bearer(authorization)
     ensure_schema()
+    from trust_voice_community_moderation import _ensure_moderation_schema
+    _ensure_moderation_schema()
     with get_db() as conn:
         cur=conn.cursor()
         cur.execute('''SELECT p.post_id,p.title,p.event_start,p.city,p.visibility,
