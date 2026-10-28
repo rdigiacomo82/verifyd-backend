@@ -18,7 +18,7 @@ from fastapi import APIRouter, BackgroundTasks, File, Header, HTTPException, Que
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from database import get_db
+from database import get_db, is_valid_email
 from trust_voice_messages import _identity_from_bearer, _message_permission_decision
 from trust_voice_signaling import _identity_by_handle, _normalize_handle, _send_to_identity
 from trust_voice_blocking import identities_blocked
@@ -215,7 +215,10 @@ async def send(payload:MailSend,tasks:BackgroundTasks,authorization:Optional[str
     else:
         if not enabled('VERIFYD_CIRCLE_EMAIL_EXTERNAL_ENABLED'):
             fail('external_not_ready','External email delivery is not enabled yet. You can send to VeriFYD @handles now.',503)
-        if not actor.get('email_verified') or not actor.get('email'):
+        # VeriFYD identities persist the verified address as email_lower.
+        # Never trust a client-supplied From or Reply-To value.
+        sender_email = str(actor.get('email_lower') or actor.get('email') or '').strip().lower()
+        if not actor.get('email_verified') or not is_valid_email(sender_email):
             fail('verified_email_required','Verify your account email before sending to an external address.',403)
         if not re.fullmatch(r'[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+',to):fail('recipient_invalid','Enter a valid email address.')
         if payload.file_ids:fail('external_files_not_ready','External attachments require a verified outbound file pipeline.',422)
@@ -261,7 +264,7 @@ async def send(payload:MailSend,tasks:BackgroundTasks,authorization:Optional[str
         resend.api_key=api_key
         from_address=os.getenv('VERIFYD_CIRCLE_EMAIL_FROM','VeriFYD Circle <noreply@vfvid.com>')
         result=resend.Emails.send({'from':from_address,'to':[recipient],
-          'reply_to':str(actor['email']).strip(),
+          'reply_to':sender_email,
           'subject':subject,'text':f"From VeriFYD Circle user @{actor.get('handle') or actor.get('handle_lower') or 'member'}\n\n{body}\n\nReplying sends email to this user's verified email address, not to VeriFYD Circle."})
         if not result:raise RuntimeError('No provider acceptance')
         state='accepted_by_provider'
