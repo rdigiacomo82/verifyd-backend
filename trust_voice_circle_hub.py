@@ -26,7 +26,7 @@ from trust_voice_signaling import _identity_by_handle, _normalize_handle, _publi
 
 log = logging.getLogger('verifyd.trust_voice.circle_hub')
 router = APIRouter(tags=['VeriFYD Circle Meetings and Community'])
-FEATURE_VERSION = '0.2.0'
+FEATURE_VERSION = '0.3.0'
 _schema_ready = False
 
 
@@ -111,6 +111,14 @@ def ensure_schema():
             reason TEXT NOT NULL, created_at TEXT NOT NULL,
             PRIMARY KEY(post_id,reporter_id)
         )''')
+        cur.execute('''CREATE TABLE IF NOT EXISTS verifyd_voice_community_alerts (
+            alert_id TEXT PRIMARY KEY, post_id TEXT NOT NULL,
+            sender_id TEXT NOT NULL, recipient_id TEXT NOT NULL,
+            created_at TEXT NOT NULL, read_at TEXT,
+            UNIQUE(post_id,recipient_id)
+        )''')
+        cur.execute('''CREATE INDEX IF NOT EXISTS idx_tv_community_alert_recipient
+            ON verifyd_voice_community_alerts (recipient_id,read_at,created_at)''')
     _schema_ready = True
 
 
@@ -296,15 +304,74 @@ def respond_circle_meeting(meeting_id: str, payload: RsvpPayload, authorization:
 @router.get('/community/health')
 def community_health():
     return {'status':'ok','version':FEATURE_VERSION,'enabled':enabled('VERIFYD_TRUST_VOICE_COMMUNITY_ENABLED'),
-            'public_posts_enabled':public_posts_allowed(),
-            'moderation':'admin_review_queue_audit_v2'}
+            'public_posts_enabled':enabled('VERIFYD_TRUST_VOICE_COMMUNITY_ENABLED'),
+            'automatic_public_posting_enabled':False,
+            'public_submission_enabled':enabled('VERIFYD_TRUST_VOICE_COMMUNITY_ENABLED'),
+            'public_review_required':True,
+            'event_alert_audience':'posters_trust_circle_only',
+            'moderation':'public_preapproval_and_report_review_v3'}
+
+
+def _is_public_approved(post_id: str) -> bool:
+    from trust_voice_community_moderation import _ensure_moderation_schema
+    _ensure_moderation_schema()
+    with get_db() as conn:
+        cur=conn.cursor()
+        cur.execute('''SELECT 1 FROM verifyd_voice_community_moderation_cases
+            WHERE post_id=%s AND status='reviewed' AND last_action='restore'
+            LIMIT 1''', (post_id,))
+        return bool(cur.fetchone())
+
+
+def _circle_alert_recipients(cur, post_id: str, author_id: str, visibility: str, group_id=None) -> list[str]:
+    # Privacy boundary: discovery can be public, but alerts are restricted
+    # to identities the AUTHOR has expressly added to their Trust Circle.
+    # A private-group event has the additional group-membership requirement.
+    from trust_voice_permissions import ensure_trust_circle_schema
+    from trust_voice_blocking import identities_blocked
+    ensure_trust_circle_schema()
+    cur.execute('''SELECT tc.member_identity_id FROM verifyd_trust_circle_members tc
+        JOIN verifyd_identities i ON i.id=tc.member_identity_id AND i.status='active'
+        WHERE tc.owner_identity_id=%s AND tc.member_identity_id<>%s
+        LIMIT 500''', (author_id, author_id))
+    member_ids=[str(r['member_identity_id']) for r in (cur.fetchall() or [])]
+    if visibility=='group':
+        cur.execute('''SELECT identity_id FROM verifyd_voice_conversation_members
+            WHERE conversation_id=%s''', (group_id,))
+        allowed={str(r['identity_id']) for r in (cur.fetchall() or [])}
+        member_ids=[i for i in member_ids if i in allowed]
+    return [i for i in member_ids if not identities_blocked(author_id,i)]
+
+
+def _insert_community_alerts(cur, post_id: str, author_id: str, visibility: str, group_id=None) -> list[str]:
+    # Database alerts are durable; WS/push are best-effort delivery hints.
+    notified=[]
+    for rid in _circle_alert_recipients(cur,post_id,author_id,visibility,group_id):
+        cur.execute('''INSERT INTO verifyd_voice_community_alerts
+            (alert_id,post_id,sender_id,recipient_id,created_at,read_at)
+            VALUES (%s,%s,%s,%s,%s,NULL)
+            ON CONFLICT(post_id,recipient_id) DO NOTHING''',
+            ('tvca_'+uuid.uuid4().hex,post_id,author_id,rid,now_iso()))
+        if cur.rowcount:
+            notified.append(rid)
+    return notified
+
+
+async def notify_community_post(recipient_id: str, post_id: str):
+    # No global fan-out: caller provides ONLY a verified Trust Circle ID.
+    await notify_identity(recipient_id, {
+        'type':'circle_community_event', 'post_id':post_id,
+        'message':'A Trust Circle contact posted a community event.'
+    })
 
 
 def may_view(row, viewer_id: str) -> bool:
     if row.get('deleted_at') or row.get('hidden_at'):
         return False
-    # Hold public listings until a moderator is configured and tested.
-    if row.get('visibility') == 'public' and not public_posts_allowed():
+    # Every public post requires an actual moderator approval, regardless
+    # of launch flags. A hidden / unapproved public post never escapes via
+    # listing, RSVP, direct lookup or notifications.
+    if row.get('visibility') == 'public' and not _is_public_approved(str(row['post_id'])):
         return False
     if row['author_id']==viewer_id: return True
     from trust_voice_blocking import identities_blocked
@@ -362,16 +429,15 @@ def list_posts(city: str = Query(default='',max_length=100),
 
 
 @router.post('/community/posts')
-def create_post(payload: PostCreate, authorization: Optional[str]=Header(default=None)):
+def create_post(payload: PostCreate, tasks: BackgroundTasks, authorization: Optional[str]=Header(default=None)):
     require_feature('VERIFYD_TRUST_VOICE_COMMUNITY_ENABLED')
     user=_identity_from_bearer(authorization)
     uid=str(user['id'])
     ensure_schema()
     if payload.rules_accepted is not True:
         raise HTTPException(400,detail={'error':'rules_acknowledgment_required'})
-    if payload.visibility == 'public' and not public_posts_allowed():
-        raise HTTPException(403,detail={'error':'public_posting_in_review',
-            'message':'Public posting is paused during moderator setup. Choose Trust Circle or a private group.'})
+    # Public submissions are accepted but are PRIVATE to moderation until
+    # an allowlisted human moderator explicitly approves them.
     title=clean(payload.title,140)
     details=clean(payload.details,2500)
     city=clean(payload.city,100)
@@ -386,6 +452,14 @@ def create_post(payload: PostCreate, authorization: Optional[str]=Header(default
             raise HTTPException(400,detail={'error':'group_required'})
         _require_group_member(group_id,uid)
     pid='tvpost_'+uuid.uuid4().hex
+    is_public=payload.visibility=='public'
+    if is_public:
+        # Lazy import avoids module import cycle; creates review/audit tables.
+        from trust_voice_community_moderation import _ensure_moderation_schema
+        _ensure_moderation_schema()
+    from trust_voice_permissions import ensure_trust_circle_schema
+    ensure_trust_circle_schema()
+    notified=[]
     with get_db() as conn:
         cur=conn.cursor()
         cur.execute('''SELECT COUNT(*) AS n FROM verifyd_voice_community_posts
@@ -394,10 +468,86 @@ def create_post(payload: PostCreate, authorization: Optional[str]=Header(default
         if int(cur.fetchone()['n']) >= 5:
             raise HTTPException(429,detail={'error':'daily_post_limit', 'message':'You can post up to 5 events per day.'})
         cur.execute('''INSERT INTO verifyd_voice_community_posts
-            (post_id,author_id,title,details,event_start,location_text,city,visibility,group_id,created_at)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)''',
-            (pid,uid,title,details,start,location,city,payload.visibility,group_id,now_iso()))
-    return {'ok':True,'post_id':pid}
+            (post_id,author_id,title,details,event_start,location_text,city,visibility,group_id,created_at,hidden_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)''',
+            (pid,uid,title,details,start,location,city,payload.visibility,group_id,now_iso(),now_iso() if is_public else None))
+        if is_public:
+            cur.execute('''INSERT INTO verifyd_voice_community_moderation_cases
+                (post_id,status,last_action,last_moderator_id,last_note,updated_at)
+                VALUES (%s,'pending_public','submitted','',%s,%s)''',
+                (pid,'Submitted for moderator approval.',now_iso()))
+        else:
+            notified=_insert_community_alerts(cur,pid,uid,payload.visibility,group_id)
+    for rid in notified:
+        tasks.add_task(notify_community_post,rid,pid)
+    return {'ok':True,'post_id':pid,'status':'pending_review' if is_public else 'published',
+            'alert_audience':'trust_circle_only','alert_count':len(notified)}
+
+
+
+@router.get('/community/posts/mine')
+def my_community_posts(authorization: Optional[str]=Header(default=None)):
+    require_feature('VERIFYD_TRUST_VOICE_COMMUNITY_ENABLED')
+    actor=_identity_from_bearer(authorization)
+    ensure_schema()
+    with get_db() as conn:
+        cur=conn.cursor()
+        cur.execute('''SELECT p.post_id,p.title,p.event_start,p.city,p.visibility,
+               p.hidden_at,p.created_at,m.status AS review_status,m.last_action
+            FROM verifyd_voice_community_posts p
+            LEFT JOIN verifyd_voice_community_moderation_cases m ON m.post_id=p.post_id
+            WHERE p.author_id=%s AND p.deleted_at IS NULL
+            ORDER BY p.created_at DESC LIMIT 50''',(str(actor['id']),))
+        items=[dict(r) for r in (cur.fetchall() or [])]
+    return {'posts':[{'post_id':x['post_id'],'title':x['title'],'event_start':x['event_start'],
+             'city':x['city'],'visibility':x['visibility'],
+             'status':('pending_review' if x['review_status']=='pending_public' else
+                       'hidden' if x['hidden_at'] else 'published')}
+             for x in items]}
+
+
+@router.get('/community/alerts')
+def community_alerts(authorization: Optional[str]=Header(default=None),
+                     limit: int=Query(default=30,ge=1,le=100)):
+    require_feature('VERIFYD_TRUST_VOICE_COMMUNITY_ENABLED')
+    viewer=_identity_from_bearer(authorization)
+    uid=str(viewer['id'])
+    ensure_schema()
+    with get_db() as conn:
+        cur=conn.cursor()
+        cur.execute('''SELECT a.alert_id,a.post_id,a.sender_id,a.created_at,a.read_at,
+               p.author_id,p.title,p.event_start,p.visibility,p.group_id,p.hidden_at,p.deleted_at
+            FROM verifyd_voice_community_alerts a
+            JOIN verifyd_voice_community_posts p ON p.post_id=a.post_id
+            WHERE a.recipient_id=%s ORDER BY a.created_at DESC LIMIT 250''',(uid,))
+        raw=[dict(x) for x in (cur.fetchall() or [])]
+    visible=[a for a in raw if may_view(a,uid)]
+    unread=sum(1 for a in visible if not a['read_at'])
+    return {'unread_count':unread,'alerts':[
+        {'alert_id':a['alert_id'],'post_id':a['post_id'],'title':a['title'],
+         'event_start':a['event_start'],'created_at':a['created_at'],'read_at':a['read_at']}
+        for a in visible[:limit]]}
+
+
+@router.post('/community/alerts/{alert_id}/read')
+def mark_community_alert_read(alert_id: str, authorization: Optional[str]=Header(default=None)):
+    require_feature('VERIFYD_TRUST_VOICE_COMMUNITY_ENABLED')
+    viewer=_identity_from_bearer(authorization)
+    ensure_schema()
+    uid=str(viewer['id'])
+    with get_db() as conn:
+        cur=conn.cursor()
+        cur.execute('''SELECT a.post_id,p.* FROM verifyd_voice_community_alerts a
+            JOIN verifyd_voice_community_posts p ON p.post_id=a.post_id
+            WHERE a.alert_id=%s AND a.recipient_id=%s''',(alert_id,uid))
+        item=cur.fetchone()
+    if not item or not may_view(item,uid):
+        raise HTTPException(404,detail={'error':'alert_not_found'})
+    with get_db() as conn:
+        cur=conn.cursor()
+        cur.execute('''UPDATE verifyd_voice_community_alerts SET read_at=COALESCE(read_at,%s)
+            WHERE alert_id=%s AND recipient_id=%s''',(now_iso(),alert_id,uid))
+    return {'ok':True}
 
 
 def get_visible_post(pid: str, uid: str) -> dict:
