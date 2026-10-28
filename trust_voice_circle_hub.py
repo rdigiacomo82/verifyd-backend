@@ -26,12 +26,19 @@ from trust_voice_signaling import _identity_by_handle, _normalize_handle, _publi
 
 log = logging.getLogger('verifyd.trust_voice.circle_hub')
 router = APIRouter(tags=['VeriFYD Circle Meetings and Community'])
-FEATURE_VERSION = '0.1.0'
+FEATURE_VERSION = '0.2.0'
 _schema_ready = False
 
 
 def enabled(env_key: str) -> bool:
     return os.environ.get(env_key, '').lower().strip() in ('1', 'yes', 'true', 'on')
+
+
+def public_posts_allowed() -> bool:
+    # Do not expose all-user posting without an explicit launch flag AND a
+    # server-side moderator allowlist. Configure/test the review queue first.
+    moderator_ids = [x.strip() for x in os.environ.get('VERIFYD_CIRCLE_MODERATOR_IDENTITY_IDS','').split(',') if x.strip()]
+    return enabled('VERIFYD_TRUST_VOICE_COMMUNITY_PUBLIC_POSTS_ENABLED') and bool(moderator_ids)
 
 
 def require_feature(env_key: str) -> None:
@@ -289,11 +296,15 @@ def respond_circle_meeting(meeting_id: str, payload: RsvpPayload, authorization:
 @router.get('/community/health')
 def community_health():
     return {'status':'ok','version':FEATURE_VERSION,'enabled':enabled('VERIFYD_TRUST_VOICE_COMMUNITY_ENABLED'),
-            'public_moderation':'user_reporting_and_auto_hide_v1_human_review_not_yet_available'}
+            'public_posts_enabled':public_posts_allowed(),
+            'moderation':'admin_review_queue_audit_v2'}
 
 
 def may_view(row, viewer_id: str) -> bool:
     if row.get('deleted_at') or row.get('hidden_at'):
+        return False
+    # Hold public listings until a moderator is configured and tested.
+    if row.get('visibility') == 'public' and not public_posts_allowed():
         return False
     if row['author_id']==viewer_id: return True
     from trust_voice_blocking import identities_blocked
@@ -358,6 +369,9 @@ def create_post(payload: PostCreate, authorization: Optional[str]=Header(default
     ensure_schema()
     if payload.rules_accepted is not True:
         raise HTTPException(400,detail={'error':'rules_acknowledgment_required'})
+    if payload.visibility == 'public' and not public_posts_allowed():
+        raise HTTPException(403,detail={'error':'public_posting_in_review',
+            'message':'Public posting is paused during moderator setup. Choose Trust Circle or a private group.'})
     title=clean(payload.title,140)
     details=clean(payload.details,2500)
     city=clean(payload.city,100)
