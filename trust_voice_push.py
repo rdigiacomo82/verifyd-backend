@@ -498,6 +498,21 @@ def dispatch_push_for_event(
 
     event_type = str(payload.get("type") or "").strip()
 
+    if event_type == "circle_community_event":
+        # Recipient is selected by the Community Board backend from the
+        # author's Trust Circle only; never broadcast public posts globally.
+        post_id = str(payload.get("post_id") or "")
+        return notify_identity_push(
+            identity_id,
+            notification_type="circle_community_event",
+            title="New Trust Circle event",
+            body="Someone in your Trust Circle shared a community event.",
+            url="/voice",
+            tag=f"trust-voice-community-{post_id}" if post_id else "trust-voice-community",
+            data={"post_id": post_id},
+            ttl=3600,
+        )
+
     if event_type == "message_created":
         sender_name = _display_name(payload.get("sender"))
         conversation_id = str(
