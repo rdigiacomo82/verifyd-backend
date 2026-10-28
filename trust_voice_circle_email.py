@@ -26,7 +26,7 @@ from trust_voice_attachment_validation import validate_attachment_content, Attac
 from trust_voice_attachments import _get_attachment_client, _storage_configured, TRUST_VOICE_BUCKET
 
 router = APIRouter(tags=['VeriFYD Circle Email'])
-VERSION='0.1.0'
+VERSION='0.2.0'
 MAX_FILE_BYTES=8*1024*1024
 ALLOWED_FILES={'.pdf','.txt','.docx','.xlsx','.png','.jpg','.jpeg','.webp','.csv','.pptx','.mp3','.wav'}
 _schema_ready=False
@@ -103,7 +103,7 @@ def files_for(db,mail_ids:list[str]):
 def email_health():
     return {'status':'ok','version':VERSION,'enabled':enabled('VERIFYD_CIRCLE_EMAIL_ENABLED'),
       'internal_handle_mail':'supported','external_outbound':enabled('VERIFYD_CIRCLE_EMAIL_EXTERNAL_ENABLED'),
-      'external_inbound':'not_configured','private_attachments':_storage_configured(),
+      'external_inbound':'enabled' if enabled('VERIFYD_CIRCLE_EMAIL_INBOUND_ENABLED') else 'not_configured','private_attachments':_storage_configured(),
       'risk_classification':'rule_signals_not_ai_certification','attachment_malware_scanning':'not_available'}
 
 @router.get('/circle-email/messages')
@@ -215,11 +215,18 @@ async def send(payload:MailSend,tasks:BackgroundTasks,authorization:Optional[str
     else:
         if not enabled('VERIFYD_CIRCLE_EMAIL_EXTERNAL_ENABLED'):
             fail('external_not_ready','External email delivery is not enabled yet. You can send to VeriFYD @handles now.',503)
-        # VeriFYD identities persist the verified address as email_lower.
-        # Never trust a client-supplied From or Reply-To value.
-        sender_email = str(actor.get('email_lower') or actor.get('email') or '').strip().lower()
+        # Use the same persisted address verified during identity registration.
+        sender_email=str(actor.get('email_lower') or actor.get('email') or '').strip().lower()
         if not actor.get('email_verified') or not is_valid_email(sender_email):
             fail('verified_email_required','Verify your account email before sending to an external address.',403)
+        # Never enable inbound aliases before receiving DNS and signed webhooks
+        # are configured; otherwise external replies would disappear.
+        inbound_reply_active=enabled('VERIFYD_CIRCLE_EMAIL_INBOUND_ENABLED')
+        if inbound_reply_active:
+            from trust_voice_circle_email_inbound import inbound_configured,ensure_inbound_schema
+            if not inbound_configured():
+                fail('inbound_not_configured','The VeriFYD reply mailbox is still being configured.',503)
+            ensure_inbound_schema()
         if not re.fullmatch(r'[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+',to):fail('recipient_invalid','Enter a valid email address.')
         if payload.file_ids:fail('external_files_not_ready','External attachments require a verified outbound file pipeline.',422)
         recipient=to.lower();tid=None
@@ -251,6 +258,10 @@ async def send(payload:MailSend,tasks:BackgroundTasks,authorization:Optional[str
                 subject,body,folder,is_read,delivery,verdict,risk_notes,created_at)
                 VALUES(%s,%s,%s,%s,%s,%s,%s,%s,'sent',TRUE,'sending',%s,%s,%s)''',
                 (sent_id,thread,uid,uid,'@'+str(actor.get('handle_lower') or actor.get('handle') or ''),recipient,subject,body,v,risk_note,now))
+            if inbound_reply_active:
+                from trust_voice_circle_email_inbound import create_reply_route
+                reply_address=create_reply_route(db,owner_id=uid,sent_mail_id=sent_id,
+                       thread_id=thread,external_recipient=recipient,stamp=now)
     if internal:
         try: tasks.add_task(_notify_recipient,tid,recv_id)
         except Exception:pass
@@ -262,10 +273,19 @@ async def send(payload:MailSend,tasks:BackgroundTasks,authorization:Optional[str
         api_key=os.getenv('RESEND_API_KEY','')
         if not api_key:raise RuntimeError('Resend key unavailable')
         resend.api_key=api_key
-        from_address=os.getenv('VERIFYD_CIRCLE_EMAIL_FROM','VeriFYD Circle <noreply@vfvid.com>')
+        display_handle=str(actor.get('handle') or actor.get('handle_lower') or 'member')
+        # Branded standard From header; only the opaque Reply-To routes replies.
+        # Keep the existing verified sending address until inbound is enabled.
+        default_from=(f'VeriFYD Circle (@{display_handle}) <mail@vfvid.com>'
+                      if inbound_reply_active else 'VeriFYD Circle <noreply@vfvid.com>')
+        from_address=os.getenv('VERIFYD_CIRCLE_EMAIL_FROM',default_from)
+        reply_to=reply_address if inbound_reply_active else sender_email
+        reply_note=('Reply to this message to reach the sender in VeriFYD Circle.'
+                    if inbound_reply_active else
+                    'Replies go to the sender\'s verified email address until VeriFYD inbound routing is enabled.')
         result=resend.Emails.send({'from':from_address,'to':[recipient],
-          'reply_to':sender_email,
-          'subject':subject,'text':f"From VeriFYD Circle user @{actor.get('handle') or actor.get('handle_lower') or 'member'}\n\n{body}\n\nReplying sends email to this user's verified email address, not to VeriFYD Circle."})
+          'reply_to':reply_to,
+          'subject':subject,'text':f"From VeriFYD Circle user @{actor.get('handle') or actor.get('handle_lower') or 'member'}\n\n{body}\n\n{reply_note}"})
         if not result:raise RuntimeError('No provider acceptance')
         state='accepted_by_provider'
     except Exception:
@@ -274,8 +294,12 @@ async def send(payload:MailSend,tasks:BackgroundTasks,authorization:Optional[str
         c=db.cursor();c.execute('UPDATE verifyd_circle_email_messages SET delivery=%s WHERE mail_id=%s AND owner_id=%s',(state,sent_id,uid))
     if state=='failed':fail('delivery_failed','External provider could not accept this email. Please try again later.',503)
     return {'ok':True,'mail_id':sent_id,'delivery':state,'recipient':recipient,
-            'notice':'External replies go to your verified email inbox; inbound VeriFYD mail is not configured.'}
+            'notice':('External replies route to your VeriFYD Inbox.' if inbound_reply_active else 'Replies go to your verified email until inbound routing is enabled.')}
 
 async def _notify_recipient(identity_id,mail_id):
     try:await _send_to_identity(identity_id,{'type':'circle_mail_received','mail_id':mail_id})
     except Exception:pass
+
+# Independent signed Resend inbound webhook router; no main.py edits needed.
+from trust_voice_circle_email_inbound import router as inbound_router
+router.include_router(inbound_router)
