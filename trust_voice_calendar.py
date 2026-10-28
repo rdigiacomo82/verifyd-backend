@@ -244,3 +244,9 @@ def calendar_ics(
             "X-Content-Type-Options": "nosniff",
         },
     )
+
+
+# VERIFYD_CIRCLE_HUB_V1: register additive Circle meetings and Community Board routes.
+# main.py already registers trust_voice_calendar_router; leave all existing routes intact.
+from trust_voice_circle_hub import router as circle_hub_router
+router.include_router(circle_hub_router)
