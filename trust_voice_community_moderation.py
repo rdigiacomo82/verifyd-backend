@@ -9,15 +9,15 @@ import os
 import uuid
 from typing import Literal, Optional
 
-from fastapi import APIRouter, Header, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from database import get_db
 from trust_voice_messages import _identity_from_bearer
-from trust_voice_circle_hub import ensure_schema, now_iso, public_posts_allowed
+from trust_voice_circle_hub import ensure_schema, now_iso, public_posts_allowed, _insert_community_alerts, notify_community_post
 
 router = APIRouter(tags=['VeriFYD Circle Community Moderation'])
-MODERATION_VERSION = '0.2.0'
+MODERATION_VERSION = '0.3.0'
 _moderation_schema_ready = False
 
 
@@ -125,14 +125,15 @@ def moderation_queue(
         fresh_report = bool(r.get('last_report_at') and (
             not r.get('reviewed_at') or str(r['last_report_at']) > str(r['reviewed_at'])
         ))
-        pending = bool(r['report_count'] > 0 and (fresh_report or not r.get('reviewed_at')))
+        awaiting_public_approval = r.get('case_status') == 'pending_public'
+        pending = awaiting_public_approval or bool(r['report_count'] > 0 and (fresh_report or not r.get('reviewed_at')))
         if status == 'pending' and not pending:
             continue
         if status == 'hidden' and not r.get('hidden_at'):
             continue
         if status == 'reviewed' and (pending or not reviewed):
             continue
-        r['review_state'] = 'pending' if pending else ('reviewed' if reviewed else 'actioned')
+        r['review_state'] = 'pending_public' if awaiting_public_approval else ('pending' if pending else ('reviewed' if reviewed else 'actioned'))
         r['report_count'] = int(r['report_count'])
         result.append(r)
         if len(result) >= limit:
@@ -141,7 +142,7 @@ def moderation_queue(
 
 
 @router.post('/community/moderation/posts/{post_id}/decision')
-def moderate_post(post_id: str, payload: ModeratorDecision,
+def moderate_post(post_id: str, payload: ModeratorDecision, tasks: BackgroundTasks,
                   authorization: Optional[str] = Header(default=None)):
     actor = _moderator(authorization)
     _ensure_moderation_schema()
@@ -151,17 +152,29 @@ def moderate_post(post_id: str, payload: ModeratorDecision,
     if not post_id.startswith('tvpost_') or len(post_id) > 90:
         raise HTTPException(404, detail={'error': 'event_not_found'})
     stamp = now_iso()
+    notified=[]
+    from trust_voice_permissions import ensure_trust_circle_schema
+    ensure_trust_circle_schema()
     with get_db() as conn:
         cur = conn.cursor()
-        cur.execute('''SELECT post_id,hidden_at,deleted_at FROM verifyd_voice_community_posts
-            WHERE post_id=%s FOR UPDATE''', (post_id,))
+        cur.execute('''SELECT post_id,author_id,visibility,group_id,hidden_at,deleted_at
+            FROM verifyd_voice_community_posts WHERE post_id=%s FOR UPDATE''', (post_id,))
         row = cur.fetchone()
         if not row or row.get('deleted_at'):
             raise HTTPException(404, detail={'error': 'event_not_found'})
+        cur.execute('SELECT status,last_action FROM verifyd_voice_community_moderation_cases WHERE post_id=%s', (post_id,))
+        prior_case=cur.fetchone()
+        pending_public = bool(prior_case and prior_case.get('status')=='pending_public')
+        if pending_public and payload.action=='resolve':
+            raise HTTPException(400,detail={'error':'approval_required', 'message':'Approve (Restore) or remove the public submission.'})
         if payload.action == 'hide':
             cur.execute('UPDATE verifyd_voice_community_posts SET hidden_at=%s WHERE post_id=%s', (stamp, post_id))
         elif payload.action == 'restore':
+            # Only an allowlisted moderator can approve. Posting does not
+            # broadcast to everyone; notifications go to author's circle.
             cur.execute('UPDATE verifyd_voice_community_posts SET hidden_at=NULL WHERE post_id=%s', (post_id,))
+            if pending_public and row['visibility']=='public':
+                notified=_insert_community_alerts(cur,post_id,str(row['author_id']),'public')
         elif payload.action == 'remove':
             cur.execute('UPDATE verifyd_voice_community_posts SET deleted_at=%s,hidden_at=%s WHERE post_id=%s', (stamp, stamp, post_id))
         # 'resolve' records a reviewed decision without changing visibility.
@@ -178,7 +191,10 @@ def moderate_post(post_id: str, payload: ModeratorDecision,
             VALUES (%s,%s,%s,%s,%s,%s,%s,%s)''',
             ('tvmod_'+uuid.uuid4().hex,post_id,str(actor['id']),payload.action,
              reason,row.get('hidden_at'),row.get('deleted_at'),stamp))
-    return {'ok': True, 'action': payload.action, 'post_id': post_id, 'reviewed_at': stamp}
+    for rid in notified:
+        tasks.add_task(notify_community_post,rid,post_id)
+    return {'ok': True, 'action': payload.action, 'post_id': post_id,
+            'reviewed_at': stamp,'trust_circle_alert_count':len(notified)}
 
 
 @router.get('/community/moderation/audit')
