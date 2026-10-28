@@ -250,3 +250,7 @@ def calendar_ics(
 # main.py already registers trust_voice_calendar_router; leave all existing routes intact.
 from trust_voice_circle_hub import router as circle_hub_router
 router.include_router(circle_hub_router)
+
+# VERIFYD_CIRCLE_MODERATION_V1: additive authenticated moderator routes.
+from trust_voice_community_moderation import router as community_moderation_router
+router.include_router(community_moderation_router)
