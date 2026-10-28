@@ -254,3 +254,7 @@ router.include_router(circle_hub_router)
 # VERIFYD_CIRCLE_MODERATION_V1: additive authenticated moderator routes.
 from trust_voice_community_moderation import router as community_moderation_router
 router.include_router(community_moderation_router)
+
+# VERIFYD_CIRCLE_EMAIL_PHASE1: independent authenticated mailbox router.
+from trust_voice_circle_email import router as circle_email_router
+router.include_router(circle_email_router)
