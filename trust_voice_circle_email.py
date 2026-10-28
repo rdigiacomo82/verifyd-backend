@@ -1,0 +1,278 @@
+"""VeriFYD Circle Email Phase 1: private @handle mailbox and gated external outbound.
+No unsolicited/inbound external-email claims, no fake AI certification. The separate
+attachment API uses existing private Trust Voice R2 storage. Feature default off.
+"""
+from __future__ import annotations
+import base64
+import hashlib
+import io
+import os
+import re
+import tempfile
+import uuid
+from datetime import datetime, timezone
+from html import escape
+from typing import Literal, Optional
+
+from fastapi import APIRouter, BackgroundTasks, File, Header, HTTPException, Query, UploadFile
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
+
+from database import get_db
+from trust_voice_messages import _identity_from_bearer, _message_permission_decision
+from trust_voice_signaling import _identity_by_handle, _normalize_handle, _send_to_identity
+from trust_voice_blocking import identities_blocked
+from trust_voice_attachment_validation import validate_attachment_content, AttachmentContentError
+from trust_voice_attachments import _get_attachment_client, _storage_configured, TRUST_VOICE_BUCKET
+
+router = APIRouter(tags=['VeriFYD Circle Email'])
+VERSION='0.1.0'
+MAX_FILE_BYTES=8*1024*1024
+ALLOWED_FILES={'.pdf','.txt','.docx','.xlsx','.png','.jpg','.jpeg','.webp','.csv','.pptx','.mp3','.wav'}
+_schema_ready=False
+
+def enabled(name): return os.getenv(name,'').strip().lower() in ('1','true','on','yes')
+def feature():
+    if not enabled('VERIFYD_CIRCLE_EMAIL_ENABLED'): raise HTTPException(503,detail={'error':'email_not_enabled','message':'Circle Email is not enabled yet.'})
+def utc(): return datetime.now(timezone.utc).isoformat()
+def fail(code,msg,status=400): raise HTTPException(status,detail={'error':code,'message':msg})
+
+def schema():
+    global _schema_ready
+    if _schema_ready: return
+    with get_db() as db:
+        c=db.cursor()
+        c.execute('''CREATE TABLE IF NOT EXISTS verifyd_circle_email_messages(
+         mail_id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, owner_id TEXT NOT NULL,
+         sender_id TEXT NOT NULL, sender_handle TEXT NOT NULL, recipient TEXT NOT NULL,
+         subject TEXT NOT NULL, body TEXT NOT NULL, folder TEXT NOT NULL,
+         is_read BOOLEAN NOT NULL DEFAULT FALSE, starred BOOLEAN NOT NULL DEFAULT FALSE,
+         spam_flag BOOLEAN NOT NULL DEFAULT FALSE, deleted_at TEXT,
+         delivery TEXT NOT NULL DEFAULT 'delivered', verdict TEXT NOT NULL,
+         risk_notes TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL)
+        ''')
+        c.execute('''CREATE INDEX IF NOT EXISTS idx_circle_email_owner_folder
+          ON verifyd_circle_email_messages(owner_id,folder,created_at DESC)''')
+        c.execute('''CREATE INDEX IF NOT EXISTS idx_circle_email_thread
+          ON verifyd_circle_email_messages(owner_id,thread_id,created_at DESC)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS verifyd_circle_email_files (
+          file_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, mail_id TEXT,
+          filename TEXT NOT NULL, content_type TEXT NOT NULL, storage_key TEXT NOT NULL,
+          byte_size BIGINT NOT NULL, sha256 TEXT NOT NULL, created_at TEXT NOT NULL)
+        ''')
+        c.execute('''CREATE INDEX IF NOT EXISTS idx_circle_email_files_mail
+          ON verifyd_circle_email_files(mail_id)''')
+    _schema_ready=True
+
+class MailSend(BaseModel):
+    to: str=Field(min_length=3,max_length=254)
+    subject: str=Field(default='',max_length=200)
+    body: str=Field(min_length=1,max_length=12000)
+    thread_id: Optional[str]=Field(default=None,max_length=100)
+    file_ids: list[str]=Field(default_factory=list,max_length=3)
+class MailUpdate(BaseModel):
+    action: Literal['read','unread','star','unstar','spam','not_spam','trash','restore']
+
+
+def risk(sender_internal:bool,subject:str,body:str):
+    text=(subject+' '+body).lower()
+    suspicious=[]
+    if re.search(r'\b(?:urgent(?:ly)?|act now|verify your account|account suspended|wire transfer|gift card|password reset|crypto wallet)\b',text): suspicious.append('Pressure or credential/payment-related language')
+    if re.search(r'https?://(?:\d{1,3}\.){3}\d{1,3}(?:[:/]|$)',text): suspicious.append('Link uses a numeric IP address')
+    if re.search(r'\b(?:bit\.ly|tinyurl\.com|t\.co)/',text): suspicious.append('Shortened link: verify destination')
+    if re.search(r'(?i)\b(?:password|one.time code|verification code|social security number)\b',text) and re.search(r'\b(?:send|share|reply|provide)\b',text): suspicious.append('Requests sensitive information')
+    if suspicious: return ('suspicious','; '.join(suspicious))
+    if sender_internal: return ('lower_risk','Authenticated VeriFYD identity; content was not malware scanned or AI-certified')
+    return ('uncertain','External identity not independently verified; content not analyzed')
+
+def public_mail(row:dict,with_body=False):
+    d={k:row[k] for k in ('mail_id','thread_id','sender_handle','recipient','subject','folder','is_read','starred','spam_flag','delivery','verdict','risk_notes','created_at')}
+    if with_body: d['body']=row['body']
+    return d
+
+def files_for(db,mail_ids:list[str]):
+    if not mail_ids:return {}
+    c=db.cursor();c.execute('''SELECT file_id,mail_id,filename,content_type,byte_size,sha256
+      FROM verifyd_circle_email_files WHERE mail_id=ANY(%s)''',(mail_ids,))
+    out={}
+    for row in c.fetchall() or []:
+        r=dict(row);out.setdefault(r['mail_id'],[]).append({k:r[k] for k in ('file_id','filename','content_type','byte_size','sha256')})
+    return out
+
+@router.get('/circle-email/health')
+def email_health():
+    return {'status':'ok','version':VERSION,'enabled':enabled('VERIFYD_CIRCLE_EMAIL_ENABLED'),
+      'internal_handle_mail':'supported','external_outbound':enabled('VERIFYD_CIRCLE_EMAIL_EXTERNAL_ENABLED'),
+      'external_inbound':'not_configured','private_attachments':_storage_configured(),
+      'risk_classification':'rule_signals_not_ai_certification','attachment_malware_scanning':'not_available'}
+
+@router.get('/circle-email/messages')
+def inbox(folder:Literal['inbox','sent','spam','trash','starred']='inbox',q:str=Query(default='',max_length=100),
+          authorization:Optional[str]=Header(default=None)):
+    feature();identity=_identity_from_bearer(authorization);schema()
+    uid=str(identity['id']);like=f'%{q}%' if q else '%'
+    with get_db() as db:
+        c=db.cursor()
+        if folder=='starred':
+            c.execute('''SELECT * FROM verifyd_circle_email_messages WHERE owner_id=%s AND starred=TRUE
+                AND deleted_at IS NULL AND (subject ILIKE %s OR sender_handle ILIKE %s OR body ILIKE %s)
+                ORDER BY created_at DESC LIMIT 150''',(uid,like,like,like))
+        else:
+            c.execute('''SELECT * FROM verifyd_circle_email_messages WHERE owner_id=%s AND folder=%s
+                AND (subject ILIKE %s OR sender_handle ILIKE %s OR body ILIKE %s)
+                ORDER BY created_at DESC LIMIT 150''',(uid,folder,like,like,like))
+        rows=[dict(x) for x in c.fetchall() or []]; a=files_for(db,[x['mail_id'] for x in rows]);
+        c.execute("SELECT COUNT(*) AS n FROM verifyd_circle_email_messages WHERE owner_id=%s AND folder='inbox' AND is_read=FALSE",(uid,));unread=int(c.fetchone()['n'])
+    return {'messages':[{**public_mail(x), 'preview':x['body'][:180], 'attachments':a.get(x['mail_id'],[])} for x in rows], 'unread':unread,'folder':folder}
+
+@router.get('/circle-email/messages/{mail_id}')
+def read(mail_id:str,authorization:Optional[str]=Header(default=None)):
+    feature();identity=_identity_from_bearer(authorization);schema();uid=str(identity['id'])
+    with get_db() as db:
+        c=db.cursor();c.execute('''SELECT * FROM verifyd_circle_email_messages WHERE mail_id=%s AND owner_id=%s''',(mail_id,uid)); row=c.fetchone()
+        if not row:fail('not_found','Email not found.',404)
+        row=dict(row)
+        if row['folder']=='inbox' and not row['is_read']:
+            c.execute('UPDATE verifyd_circle_email_messages SET is_read=TRUE WHERE mail_id=%s',(mail_id,));row['is_read']=True
+        attachments=files_for(db,[mail_id]).get(mail_id,[])
+    return {'message':{**public_mail(row,True),'attachments':attachments}}
+
+@router.post('/circle-email/messages/{mail_id}/action')
+def action(mail_id:str,payload:MailUpdate,authorization:Optional[str]=Header(default=None)):
+    feature();identity=_identity_from_bearer(authorization);schema();uid=str(identity['id'])
+    with get_db() as db:
+        c=db.cursor();c.execute('SELECT * FROM verifyd_circle_email_messages WHERE mail_id=%s AND owner_id=%s FOR UPDATE',(mail_id,uid));row=c.fetchone()
+        if not row:fail('not_found','Email not found.',404)
+        row=dict(row);a=payload.action
+        if a in ('read','unread'):c.execute('UPDATE verifyd_circle_email_messages SET is_read=%s WHERE mail_id=%s',(a=='read',mail_id))
+        elif a in ('star','unstar'):c.execute('UPDATE verifyd_circle_email_messages SET starred=%s WHERE mail_id=%s',(a=='star',mail_id))
+        elif a=='spam': c.execute("UPDATE verifyd_circle_email_messages SET folder='spam',spam_flag=TRUE WHERE mail_id=%s",(mail_id,))
+        elif a=='not_spam':c.execute("UPDATE verifyd_circle_email_messages SET folder='inbox',spam_flag=FALSE WHERE mail_id=%s",(mail_id,))
+        elif a=='trash':c.execute("UPDATE verifyd_circle_email_messages SET folder='trash',deleted_at=%s WHERE mail_id=%s",(utc(),mail_id))
+        elif a=='restore': c.execute("UPDATE verifyd_circle_email_messages SET folder=%s,deleted_at=NULL WHERE mail_id=%s",('sent' if row['folder']=='sent' or row['owner_id']==row['sender_id'] else 'inbox',mail_id))
+    return {'ok':True}
+
+@router.post('/circle-email/files')
+async def upload_file(file:UploadFile=File(...),authorization:Optional[str]=Header(default=None)):
+    feature();identity=_identity_from_bearer(authorization);schema()
+    if not _storage_configured():fail('storage_unavailable','Private file storage is not configured.',503)
+    name=os.path.basename((file.filename or '').strip())[:140];ext=os.path.splitext(name)[1].lower()
+    if ext not in ALLOWED_FILES or not name:fail('file_type_not_allowed','This file type is not supported.')
+    payload=await file.read(MAX_FILE_BYTES+1)
+    if not payload or len(payload)>MAX_FILE_BYTES:fail('file_size','Attach a file smaller than 8 MB.')
+    with tempfile.NamedTemporaryFile(suffix=ext) as tmp:
+        tmp.write(payload);tmp.flush()
+        try:metadata=validate_attachment_content(tmp.name,extension=ext,supplied_content_type=file.content_type or '')
+        except AttachmentContentError:fail('file_content_invalid','File type and contents did not match.')
+    user_id=str(identity['id']);fid='tvcfile_'+uuid.uuid4().hex
+    key=f'circle-email/{user_id}/{fid}{ext}'
+    ctype=(metadata.get('content_type') or file.content_type or 'application/octet-stream') if isinstance(metadata,dict) else 'application/octet-stream'
+    try:_get_attachment_client().put_object(Bucket=TRUST_VOICE_BUCKET,Key=key,Body=payload,ContentType=ctype)
+    except Exception:fail('file_storage_error','Could not store attachment.',503)
+    try:
+        with get_db() as db:
+            c=db.cursor();c.execute('''INSERT INTO verifyd_circle_email_files
+                 (file_id,owner_id,mail_id,filename,content_type,storage_key,byte_size,sha256,created_at)
+                 VALUES (%s,%s,NULL,%s,%s,%s,%s,%s,%s)''',(fid,user_id,name,ctype,key,len(payload),hashlib.sha256(payload).hexdigest(),utc()))
+    except Exception:
+        try:_get_attachment_client().delete_object(Bucket=TRUST_VOICE_BUCKET,Key=key)
+        except Exception:pass
+        raise
+    return {'file_id':fid,'filename':name,'size':len(payload)}
+
+@router.get('/circle-email/files/{file_id}/download')
+def download_file(file_id:str,authorization:Optional[str]=Header(default=None)):
+    feature();identity=_identity_from_bearer(authorization);schema();uid=str(identity['id'])
+    with get_db() as db:
+        c=db.cursor();c.execute('''SELECT f.* FROM verifyd_circle_email_files f
+          LEFT JOIN verifyd_circle_email_messages m ON f.mail_id=m.mail_id
+          WHERE f.file_id=%s AND (f.owner_id=%s OR m.owner_id=%s) LIMIT 1''',(file_id,uid,uid))
+        r=c.fetchone()
+    if not r:fail('file_not_found','Attachment not found.',404)
+    r=dict(r)
+    if r['mail_id'] is None and r['owner_id']!=uid:fail('file_not_found','Attachment not found.',404)
+    try:resp=_get_attachment_client().get_object(Bucket=TRUST_VOICE_BUCKET,Key=r['storage_key'])
+    except Exception:fail('file_unavailable','Attachment unavailable.',503)
+    safe=re.sub(r'[^A-Za-z0-9_. -]','_',r['filename']).replace('"','_')
+    return StreamingResponse(resp['Body'].iter_chunks(chunk_size=65536),media_type='application/octet-stream',headers={
+       'Content-Disposition':f'attachment; filename="{safe}"','Cache-Control':'private, no-store','X-Content-Type-Options':'nosniff'})
+
+@router.post('/circle-email/send')
+async def send(payload:MailSend,tasks:BackgroundTasks,authorization:Optional[str]=Header(default=None)):
+    feature();actor=_identity_from_bearer(authorization);schema();uid=str(actor['id'])
+    to=payload.to.strip();subject=payload.subject.strip() or '(no subject)';body=payload.body.strip()
+    if not body:fail('empty_body','Write a message before sending.')
+    internal=to.startswith('@') or ('@' not in to)
+    if internal:
+        target=_identity_by_handle(_normalize_handle(to))
+        if not target:fail('recipient_not_found','That VeriFYD handle was not found.',404)
+        tid=str(target['id']);
+        if tid==uid:fail('recipient_self','Choose another VeriFYD user.')
+        if identities_blocked(uid,tid):fail('recipient_unavailable','Cannot send to this user.',403)
+        allowed,_reason=_message_permission_decision(actor,target)
+        if not allowed:fail('recipient_unavailable','This user is not accepting messages from your account.',403)
+        recipient='@'+str(target.get('handle_lower') or '').strip()
+    else:
+        if not enabled('VERIFYD_CIRCLE_EMAIL_EXTERNAL_ENABLED'):
+            fail('external_not_ready','External email delivery is not enabled yet. You can send to VeriFYD @handles now.',503)
+        if not actor.get('email_verified') or not actor.get('email'):
+            fail('verified_email_required','Verify your account email before sending to an external address.',403)
+        if not re.fullmatch(r'[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+',to):fail('recipient_invalid','Enter a valid email address.')
+        if payload.file_ids:fail('external_files_not_ready','External attachments require a verified outbound file pipeline.',422)
+        recipient=to.lower();tid=None
+    if len(set(payload.file_ids))!=len(payload.file_ids):fail('duplicate_file','An attachment was selected more than once.')
+    if len(payload.file_ids)>3:fail('too_many_files','Attach no more than three files.')
+    with get_db() as db:
+        c=db.cursor();c.execute('''SELECT COUNT(*) AS n FROM verifyd_circle_email_messages WHERE sender_id=%s AND folder='sent'
+          AND created_at::timestamptz > NOW() - INTERVAL '24 hours' ''',(uid,))
+        if int(c.fetchone()['n']) >= (10 if not internal else 60):fail('mail_rate_limit','Daily email limit reached.',429)
+        rows=[]
+        if payload.file_ids:
+            c.execute('''SELECT * FROM verifyd_circle_email_files WHERE file_id=ANY(%s)
+             AND owner_id=%s AND mail_id IS NULL FOR UPDATE''',(payload.file_ids,uid))
+            rows=[dict(x) for x in c.fetchall() or []]
+            if len(rows)!=len(payload.file_ids):fail('file_missing','Upload or remove an expired attachment.')
+        thread=payload.thread_id if payload.thread_id and re.fullmatch(r'tvcemail_[a-f0-9]{32}',payload.thread_id) else 'tvcemail_'+uuid.uuid4().hex
+        sent_id='tvcmail_'+uuid.uuid4().hex;now=utc();v,risk_note=risk(True,subject,body)
+        if internal:
+            recv_id='tvcmail_'+uuid.uuid4().hex;incoming_verdict,reason=risk(True,subject,body)
+            for mid,owner,folder,read_flag,verdict,notes in [(sent_id,uid,'sent',True,v,risk_note),(recv_id,tid,'inbox',False,incoming_verdict,reason)]:
+                c.execute('''INSERT INTO verifyd_circle_email_messages(mail_id,thread_id,owner_id,sender_id,sender_handle,recipient,
+                    subject,body,folder,is_read,verdict,risk_notes,created_at)
+                    VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)''',(mid,thread,owner,uid,'@'+str(actor.get('handle_lower') or actor.get('handle') or ''),recipient,subject,body,folder,read_flag,verdict,notes,now))
+            for item in rows:
+                # One mail attachment is linked by the recipient copy. Sender can still access as owner.
+                c.execute('UPDATE verifyd_circle_email_files SET mail_id=%s WHERE file_id=%s',(recv_id,item['file_id']))
+        else:
+            c.execute('''INSERT INTO verifyd_circle_email_messages(mail_id,thread_id,owner_id,sender_id,sender_handle,recipient,
+                subject,body,folder,is_read,delivery,verdict,risk_notes,created_at)
+                VALUES(%s,%s,%s,%s,%s,%s,%s,%s,'sent',TRUE,'sending',%s,%s,%s)''',
+                (sent_id,thread,uid,uid,'@'+str(actor.get('handle_lower') or actor.get('handle') or ''),recipient,subject,body,v,risk_note,now))
+    if internal:
+        try: tasks.add_task(_notify_recipient,tid,recv_id)
+        except Exception:pass
+        return {'ok':True,'mail_id':sent_id,'delivery':'delivered','recipient':recipient}
+    # Outbound external mail goes through existing Resend account, fixed verified FROM,
+    # never dynamically from a user-controlled address. Replies go to the verified email.
+    try:
+        import resend
+        api_key=os.getenv('RESEND_API_KEY','')
+        if not api_key:raise RuntimeError('Resend key unavailable')
+        resend.api_key=api_key
+        from_address=os.getenv('VERIFYD_CIRCLE_EMAIL_FROM','VeriFYD Circle <noreply@vfvid.com>')
+        result=resend.Emails.send({'from':from_address,'to':[recipient],
+          'reply_to':str(actor['email']).strip(),
+          'subject':subject,'text':f"From VeriFYD Circle user @{actor.get('handle') or actor.get('handle_lower') or 'member'}\n\n{body}\n\nReplying sends email to this user's verified email address, not to VeriFYD Circle."})
+        if not result:raise RuntimeError('No provider acceptance')
+        state='accepted_by_provider'
+    except Exception:
+        state='failed'
+    with get_db() as db:
+        c=db.cursor();c.execute('UPDATE verifyd_circle_email_messages SET delivery=%s WHERE mail_id=%s AND owner_id=%s',(state,sent_id,uid))
+    if state=='failed':fail('delivery_failed','External provider could not accept this email. Please try again later.',503)
+    return {'ok':True,'mail_id':sent_id,'delivery':state,'recipient':recipient,
+            'notice':'External replies go to your verified email inbox; inbound VeriFYD mail is not configured.'}
+
+async def _notify_recipient(identity_id,mail_id):
+    try:await _send_to_identity(identity_id,{'type':'circle_mail_received','mail_id':mail_id})
+    except Exception:pass
