@@ -303,6 +303,8 @@ def inbound_health():
     return {'status':'ok','version':INBOUND_VERSION,
             'enabled':inbound_enabled(),
             'configuration':'ready' if inbound_configured() else 'not_configured',
+            'receiving_key_mode':('dedicated' if os.getenv('VERIFYD_CIRCLE_EMAIL_RECEIVING_API_KEY','').strip() else 'shared'),
+            'provider_read_permission':'not_verified_by_health',
             'routing':'per_message_opaque_reply_alias',
             'external_attachments':'private_r2_download_with_unscanned_ack_required',
             'external_attachment_max_files':3,
