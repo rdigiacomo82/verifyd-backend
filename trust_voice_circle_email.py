@@ -26,7 +26,7 @@ from trust_voice_attachment_validation import validate_attachment_content, Attac
 from trust_voice_attachments import _get_attachment_client, _storage_configured, TRUST_VOICE_BUCKET
 
 router = APIRouter(tags=['VeriFYD Circle Email'])
-VERSION='0.2.0'
+VERSION='0.3.0'
 MAX_FILE_BYTES=8*1024*1024
 ALLOWED_FILES={'.pdf','.txt','.docx','.xlsx','.png','.jpg','.jpeg','.webp','.csv','.pptx','.mp3','.wav'}
 # Resend has a higher provider maximum, but limit raw Circle attachments to 16 MiB total.
@@ -128,6 +128,8 @@ def email_health():
     return {'status':'ok','version':VERSION,'enabled':enabled('VERIFYD_CIRCLE_EMAIL_ENABLED'),
       'internal_handle_mail':'supported','external_outbound':enabled('VERIFYD_CIRCLE_EMAIL_EXTERNAL_ENABLED'),
       'external_inbound':'enabled' if enabled('VERIFYD_CIRCLE_EMAIL_INBOUND_ENABLED') else 'not_configured','private_attachments':_storage_configured(),
+      'external_attachment_send':_storage_configured() and enabled('VERIFYD_CIRCLE_EMAIL_EXTERNAL_ENABLED'),
+      'external_attachment_receive':_storage_configured() and enabled('VERIFYD_CIRCLE_EMAIL_INBOUND_ENABLED'),
       'risk_classification':'rule_signals_not_ai_certification','attachment_malware_scanning':'not_available'}
 
 @router.get('/circle-email/messages')
