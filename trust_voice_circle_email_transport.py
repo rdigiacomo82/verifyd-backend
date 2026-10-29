@@ -174,7 +174,8 @@ def fetch_inbound_attachment_files(provider_id: str, advertised: list) -> tuple[
     }
     if expected_ids and not expected_ids.issubset({
         str(a.get("id")) for a in records if isinstance(a, dict)
-    }):
+    }) and len(records) <= MAX_FILES:
+        # A paginated response can omit excess attachments by design.
         raise HTTPException(503, detail={"error": "inbound_attachment_retry"})
     files, omitted, used = [], 0, 0
     for index, item in enumerate(records):
