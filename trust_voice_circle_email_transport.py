@@ -90,7 +90,7 @@ def prepare_outbound_attachments(rows: list[dict]) -> list[dict]:
                 "filename": _safe_name(record["filename"]),
                 "content": base64.b64encode(raw).decode("ascii"),
             })
-    except (ValueError, OSError, KeyError, TypeError, Exception) as exc:
+    except Exception as exc:
         # Do not disclose storage details, names, content or credentials.
         log.warning("Circle mail outbound attachment failed: %s", type(exc).__name__)
         raise HTTPException(503, detail={"error": "attachment_unavailable"}) from None
@@ -117,8 +117,10 @@ def _received_list(provider_id: str) -> list[dict]:
         envelope = json.loads(raw)
         if not isinstance(envelope, dict) or not isinstance(envelope.get("data"), list):
             raise ValueError("bad_metadata")
-        if envelope.get("has_more") and len(envelope["data"]) < MAX_FILES + 1:
-            raise ValueError("unpaged_metadata")
+        if envelope.get("has_more"):
+            # A fourth-plus attachment is intentionally omitted under our
+            # three-file limit; never retry the webhook forever for this.
+            envelope["data"].append({"id": "", "filename": "", "size": 0})
         return envelope["data"]
     except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError,
             ValueError, TypeError):
@@ -143,9 +145,9 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 def _download_received_file(url: str, provider_id: str, attachment_id: str,
                             claimed_size: int) -> bytes:
-    _verify_cdn_url(url, provider_id, attachment_id)
-    req = urllib.request.Request(url, headers={"User-Agent": "VeriFYD-Mail-Receive/1"})
     try:
+        _verify_cdn_url(url, provider_id, attachment_id)
+        req = urllib.request.Request(url, headers={"User-Agent": "VeriFYD-Mail-Receive/1"})
         opener = urllib.request.build_opener(_NoRedirect())
         with opener.open(req, timeout=12) as response:
             raw = response.read(MAX_FILE_BYTES + 1)
