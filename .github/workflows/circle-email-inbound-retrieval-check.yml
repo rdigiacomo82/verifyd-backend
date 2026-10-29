@@ -6,6 +6,9 @@ on:
     paths:
       - "trust_voice_circle_email_inbound.py"
       - "tests/test_circle_email_inbound_retrieval.py"
+      - "tests/test_circle_email_attachments.py"
+      - "trust_voice_circle_email_transport.py"
+      - "trust_voice_circle_email.py"
       - ".github/workflows/circle-email-inbound-retrieval-check.yml"
   pull_request:
     paths:
@@ -25,6 +28,8 @@ jobs:
         with:
           python-version: "3.11"
       - name: Check source syntax
-        run: python -m py_compile trust_voice_circle_email_inbound.py
+        run: python -m py_compile trust_voice_circle_email_inbound.py trust_voice_circle_email_transport.py trust_voice_circle_email.py
       - name: Run offline receiving tests (no credentials required)
         run: python -m unittest discover -s tests -p 'test_circle_email_inbound_retrieval.py' -v
+      - name: Run isolated email attachment contract tests
+        run: python -m unittest discover -s tests -p 'test_circle_email_attachments.py' -v
