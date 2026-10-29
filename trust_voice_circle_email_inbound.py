@@ -33,7 +33,7 @@ from trust_voice_signaling import _send_to_identity
 
 log = logging.getLogger('verifyd.circle_email.inbound')
 router = APIRouter(tags=['VeriFYD Circle Email Inbound'])
-INBOUND_VERSION = '0.2.0'
+INBOUND_VERSION = '0.2.1'
 _HEX_TOKEN = re.compile(r'^reply\+([a-f0-9]{40})@([a-z0-9.-]+)$', re.I)
 _PROVIDER_ID = re.compile(r'^[a-zA-Z0-9-]{15,90}$')
 _INBOUND_SCHEMA_READY = False
@@ -55,10 +55,20 @@ def _inbound_secret() -> str:
     return os.getenv('VERIFYD_CIRCLE_EMAIL_INBOUND_WEBHOOK_SECRET', '').strip()
 
 
+def _receiving_api_key() -> str:
+    """Prefer a separately permissioned Resend key for inbound message reads.
+
+    The fallback preserves existing deployments while the new receiving key is
+    being provisioned. A send-only fallback key cannot retrieve inbound emails.
+    """
+    return (os.getenv('VERIFYD_CIRCLE_EMAIL_RECEIVING_API_KEY', '').strip()
+            or os.getenv('RESEND_API_KEY', '').strip())
+
+
 def inbound_configured() -> bool:
     try:
         return bool(inbound_enabled() and _inbound_secret().startswith('whsec_')
-                    and os.getenv('RESEND_API_KEY', '').strip() and reply_domain())
+                    and _receiving_api_key() and reply_domain())
     except (ValueError, RuntimeError):
         return False
 
@@ -142,19 +152,28 @@ def _fetch_received_email(provider_id: str) -> dict:
     """Fetch authoritative content; do not trust webhook's unauthenticated metadata."""
     if not _PROVIDER_ID.fullmatch(provider_id):
         raise HTTPException(status_code=400, detail={'error':'invalid_provider_id'})
-    key = os.getenv('RESEND_API_KEY', '').strip()
+    key = _receiving_api_key()
     if not key:
         raise HTTPException(status_code=503, detail={'error':'mail_provider_not_configured'})
     req = urllib.request.Request(
         'https://api.resend.com/emails/receiving/' + provider_id,
-        headers={'Authorization': 'Bearer ' + key, 'Accept': 'application/json'},
+        headers={
+            'Authorization': 'Bearer ' + key,
+            'Accept': 'application/json',
+            'User-Agent': 'VeriFYD-Circle-Inbound/0.2.1',
+        },
         method='GET')
     try:
         with urllib.request.urlopen(req, timeout=12) as response:
             raw = response.read(2_000_001)
-    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError):
-        log.warning('Resend received-email retrieval failed for event')
-        raise HTTPException(status_code=503, detail={'error':'inbound_provider_retry'})
+    except urllib.error.HTTPError as exc:
+        # Diagnostic status only: never log auth headers, API keys, email bodies,
+        # reply tokens, provider response bodies, or raw webhook payloads.
+        log.warning('Resend received-email retrieval HTTP status: %s', exc.code)
+        raise HTTPException(status_code=503, detail={'error':'inbound_provider_retry'}) from None
+    except (urllib.error.URLError, TimeoutError):
+        log.warning('Resend received-email retrieval network or timeout failure')
+        raise HTTPException(status_code=503, detail={'error':'inbound_provider_retry'}) from None
     if len(raw) > 2_000_000:
         raise HTTPException(status_code=413, detail={'error':'inbound_message_too_large'})
     try:
