@@ -258,3 +258,7 @@ router.include_router(community_moderation_router)
 # VERIFYD_CIRCLE_EMAIL_PHASE1: independent authenticated mailbox router.
 from trust_voice_circle_email import router as circle_email_router
 router.include_router(circle_email_router)
+
+# VERIFYD_CIRCLE_SOCIAL_CONNECTIONS_PHASE1: authenticated per-user social profile links.
+from trust_voice_social_links import router as circle_social_router
+router.include_router(circle_social_router)
