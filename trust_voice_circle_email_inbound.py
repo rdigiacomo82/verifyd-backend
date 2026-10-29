@@ -33,7 +33,7 @@ from trust_voice_signaling import _send_to_identity
 
 log = logging.getLogger('verifyd.circle_email.inbound')
 router = APIRouter(tags=['VeriFYD Circle Email Inbound'])
-INBOUND_VERSION = '0.2.1'
+INBOUND_VERSION = '0.3.0'
 _HEX_TOKEN = re.compile(r'^reply\+([a-f0-9]{40})@([a-z0-9.-]+)$', re.I)
 _PROVIDER_ID = re.compile(r'^[a-zA-Z0-9-]{15,90}$')
 _INBOUND_SCHEMA_READY = False
@@ -242,9 +242,9 @@ def _store_received(received: dict, provider_id: str) -> tuple[Optional[str],Opt
     verdict, notes = risk(False, subject, body)
     if isinstance(authentic,dict) and str(authentic.get('dmarc') or '').lower()=='fail':
         verdict='suspicious';notes='Provider reports failed DMARC authentication; '+notes
-    attachments=received.get('attachments') or []
-    if isinstance(attachments,list) and attachments:
-        body=(body[:11600]+'\n\n[External attachments withheld pending malware scanning.]')[:12000]
+    advertised=received.get('attachments') or []
+    if not isinstance(advertised,list):
+        advertised=[]
     timestamp=utc()
     with get_db() as db:
         cur=db.cursor()
@@ -271,6 +271,18 @@ def _store_received(received: dict, provider_id: str) -> tuple[Optional[str],Opt
         # with a Trust Circle contact; classify them as unverified/uncertain.
         mail_id='tvcmail_'+uuid.uuid4().hex
         folder='spam' if verdict=='suspicious' else 'inbox'
+        # Fetch attachment bytes only after verifying the stored reply token and
+        # the exact external sender. Provider/network errors remain retryable.
+        from trust_voice_circle_email_transport import (
+            fetch_inbound_attachment_files, persist_inbound_attachments
+        )
+        attached, omitted = fetch_inbound_attachment_files(provider_id, advertised)
+        if attached or omitted:
+            notice = ('[External attachments are not malware scanned. '
+                      'Download only after reviewing the warning.]')
+            if omitted:
+                notice += f' [{omitted} attachment(s) withheld due to file restrictions.]'
+            body = (body[:max(0,12000-len(notice)-2)] + '\n\n' + notice)[:12000]
         cur.execute('''INSERT INTO verifyd_circle_email_messages
           (mail_id,thread_id,owner_id,sender_id,sender_handle,recipient,
            subject,body,folder,is_read,spam_flag,delivery,verdict,risk_notes,created_at)
@@ -278,6 +290,8 @@ def _store_received(received: dict, provider_id: str) -> tuple[Optional[str],Opt
           (mail_id,route['thread_id'],uid,'external:'+sender,sender,
            '@'+str(route['handle_lower']),subject,body,folder,
            verdict=='suspicious',verdict,notes,timestamp))
+        persist_inbound_attachments(db,files=attached,owner_id=uid,
+                                    mail_id=mail_id,stamp=timestamp)
         cur.execute('''INSERT INTO verifyd_circle_email_received_events
           (provider_email_id,mail_id,created_at) VALUES (%s,%s,%s)''',
           (provider_id,mail_id,timestamp))
@@ -290,7 +304,9 @@ def inbound_health():
             'enabled':inbound_enabled(),
             'configuration':'ready' if inbound_configured() else 'not_configured',
             'routing':'per_message_opaque_reply_alias',
-            'external_attachments':'withheld_pending_malware_scan'}
+            'external_attachments':'private_r2_download_with_unscanned_ack_required',
+            'external_attachment_max_files':3,
+            'external_attachment_max_size_mb':8}
 
 
 @router.post('/circle-email/webhooks/resend-inbound')
