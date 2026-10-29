@@ -47,7 +47,7 @@ def _normalize_url(platform: str, supplied: str) -> str:
         host = (parsed.hostname or '').lower().rstrip('.')
         if (parsed.scheme.lower() != 'https' or host not in HOSTS[platform]
                 or parsed.port is not None or parsed.username or parsed.password
-                or parsed.query or parsed.fragment):
+                ):
             raise ValueError('Unsafe or unsupported URL')
         segments = [v for v in parsed.path.split('/') if v]
         if not segments or len(segments) > 3:
@@ -63,6 +63,8 @@ def _normalize_url(platform: str, supplied: str) -> str:
             raise ValueError('Use a LinkedIn profile or company URL')
         if platform in {'instagram', 'x'} and len(segments) != 1:
             raise ValueError('Use a direct social profile URL')
+        # Social apps often append share/tracking parameters. Preserve only the
+        # validated HTTPS host and profile path, never the query or fragment.
         return urlunsplit(('https', host, '/' + '/'.join(segments), '', ''))
     except (ValueError, TypeError) as exc:
         raise HTTPException(status_code=422, detail={
