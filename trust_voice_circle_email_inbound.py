@@ -246,57 +246,73 @@ def _store_received(received: dict, provider_id: str) -> tuple[Optional[str],Opt
     if not isinstance(advertised,list):
         advertised=[]
     timestamp=utc()
-    with get_db() as db:
-        cur=db.cursor()
-        cur.execute('''SELECT r.owner_id,r.thread_id,r.external_recipient,i.handle_lower
-          FROM verifyd_circle_email_reply_routes r
-          JOIN verifyd_identities i ON i.id=r.owner_id
-          WHERE r.token_hash=%s AND r.revoked_at IS NULL AND i.status='active'
-          FOR UPDATE OF r''',(digest,))
-        route=cur.fetchone()
-        if not route:
-            return None,None
-        route=dict(route)
-        # A reply-to address is private to one outbound recipient. Prevent the
-        # address from being forwarded to create a cross-account inbox channel.
-        if sender!=str(route['external_recipient']).strip().lower():
-            return None,None
-        cur.execute('''SELECT 1 FROM verifyd_circle_email_received_events
-          WHERE provider_email_id=%s''',(provider_id,))
-        if cur.fetchone():
-            return None,None  # idempotent Resend redelivery/replay
-        uid=str(route['owner_id'])
-        # Avoid cross-network delivery after a bilateral block is configured.
-        # External addresses are not VeriFYD identities, so do not equate them
-        # with a Trust Circle contact; classify them as unverified/uncertain.
-        mail_id='tvcmail_'+uuid.uuid4().hex
-        folder='spam' if verdict=='suspicious' else 'inbox'
-        # Fetch attachment bytes only after verifying the stored reply token and
-        # the exact external sender. Provider/network errors remain retryable.
-        from trust_voice_circle_email_transport import (
-            fetch_inbound_attachment_files, persist_inbound_attachments
-        )
-        attached, omitted = fetch_inbound_attachment_files(provider_id, advertised)
-        if attached or omitted:
-            notice = ('[External attachments are not malware scanned. '
-                      'Download only after reviewing the warning.]')
-            if omitted:
-                notice += f' [{omitted} attachment(s) withheld due to file restrictions.]'
-            body = (body[:max(0,12000-len(notice)-2)] + '\n\n' + notice)[:12000]
-        cur.execute('''INSERT INTO verifyd_circle_email_messages
-          (mail_id,thread_id,owner_id,sender_id,sender_handle,recipient,
-           subject,body,folder,is_read,spam_flag,delivery,verdict,risk_notes,created_at)
-          VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,FALSE,%s,'received_external',%s,%s,%s)''',
-          (mail_id,route['thread_id'],uid,'external:'+sender,sender,
-           '@'+str(route['handle_lower']),subject,body,folder,
-           verdict=='suspicious',verdict,notes,timestamp))
-        persist_inbound_attachments(db,files=attached,owner_id=uid,
-                                    mail_id=mail_id,stamp=timestamp)
-        cur.execute('''INSERT INTO verifyd_circle_email_received_events
-          (provider_email_id,mail_id,created_at) VALUES (%s,%s,%s)''',
-          (provider_id,mail_id,timestamp))
+    created_keys = []
+    try:
+        with get_db() as db:
+            cur=db.cursor()
+            cur.execute('''SELECT r.owner_id,r.thread_id,r.external_recipient,i.handle_lower
+              FROM verifyd_circle_email_reply_routes r
+              JOIN verifyd_identities i ON i.id=r.owner_id
+              WHERE r.token_hash=%s AND r.revoked_at IS NULL AND i.status='active'
+              FOR UPDATE OF r''',(digest,))
+            route=cur.fetchone()
+            if not route:
+                return None,None
+            route=dict(route)
+            # A reply-to address is private to one outbound recipient. Prevent the
+            # address from being forwarded to create a cross-account inbox channel.
+            if sender!=str(route['external_recipient']).strip().lower():
+                return None,None
+            cur.execute('''SELECT 1 FROM verifyd_circle_email_received_events
+              WHERE provider_email_id=%s''',(provider_id,))
+            if cur.fetchone():
+                return None,None  # idempotent Resend redelivery/replay
+            uid=str(route['owner_id'])
+            # Avoid cross-network delivery after a bilateral block is configured.
+            # External addresses are not VeriFYD identities, so do not equate them
+            # with a Trust Circle contact; classify them as unverified/uncertain.
+            mail_id='tvcmail_'+uuid.uuid4().hex
+            folder='spam' if verdict=='suspicious' else 'inbox'
+            # Fetch attachment bytes only after verifying the stored reply token and
+            # the exact external sender. Provider/network errors remain retryable.
+            from trust_voice_circle_email_transport import (
+                fetch_inbound_attachment_files, persist_inbound_attachments
+            )
+            attached, omitted = fetch_inbound_attachment_files(provider_id, advertised)
+            if attached or omitted:
+                notice = ('[External attachments are not malware scanned. '
+                          'Download only after reviewing the warning.]')
+                if omitted:
+                    notice += f' [{omitted} attachment(s) withheld due to file restrictions.]'
+                body = (body[:max(0,12000-len(notice)-2)] + '\n\n' + notice)[:12000]
+            cur.execute('''INSERT INTO verifyd_circle_email_messages
+              (mail_id,thread_id,owner_id,sender_id,sender_handle,recipient,
+               subject,body,folder,is_read,spam_flag,delivery,verdict,risk_notes,created_at)
+              VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,FALSE,%s,'received_external',%s,%s,%s)''',
+              (mail_id,route['thread_id'],uid,'external:'+sender,sender,
+               '@'+str(route['handle_lower']),subject,body,folder,
+               verdict=='suspicious',verdict,notes,timestamp))
+            created_keys = persist_inbound_attachments(db,files=attached,owner_id=uid,
+                                        mail_id=mail_id,stamp=timestamp)
+            cur.execute('''INSERT INTO verifyd_circle_email_received_events
+              (provider_email_id,mail_id,created_at) VALUES (%s,%s,%s)''',
+              (provider_id,mail_id,timestamp))
+    except Exception:
+        # Restore storage/DB consistency if the DB commit or event ledger fails
+        # AFTER objects were successfully placed in private R2.
+        if created_keys:
+            try:
+                from trust_voice_attachments import _get_attachment_client, TRUST_VOICE_BUCKET
+                client = _get_attachment_client()
+                for key in created_keys:
+                    try:
+                        client.delete_object(Bucket=TRUST_VOICE_BUCKET, Key=key)
+                    except Exception:
+                        log.warning('Inbound Circle attachment cleanup failed')
+            except Exception:
+                log.warning('Inbound Circle R2 cleanup client unavailable')
+        raise
     return uid,mail_id
-
 
 @router.get('/circle-email/inbound/health')
 def inbound_health():
