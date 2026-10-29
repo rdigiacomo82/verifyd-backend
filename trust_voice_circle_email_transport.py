@@ -32,7 +32,10 @@ ALLOWED_EXTENSIONS = frozenset(
     {".pdf", ".txt", ".docx", ".xlsx", ".png", ".jpg", ".jpeg", ".webp", ".csv", ".pptx", ".mp3", ".wav"}
 )
 _RESEND_ID = re.compile(r"^[A-Za-z0-9-]{15,90}$")
-_CDN_HOST = "inbound-cdn.resend.com"
+# Only public HTTPS CDN origins. The Resend API returns opaque signed URLs;
+# their path is provider-defined and must not be reconstructed from IDs.
+_ALLOWED_CDN_HOSTS = frozenset({"inbound-cdn.resend.com", "download.resend.com"})
+_ALLOWED_CDN_SUFFIXES = (".cloudfront.net", ".amazonaws.com")
 
 
 def _safe_name(name: str) -> str:
@@ -129,11 +132,17 @@ def _received_list(provider_id: str) -> list[dict]:
 
 
 def _verify_cdn_url(url: str, provider_id: str, attachment_id: str) -> None:
+    # This signed URL originates from an authenticated Resend API response,
+    # never from webhook JSON or a user's message. Its path is opaque and may
+    # change across CDN providers; authorize only established public CDN hosts.
     parsed = urllib.parse.urlsplit(url)
-    expected = "/" + provider_id + "/attachments/" + attachment_id
-    if (parsed.scheme != "https" or parsed.hostname != _CDN_HOST or
+    host = (parsed.hostname or "").lower().rstrip(".")
+    allowed = (host in _ALLOWED_CDN_HOSTS or
+               any(host.endswith(suffix) for suffix in _ALLOWED_CDN_SUFFIXES))
+    if (not isinstance(url, str) or len(url) > 4096 or
+        parsed.scheme != "https" or not allowed or
         parsed.port not in (None, 443) or parsed.username is not None or
-        parsed.password is not None or parsed.path != expected or
+        parsed.password is not None or not parsed.path.startswith("/") or
         parsed.fragment or not parsed.query):
         raise ValueError("unexpected_attachment_url")
 
