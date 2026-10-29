@@ -20,7 +20,7 @@ from trust_voice_permissions import trust_circle_contains
 from trust_voice_blocking import identities_blocked
 
 router = APIRouter(prefix='/social', tags=['VeriFYD Circle Social Connections'])
-PLATFORMS = frozenset({'instagram', 'facebook', 'youtube', 'tiktok', 'linkedin', 'x'})
+PLATFORMS = frozenset({'instagram', 'facebook', 'youtube', 'tiktok', 'linkedin', 'x', 'pinterest'})
 VISIBILITY = frozenset({'private', 'trust_circle', 'everyone'})
 HOSTS = {
     'instagram': {'instagram.com', 'www.instagram.com'},
@@ -29,17 +29,18 @@ HOSTS = {
     'tiktok': {'tiktok.com', 'www.tiktok.com'},
     'linkedin': {'linkedin.com', 'www.linkedin.com'},
     'x': {'x.com', 'www.x.com', 'twitter.com', 'www.twitter.com'},
+    'pinterest': {'pinterest.com', 'www.pinterest.com'},
 }
-MAX_LINKS = 4
+MAX_LINKS = 6
 
 class SocialLinkInput(BaseModel):
     platform: str = Field(min_length=1, max_length=24)
     url: str = Field(min_length=10, max_length=400)
     visibility: Literal['private', 'trust_circle', 'everyone'] = 'private'
-    position: int = Field(ge=0, le=3)
+    position: int = Field(ge=0, le=5)
 
 class SocialLinksUpdate(BaseModel):
-    links: list[SocialLinkInput] = Field(default_factory=list, max_length=4)
+    links: list[SocialLinkInput] = Field(default_factory=list, max_length=6)
 
 def _normalize_url(platform: str, supplied: str) -> str:
     try:
@@ -55,13 +56,15 @@ def _normalize_url(platform: str, supplied: str) -> str:
         first = segments[0].lower()
         if first in {'login', 'share', 'watch', 'explore', 'accounts', 'redirect', 'search', 'messages', 'settings'}:
             raise ValueError('Use a social profile URL, not a general page')
+        if platform == 'pinterest' and first in {'pin', 'pins', 'ideas', 'today', 'search', 'business', 'categories', 'settings'}:
+            raise ValueError('Use a Pinterest user profile URL')
         if platform == 'tiktok' and not first.startswith('@'):
             raise ValueError('TikTok profile URLs begin with @')
         if platform == 'youtube' and not (first.startswith('@') or first in {'channel', 'user', 'c'}):
             raise ValueError('Use a YouTube channel URL')
         if platform == 'linkedin' and (first not in {'in', 'company', 'school'} or len(segments) < 2):
             raise ValueError('Use a LinkedIn profile or company URL')
-        if platform in {'instagram', 'x'} and len(segments) != 1:
+        if platform in {'instagram', 'x', 'pinterest'} and len(segments) != 1:
             raise ValueError('Use a direct social profile URL')
         # Social apps often append share/tracking parameters. Preserve only the
         # validated HTTPS host and profile path, never the query or fragment.
