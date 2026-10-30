@@ -12,6 +12,7 @@ import tempfile
 import uuid
 from datetime import datetime, timezone
 from html import escape
+from email.utils import parseaddr
 from typing import Literal, Optional
 
 from fastapi import APIRouter, BackgroundTasks, File, Header, HTTPException, Query, UploadFile
@@ -26,7 +27,7 @@ from trust_voice_attachment_validation import validate_attachment_content, Attac
 from trust_voice_attachments import _get_attachment_client, _storage_configured, TRUST_VOICE_BUCKET
 
 router = APIRouter(tags=['VeriFYD Circle Email'])
-VERSION='0.3.0'
+VERSION='0.3.1'
 MAX_FILE_BYTES=8*1024*1024
 ALLOWED_FILES={'.pdf','.txt','.docx','.xlsx','.png','.jpg','.jpeg','.webp','.csv','.pptx','.mp3','.wav'}
 # Resend has a higher provider maximum, but limit raw Circle attachments to 16 MiB total.
@@ -38,6 +39,26 @@ def feature():
     if not enabled('VERIFYD_CIRCLE_EMAIL_ENABLED'): raise HTTPException(503,detail={'error':'email_not_enabled','message':'Circle Email is not enabled yet.'})
 def utc(): return datetime.now(timezone.utc).isoformat()
 def fail(code,msg,status=400): raise HTTPException(status,detail={'error':code,'message':msg})
+
+def _has_mail_content(subject:str, body:str, file_ids:list[str]) -> bool:
+    """A subject, message body or one attached file makes a valid email."""
+    return bool(str(subject or '').strip() or str(body or '').strip() or file_ids)
+
+def _personal_from_header(actor:dict, inbound_reply_active:bool) -> str:
+    """Show the verified Circle handle, not the generic application name.
+
+    Keep the verified mailbox address from existing Render configuration; the
+    display name is from an authenticated identity, never untrusted compose text.
+    """
+    handle = str(actor.get('handle') or actor.get('handle_lower') or '').strip().lstrip('@')
+    if not re.fullmatch(r'[A-Za-z][A-Za-z0-9_]{2,23}', handle):
+        fail('invalid_sender_handle','The sender handle is not valid.',503)
+    configured = os.getenv('VERIFYD_CIRCLE_EMAIL_FROM','').strip()
+    from_address = (parseaddr(configured)[1].strip() if configured else
+                    ('mail@vfvid.com' if inbound_reply_active else 'noreply@vfvid.com'))
+    if not is_valid_email(from_address) or any(c in from_address for c in '\r\n'):
+        fail('invalid_sender_address','The verified sending address is not configured.',503)
+    return f'"@{handle}" <{from_address}>'
 
 def schema():
     global _schema_ready
@@ -73,7 +94,7 @@ def schema():
 class MailSend(BaseModel):
     to: str=Field(min_length=3,max_length=254)
     subject: str=Field(default='',max_length=200)
-    body: str=Field(min_length=1,max_length=12000)
+    body: str=Field(default='',max_length=12000)
     thread_id: Optional[str]=Field(default=None,max_length=100)
     file_ids: list[str]=Field(default_factory=list,max_length=3)
 class MailUpdate(BaseModel):
@@ -231,8 +252,12 @@ def download_file(file_id:str,authorization:Optional[str]=Header(default=None),
 @router.post('/circle-email/send')
 async def send(payload:MailSend,tasks:BackgroundTasks,authorization:Optional[str]=Header(default=None)):
     feature();actor=_identity_from_bearer(authorization);schema();uid=str(actor['id'])
-    to=payload.to.strip();subject=payload.subject.strip() or '(no subject)';body=payload.body.strip()
-    if not body:fail('empty_body','Write a message before sending.')
+    to=payload.to.strip()
+    supplied_subject=payload.subject.strip()
+    subject=supplied_subject or '(no subject)'
+    body=payload.body.strip()
+    if not _has_mail_content(supplied_subject,body,payload.file_ids):
+        fail('empty_message','Enter a subject, write a message, or attach a file.')
     internal=to.startswith('@') or ('@' not in to)
     if internal:
         target=_identity_by_handle(_normalize_handle(to))
@@ -309,12 +334,9 @@ async def send(payload:MailSend,tasks:BackgroundTasks,authorization:Optional[str
         api_key=os.getenv('RESEND_API_KEY','')
         if not api_key:raise RuntimeError('Resend key unavailable')
         resend.api_key=api_key
-        display_handle=str(actor.get('handle') or actor.get('handle_lower') or 'member')
-        # Branded standard From header; only the opaque Reply-To routes replies.
-        # Keep the existing verified sending address until inbound is enabled.
-        default_from=(f'VeriFYD Circle (@{display_handle}) <mail@vfvid.com>'
-                      if inbound_reply_active else 'VeriFYD Circle <noreply@vfvid.com>')
-        from_address=os.getenv('VERIFYD_CIRCLE_EMAIL_FROM',default_from)
+        # User-facing From display is the authenticated handle, while the
+        # actual sender remains our configured, verified Resend email address.
+        from_address=_personal_from_header(actor,inbound_reply_active)
         reply_to=reply_address if inbound_reply_active else sender_email
         reply_note=('Reply to this message to reach the sender in VeriFYD Circle.'
                     if inbound_reply_active else
@@ -323,7 +345,7 @@ async def send(payload:MailSend,tasks:BackgroundTasks,authorization:Optional[str
         attachment_payload=prepare_outbound_attachments(rows)
         send_params={'from':from_address,'to':[recipient],
           'reply_to':reply_to,
-          'subject':subject,'text':f"From VeriFYD Circle user @{actor.get('handle') or actor.get('handle_lower') or 'member'}\n\n{body}\n\n{reply_note}"}
+          'subject':subject,'text':((body + '\n\n') if body else '') + reply_note}
         if attachment_payload:
             send_params['attachments']=attachment_payload
         result=resend.Emails.send(send_params)
