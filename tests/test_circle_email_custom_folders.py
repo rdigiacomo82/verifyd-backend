@@ -86,7 +86,7 @@ class CustomFolderTests(unittest.TestCase):
         self.assertIn("action: Literal['trash','restore','move','move_inbox']",src)
         self.assertIn("if row['folder'] not in ('inbox',) and not row['folder'].startswith('custom:'):",src)
         self.assertIn('COUNT(m.mail_id) FILTER (WHERE m.is_read=FALSE)',src)
-        self.assertIn("folder LIKE 'custom:%'",src)
+        self.assertIn("folder LIKE %s) AND is_read=FALSE\",(uid,'custom:%')",src)
         self.assertIn('m.sender_id=m.owner_id AND f.owner_id=m.owner_id',src)
         self.assertIn('previous_folder=%s,deleted_at=%s',src)
 
