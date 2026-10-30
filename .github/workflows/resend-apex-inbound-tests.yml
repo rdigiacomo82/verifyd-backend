@@ -1,0 +1,26 @@
+name: Resend apex staged inbound security
+on:
+  pull_request:
+    paths:
+      - 'trust_voice_circle_email_resend_apex.py'
+      - 'trust_voice_circle_email_inbound.py'
+      - 'tests/test_trust_voice_circle_email_resend_apex.py'
+      - '.github/workflows/resend-apex-inbound-tests.yml'
+  push:
+    paths:
+      - 'trust_voice_circle_email_resend_apex.py'
+      - 'trust_voice_circle_email_inbound.py'
+      - 'tests/test_trust_voice_circle_email_resend_apex.py'
+      - '.github/workflows/resend-apex-inbound-tests.yml'
+jobs:
+  gated-route:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Compile
+        run: python -m py_compile trust_voice_circle_email_resend_apex.py trust_voice_circle_email_inbound.py
+      - name: Test strict Resend apex routing
+        run: python -m unittest discover -s tests -p 'test_trust_voice_circle_email_resend_apex.py' -v
