@@ -1,6 +1,6 @@
 # VeriFYD Circle mail: inbound retrieval + attachments — staged integration
 
-Status: isolated backend candidate; NOT merged or deployed. Full end-to-end verification required.
+Status: isolated backend candidate; NOT merged or deployed. Full end-to-end verification required. Incoming external attachment processing is opt-in and disabled until real Resend + R2 tests.
 
 ## Changes
 - Incoming webhook retains authenticated Svix verification, opaque reply routing,
@@ -14,7 +14,7 @@ Status: isolated backend candidate; NOT merged or deployed. Full end-to-end veri
   and revalidated before sending. The sender's Sent copy keeps the attachment.
 - Internal Sent copies of existing attached mail expose sender-owned file links
   matched on the same thread, sender, and timestamp.
-- Incoming replies: attachment metadata is retrieved from Resend, supported files
+- Incoming replies: when `VERIFYD_CIRCLE_EMAIL_INBOUND_ATTACHMENTS_ENABLED=true`, attachment metadata is retrieved from Resend, supported files
   are downloaded using a strict HTTPS host/path allowlist (no redirects), size
   bounded, byte-type validated and copied into private R2, with database linkage.
   Unsupported, oversize, and excess files are omitted with an explicit body note.
@@ -24,6 +24,14 @@ Status: isolated backend candidate; NOT merged or deployed. Full end-to-end veri
   warning via `?acknowledge_unscanned=true`. Downloads force octet-stream,
   Content-Disposition attachment and nosniff. They are NOT represented as clean.
   An antivirus/malware scan should be integrated before broad release.
+
+## Secure reply address naming
+- New replies use `<handle>+<128-bit-random-token>@reply.vfvid.com`, such as
+  `roberttest22+<random>@reply.vfvid.com`; the handle is recognizable, but only
+  the hashed secret token and matching external sender select a recipient.
+- Existing 160-bit `reply+<token>@reply.vfvid.com` routes continue to work.
+- No apex MX changes, no permanent public inbox addresses, and no direct
+  `<handle>@vfvid.com` delivery in this phase.
 
 ## IMPORTANT: Hosted Horizons frontend still needs to be synchronized
 The React Horizons frontend is NOT stored in this backend repository. A current
@@ -57,6 +65,9 @@ email composer must:
 - Other existing flags: `VERIFYD_CIRCLE_EMAIL_ENABLED`,
   `VERIFYD_CIRCLE_EMAIL_EXTERNAL_ENABLED`, `VERIFYD_CIRCLE_EMAIL_INBOUND_ENABLED`,
   `VERIFYD_CIRCLE_EMAIL_INBOUND_WEBHOOK_SECRET`, and private R2 credentials.
+- Incoming file processing requires separate explicit opt-in
+  `VERIFYD_CIRCLE_EMAIL_INBOUND_ATTACHMENTS_ENABLED=true`. Its default is off;
+  inbound text replies continue working and the body reports withheld files.
 - `GET /trust-voice/circle-email/inbound/health` reports configuration existence,
   NOT remote key permissions or live delivery.
 
