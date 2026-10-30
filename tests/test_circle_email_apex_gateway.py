@@ -59,6 +59,44 @@ class ApexGatewayTests(unittest.TestCase):
         self.assertEqual(data["to"],["annslp@vfvid.com"])
         self.assertEqual(data["text"],"Test email")
 
+    def test_actual_hostinger_october_30_catchall_header(self):
+        # User-provided successful catch-all delivery, with private content
+        # replaced by a synthetic plain-text body for this security regression.
+        # The real Hostinger ingress appends this topmost Received header:
+        raw=mail(
+            top=("from mail-dl1-x1234.google.com "
+                 "(mail-dl1-x1234.google.com [IPv6:2607:f8b0:4864:20::1234]) "
+                 "by de-fra-smtpin6.hostinger.io (mx.hostinger.com) "
+                 "with ESMTPS id 4jGQhR2nxLz4vxp "
+                 "for <roberttest22@vfvid.com>; "
+                 "Fri, 30 Oct 2026 15:56:55 +0000 (UTC)"),
+            to="another-member@vfvid.com",
+            body="Gateway recipient verification test"
+        )
+        verified=frozenset({"de-fra-smtpin6.hostinger.io"})
+        handle,record=self.h["parse_catchall"](raw,verified)
+        self.assertEqual(handle,"roberttest22")
+        self.assertEqual(record["to"],["roberttest22@vfvid.com"])
+        self.assertEqual(record["text"],"Gateway recipient verification test")
+        # An unverified MTA must never be automatically trusted.
+        self.assertEqual(self.h["parse_catchall"](raw,frozenset()),(None,None))
+        self.assertEqual(self.h["parse_catchall"](
+            raw,frozenset({"fr-int-smtpin28.hostinger.io"})),(None,None))
+        # The real host is an exact match, not a wildcard suffix.
+        fake=raw.replace(b"by de-fra-smtpin6.hostinger.io ",
+                         b"by de-fra-smtpin6.hostinger.io.attacker.test ")
+        self.assertEqual(self.h["parse_catchall"](fake,verified),(None,None))
+
+    def test_real_hostinger_server_allowlist_config(self):
+        from unittest.mock import patch
+        with patch.dict(os.environ,{"VERIFYD_CIRCLE_EMAIL_APEX_TRUSTED_RECEIVED_BY":
+             " de-fra-smtpin6.hostinger.io , mx.other.test "}):
+            self.assertEqual(self.h["_trusted_hosts"](),frozenset({
+                "de-fra-smtpin6.hostinger.io", "mx.other.test"
+            }))
+        with patch.dict(os.environ,{"VERIFYD_CIRCLE_EMAIL_APEX_TRUSTED_RECEIVED_BY":""}):
+            self.assertEqual(self.h["_trusted_hosts"](),frozenset())
+
     def test_spoofed_to_header_cannot_select_recipient(self):
         raw=mail(top="from gmail.com by unrelated.mailhost.com with ESMTP for <attacker@vfvid.com>;",
             to="roberttest22@vfvid.com")
