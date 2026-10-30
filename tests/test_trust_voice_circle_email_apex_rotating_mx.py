@@ -1,11 +1,12 @@
 """Security regression tests for opt-in Hostinger rotating MX support."""
+import hashlib
 import os
 import unittest
 from email import policy
 from email.parser import Parser
 from unittest.mock import patch
 
-from trust_voice_circle_email_apex_gateway import original_envelope_recipient
+from trust_voice_circle_email_apex_gateway import original_envelope_recipient, _replay_policy_fingerprint
 
 EXACT_HOSTS = frozenset({"de-fra-smtpin12.hostinger.io"})
 
@@ -68,6 +69,17 @@ class TestRotatingHostingerMx(unittest.TestCase):
                 mail("de-fra-smtpin7.hostinger.io", recipient="support@vfvid.com",
                      older_received=forged),
                 EXACT_HOSTS), "support@vfvid.com")
+
+    def test_quarantine_replay_fingerprint_changes_when_rotating_mx_enabled(self):
+        hosts = frozenset({"de-fra-smtpin12.hostinger.io", "fr-int-smtpin32.hostinger.io"})
+        legacy = hashlib.sha256(",".join(sorted(hosts)).encode("ascii")).hexdigest()
+        with patch.dict(os.environ, {"VERIFYD_CIRCLE_EMAIL_APEX_ALLOW_ROTATING_MX": "0"}):
+            exact_only = _replay_policy_fingerprint(hosts)
+        with patch.dict(os.environ, {"VERIFYD_CIRCLE_EMAIL_APEX_ALLOW_ROTATING_MX": "1"}):
+            rotating = _replay_policy_fingerprint(hosts)
+            self.assertEqual(rotating, _replay_policy_fingerprint(frozenset(reversed(sorted(hosts)))))
+        self.assertEqual(exact_only, legacy)
+        self.assertNotEqual(rotating, exact_only)
 
     def test_no_trusted_host_configuration_fails_closed(self):
         with patch.dict(os.environ, {"VERIFYD_CIRCLE_EMAIL_APEX_ALLOW_ROTATING_MX": "1"}):
