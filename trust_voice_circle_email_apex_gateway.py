@@ -31,8 +31,7 @@ _TRUSTED_BY = re.compile(r"\bby\s+([a-z0-9][a-z0-9.-]+)", re.I)
 # Restricted Hostinger inbound MX families observed in actual Received hops.
 # Opt-in only: verify the outermost server, MX label, and ESMTPS transaction.
 _HOSTINGER_MX_BY = re.compile(r"^(?:de-fra|fr-int)-smtpin[1-9][0-9]{0,2}\.hostinger\.io$", re.I)
-_HOSTINGER_MX_LABEL = re.compile(r"\(mx\.hostinger\.com\)", re.I)
-_HOSTINGER_MX_ESMTPS = re.compile(r"\bwith\s+ESMTPS\s+id\s+[a-z0-9]+\b", re.I)
+_HOSTINGER_MX_SUFFIX = re.compile(r"^\s+\(mx\.hostinger\.com\)\s+with\s+ESMTPS\s+id\s+[a-z0-9]+\b", re.I)
 _FOR_ADDRESS = re.compile(r"\bfor\s+<?([a-z][a-z0-9_]{2,23}@vfvid\.com)>?(?=[\s;,]|$)", re.I)
 _UID_SIZE = re.compile(rb"RFC822\.SIZE\s+(\d+)")
 _MAX_BATCH = 30
@@ -100,8 +99,7 @@ def original_envelope_recipient(message: email.message.Message,
         if not (
             _on("VERIFYD_CIRCLE_EMAIL_APEX_ALLOW_ROTATING_MX")
             and _HOSTINGER_MX_BY.fullmatch(hostname)
-            and _HOSTINGER_MX_LABEL.search(top)
-            and _HOSTINGER_MX_ESMTPS.search(top)
+            and _HOSTINGER_MX_SUFFIX.match(top[server.end():])
         ):
             return None
     match = _FOR_ADDRESS.search(top)
