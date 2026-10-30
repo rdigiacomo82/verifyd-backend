@@ -160,8 +160,11 @@ def my_address(authorization:Optional[str]=Header(default=None)):
     feature();actor=_identity_from_bearer(authorization)
     handle=str(actor.get('handle_lower') or actor.get('handle') or '').strip().lower()
     from trust_voice_circle_email_inbound import reply_domain
-    from trust_voice_circle_email_public import public_address_for_handle
-    available=(public_address_for_handle(handle,reply_domain())
+    from trust_voice_circle_email_public import (
+        public_address_for_handle, public_apex_address_for_handle
+    )
+    available=((public_apex_address_for_handle(handle)
+                or public_address_for_handle(handle,reply_domain()))
                if enabled('VERIFYD_CIRCLE_EMAIL_INBOUND_ENABLED')
                and actor.get('email_verified') and actor.get('status')=='active'
                else None)
@@ -356,11 +359,13 @@ async def send(payload:MailSend,tasks:BackgroundTasks,authorization:Optional[str
         if inbound_reply_active:
             # One global feature gate: every eligible registered handle
             # automatically gets a stable address, with no manual forwards.
-            from trust_voice_circle_email_public import public_address_for_handle
+            from trust_voice_circle_email_public import (
+                public_address_for_handle, public_apex_address_for_handle
+            )
             from trust_voice_circle_email_inbound import reply_domain
-            public_reply=public_address_for_handle(
-                str(actor.get('handle_lower') or actor.get('handle') or ''),
-                reply_domain())
+            sender_handle=str(actor.get('handle_lower') or actor.get('handle') or '')
+            public_reply=(public_apex_address_for_handle(sender_handle)
+                or public_address_for_handle(sender_handle,reply_domain()))
             reply_to=public_reply or reply_address
         else:
             reply_to=sender_email
