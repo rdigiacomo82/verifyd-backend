@@ -7,6 +7,7 @@ on:
       - "trust_voice_circle_email_public.py"
       - "trust_voice_circle_email_inbound.py"
       - "trust_voice_circle_email.py"
+      - "trust_voice_identity.py"
       - "tests/test_circle_email_public_handle.py"
       - "trust_voice_circle_email_apex_gateway.py"
       - "tests/test_circle_email_apex_gateway.py"
@@ -16,6 +17,7 @@ on:
       - "trust_voice_circle_email_public.py"
       - "trust_voice_circle_email_inbound.py"
       - "trust_voice_circle_email.py"
+      - "trust_voice_identity.py"
       - "tests/test_circle_email_public_handle.py"
       - "trust_voice_circle_email_apex_gateway.py"
       - "tests/test_circle_email_apex_gateway.py"
@@ -33,7 +35,7 @@ jobs:
         with:
           python-version: "3.11"
       - name: Validate mailbox modules
-        run: python -m py_compile trust_voice_circle_email_public.py trust_voice_circle_email_inbound.py trust_voice_circle_email.py trust_voice_circle_email_apex_gateway.py
+        run: python -m py_compile trust_voice_circle_email_public.py trust_voice_circle_email_inbound.py trust_voice_circle_email.py trust_voice_circle_email_apex_gateway.py trust_voice_identity.py
       - name: Test dynamic all-member handles, abuse boundaries and idempotency
         run: python -m unittest discover -s tests -p 'test_circle_email_public_handle.py' -v
       - name: Validate Hostinger envelope-recipient trust boundaries
