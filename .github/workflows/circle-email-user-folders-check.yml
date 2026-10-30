@@ -1,0 +1,37 @@
+name: Circle Email Custom Folders
+
+on:
+  push:
+    branches: [feature/circle-email-user-folders-20261030]
+    paths:
+      - "trust_voice_circle_email.py"
+      - "tests/test_circle_email_custom_folders.py"
+      - ".github/workflows/circle-email-user-folders-check.yml"
+  pull_request:
+    paths:
+      - "trust_voice_circle_email.py"
+      - "tests/test_circle_email_custom_folders.py"
+      - ".github/workflows/circle-email-user-folders-check.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Check syntax
+        run: python -m py_compile trust_voice_circle_email.py
+      - name: Custom folder security and mail routing tests
+        run: python -m unittest discover -s tests -p 'test_circle_email_custom_folders.py' -v
+      - name: Existing bulk trash/restore tests
+        run: python -m unittest discover -s tests -p 'test_circle_email_bulk_actions.py' -v
+      - name: Sending and attachment regressions
+        run: |
+          python -m unittest discover -s tests -p 'test_circle_email_attachments.py' -v
+          python -m unittest discover -s tests -p 'test_circle_email_optional_body_sender.py' -v
+          python -m unittest discover -s tests -p 'test_trust_voice_session_db_resilience.py' -v
