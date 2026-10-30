@@ -129,7 +129,7 @@ def email_health():
       'internal_handle_mail':'supported','external_outbound':enabled('VERIFYD_CIRCLE_EMAIL_EXTERNAL_ENABLED'),
       'external_inbound':'enabled' if enabled('VERIFYD_CIRCLE_EMAIL_INBOUND_ENABLED') else 'not_configured','private_attachments':_storage_configured(),
       'external_attachment_send':_storage_configured() and enabled('VERIFYD_CIRCLE_EMAIL_EXTERNAL_ENABLED'),
-      'external_attachment_receive':_storage_configured() and enabled('VERIFYD_CIRCLE_EMAIL_INBOUND_ENABLED'),
+      'external_attachment_receive':_storage_configured() and enabled('VERIFYD_CIRCLE_EMAIL_INBOUND_ENABLED') and enabled('VERIFYD_CIRCLE_EMAIL_INBOUND_ATTACHMENTS_ENABLED'),
       'risk_classification':'rule_signals_not_ai_certification','attachment_malware_scanning':'not_available'}
 
 @router.get('/circle-email/messages')
