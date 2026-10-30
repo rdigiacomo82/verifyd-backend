@@ -6,7 +6,7 @@ import os
 import pathlib
 import re
 import uuid
-from email.utils import parseaddr
+from email.utils import parseaddr, getaddresses
 from unittest import TestCase, main
 from unittest.mock import patch
 
@@ -25,7 +25,7 @@ def helpers():
                    "__future__",
                }]
     env = {
-        "os": os, "re": re, "uuid": uuid, "parseaddr": parseaddr,
+        "os": os, "re": re, "uuid": uuid, "parseaddr": parseaddr, "getaddresses": getaddresses,
         "_HANDLE": re.compile(r"^[a-z][a-z0-9_]{2,23}$"),
         "_MAX_OWNER_DAY": 60, "_MAX_SENDER_DAY": 8,
     }
@@ -67,7 +67,8 @@ class PublicHandleTests(TestCase):
                 ["roberttest22@vfvid.com"],
                 ["roberttest22@otherdomain.com"],
                 ["roberttest22+aaa@reply.vfvid.com"],
-                ["roberttest22@reply.vfvid.com", "other@reply.vfvid.com"]
+                ["roberttest22@reply.vfvid.com", "other@reply.vfvid.com"],
+                ["roberttest22@reply.vfvid.com, other@reply.vfvid.com"]
             ):
                 with self.subTest(addrs=addrs):
                     self.assertIsNone(h["public_recipient_from_to"](addrs, DOMAIN))
