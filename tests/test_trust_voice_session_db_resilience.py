@@ -98,6 +98,6 @@ class SessionReliabilityTests(unittest.TestCase):
         self.assertIn('DB_POOL_MAX = _db_env_int(\n    "VERIFYD_DB_POOL_MAX",\n    16,',src)
         self.assertIn('DB_POOL_WAIT_SECONDS = _db_env_float(\n    "VERIFYD_DB_POOL_WAIT_SECONDS",\n    8.0,',src)
         self.assertIn('"_db_pool_gate"'.strip('"'),src)
-        self.assertIn("pool.putconn",src)
+        self.assertIn("_get_db_pool().putconn",src)
 
 if __name__=="__main__":unittest.main()
