@@ -14,10 +14,18 @@ FILE = ROOT / "trust_voice_circle_email_apex_gateway.py"
 
 def load():
     tree = ast.parse(FILE.read_text(encoding="utf-8"))
-    names = ("_trusted_hosts", "original_envelope_recipient", "parse_catchall")
+    names = ("_on", "_trusted_hosts", "original_envelope_recipient", "parse_catchall")
     functions=[node for node in tree.body
         if isinstance(node,ast.FunctionDef) and node.name in names]
-    assert len(functions)==3
+    assert len(functions)==4
+    # Keep the small AST-based test loader in sync with newly added, opt-in
+    # Hostinger MX validation constants, without importing live DB/IMAP code.
+    mx_regex_names = {"_HOSTINGER_MX_BY", "_HOSTINGER_MX_SUFFIX"}
+    regex_assignments = [node for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id in mx_regex_names
+                for target in node.targets)]
+    assert len(regex_assignments) == len(mx_regex_names)
     mod = __import__("types").SimpleNamespace()
     ns = {
         "os": os, "re": re,"email":email, "policy":policy,
@@ -34,7 +42,7 @@ def load():
         if isinstance(b,type(re.compile(""))):
             # File is literal untrusted source under test; compile exactly as declared.
             pass
-    exec(compile(ast.Module(body=functions,type_ignores=[]),str(FILE),"exec"),ns)
+    exec(compile(ast.Module(body=regex_assignments + functions,type_ignores=[]),str(FILE),"exec"),ns)
     return ns
 
 

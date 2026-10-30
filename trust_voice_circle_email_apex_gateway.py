@@ -28,6 +28,10 @@ _IMAP_HOST = "imap.hostinger.com"
 _MAX_RAW_BYTES = 18 * 1024 * 1024
 _LOCALPART = re.compile(r"^[a-z][a-z0-9_]{2,23}$")
 _TRUSTED_BY = re.compile(r"\bby\s+([a-z0-9][a-z0-9.-]+)", re.I)
+# Restricted Hostinger inbound MX families observed in actual Received hops.
+# Opt-in only: verify the outermost server, MX label, and ESMTPS transaction.
+_HOSTINGER_MX_BY = re.compile(r"^(?:de-fra|fr-int)-smtpin[1-9][0-9]{0,2}\.hostinger\.io$", re.I)
+_HOSTINGER_MX_SUFFIX = re.compile(r"^\s+\(mx\.hostinger\.com\)\s+with\s+ESMTPS\s+id\s+[a-z0-9]+\b", re.I)
 _FOR_ADDRESS = re.compile(r"\bfor\s+<?([a-z][a-z0-9_]{2,23}@vfvid\.com)>?(?=[\s;,]|$)", re.I)
 _UID_SIZE = re.compile(rb"RFC822\.SIZE\s+(\d+)")
 _MAX_BATCH = 30
@@ -72,6 +76,18 @@ def _trusted_hosts() -> frozenset[str]:
     )
 
 
+def _replay_policy_fingerprint(trusted_hosts: frozenset[str]) -> str:
+    """Replay quarantined mail when the trusted MX verification policy changes.
+
+    Match the legacy fingerprint while rotating-MX support is disabled so the
+    existing replay watermark remains stable during ordinary deployments.
+    """
+    policy_key = ",".join(sorted(trusted_hosts))
+    if _on("VERIFYD_CIRCLE_EMAIL_APEX_ALLOW_ROTATING_MX"):
+        policy_key += "|allow_rotating_mx=1"
+    return hashlib.sha256(policy_key.encode("ascii")).hexdigest()
+
+
 def original_envelope_recipient(message: email.message.Message,
                                 trusted_hosts: frozenset[str]) -> str | None:
     """Fail closed unless Hostinger's actual *outermost* Received says for <user>.
@@ -86,8 +102,18 @@ def original_envelope_recipient(message: email.message.Message,
         return None
     top = str(received[0])
     server = _TRUSTED_BY.search(top)
-    if not server or server.group(1).rstrip(".").lower() not in trusted_hosts:
+    if not server:
         return None
+    hostname = server.group(1).rstrip(".").lower()
+    if hostname not in trusted_hosts:
+        # Opt-in fallback for Hostinger's rotating numbered MX servers.
+        # Keep rejecting unexpected hosts and headers lacking the MX markers.
+        if not (
+            _on("VERIFYD_CIRCLE_EMAIL_APEX_ALLOW_ROTATING_MX")
+            and _HOSTINGER_MX_BY.fullmatch(hostname)
+            and _HOSTINGER_MX_SUFFIX.match(top[server.end():])
+        ):
+            return None
     match = _FOR_ADDRESS.search(top)
     if not match:
         return None
@@ -301,8 +327,7 @@ def _replay_recent_quarantine(conn, mailbox_key: str, valid: str,
     from database import get_db
     from trust_voice_circle_email_public import store_public_received
 
-    hosts_hash = hashlib.sha256(
-        ",".join(sorted(trusted_hosts)).encode("ascii")).hexdigest()
+    hosts_hash = _replay_policy_fingerprint(trusted_hosts)
     recent = _recent_processed_uids(conn, last_uid)
     provider_for_uid = {
         uid: "hostinger-" + hashlib.sha256(
