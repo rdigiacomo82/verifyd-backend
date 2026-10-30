@@ -20,6 +20,11 @@ DOMAIN = "reply.vfvid.com"
 def helpers():
     tree = ast.parse(PUBLIC.read_text(encoding="utf-8"))
     nodes = [node for node in tree.body if isinstance(node, ast.FunctionDef)]
+    constants = [node for node in tree.body if isinstance(node, ast.Assign)
+                 and any(isinstance(target, ast.Name)
+                         and target.id == "_RESERVED_EMAIL_LOCALPARTS"
+                         for target in node.targets)]
+    assert len(constants) == 1
     imports = [node for node in tree.body
                if isinstance(node, ast.ImportFrom) and node.module in {
                    "__future__",
@@ -29,7 +34,7 @@ def helpers():
         "_HANDLE": re.compile(r"^[a-z][a-z0-9_]{2,23}$"),
         "_MAX_OWNER_DAY": 60, "_MAX_SENDER_DAY": 8,
     }
-    exec(compile(ast.Module(body=imports + nodes, type_ignores=[]), str(PUBLIC), "exec"), env)
+    exec(compile(ast.Module(body=imports + constants + nodes, type_ignores=[]), str(PUBLIC), "exec"), env)
     return env
 
 
