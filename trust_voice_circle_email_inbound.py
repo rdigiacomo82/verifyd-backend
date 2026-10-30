@@ -33,8 +33,9 @@ from trust_voice_signaling import _send_to_identity
 
 log = logging.getLogger('verifyd.circle_email.inbound')
 router = APIRouter(tags=['VeriFYD Circle Email Inbound'])
-INBOUND_VERSION = '0.3.0'
+INBOUND_VERSION = '0.3.1'
 _HEX_TOKEN = re.compile(r'^reply\+([a-f0-9]{40})@([a-z0-9.-]+)$', re.I)
+_HANDLE_TOKEN = re.compile(r'^([a-z][a-z0-9_]{2,23})\+([a-f0-9]{32})@([a-z0-9.-]+)$', re.I)
 _PROVIDER_ID = re.compile(r'^[a-zA-Z0-9-]{15,90}$')
 _INBOUND_SCHEMA_READY = False
 
@@ -98,19 +99,25 @@ def ensure_inbound_schema() -> None:
 
 
 def create_reply_route(db, *, owner_id: str, sent_mail_id: str,
-                       thread_id: str, external_recipient: str, stamp: str) -> str:
+                       thread_id: str, external_recipient: str, stamp: str,
+                       sender_handle: str = '') -> str:
     """Store route in the caller's *existing outbound transaction*."""
     if not inbound_configured():
         raise HTTPException(status_code=503, detail={'error':'inbound_not_configured',
             'message':'VeriFYD reply receiving is still being configured.'})
-    token = secrets.token_hex(20)  # 160 bits; not derived from identity, handle or email.
+    # Handle is decorative; a random 128-bit token is the ONLY routing key.
+    # The 24-character handle limit keeps the SMTP local part <=64 chars.
+    display_handle = str(sender_handle or '').strip().lstrip('@').lower()
+    if not re.fullmatch(r'[a-z][a-z0-9_]{2,23}', display_handle):
+        raise HTTPException(status_code=503, detail={'error': 'invalid_reply_sender_handle'})
+    token = secrets.token_hex(16)
     digest = hashlib.sha256(token.encode('ascii')).hexdigest()
     cur = db.cursor()
     cur.execute('''INSERT INTO verifyd_circle_email_reply_routes
       (token_hash,owner_id,sender_mail_id,thread_id,external_recipient,created_at)
       VALUES (%s,%s,%s,%s,%s,%s)''',
       (digest,owner_id,sent_mail_id,thread_id,external_recipient.lower(),stamp))
-    return 'reply+' + token + '@' + reply_domain()
+    return display_handle + '+' + token + '@' + reply_domain()
 
 
 def verify_resend_webhook(raw: bytes, headers, *, secret: Optional[str] = None,
@@ -219,9 +226,13 @@ def _candidate_routes(to_list, domain: str):
     tokens=[]
     for val in (to_list if isinstance(to_list,list) else [to_list]):
         address=parseaddr(str(val or ''))[1].strip().lower()
-        match=_HEX_TOKEN.fullmatch(address)
-        if match and match.group(2)==domain:
-            tokens.append(match.group(1).lower())
+        legacy = _HEX_TOKEN.fullmatch(address)
+        named = _HANDLE_TOKEN.fullmatch(address)
+        if legacy and legacy.group(2)==domain:
+            tokens.append(legacy.group(1).lower())
+        elif named and named.group(3)==domain:
+            # The handle must never be trusted for inbox selection.
+            tokens.append(named.group(2).lower())
     return list(dict.fromkeys(tokens))
 
 
@@ -321,7 +332,7 @@ def inbound_health():
             'configuration':'ready' if inbound_configured() else 'not_configured',
             'receiving_key_mode':('dedicated' if os.getenv('VERIFYD_CIRCLE_EMAIL_RECEIVING_API_KEY','').strip() else 'shared'),
             'provider_read_permission':'not_verified_by_health',
-            'routing':'per_message_opaque_reply_alias',
+            'routing':'handle_prefixed_opaque_reply_alias_legacy_compatible',
             'external_attachments':'private_r2_download_with_unscanned_ack_required',
             'external_attachment_max_files':3,
             'external_attachment_max_size_mb':8}
