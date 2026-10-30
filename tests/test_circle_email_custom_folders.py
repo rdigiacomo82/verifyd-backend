@@ -83,7 +83,7 @@ class CustomFolderTests(unittest.TestCase):
 
     def test_bulk_move_only_from_inbox_or_custom_folder(self):
         src=SOURCE.read_text(encoding='utf-8')
-        self.assertIn("action: Literal['trash','restore','move','move_inbox']",src)
+        self.assertIn("action: Literal['trash','restore','move','move_inbox','archive','unarchive','read','unread']",src)
         self.assertIn("if row['folder'] not in ('inbox',) and not row['folder'].startswith('custom:'):",src)
         self.assertIn('COUNT(m.mail_id) FILTER (WHERE m.is_read=FALSE)',src)
         self.assertIn("folder LIKE %s) AND is_read=FALSE\",(uid,'custom:%')",src)

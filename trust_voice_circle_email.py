@@ -27,7 +27,7 @@ from trust_voice_attachment_validation import validate_attachment_content, Attac
 from trust_voice_attachments import _get_attachment_client, _storage_configured, TRUST_VOICE_BUCKET
 
 router = APIRouter(tags=['VeriFYD Circle Email'])
-VERSION='0.3.6'
+VERSION='0.3.7'
 MAX_FILE_BYTES=8*1024*1024
 ALLOWED_FILES={'.pdf','.txt','.docx','.xlsx','.png','.jpg','.jpeg','.webp','.csv','.pptx','.mp3','.wav'}
 # Resend has a higher provider maximum, but limit raw Circle attachments to 16 MiB total.
@@ -106,10 +106,10 @@ class MailSend(BaseModel):
     thread_id: Optional[str]=Field(default=None,max_length=100)
     file_ids: list[str]=Field(default_factory=list,max_length=3)
 class MailUpdate(BaseModel):
-    action: Literal['read','unread','star','unstar','spam','not_spam','trash','restore']
+    action: Literal['read','unread','star','unstar','spam','not_spam','trash','restore','archive','unarchive']
 
 class MailBulkUpdate(BaseModel):
-    action: Literal['trash','restore','move','move_inbox']
+    action: Literal['trash','restore','move','move_inbox','archive','unarchive','read','unread']
     mail_ids: list[str] = Field(min_length=1, max_length=150)
     folder_id: Optional[str] = None
 
@@ -125,7 +125,7 @@ def _folder_name(value:str)->str:
     if (not name or len(name)>40 or any(ord(c)<32 for c in name)
             or any(c in name for c in '<>\\/')):
         fail('invalid_folder_name','Use 1–40 characters without special control characters.')
-    if name.lower() in {'inbox','sent','starred','spam','trash','drafts','all mail'}:
+    if name.lower() in {'inbox','sent','starred','spam','trash','drafts','all mail','all','archive'}:
         fail('reserved_folder_name','That name is reserved for a standard mailbox.')
     return name
 
@@ -295,11 +295,16 @@ def inbox(folder:str=Query(default='inbox',max_length=50),q:str=Query(default=''
     uid=str(identity['id']);like=f'%{q}%' if q else '%'
     with get_db() as db:
         c=db.cursor()
-        if folder not in {'inbox','sent','spam','trash','starred'}:
+        if folder not in {'inbox','sent','spam','trash','starred','archive','all'}:
             if not folder.startswith('custom:'):
                 fail('folder_not_found','Unknown mailbox folder.',404)
             _require_owned_folder(c,uid,folder[7:])
-        if folder=='starred':
+        if folder=='all':
+            c.execute('''SELECT * FROM verifyd_circle_email_messages WHERE owner_id=%s
+                AND folder NOT IN ('trash','spam') AND deleted_at IS NULL
+                AND (subject ILIKE %s OR sender_handle ILIKE %s OR body ILIKE %s)
+                ORDER BY created_at DESC LIMIT 150''',(uid,like,like,like))
+        elif folder=='starred':
             c.execute('''SELECT * FROM verifyd_circle_email_messages WHERE owner_id=%s AND starred=TRUE
                 AND deleted_at IS NULL AND (subject ILIKE %s OR sender_handle ILIKE %s OR body ILIKE %s)
                 ORDER BY created_at DESC LIMIT 150''',(uid,like,like,like))
@@ -437,6 +442,17 @@ def action(mail_id:str,payload:MailUpdate,authorization:Optional[str]=Header(def
         elif a in ('star','unstar'):c.execute('UPDATE verifyd_circle_email_messages SET starred=%s WHERE mail_id=%s',(a=='star',mail_id))
         elif a=='spam': c.execute("UPDATE verifyd_circle_email_messages SET folder='spam',spam_flag=TRUE WHERE mail_id=%s",(mail_id,))
         elif a=='not_spam':c.execute("UPDATE verifyd_circle_email_messages SET folder='inbox',spam_flag=FALSE WHERE mail_id=%s",(mail_id,))
+        elif a=='archive':
+            if row['folder'] not in ('archive','trash','spam'):
+                c.execute("""UPDATE verifyd_circle_email_messages SET folder='archive',
+                  previous_folder=%s WHERE owner_id=%s AND mail_id=%s""",
+                  (row['folder'],uid,mail_id))
+        elif a=='unarchive':
+            if row['folder']=='archive':
+                dest=_restore_folder(c,uid,row)
+                c.execute("""UPDATE verifyd_circle_email_messages SET folder=%s,
+                  previous_folder=NULL WHERE owner_id=%s AND mail_id=%s""",
+                  (dest,uid,mail_id))
         elif a=='trash':
             if row['folder']!='trash':
                 c.execute("UPDATE verifyd_circle_email_messages SET folder='trash',previous_folder=%s,deleted_at=%s WHERE owner_id=%s AND mail_id=%s",(row['folder'],utc(),uid,mail_id))
@@ -474,7 +490,27 @@ def bulk_action(payload:MailBulkUpdate,authorization:Optional[str]=Header(defaul
             fail('not_found','One or more selected emails were not found.',404)
         count=0
         for row in rows:
-            if payload.action=='move':
+            if payload.action in ('read','unread'):
+                c.execute("""UPDATE verifyd_circle_email_messages SET is_read=%s
+                  WHERE owner_id=%s AND mail_id=%s""",
+                  (payload.action=='read',uid,row['mail_id']))
+                count+=1
+            elif payload.action=='archive':
+                if row['folder'] not in ('archive','spam','trash'):
+                    c.execute("""UPDATE verifyd_circle_email_messages
+                      SET folder='archive',previous_folder=%s
+                      WHERE owner_id=%s AND mail_id=%s""",
+                      (row['folder'],uid,row['mail_id']))
+                    count+=1
+            elif payload.action=='unarchive':
+                if row['folder']=='archive':
+                    dest=_restore_folder(c,uid,row)
+                    c.execute("""UPDATE verifyd_circle_email_messages
+                      SET folder=%s,previous_folder=NULL
+                      WHERE owner_id=%s AND mail_id=%s""",
+                      (dest,uid,row['mail_id']))
+                    count+=1
+            elif payload.action=='move':
                 if row['folder'] not in ('inbox',) and not row['folder'].startswith('custom:'):
                     fail('move_not_allowed','Only Inbox or custom-folder emails can be organized.')
                 destination='custom:'+payload.folder_id

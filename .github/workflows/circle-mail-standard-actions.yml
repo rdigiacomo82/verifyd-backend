@@ -1,0 +1,34 @@
+name: Circle Email Standard Actions
+on:
+  push:
+    branches: [feature/circle-mail-standard-actions-20261030]
+    paths:
+      - "trust_voice_circle_email.py"
+      - "tests/test_circle_email_standard_actions.py"
+      - ".github/workflows/circle-mail-standard-actions.yml"
+  pull_request:
+    paths:
+      - "trust_voice_circle_email.py"
+      - "tests/test_circle_email_standard_actions.py"
+      - ".github/workflows/circle-mail-standard-actions.yml"
+permissions:
+  contents: read
+jobs:
+  validation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Compile Email backend and transport
+        run: python -m py_compile trust_voice_circle_email.py trust_voice_circle_email_inbound.py trust_voice_circle_email_transport.py trust_voice_circle_email_public.py
+      - name: Run owner-isolation and archive tests
+        run: python -m unittest discover -s tests -p 'test_circle_email_standard_actions.py' -v
+      - name: Preserve custom folders, bulk deletion, Reply-To and attachments
+        run: |
+          python -m unittest discover -s tests -p 'test_circle_email_custom_folders.py' -v
+          python -m unittest discover -s tests -p 'test_circle_email_bulk_actions.py' -v
+          python -m unittest discover -s tests -p 'test_circle_email_inbox_sql.py' -v
+          python -m unittest discover -s tests -p 'test_circle_email_attachments.py' -v
+          python -m unittest discover -s tests -p 'test_circle_email_attachment_recovery.py' -v
