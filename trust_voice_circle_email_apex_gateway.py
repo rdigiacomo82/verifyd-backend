@@ -261,7 +261,7 @@ def ingest_batch(max_count: int = _MAX_BATCH) -> dict:
     _stage("schema")
     _schema()
     _stage("advisory_lock")
-    handled = quarantined = 0
+    handled = quarantined = skipped = 0
     # Transaction-scoped lock keeps two concurrent cron invocations from
     # advancing the watermark past one another or skipping any message.
     with get_db() as lockdb:
@@ -307,16 +307,21 @@ def ingest_batch(max_count: int = _MAX_BATCH) -> dict:
                 # store_public_received is idempotent on provider_id and
                 # resolves active account records in database, not headers.
                 _stage("store_received")
-                store_public_received(received,provider_id,handle=handle)
+                delivered_owner, delivered_id = store_public_received(received,provider_id,handle=handle)
                 _stage("checkpoint")
                 _checkpoint(mailbox_key,valid,uid,None,provider_id)
-                handled += 1
+                if delivered_owner and delivered_id:
+                    handled += 1
+                else:
+                    # Reserved aliases, unregistered accounts, duplicates and
+                    # sender limits are not actual VeriFYD Inbox deliveries.
+                    skipped += 1
         finally:
             try:
                 connection.logout()
             except (imaplib.IMAP4.error,OSError):
                 pass
-    return {"status": "ok", "processed": handled, "quarantined": quarantined}
+    return {"status": "ok", "processed": handled, "quarantined": quarantined, "skipped": skipped}
 
 
 def main() -> int:
@@ -324,8 +329,8 @@ def main() -> int:
     try:
         result = ingest_batch()
         # No addresses, bodies, authentication secrets or message headers in logs.
-        log.info("Apex mail batch status=%s processed=%d quarantined=%d",
-                 result["status"],result["processed"],result["quarantined"])
+        log.info("Apex mail batch status=%s imported=%d quarantined=%d skipped=%d",
+                 result["status"],result["processed"],result["quarantined"],result.get("skipped",0))
         return 0
     except Exception as exc:
         # Never log provider exception messages: they may contain account names
