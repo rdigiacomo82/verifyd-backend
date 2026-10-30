@@ -101,6 +101,12 @@ class AliasRegressions(unittest.TestCase):
                         external_recipient="x@example.com",stamp="now",
                         sender_handle=bad)
 
+    def test_legacy_prefix_never_infers_a_new_handle_route(self):
+        env=isolated()
+        # "reply" is a reserved legacy prefix, not a user handle.
+        self.assertEqual(env["_candidate_routes"](
+            ["reply+"+"f"*32+"@reply.vfvid.com"],"reply.vfvid.com"),[])
+
     def test_backend_passes_authenticated_sender_handle(self):
         source=OUTBOUND.read_text(encoding="utf-8")
         self.assertIn("sender_handle=str(actor.get('handle_lower')",source)
