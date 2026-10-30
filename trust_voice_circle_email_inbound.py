@@ -33,7 +33,7 @@ from trust_voice_signaling import _send_to_identity
 
 log = logging.getLogger('verifyd.circle_email.inbound')
 router = APIRouter(tags=['VeriFYD Circle Email Inbound'])
-INBOUND_VERSION = '0.3.1'
+INBOUND_VERSION = '0.3.2'
 _HEX_TOKEN = re.compile(r'^reply\+([a-f0-9]{40})@([a-z0-9.-]+)$', re.I)
 _HANDLE_TOKEN = re.compile(r'^([a-z][a-z0-9_]{2,23})\+([a-f0-9]{32})@([a-z0-9.-]+)$', re.I)
 _PROVIDER_ID = re.compile(r'^[a-zA-Z0-9-]{15,90}$')
@@ -247,6 +247,14 @@ def _store_received(received: dict, provider_id: str) -> tuple[Optional[str],Opt
     from trust_voice_circle_email import risk, utc
     ensure_inbound_schema()
     domain=reply_domain()
+    # A public @handle mailbox may accept NEW conversations. This path is
+    # opt-in per handle and never bypasses the signed Resend webhook.
+    from trust_voice_circle_email_public import (
+        public_recipient_from_to, store_public_received
+    )
+    public_handle=public_recipient_from_to(received.get('to') or [], domain)
+    if public_handle is not None:
+        return store_public_received(received,provider_id,handle=public_handle)
     candidates=_candidate_routes(received.get('to') or [], domain)
     if len(candidates)!=1:
         return None,None
@@ -348,6 +356,8 @@ def inbound_health():
             'receiving_key_mode':('dedicated' if os.getenv('VERIFYD_CIRCLE_EMAIL_RECEIVING_API_KEY','').strip() else 'shared'),
             'provider_read_permission':'not_verified_by_health',
             'routing':'handle_prefixed_opaque_reply_alias_legacy_compatible',
+            'public_handle_address':'opt_in_only',
+            'public_handle_enabled':os.getenv('VERIFYD_CIRCLE_EMAIL_PUBLIC_HANDLE_ENABLED','').strip().lower() in ('1','true','yes','on'),
             'external_attachments':('private_r2_download_with_unscanned_ack_required'
                 if inbound_attachments_enabled() else 'withheld_until_attachment_validation'),
             'external_attachment_max_files':3,
