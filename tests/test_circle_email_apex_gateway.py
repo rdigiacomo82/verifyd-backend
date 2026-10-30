@@ -96,7 +96,7 @@ class ApexGatewayTests(unittest.TestCase):
             " by de-fra-smtpin6.hostinger.io (mx.hostinger.com) with ESMTPS "
             "id 4jGQhR2nxLz4vxp\n"
             " for <roberttest22@vfvid.com>; Fri, 30 Oct 2026 15:56:55 +0000 (UTC)\n"
-            "From: \\"External Sender\\" <external@example.com>\n"
+            "From: External Sender <external@example.com>\n"
             "To: <roberttest22@vfvid.com>\n"
             "Subject: One more time\n"
             "MIME-Version: 1.0\n"
