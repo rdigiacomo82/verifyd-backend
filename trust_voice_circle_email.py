@@ -26,9 +26,11 @@ from trust_voice_attachment_validation import validate_attachment_content, Attac
 from trust_voice_attachments import _get_attachment_client, _storage_configured, TRUST_VOICE_BUCKET
 
 router = APIRouter(tags=['VeriFYD Circle Email'])
-VERSION='0.2.0'
+VERSION='0.3.0'
 MAX_FILE_BYTES=8*1024*1024
 ALLOWED_FILES={'.pdf','.txt','.docx','.xlsx','.png','.jpg','.jpeg','.webp','.csv','.pptx','.mp3','.wav'}
+# Resend has a higher provider maximum, but limit raw Circle attachments to 16 MiB total.
+MAX_EMAIL_TOTAL_BYTES=16*1024*1024
 _schema_ready=False
 
 def enabled(name): return os.getenv(name,'').strip().lower() in ('1','true','on','yes')
@@ -58,8 +60,12 @@ def schema():
         c.execute('''CREATE TABLE IF NOT EXISTS verifyd_circle_email_files (
           file_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, mail_id TEXT,
           filename TEXT NOT NULL, content_type TEXT NOT NULL, storage_key TEXT NOT NULL,
-          byte_size BIGINT NOT NULL, sha256 TEXT NOT NULL, created_at TEXT NOT NULL)
+          byte_size BIGINT NOT NULL, sha256 TEXT NOT NULL, created_at TEXT NOT NULL,
+          source TEXT NOT NULL DEFAULT 'internal',
+          scan_status TEXT NOT NULL DEFAULT 'not_scanned')
         ''')
+        c.execute("ALTER TABLE verifyd_circle_email_files ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'internal'")
+        c.execute("ALTER TABLE verifyd_circle_email_files ADD COLUMN IF NOT EXISTS scan_status TEXT NOT NULL DEFAULT 'not_scanned'")
         c.execute('''CREATE INDEX IF NOT EXISTS idx_circle_email_files_mail
           ON verifyd_circle_email_files(mail_id)''')
     _schema_ready=True
@@ -92,11 +98,29 @@ def public_mail(row:dict,with_body=False):
 
 def files_for(db,mail_ids:list[str]):
     if not mail_ids:return {}
-    c=db.cursor();c.execute('''SELECT file_id,mail_id,filename,content_type,byte_size,sha256
-      FROM verifyd_circle_email_files WHERE mail_id=ANY(%s)''',(mail_ids,))
+    c=db.cursor()
+    # Legacy files remain attached to the recipient copy. Expose the same
+    # authenticated sender-owned file in the matching Sent copy, never in
+    # an unrelated conversation that happens to share a thread identifier.
+    c.execute('''SELECT m.mail_id AS visible_mail_id, f.file_id,f.filename,
+        f.content_type,f.byte_size,f.sha256,f.source,f.scan_status
+      FROM verifyd_circle_email_messages m
+      JOIN verifyd_circle_email_files f ON
+        f.mail_id=m.mail_id
+        OR (m.folder='sent' AND f.owner_id=m.owner_id
+            AND EXISTS (SELECT 1 FROM verifyd_circle_email_messages recipient
+              WHERE recipient.mail_id=f.mail_id AND recipient.thread_id=m.thread_id
+                AND recipient.sender_id=m.sender_id
+                AND recipient.created_at=m.created_at))
+      WHERE m.mail_id=ANY(%s)''',(mail_ids,))
     out={}
     for row in c.fetchall() or []:
-        r=dict(row);out.setdefault(r['mail_id'],[]).append({k:r[k] for k in ('file_id','filename','content_type','byte_size','sha256')})
+        item=dict(row)
+        target=item.pop('visible_mail_id')
+        item['malware_scanned']=item.pop('scan_status','not_scanned')=='clean'
+        item['security_notice']=('External attachment has not been malware scanned. Download only if you trust the sender.'
+                                 if item.get('source')=='external' and not item['malware_scanned'] else '')
+        out.setdefault(target,[]).append(item)
     return out
 
 @router.get('/circle-email/health')
@@ -104,6 +128,8 @@ def email_health():
     return {'status':'ok','version':VERSION,'enabled':enabled('VERIFYD_CIRCLE_EMAIL_ENABLED'),
       'internal_handle_mail':'supported','external_outbound':enabled('VERIFYD_CIRCLE_EMAIL_EXTERNAL_ENABLED'),
       'external_inbound':'enabled' if enabled('VERIFYD_CIRCLE_EMAIL_INBOUND_ENABLED') else 'not_configured','private_attachments':_storage_configured(),
+      'external_attachment_send':_storage_configured() and enabled('VERIFYD_CIRCLE_EMAIL_EXTERNAL_ENABLED'),
+      'external_attachment_receive':_storage_configured() and enabled('VERIFYD_CIRCLE_EMAIL_INBOUND_ENABLED') and enabled('VERIFYD_CIRCLE_EMAIL_INBOUND_ATTACHMENTS_ENABLED'),
       'risk_classification':'rule_signals_not_ai_certification','attachment_malware_scanning':'not_available'}
 
 @router.get('/circle-email/messages')
@@ -181,7 +207,8 @@ async def upload_file(file:UploadFile=File(...),authorization:Optional[str]=Head
     return {'file_id':fid,'filename':name,'size':len(payload)}
 
 @router.get('/circle-email/files/{file_id}/download')
-def download_file(file_id:str,authorization:Optional[str]=Header(default=None)):
+def download_file(file_id:str,authorization:Optional[str]=Header(default=None),
+                  acknowledge_unscanned:bool=Query(default=False)):
     feature();identity=_identity_from_bearer(authorization);schema();uid=str(identity['id'])
     with get_db() as db:
         c=db.cursor();c.execute('''SELECT f.* FROM verifyd_circle_email_files f
@@ -191,11 +218,15 @@ def download_file(file_id:str,authorization:Optional[str]=Header(default=None)):
     if not r:fail('file_not_found','Attachment not found.',404)
     r=dict(r)
     if r['mail_id'] is None and r['owner_id']!=uid:fail('file_not_found','Attachment not found.',404)
+    if r.get('source')=='external' and r.get('scan_status')!='clean' and not acknowledge_unscanned:
+        fail('attachment_confirmation_required',
+             'External attachment is not malware scanned. Confirm before downloading.',409)
     try:resp=_get_attachment_client().get_object(Bucket=TRUST_VOICE_BUCKET,Key=r['storage_key'])
     except Exception:fail('file_unavailable','Attachment unavailable.',503)
     safe=re.sub(r'[^A-Za-z0-9_. -]','_',r['filename']).replace('"','_')
     return StreamingResponse(resp['Body'].iter_chunks(chunk_size=65536),media_type='application/octet-stream',headers={
-       'Content-Disposition':f'attachment; filename="{safe}"','Cache-Control':'private, no-store','X-Content-Type-Options':'nosniff'})
+       'Content-Disposition':f'attachment; filename="{safe}"','Cache-Control':'private, no-store',
+       'X-Content-Type-Options':'nosniff','X-VeriFYD-Malware-Scanned':('true' if r.get('scan_status')=='clean' else 'false')})
 
 @router.post('/circle-email/send')
 async def send(payload:MailSend,tasks:BackgroundTasks,authorization:Optional[str]=Header(default=None)):
@@ -228,7 +259,6 @@ async def send(payload:MailSend,tasks:BackgroundTasks,authorization:Optional[str
                 fail('inbound_not_configured','The VeriFYD reply mailbox is still being configured.',503)
             ensure_inbound_schema()
         if not re.fullmatch(r'[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+',to):fail('recipient_invalid','Enter a valid email address.')
-        if payload.file_ids:fail('external_files_not_ready','External attachments require a verified outbound file pipeline.',422)
         recipient=to.lower();tid=None
     if len(set(payload.file_ids))!=len(payload.file_ids):fail('duplicate_file','An attachment was selected more than once.')
     if len(payload.file_ids)>3:fail('too_many_files','Attach no more than three files.')
@@ -242,6 +272,8 @@ async def send(payload:MailSend,tasks:BackgroundTasks,authorization:Optional[str
              AND owner_id=%s AND mail_id IS NULL FOR UPDATE''',(payload.file_ids,uid))
             rows=[dict(x) for x in c.fetchall() or []]
             if len(rows)!=len(payload.file_ids):fail('file_missing','Upload or remove an expired attachment.')
+            if sum(int(x['byte_size']) for x in rows)>MAX_EMAIL_TOTAL_BYTES:
+                fail('attachment_total_limit','Attachments exceed the 16 MB combined limit.',413)
         thread=payload.thread_id if payload.thread_id and re.fullmatch(r'tvcemail_[a-f0-9]{32}',payload.thread_id) else 'tvcemail_'+uuid.uuid4().hex
         sent_id='tvcmail_'+uuid.uuid4().hex;now=utc();v,risk_note=risk(True,subject,body)
         if internal:
@@ -258,10 +290,14 @@ async def send(payload:MailSend,tasks:BackgroundTasks,authorization:Optional[str
                 subject,body,folder,is_read,delivery,verdict,risk_notes,created_at)
                 VALUES(%s,%s,%s,%s,%s,%s,%s,%s,'sent',TRUE,'sending',%s,%s,%s)''',
                 (sent_id,thread,uid,uid,'@'+str(actor.get('handle_lower') or actor.get('handle') or ''),recipient,subject,body,v,risk_note,now))
+            for item in rows:
+                c.execute('UPDATE verifyd_circle_email_files SET mail_id=%s WHERE file_id=%s',
+                          (sent_id,item['file_id']))
             if inbound_reply_active:
                 from trust_voice_circle_email_inbound import create_reply_route
                 reply_address=create_reply_route(db,owner_id=uid,sent_mail_id=sent_id,
-                       thread_id=thread,external_recipient=recipient,stamp=now)
+                       thread_id=thread,external_recipient=recipient,stamp=now,
+                       sender_handle=str(actor.get('handle_lower') or actor.get('handle') or ''))
     if internal:
         try: tasks.add_task(_notify_recipient,tid,recv_id)
         except Exception:pass
@@ -283,15 +319,26 @@ async def send(payload:MailSend,tasks:BackgroundTasks,authorization:Optional[str
         reply_note=('Reply to this message to reach the sender in VeriFYD Circle.'
                     if inbound_reply_active else
                     'Replies go to the sender\'s verified email address until VeriFYD inbound routing is enabled.')
-        result=resend.Emails.send({'from':from_address,'to':[recipient],
+        from trust_voice_circle_email_transport import prepare_outbound_attachments
+        attachment_payload=prepare_outbound_attachments(rows)
+        send_params={'from':from_address,'to':[recipient],
           'reply_to':reply_to,
-          'subject':subject,'text':f"From VeriFYD Circle user @{actor.get('handle') or actor.get('handle_lower') or 'member'}\n\n{body}\n\n{reply_note}"})
+          'subject':subject,'text':f"From VeriFYD Circle user @{actor.get('handle') or actor.get('handle_lower') or 'member'}\n\n{body}\n\n{reply_note}"}
+        if attachment_payload:
+            send_params['attachments']=attachment_payload
+        result=resend.Emails.send(send_params)
         if not result:raise RuntimeError('No provider acceptance')
         state='accepted_by_provider'
     except Exception:
         state='failed'
     with get_db() as db:
         c=db.cursor();c.execute('UPDATE verifyd_circle_email_messages SET delivery=%s WHERE mail_id=%s AND owner_id=%s',(state,sent_id,uid))
+        if state=='failed' and rows:
+            # Preserve previously uploaded private files for a retry when the
+            # provider rejects the message. The failed Sent entry must not
+            # consume these file IDs permanently.
+            c.execute('''UPDATE verifyd_circle_email_files SET mail_id=NULL
+                  WHERE mail_id=%s AND owner_id=%s''',(sent_id,uid))
     if state=='failed':fail('delivery_failed','External provider could not accept this email. Please try again later.',503)
     return {'ok':True,'mail_id':sent_id,'delivery':state,'recipient':recipient,
             'notice':('External replies route to your VeriFYD Inbox.' if inbound_reply_active else 'Replies go to your verified email until inbound routing is enabled.')}
