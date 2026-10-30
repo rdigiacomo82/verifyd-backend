@@ -1989,16 +1989,22 @@ async def signaling_ws(
             )
             return
 
-    except HTTPException:
+    except HTTPException as exc:
+        # Only a definitively INVALID token should log the user out.
+        # A transient unavailable session DB must not produce 4401.
         await websocket.close(
-            code=4401
+            code=4401 if exc.status_code == 401 else 1013
         )
         return
 
+    except (psycopg2.Error, psycopg2.pool.PoolError):
+        # Database overload is temporary, not an authentication failure.
+        await websocket.close(code=1013)
+        return
+
     except Exception:
-        await websocket.close(
-            code=4401
-        )
+        # Unexpected infrastructure problems also must not revoke sessions.
+        await websocket.close(code=1013)
         return
 
     identity_id = (
