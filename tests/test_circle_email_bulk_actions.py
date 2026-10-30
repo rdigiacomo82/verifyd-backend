@@ -102,7 +102,7 @@ class BulkTests(unittest.TestCase):
     def test_safety_contract_and_bounded_model(self):
         s=MAIL.read_text(encoding='utf-8')
         self.assertIn('class MailBulkUpdate(BaseModel):',s)
-        self.assertIn("action: Literal['trash','restore','move','move_inbox']",s)
+        self.assertIn("action: Literal['trash','restore','move','move_inbox','archive','unarchive','read','unread']",s)
         self.assertIn('Field(min_length=1, max_length=150)',s)
         self.assertIn("@router.post('/circle-email/messages/bulk-action')",s)
         self.assertIn('owner_id=%s AND mail_id=ANY(%s) FOR UPDATE',s)
