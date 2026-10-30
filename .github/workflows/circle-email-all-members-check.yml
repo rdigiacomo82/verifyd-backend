@@ -8,6 +8,8 @@ on:
       - "trust_voice_circle_email_inbound.py"
       - "trust_voice_circle_email.py"
       - "tests/test_circle_email_public_handle.py"
+      - "trust_voice_circle_email_apex_gateway.py"
+      - "tests/test_circle_email_apex_gateway.py"
       - ".github/workflows/circle-email-all-members-check.yml"
   pull_request:
     paths:
@@ -15,6 +17,8 @@ on:
       - "trust_voice_circle_email_inbound.py"
       - "trust_voice_circle_email.py"
       - "tests/test_circle_email_public_handle.py"
+      - "trust_voice_circle_email_apex_gateway.py"
+      - "tests/test_circle_email_apex_gateway.py"
       - ".github/workflows/circle-email-all-members-check.yml"
 
 permissions:
@@ -29,9 +33,11 @@ jobs:
         with:
           python-version: "3.11"
       - name: Validate mailbox modules
-        run: python -m py_compile trust_voice_circle_email_public.py trust_voice_circle_email_inbound.py trust_voice_circle_email.py
+        run: python -m py_compile trust_voice_circle_email_public.py trust_voice_circle_email_inbound.py trust_voice_circle_email.py trust_voice_circle_email_apex_gateway.py
       - name: Test dynamic all-member handles, abuse boundaries and idempotency
         run: python -m unittest discover -s tests -p 'test_circle_email_public_handle.py' -v
+      - name: Validate Hostinger envelope-recipient trust boundaries
+        run: python -m unittest discover -s tests -p 'test_circle_email_apex_gateway.py' -v
       - name: Preserve existing reply, attachment and compose behavior
         run: |
           python -m unittest discover -s tests -p 'test_circle_email_inbound_retrieval.py' -v
