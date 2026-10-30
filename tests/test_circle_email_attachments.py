@@ -156,6 +156,17 @@ class AttachmentTests(unittest.TestCase):
         self.assertIn(keys[0],env_client.storage)
         self.assertIn("'external','not_scanned'",params[0][0])
 
+    def test_incoming_attachments_default_off_to_protect_working_mail(self):
+        source = INBOUND.read_text(encoding="utf-8")
+        self.assertIn("def inbound_attachments_enabled()",source)
+        self.assertIn("VERIFYD_CIRCLE_EMAIL_INBOUND_ATTACHMENTS_ENABLED",source)
+        self.assertIn("attached, omitted = [], len(advertised)",source)
+
+    def test_failed_external_send_does_not_consume_uploaded_files(self):
+        source = EMAIL.read_text(encoding="utf-8")
+        self.assertIn("if state=='failed' and rows:",source)
+        self.assertIn("UPDATE verifyd_circle_email_files SET mail_id=NULL",source)
+
     def test_external_download_requires_acknowledgement(self):
         source = EMAIL.read_text(encoding="utf-8")
         self.assertIn("attachment_confirmation_required", source)
