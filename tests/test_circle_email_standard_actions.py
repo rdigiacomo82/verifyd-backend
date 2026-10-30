@@ -43,7 +43,7 @@ def extract_function(name,cur):
     fn.returns=None
     for arg in (*fn.args.posonlyargs,*fn.args.args,*fn.args.kwonlyargs):
         arg.annotation=None
-    env=dict(feature=lambda:None,_identity_from_bearer=lambda a:{"id":"ownerA"},
+    env=dict(Header=lambda default=None:None, feature=lambda:None,_identity_from_bearer=lambda a:{"id":"ownerA"},
              schema=lambda:None,get_db=lambda:Db(cur),
              fail=lambda code,msg,status=400: (_ for _ in ()).throw(HTTPError(status,code)),
              _restore_folder=lambda c,owner,row:row.get("previous_folder") or "inbox",
