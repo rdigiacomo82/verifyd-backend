@@ -26,7 +26,7 @@ from trust_voice_attachment_validation import validate_attachment_content, Attac
 from trust_voice_attachments import _get_attachment_client, _storage_configured, TRUST_VOICE_BUCKET
 
 router = APIRouter(tags=['VeriFYD Circle Email'])
-VERSION='0.3.0'
+VERSION='0.3.1'
 MAX_FILE_BYTES=8*1024*1024
 ALLOWED_FILES={'.pdf','.txt','.docx','.xlsx','.png','.jpg','.jpeg','.webp','.csv','.pptx','.mp3','.wav'}
 # Resend has a higher provider maximum, but limit raw Circle attachments to 16 MiB total.
@@ -130,7 +130,21 @@ def email_health():
       'external_inbound':'enabled' if enabled('VERIFYD_CIRCLE_EMAIL_INBOUND_ENABLED') else 'not_configured','private_attachments':_storage_configured(),
       'external_attachment_send':_storage_configured() and enabled('VERIFYD_CIRCLE_EMAIL_EXTERNAL_ENABLED'),
       'external_attachment_receive':_storage_configured() and enabled('VERIFYD_CIRCLE_EMAIL_INBOUND_ENABLED') and enabled('VERIFYD_CIRCLE_EMAIL_INBOUND_ATTACHMENTS_ENABLED'),
+      'public_handle_email':'opt_in_via_handle_allowlist',
       'risk_classification':'rule_signals_not_ai_certification','attachment_malware_scanning':'not_available'}
+
+@router.get('/circle-email/my-address')
+def my_address(authorization:Optional[str]=Header(default=None)):
+    """Return only the authenticated member's public address, if opted in."""
+    feature();actor=_identity_from_bearer(authorization)
+    handle=str(actor.get('handle_lower') or actor.get('handle') or '').strip().lower()
+    from trust_voice_circle_email_inbound import reply_domain
+    from trust_voice_circle_email_public import public_address_for_handle
+    available=(public_address_for_handle(handle,reply_domain())
+               if enabled('VERIFYD_CIRCLE_EMAIL_INBOUND_ENABLED') else None)
+    return {'internal_handle':'@'+handle,'public_email_address':available,
+            'public_email_enabled':bool(available)}
+
 
 @router.get('/circle-email/messages')
 def inbox(folder:Literal['inbox','sent','spam','trash','starred']='inbox',q:str=Query(default='',max_length=100),
@@ -315,7 +329,17 @@ async def send(payload:MailSend,tasks:BackgroundTasks,authorization:Optional[str
         default_from=(f'VeriFYD Circle (@{display_handle}) <mail@vfvid.com>'
                       if inbound_reply_active else 'VeriFYD Circle <noreply@vfvid.com>')
         from_address=os.getenv('VERIFYD_CIRCLE_EMAIL_FROM',default_from)
-        reply_to=reply_address if inbound_reply_active else sender_email
+        # Opted-in public handles replace the long Reply-To in NEW emails.
+        # A private token route is still stored for historical compatibility.
+        if inbound_reply_active:
+            from trust_voice_circle_email_public import public_address_for_handle
+            from trust_voice_circle_email_inbound import reply_domain
+            public_reply=public_address_for_handle(
+                str(actor.get('handle_lower') or actor.get('handle') or ''),
+                reply_domain())
+            reply_to=public_reply or reply_address
+        else:
+            reply_to=sender_email
         reply_note=('Reply to this message to reach the sender in VeriFYD Circle.'
                     if inbound_reply_active else
                     'Replies go to the sender\'s verified email address until VeriFYD inbound routing is enabled.')
