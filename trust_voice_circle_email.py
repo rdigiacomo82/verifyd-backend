@@ -152,6 +152,7 @@ def email_health():
       'external_attachment_send':_storage_configured() and enabled('VERIFYD_CIRCLE_EMAIL_EXTERNAL_ENABLED'),
       'external_attachment_receive':_storage_configured() and enabled('VERIFYD_CIRCLE_EMAIL_INBOUND_ENABLED') and enabled('VERIFYD_CIRCLE_EMAIL_INBOUND_ATTACHMENTS_ENABLED'),
       'public_handle_email':'dynamic_all_verified_accounts_gated',
+      'apex_public_reply_to_enabled':enabled('VERIFYD_CIRCLE_EMAIL_PUBLIC_HANDLE_ENABLED') and enabled('VERIFYD_CIRCLE_EMAIL_APEX_ADVERTISE_ENABLED'),
       'risk_classification':'rule_signals_not_ai_certification','attachment_malware_scanning':'not_available'}
 
 @router.get('/circle-email/my-address')
