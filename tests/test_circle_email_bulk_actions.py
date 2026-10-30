@@ -58,6 +58,8 @@ def isolated(rows):
         re=re,
         fail=lambda code,msg,status=400: (_ for _ in ()).throw(MailFailure(code,msg,status)),
         utc=lambda:'2026-10-30T00:00:00+00:00',
+        _restore_folder=lambda _c,owner,row:
+            ('sent' if row.get('previous_folder')=='sent' or row.get('sender_id')==owner else 'inbox'),
     )
     exec(compile(ast.Module(body=[node],type_ignores=[]),str(MAIL),'exec'),env)
     return env['bulk_action'],db
@@ -100,7 +102,7 @@ class BulkTests(unittest.TestCase):
     def test_safety_contract_and_bounded_model(self):
         s=MAIL.read_text(encoding='utf-8')
         self.assertIn('class MailBulkUpdate(BaseModel):',s)
-        self.assertIn("action: Literal['trash','restore']",s)
+        self.assertIn("action: Literal['trash','restore','move','move_inbox']",s)
         self.assertIn('Field(min_length=1, max_length=150)',s)
         self.assertIn("@router.post('/circle-email/messages/bulk-action')",s)
         self.assertIn('owner_id=%s AND mail_id=ANY(%s) FOR UPDATE',s)
