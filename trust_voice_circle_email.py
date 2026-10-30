@@ -410,13 +410,8 @@ def recover_inbound_attachments(
             created_keys=persist_inbound_attachments(
                 db,files=fetched,owner_id=uid,mail_id=mail_id,stamp=utc()
             )
-            # Replace only our own generated earlier withholding warning.
-            # Users should not see a stale missing-file notice after recovery.
-            c.execute("""UPDATE verifyd_circle_email_messages
-              SET body=regexp_replace(body,
-                E'\\\\n\\\\n\\\\[[0-9]+ external attachment\\\\(s\\\\) withheld: incoming file downloads have not yet been activated\\\\.\\\\]',
-                '', 'g')
-              WHERE owner_id=%s AND mail_id=%s""",(uid,mail_id))
+            # The existing body remains immutable. The UI suppresses the old
+            # withholding banner when attachments are now present.
     except Exception:
         if created_keys:
             try:
