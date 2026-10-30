@@ -99,6 +99,22 @@ class PublicHandleTests(TestCase):
             self.assertIsNone(h["public_address_for_handle"]("123invalid", DOMAIN))
             self.assertIsNone(h["public_address_for_handle"]("roberttest22","vfvid.com"))
 
+    def test_apex_addresses_only_advertised_after_separate_gateway_flag(self):
+        h = helpers()
+        with self.config():
+            self.assertIsNone(h["public_apex_address_for_handle"]("roberttest22"))
+        with self.config():
+            with patch.dict(os.environ,{"VERIFYD_CIRCLE_EMAIL_APEX_ADVERTISE_ENABLED":"true"}):
+                self.assertEqual(h["public_apex_address_for_handle"]("@RobertTest22"),
+                                 "roberttest22@vfvid.com")
+                self.assertIsNone(h["public_apex_address_for_handle"]("support"))
+
+    def test_registration_reserves_existing_hostinger_business_mailboxes(self):
+        src=(ROOT/"trust_voice_identity.py").read_text(encoding="utf-8")
+        self.assertIn('from trust_voice_circle_email_public import _reserved_aliases',src)
+        self.assertIn('VERIFYD_CIRCLE_EMAIL_PUBLIC_HANDLE_ENABLED',src)
+        self.assertIn('if handle_lower in _reserved_aliases():',src)
+
     def test_sender_and_owner_daily_limits(self):
         h = helpers()
         class Cursor:
