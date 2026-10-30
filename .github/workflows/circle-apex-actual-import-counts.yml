@@ -1,0 +1,23 @@
+name: Hostinger actual member import counts
+on:
+  push:
+    branches: [fix/circle-apex-actual-import-counts-20261030]
+  pull_request:
+    paths:
+      - 'trust_voice_circle_email_apex_gateway.py'
+      - 'tests/test_circle_email_apex_import_counts.py'
+permissions:
+  contents: read
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m py_compile trust_voice_circle_email_apex_gateway.py
+      - run: python -m unittest discover -s tests -p 'test_circle_email_apex_import_counts.py' -v
+      - run: python -m unittest discover -s tests -p 'test_circle_email_apex_gateway.py' -v
+      - run: python -m unittest discover -s tests -p 'test_circle_email_apex_imap_uids.py' -v
+      - run: python -m unittest discover -s tests -p 'test_circle_email_apex_diagnostics.py' -v
