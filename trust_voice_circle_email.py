@@ -109,7 +109,7 @@ class MailUpdate(BaseModel):
     action: Literal['read','unread','star','unstar','spam','not_spam','trash','restore']
 
 class MailBulkUpdate(BaseModel):
-    action: Literal['trash','restore','move']
+    action: Literal['trash','restore','move','move_inbox']
     mail_ids: list[str] = Field(min_length=1, max_length=150)
     folder_id: Optional[str] = None
 
@@ -344,7 +344,7 @@ def action(mail_id:str,payload:MailUpdate,authorization:Optional[str]=Header(def
 
 @router.post('/circle-email/messages/bulk-action')
 def bulk_action(payload:MailBulkUpdate,authorization:Optional[str]=Header(default=None)):
-    """Atomically move an authenticated member's selected email to/from Trash.
+    """Atomically organize or move selected emails to/from Trash.
 
     This only changes the owner's own mail rows; no cross-account mail,
     attachments, or other copies are deleted. Trash is intentionally
@@ -379,6 +379,12 @@ def bulk_action(payload:MailBulkUpdate,authorization:Optional[str]=Header(defaul
                         SET folder=%s WHERE owner_id=%s AND mail_id=%s''',
                         (destination,uid,row['mail_id']))
                     count+=1
+            elif payload.action=='move_inbox':
+                if not row['folder'].startswith('custom:'):
+                    fail('move_not_allowed','Only custom-folder emails can be moved back to Inbox.')
+                c.execute('''UPDATE verifyd_circle_email_messages SET folder='inbox'
+                  WHERE owner_id=%s AND mail_id=%s''',(uid,row['mail_id']))
+                count+=1
             elif payload.action=='trash' and row['folder']!='trash':
                 c.execute('''UPDATE verifyd_circle_email_messages
                     SET folder='trash', previous_folder=%s,deleted_at=%s
