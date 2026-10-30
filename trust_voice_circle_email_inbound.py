@@ -236,8 +236,9 @@ def _candidate_routes(to_list, domain: str):
         named = _HANDLE_TOKEN.fullmatch(address)
         if legacy and legacy.group(2)==domain:
             tokens.append(legacy.group(1).lower())
-        elif named and named.group(3)==domain:
-            # The handle must never be trusted for inbox selection.
+        elif named and named.group(3)==domain and named.group(1).lower()!='reply':
+            # "reply" is reserved for legacy addresses; a handle is never
+            # trusted for recipient selection, only the stored secret token.
             tokens.append(named.group(2).lower())
     return list(dict.fromkeys(tokens))
 
