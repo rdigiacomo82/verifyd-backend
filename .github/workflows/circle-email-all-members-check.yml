@@ -1,0 +1,40 @@
+name: Circle all-member email address routing checks
+
+on:
+  push:
+    branches: [feature/circle-all-members-email-addresses-20261029]
+    paths:
+      - "trust_voice_circle_email_public.py"
+      - "trust_voice_circle_email_inbound.py"
+      - "trust_voice_circle_email.py"
+      - "tests/test_circle_email_public_handle.py"
+      - ".github/workflows/circle-email-all-members-check.yml"
+  pull_request:
+    paths:
+      - "trust_voice_circle_email_public.py"
+      - "trust_voice_circle_email_inbound.py"
+      - "trust_voice_circle_email.py"
+      - "tests/test_circle_email_public_handle.py"
+      - ".github/workflows/circle-email-all-members-check.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Validate mailbox modules
+        run: python -m py_compile trust_voice_circle_email_public.py trust_voice_circle_email_inbound.py trust_voice_circle_email.py
+      - name: Test dynamic all-member handles, abuse boundaries and idempotency
+        run: python -m unittest discover -s tests -p 'test_circle_email_public_handle.py' -v
+      - name: Preserve existing reply, attachment and compose behavior
+        run: |
+          python -m unittest discover -s tests -p 'test_circle_email_inbound_retrieval.py' -v
+          python -m unittest discover -s tests -p 'test_circle_email_reply_aliases.py' -v
+          python -m unittest discover -s tests -p 'test_circle_email_attachments.py' -v
+          python -m unittest discover -s tests -p 'test_circle_email_optional_body_sender.py' -v
