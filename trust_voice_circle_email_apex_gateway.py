@@ -31,6 +31,8 @@ _TRUSTED_BY = re.compile(r"\bby\s+([a-z0-9][a-z0-9.-]+)", re.I)
 _FOR_ADDRESS = re.compile(r"\bfor\s+<?([a-z][a-z0-9_]{2,23}@vfvid\.com)>?(?=[\s;,]|$)", re.I)
 _UID_SIZE = re.compile(rb"RFC822\.SIZE\s+(\d+)")
 _MAX_BATCH = 30
+_REPLAY_WINDOW_UIDS = 256
+_REPLAY_BATCH = 12
 
 # Single-run, non-sensitive diagnostic stage. Never log messages, addresses,
 # server responses or IMAP provider exception texts in production logs.
@@ -147,6 +149,10 @@ def _schema():
             provider_id TEXT PRIMARY KEY, reason TEXT NOT NULL,
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )""")
+        c.execute("""ALTER TABLE verifyd_circle_email_apex_quarantine
+            ADD COLUMN IF NOT EXISTS last_replay_trust_hash TEXT""")
+        c.execute("""ALTER TABLE verifyd_circle_email_apex_quarantine
+            ADD COLUMN IF NOT EXISTS recovered_at TIMESTAMPTZ""")
 
 
 def _check_cursor(mailbox_hash: str, uidvalidity: str) -> int:
@@ -249,6 +255,109 @@ def _fetch_raw(conn, uid: int) -> bytes:
     raise RuntimeError("IMAP message body unavailable")
 
 
+
+def _recent_processed_uids(conn, last_uid: int,
+                           window: int = _REPLAY_WINDOW_UIDS) -> list[int]:
+    """Only list existing, already checkpointed IMAP UIDs in a bounded window."""
+    if last_uid < 1:
+        return []
+    first = max(1, last_uid - window + 1)
+    status, rows = conn.uid("search", None, "UID", f"{first}:{last_uid}")
+    if status != "OK" or not isinstance(rows, (list, tuple)):
+        raise RuntimeError("Hostinger replay UID SEARCH failed")
+    if not rows or rows[0] is None:
+        return []
+    response = rows[0]
+    if not isinstance(response, (bytes, str)):
+        raise RuntimeError("Hostinger replay UID SEARCH malformed")
+    found = set()
+    for token in response.split():
+        if isinstance(token, bytes):
+            if not token.isdigit():
+                raise RuntimeError("Hostinger replay UID malformed")
+            number = int(token.decode("ascii"))
+        else:
+            if not token.isascii() or not token.isdecimal():
+                raise RuntimeError("Hostinger replay UID malformed")
+            number = int(token)
+        if not 0 < number <= 0xFFFFFFFF:
+            raise RuntimeError("Hostinger replay UID invalid")
+        if first <= number <= last_uid:
+            found.add(number)
+    return sorted(found, reverse=True)
+
+
+def _replay_recent_quarantine(conn, mailbox_key: str, valid: str,
+                              last_uid: int, trusted_hosts: frozenset[str],
+                              max_count: int = _REPLAY_BATCH) -> tuple[int, int]:
+    """Recover only verified recipients from previously quarantined mail.
+
+    Never rewind the live cursor, trust To headers, delete provider mail or
+    deliver to a handle not validated by store_public_received(). Each
+    quarantined provider ID is checked once for each exact trusted-host set.
+    """
+    if not trusted_hosts or not 0 < max_count <= _REPLAY_BATCH:
+        return 0, 0
+    from database import get_db
+    from trust_voice_circle_email_public import store_public_received
+
+    hosts_hash = hashlib.sha256(
+        ",".join(sorted(trusted_hosts)).encode("ascii")).hexdigest()
+    recent = _recent_processed_uids(conn, last_uid)
+    provider_for_uid = {
+        uid: "hostinger-" + hashlib.sha256(
+            f"{mailbox_key}:{valid}:{uid}".encode("ascii")).hexdigest()
+        for uid in recent
+    }
+    if not provider_for_uid:
+        return 0, 0
+    with get_db() as db:
+        cur = db.cursor()
+        cur.execute("""SELECT provider_id
+            FROM verifyd_circle_email_apex_quarantine
+            WHERE provider_id = ANY(%s)
+              AND reason = 'recipient_unverified'
+              AND recovered_at IS NULL
+              AND last_replay_trust_hash IS DISTINCT FROM %s""",
+                    (list(provider_for_uid.values()), hosts_hash))
+        eligible = {row["provider_id"] for row in cur.fetchall()}
+
+    checked = recovered = 0
+    for uid in recent:
+        provider_id = provider_for_uid[uid]
+        if provider_id not in eligible:
+            continue
+        _stage("replay_fetch_size")
+        size = _fetch_size(conn, uid)
+        delivered = False
+        if 0 < size <= _MAX_RAW_BYTES:
+            _stage("replay_fetch_raw")
+            raw = _fetch_raw(conn, uid)
+            _stage("replay_parse")
+            handle, received = parse_catchall(raw, trusted_hosts)
+            if received is not None:
+                _stage("replay_store")
+                owner, mail_id = store_public_received(
+                    received, provider_id, handle=handle)
+                delivered = bool(owner and mail_id)
+        # The DB insert above commits before replay state is recorded.
+        # A retry is safe: store_public_received is idempotent by provider_id.
+        _stage("replay_mark")
+        with get_db() as db:
+            db.cursor().execute(
+                """UPDATE verifyd_circle_email_apex_quarantine
+                   SET last_replay_trust_hash=%s,
+                       recovered_at=CASE WHEN %s THEN NOW() ELSE recovered_at END
+                   WHERE provider_id=%s""",
+                (hosts_hash, delivered, provider_id))
+        checked += 1
+        if delivered:
+            recovered += 1
+        if checked >= max_count:
+            break
+    return recovered, checked
+
+
 def ingest_batch(max_count: int = _MAX_BATCH) -> dict:
     """Read one bounded IMAP batch; checkpoint only after each message commits."""
     from database import get_db
@@ -316,12 +425,17 @@ def ingest_batch(max_count: int = _MAX_BATCH) -> dict:
                     # Reserved aliases, unregistered accounts, duplicates and
                     # sender limits are not actual VeriFYD Inbox deliveries.
                     skipped += 1
+            _stage("replay_quarantine")
+            recovered, rechecked = _replay_recent_quarantine(
+                connection, mailbox_key, valid, last, _trusted_hosts())
+            handled += recovered
         finally:
             try:
                 connection.logout()
             except (imaplib.IMAP4.error,OSError):
                 pass
-    return {"status": "ok", "processed": handled, "quarantined": quarantined, "skipped": skipped}
+    return {"status": "ok", "processed": handled, "quarantined": quarantined,
+            "skipped": skipped, "recovered": recovered, "rechecked": rechecked}
 
 
 def main() -> int:
@@ -331,6 +445,8 @@ def main() -> int:
         # No addresses, bodies, authentication secrets or message headers in logs.
         log.info("Apex mail batch status=%s imported=%d quarantined=%d skipped=%d",
                  result["status"],result["processed"],result["quarantined"],result.get("skipped",0))
+        log.info("Apex quarantine replay recovered=%d rechecked=%d",
+                 result.get("recovered", 0), result.get("rechecked", 0))
         return 0
     except Exception as exc:
         # Never log provider exception messages: they may contain account names
