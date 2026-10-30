@@ -1,0 +1,24 @@
+name: Hostinger rotating MX security regression
+on:
+  pull_request:
+    paths:
+      - 'trust_voice_circle_email_apex_gateway.py'
+      - 'tests/test_trust_voice_circle_email_apex_rotating_mx.py'
+      - '.github/workflows/hostinger-rotating-mx-tests.yml'
+  push:
+    paths:
+      - 'trust_voice_circle_email_apex_gateway.py'
+      - 'tests/test_trust_voice_circle_email_apex_rotating_mx.py'
+      - '.github/workflows/hostinger-rotating-mx-tests.yml'
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Compile inbound gateway
+        run: python -m py_compile trust_voice_circle_email_apex_gateway.py
+      - name: Validate rotating MX and spoof protection
+        run: python -m unittest discover -s tests -p 'test_trust_voice_circle_email_apex_rotating_mx.py' -v
