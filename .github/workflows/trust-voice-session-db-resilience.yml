@@ -1,0 +1,35 @@
+name: Session OTP reliability under database contention
+
+on:
+  push:
+    branches: [fix/trust-voice-otp-db-pool-resilience-20261030]
+    paths:
+      - "database.py"
+      - "trust_voice_signaling.py"
+      - "tests/test_trust_voice_session_db_resilience.py"
+      - ".github/workflows/trust-voice-session-db-resilience.yml"
+  pull_request:
+    paths:
+      - "database.py"
+      - "trust_voice_signaling.py"
+      - "tests/test_trust_voice_session_db_resilience.py"
+      - ".github/workflows/trust-voice-session-db-resilience.yml"
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Check Python syntax
+        run: python -m py_compile database.py trust_voice_signaling.py
+      - name: Verify existing session tokens survive database contention
+        run: python -m unittest discover -s tests -p 'test_trust_voice_session_db_resilience.py' -v
+      - name: Verify recent Circle email features unchanged
+        run: |
+          python -m unittest discover -s tests -p 'test_circle_email_bulk_actions.py' -v
+          python -m unittest discover -s tests -p 'test_circle_email_optional_body_sender.py' -v
+          python -m unittest discover -s tests -p 'test_circle_email_attachments.py' -v

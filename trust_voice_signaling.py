@@ -31,6 +31,8 @@ import hmac
 import json
 import logging
 import os
+import psycopg2
+import psycopg2.pool
 import secrets
 import time
 import uuid
@@ -738,9 +740,21 @@ def _verify_token(
         # NEW persistent / revocable session format
         # --------------------------------------------------
         if session_id:
-            row = _persistent_session_row(
-                session_id
-            )
+            try:
+                row = _persistent_session_row(
+                    session_id
+                )
+            except (psycopg2.Error, psycopg2.pool.PoolError):
+                # A brief database outage or exhausted pool must NEVER be
+                # interpreted as a revoked/invalid user session. The caller
+                # should retain the existing token and retry after recovery.
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "error": "session_check_unavailable",
+                        "message": "VeriFYD is temporarily busy. Please retry without signing out.",
+                    },
+                ) from None
 
             if not row:
                 raise ValueError(
@@ -1975,16 +1989,22 @@ async def signaling_ws(
             )
             return
 
-    except HTTPException:
+    except HTTPException as exc:
+        # Only a definitively INVALID token should log the user out.
+        # A transient unavailable session DB must not produce 4401.
         await websocket.close(
-            code=4401
+            code=4401 if exc.status_code == 401 else 1013
         )
         return
 
+    except (psycopg2.Error, psycopg2.pool.PoolError):
+        # Database overload is temporary, not an authentication failure.
+        await websocket.close(code=1013)
+        return
+
     except Exception:
-        await websocket.close(
-            code=4401
-        )
+        # Unexpected infrastructure problems also must not revoke sessions.
+        await websocket.close(code=1013)
         return
 
     identity_id = (
