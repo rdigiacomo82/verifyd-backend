@@ -1,0 +1,85 @@
+"""Offline regression for the production Hostinger IMAP UID AttributeError.
+
+IMAP4.uid("search", ...) returns raw bytes: [b'1 2 3'].
+bytes.isdecimal() does not exist; bytes.isdigit() does.
+"""
+from __future__ import annotations
+
+import ast
+from pathlib import Path
+import unittest
+
+ROOT=Path(__file__).resolve().parents[1]
+GATEWAY=ROOT/"trust_voice_circle_email_apex_gateway.py"
+
+
+def extract():
+    tree=ast.parse(GATEWAY.read_text(encoding="utf-8"))
+    fn=next(n for n in tree.body
+            if isinstance(n,ast.FunctionDef) and n.name=="_search_new_uids")
+    namespace={"_MAX_BATCH":30}
+    exec(compile(ast.Module(body=[fn],type_ignores=[]),str(GATEWAY),"exec"),namespace)
+    return namespace["_search_new_uids"]
+
+
+class Imap:
+    def __init__(self,rows,status="OK"):
+        self.rows=rows
+        self.status=status
+        self.calls=[]
+    def uid(self,*args):
+        self.calls.append(args)
+        return (self.status,self.rows)
+
+
+class IMAPUidTests(unittest.TestCase):
+    def setUp(self):
+        self.fn=extract()
+
+    def test_real_imap_bytes_are_decoded_and_sorted(self):
+        imap=Imap([b"3 1 9 2 3"])
+        self.assertEqual(self.fn(imap,0),[1,2,3,9])
+        self.assertEqual(imap.calls,[("search",None,"UID","1:*")])
+
+    def test_skip_already_imported_uids(self):
+        imap=Imap([b"5 6 7 8 9"])
+        self.assertEqual(self.fn(imap,6),[7,8,9])
+        self.assertEqual(imap.calls,[("search",None,"UID","7:*")])
+
+    def test_empty_imap_results(self):
+        for response in ([b""],[None],[]):
+            with self.subTest(response=response):
+                self.assertEqual(self.fn(Imap(response),0),[])
+
+    def test_str_response_supported(self):
+        self.assertEqual(self.fn(Imap(["4 12 7"]),4),[7,12])
+
+    def test_limit_batches_without_skipping_earlier_messages(self):
+        imap=Imap([b"11 6 9 8 10 7"])
+        self.assertEqual(self.fn(imap,5,3),[6,7,8])
+
+    def test_malformed_uids_fail_closed_not_silent(self):
+        for response in ([b"1 2 xyz"],[b"-1 2"],[b"0"],[b"4294967296"],
+                         [b"1\n1 2\x00"],[{"unexpected":"item"}]):
+            with self.subTest(response=response):
+                with self.assertRaises(RuntimeError):
+                    self.fn(Imap(response),0)
+
+    def test_imap_failure_raises(self):
+        with self.assertRaises(RuntimeError):
+            self.fn(Imap([b""],"NO"),0)
+
+    def test_cursor_checkpoint_stays_after_message_processing(self):
+        source=GATEWAY.read_text(encoding="utf-8")
+        self.assertIn("_search_new_uids(connection, last, max_count)",source)
+        self.assertNotIn("x.isdecimal()",source)
+        start=source.index("def ingest_batch(")
+        block=source[start:source.index("def main()",start)]
+        self.assertLess(block.index("_fetch_raw(connection,uid)"),
+                        block.index("store_public_received(received,provider_id,handle=handle)"))
+        self.assertLess(block.index("store_public_received(received,provider_id,handle=handle)"),
+                        block.index("_checkpoint(mailbox_key,valid,uid,None,provider_id)"))
+
+
+if __name__=="__main__":
+    unittest.main()

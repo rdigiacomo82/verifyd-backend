@@ -1,0 +1,33 @@
+name: Hostinger IMAP UID parser regression
+on:
+  push:
+    branches: [fix/hostinger-imap-uid-bytes-20261030]
+    paths:
+      - "trust_voice_circle_email_apex_gateway.py"
+      - "tests/test_circle_email_apex_imap_uids.py"
+      - "tests/test_circle_email_apex_gateway.py"
+      - ".github/workflows/hostinger-imap-uid-regression.yml"
+  pull_request:
+    paths:
+      - "trust_voice_circle_email_apex_gateway.py"
+      - "tests/test_circle_email_apex_imap_uids.py"
+      - "tests/test_circle_email_apex_gateway.py"
+      - ".github/workflows/hostinger-imap-uid-regression.yml"
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Compile gateway and tests
+        run: python -m py_compile trust_voice_circle_email_apex_gateway.py tests/test_circle_email_apex_imap_uids.py tests/test_circle_email_apex_gateway.py
+      - name: Reproduce and fix raw IMAP byte UID responses
+        run: python -m unittest discover -s tests -p 'test_circle_email_apex_imap_uids.py' -v
+      - name: Preserve recipient trust isolation
+        run: |
+          python -m unittest discover -s tests -p 'test_circle_email_apex_gateway.py' -v
+          python -m unittest discover -s tests -p 'test_circle_email_public_handle.py' -v

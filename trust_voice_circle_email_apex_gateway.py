@@ -167,6 +167,43 @@ def _checkpoint(mailbox_hash: str, uidvalidity: str, uid: int, reason: str | Non
             (uid,mailbox_hash,uidvalidity))
 
 
+def _search_new_uids(conn, last: int, max_count: int = _MAX_BATCH) -> list[int]:
+    """Decode IMAP UID SEARCH responses without assuming text rather than bytes.
+
+    imaplib returns a list containing raw bytes, e.g. [b'1 2 17'].
+    bytes support isdigit(), not isdecimal(): the latter raised AttributeError
+    and prevented the Hostinger gateway from importing any email.
+    """
+    status, rows = conn.uid("search", None, "UID", f"{last + 1}:*")
+    if status != "OK" or not isinstance(rows, (list, tuple)):
+        raise RuntimeError("Hostinger IMAP UID SEARCH failed")
+    if not rows or rows[0] is None:
+        return []
+    data = rows[0]
+    if not isinstance(data, (bytes, str)):
+        raise RuntimeError("Hostinger IMAP UID SEARCH returned unexpected data")
+    tokens = data.split()
+    ids = set()
+    for token in tokens:
+        # Both str.isdigit and bytes.isdigit are available. A strict ASCII
+        # token check rejects anything other than decimal digits.
+        if isinstance(token, bytes):
+            if not token.isdigit():
+                raise RuntimeError("Hostinger IMAP UID SEARCH returned invalid UID")
+            number = int(token.decode("ascii"))
+        elif isinstance(token, str):
+            if not token.isascii() or not token.isdecimal():
+                raise RuntimeError("Hostinger IMAP UID SEARCH returned invalid UID")
+            number = int(token)
+        else:
+            raise RuntimeError("Hostinger IMAP UID SEARCH returned invalid UID")
+        if 0 < number <= 0xFFFFFFFF and number > last:
+            ids.add(number)
+        elif number < 1 or number > 0xFFFFFFFF:
+            raise RuntimeError("Hostinger IMAP UID SEARCH returned invalid UID")
+    return sorted(ids)[:min(_MAX_BATCH,max(1,max_count))]
+
+
 def _fetch_size(conn, uid: int) -> int:
     status, data = conn.uid("fetch", str(uid), "(RFC822.SIZE)")
     if status != "OK":
@@ -219,13 +256,7 @@ def ingest_batch(max_count: int = _MAX_BATCH) -> dict:
             if not valid.isdecimal():
                 raise RuntimeError("Hostinger IMAP UIDVALIDITY unavailable")
             last = _check_cursor(mailbox_key,valid)
-            status, rows = connection.uid("search",None,"UID",f"{last + 1}:*")
-            if status != "OK":
-                raise RuntimeError("Hostinger IMAP UID SEARCH failed")
-            uids = sorted({
-                int(x) for x in (rows[0] or b"").split()
-                if x.isdecimal() and int(x)>last
-            })[:min(_MAX_BATCH,max(1,max_count))]
+            uids = _search_new_uids(connection, last, max_count)
             for uid in uids:
                 provider_id = "hostinger-" + hashlib.sha256(
                     f"{mailbox_key}:{valid}:{uid}".encode("ascii")
