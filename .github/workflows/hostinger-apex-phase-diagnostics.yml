@@ -1,0 +1,32 @@
+name: Hostinger IMAP safe phase diagnostics
+on:
+  push:
+    branches: [fix/hostinger-import-phase-diagnostics-20261030]
+    paths:
+      - 'trust_voice_circle_email_apex_gateway.py'
+      - 'tests/test_circle_email_apex_diagnostics.py'
+      - '.github/workflows/hostinger-apex-phase-diagnostics.yml'
+  pull_request:
+    paths:
+      - 'trust_voice_circle_email_apex_gateway.py'
+      - 'tests/test_circle_email_apex_diagnostics.py'
+      - '.github/workflows/hostinger-apex-phase-diagnostics.yml'
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Compile gateway and tests
+        run: python -m py_compile trust_voice_circle_email_apex_gateway.py tests/test_circle_email_apex_diagnostics.py
+      - name: Diagnostics and UIDVALIDITY
+        run: python -m unittest discover -s tests -p 'test_circle_email_apex_diagnostics.py' -v
+      - name: Preserve IMAP UID handling and anti-spoof routing
+        run: |
+          python -m unittest discover -s tests -p 'test_circle_email_apex_imap_uids.py' -v
+          python -m unittest discover -s tests -p 'test_circle_email_apex_gateway.py' -v
+          python -m unittest discover -s tests -p 'test_circle_email_public_handle.py' -v
