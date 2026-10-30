@@ -27,7 +27,7 @@ from trust_voice_attachment_validation import validate_attachment_content, Attac
 from trust_voice_attachments import _get_attachment_client, _storage_configured, TRUST_VOICE_BUCKET
 
 router = APIRouter(tags=['VeriFYD Circle Email'])
-VERSION='0.3.1'
+VERSION='0.3.2'
 MAX_FILE_BYTES=8*1024*1024
 ALLOWED_FILES={'.pdf','.txt','.docx','.xlsx','.png','.jpg','.jpeg','.webp','.csv','.pptx','.mp3','.wav'}
 # Resend has a higher provider maximum, but limit raw Circle attachments to 16 MiB total.
@@ -151,7 +151,27 @@ def email_health():
       'external_inbound':'enabled' if enabled('VERIFYD_CIRCLE_EMAIL_INBOUND_ENABLED') else 'not_configured','private_attachments':_storage_configured(),
       'external_attachment_send':_storage_configured() and enabled('VERIFYD_CIRCLE_EMAIL_EXTERNAL_ENABLED'),
       'external_attachment_receive':_storage_configured() and enabled('VERIFYD_CIRCLE_EMAIL_INBOUND_ENABLED') and enabled('VERIFYD_CIRCLE_EMAIL_INBOUND_ATTACHMENTS_ENABLED'),
+      'public_handle_email':'dynamic_all_verified_accounts_gated',
+      'apex_public_reply_to_enabled':enabled('VERIFYD_CIRCLE_EMAIL_PUBLIC_HANDLE_ENABLED') and enabled('VERIFYD_CIRCLE_EMAIL_APEX_ADVERTISE_ENABLED'),
       'risk_classification':'rule_signals_not_ai_certification','attachment_malware_scanning':'not_available'}
+
+@router.get('/circle-email/my-address')
+def my_address(authorization:Optional[str]=Header(default=None)):
+    """Return the current account's computed short receiving address."""
+    feature();actor=_identity_from_bearer(authorization)
+    handle=str(actor.get('handle_lower') or actor.get('handle') or '').strip().lower()
+    from trust_voice_circle_email_inbound import reply_domain
+    from trust_voice_circle_email_public import (
+        public_address_for_handle, public_apex_address_for_handle
+    )
+    available=((public_apex_address_for_handle(handle)
+                or public_address_for_handle(handle,reply_domain()))
+               if enabled('VERIFYD_CIRCLE_EMAIL_INBOUND_ENABLED')
+               and actor.get('email_verified') and actor.get('status')=='active'
+               else None)
+    return {'internal_handle':'@'+handle,'public_email_address':available,
+            'public_email_enabled':bool(available)}
+
 
 @router.get('/circle-email/messages')
 def inbox(folder:Literal['inbox','sent','spam','trash','starred']='inbox',q:str=Query(default='',max_length=100),
@@ -337,7 +357,19 @@ async def send(payload:MailSend,tasks:BackgroundTasks,authorization:Optional[str
         # User-facing From display is the authenticated handle, while the
         # actual sender remains our configured, verified Resend email address.
         from_address=_personal_from_header(actor,inbound_reply_active)
-        reply_to=reply_address if inbound_reply_active else sender_email
+        if inbound_reply_active:
+            # One global feature gate: every eligible registered handle
+            # automatically gets a stable address, with no manual forwards.
+            from trust_voice_circle_email_public import (
+                public_address_for_handle, public_apex_address_for_handle
+            )
+            from trust_voice_circle_email_inbound import reply_domain
+            sender_handle=str(actor.get('handle_lower') or actor.get('handle') or '')
+            public_reply=(public_apex_address_for_handle(sender_handle)
+                or public_address_for_handle(sender_handle,reply_domain()))
+            reply_to=public_reply or reply_address
+        else:
+            reply_to=sender_email
         reply_note=('Reply to this message to reach the sender in VeriFYD Circle.'
                     if inbound_reply_active else
                     'Replies go to the sender\'s verified email address until VeriFYD inbound routing is enabled.')

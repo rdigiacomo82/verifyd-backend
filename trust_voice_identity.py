@@ -116,6 +116,21 @@ def _validate_handle(value: str) -> tuple[str, str]:
                 "message": "That handle is reserved by VeriFYD.",
             },
         )
+    # When public email is activated, also reserve operational addresses and
+    # pre-existing Hostinger business mailbox local parts. This applies to
+    # all NEW registrations, not a per-member email provisioning list.
+    if os.getenv("VERIFYD_CIRCLE_EMAIL_PUBLIC_HANDLE_ENABLED", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }:
+        from trust_voice_circle_email_public import _reserved_aliases
+        if handle_lower in _reserved_aliases():
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "reserved_handle",
+                    "message": "That handle is reserved by VeriFYD.",
+                },
+            )
     return handle, handle_lower
 
 
