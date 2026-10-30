@@ -255,6 +255,12 @@ def _store_received(received: dict, provider_id: str) -> tuple[Optional[str],Opt
     public_handle=public_recipient_from_to(received.get('to') or [], domain)
     if public_handle is not None:
         return store_public_received(received,provider_id,handle=public_handle)
+    # Only Resend's authenticated receiving API recipient list, never the
+    # email's visible To header, may select an apex address after MX cutover.
+    from trust_voice_circle_email_resend_apex import resend_apex_recipient_handle
+    apex_handle=resend_apex_recipient_handle(received.get('to') or [])
+    if apex_handle is not None:
+        return store_public_received(received,provider_id,handle=apex_handle)
     candidates=_candidate_routes(received.get('to') or [], domain)
     if len(candidates)!=1:
         return None,None
@@ -355,6 +361,8 @@ def inbound_health():
             'configuration':'ready' if inbound_configured() else 'not_configured',
             'receiving_key_mode':('dedicated' if os.getenv('VERIFYD_CIRCLE_EMAIL_RECEIVING_API_KEY','').strip() else 'shared'),
             'provider_read_permission':'not_verified_by_health',
+            'resend_apex_receiving':('enabled' if __import__('trust_voice_circle_email_resend_apex',fromlist=['resend_apex_enabled']).resend_apex_enabled() else 'disabled'),
+            'apex_mx_and_operational_mailboxes':'not_verified_by_health',
             'routing':'handle_prefixed_opaque_reply_alias_legacy_compatible',
             'public_handles':'all_active_verified_accounts_when_enabled',
             'public_handle_enabled':os.getenv('VERIFYD_CIRCLE_EMAIL_PUBLIC_HANDLE_ENABLED','').strip().lower() in ('1','true','yes','on'),
