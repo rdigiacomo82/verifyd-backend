@@ -76,6 +76,18 @@ def _trusted_hosts() -> frozenset[str]:
     )
 
 
+def _replay_policy_fingerprint(trusted_hosts: frozenset[str]) -> str:
+    """Replay quarantined mail when the trusted MX verification policy changes.
+
+    Match the legacy fingerprint while rotating-MX support is disabled so the
+    existing replay watermark remains stable during ordinary deployments.
+    """
+    policy_key = ",".join(sorted(trusted_hosts))
+    if _on("VERIFYD_CIRCLE_EMAIL_APEX_ALLOW_ROTATING_MX"):
+        policy_key += "|allow_rotating_mx=1"
+    return hashlib.sha256(policy_key.encode("ascii")).hexdigest()
+
+
 def original_envelope_recipient(message: email.message.Message,
                                 trusted_hosts: frozenset[str]) -> str | None:
     """Fail closed unless Hostinger's actual *outermost* Received says for <user>.
@@ -315,8 +327,7 @@ def _replay_recent_quarantine(conn, mailbox_key: str, valid: str,
     from database import get_db
     from trust_voice_circle_email_public import store_public_received
 
-    hosts_hash = hashlib.sha256(
-        ",".join(sorted(trusted_hosts)).encode("ascii")).hexdigest()
+    hosts_hash = _replay_policy_fingerprint(trusted_hosts)
     recent = _recent_processed_uids(conn, last_uid)
     provider_for_uid = {
         uid: "hostinger-" + hashlib.sha256(
