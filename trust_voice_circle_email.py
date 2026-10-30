@@ -27,7 +27,7 @@ from trust_voice_attachment_validation import validate_attachment_content, Attac
 from trust_voice_attachments import _get_attachment_client, _storage_configured, TRUST_VOICE_BUCKET
 
 router = APIRouter(tags=['VeriFYD Circle Email'])
-VERSION='0.3.2'
+VERSION='0.3.3'
 MAX_FILE_BYTES=8*1024*1024
 ALLOWED_FILES={'.pdf','.txt','.docx','.xlsx','.png','.jpg','.jpeg','.webp','.csv','.pptx','.mp3','.wav'}
 # Resend has a higher provider maximum, but limit raw Circle attachments to 16 MiB total.
@@ -99,6 +99,10 @@ class MailSend(BaseModel):
     file_ids: list[str]=Field(default_factory=list,max_length=3)
 class MailUpdate(BaseModel):
     action: Literal['read','unread','star','unstar','spam','not_spam','trash','restore']
+
+class MailBulkUpdate(BaseModel):
+    action: Literal['trash','restore']
+    mail_ids: list[str] = Field(min_length=1, max_length=150)
 
 
 def risk(sender_internal:bool,subject:str,body:str):
@@ -218,6 +222,46 @@ def action(mail_id:str,payload:MailUpdate,authorization:Optional[str]=Header(def
         elif a=='trash':c.execute("UPDATE verifyd_circle_email_messages SET folder='trash',deleted_at=%s WHERE mail_id=%s",(utc(),mail_id))
         elif a=='restore': c.execute("UPDATE verifyd_circle_email_messages SET folder=%s,deleted_at=NULL WHERE mail_id=%s",('sent' if row['folder']=='sent' or row['owner_id']==row['sender_id'] else 'inbox',mail_id))
     return {'ok':True}
+
+@router.post('/circle-email/messages/bulk-action')
+def bulk_action(payload:MailBulkUpdate,authorization:Optional[str]=Header(default=None)):
+    """Atomically move an authenticated member's selected email to/from Trash.
+
+    This only changes the owner's own mail rows; no cross-account mail,
+    attachments, or other copies are deleted. Trash is intentionally
+    recoverable (permanent R2/file cleanup requires a separate rollout).
+    """
+    feature();identity=_identity_from_bearer(authorization);schema()
+    uid=str(identity['id'])
+    ids=payload.mail_ids
+    if len(ids)!=len(set(ids)):
+        fail('duplicate_message','An email was selected more than once.')
+    if any(not re.fullmatch(r'tvcmail_[a-f0-9]{32}',mid) for mid in ids):
+        fail('invalid_message','One of the selected email IDs is invalid.')
+    with get_db() as db:
+        c=db.cursor()
+        c.execute('''SELECT mail_id, folder, sender_id, owner_id
+            FROM verifyd_circle_email_messages
+            WHERE owner_id=%s AND mail_id=ANY(%s) FOR UPDATE''',(uid,ids))
+        rows=[dict(item) for item in (c.fetchall() or [])]
+        if len(rows)!=len(ids):
+            fail('not_found','One or more selected emails were not found.',404)
+        count=0
+        for row in rows:
+            if payload.action=='trash' and row['folder']!='trash':
+                c.execute('''UPDATE verifyd_circle_email_messages
+                    SET folder='trash', deleted_at=%s
+                    WHERE owner_id=%s AND mail_id=%s''',(utc(),uid,row['mail_id']))
+                count+=1
+            elif payload.action=='restore' and row['folder']=='trash':
+                # Existing single-message restore behavior preserved.
+                original='sent' if row['owner_id']==row['sender_id'] else 'inbox'
+                c.execute('''UPDATE verifyd_circle_email_messages
+                    SET folder=%s,deleted_at=NULL
+                    WHERE owner_id=%s AND mail_id=%s''',(original,uid,row['mail_id']))
+                count+=1
+    return {'ok':True,'action':payload.action,'updated':count}
+
 
 @router.post('/circle-email/files')
 async def upload_file(file:UploadFile=File(...),authorization:Optional[str]=Header(default=None)):
