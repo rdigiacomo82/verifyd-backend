@@ -6,11 +6,13 @@ on:
     paths:
       - "trust_voice_circle_email.py"
       - "tests/test_circle_email_custom_folders.py"
+      - "tests/test_circle_email_bulk_actions.py"
       - ".github/workflows/circle-email-user-folders-check.yml"
   pull_request:
     paths:
       - "trust_voice_circle_email.py"
       - "tests/test_circle_email_custom_folders.py"
+      - "tests/test_circle_email_bulk_actions.py"
       - ".github/workflows/circle-email-user-folders-check.yml"
 
 permissions:
