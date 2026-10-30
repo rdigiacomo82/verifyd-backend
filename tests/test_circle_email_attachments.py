@@ -77,8 +77,7 @@ def load_transport(client=None):
                MAX_TOTAL_BYTES=16*1024*1024, MAX_FILES=3,
                ALLOWED_EXTENSIONS=frozenset({".txt", ".pdf", ".png"}),
                _RESEND_ID=re.compile(r"^[A-Za-z0-9-]{15,90}$"),
-               _ALLOWED_CDN_HOSTS=frozenset({"inbound-cdn.resend.com","download.resend.com"}),
-               _ALLOWED_CDN_SUFFIXES=(".cloudfront.net", ".amazonaws.com"),
+               _CDN_HOST="inbound-cdn.resend.com",
                TRUST_VOICE_BUCKET="test", _get_attachment_client=lambda: client,
                validate_attachment_content=lambda *a, **k: {"content_type": "text/plain"},
                AttachmentContentError=ValueError)
@@ -120,6 +119,7 @@ class AttachmentTests(unittest.TestCase):
         for evil in (
             good.replace("inbound-cdn.resend.com","evil.example"),
             good.replace("https:","http:"),
+            good.replace(att_id,"other-id"),
             good.replace("inbound-cdn.resend.com","inbound-cdn.resend.com.evil.test"),
             good.replace("inbound-cdn.resend.com","inbound-cdn.resend.com:444"),
             good.replace("https://","https://example@"),
