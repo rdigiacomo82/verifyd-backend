@@ -51,8 +51,8 @@ def isolated():
     assert "_HANDLE_TOKEN" in source and "_HEX_TOKEN" in source
     env=dict(
         re=re,os=os,hashlib=hashlib,secrets=secrets,
-        _HEX_TOKEN=re.compile(r"^reply\\+([a-f0-9]{40})@([a-z0-9.-]+)$",re.I),
-        _HANDLE_TOKEN=re.compile(r"^([a-z][a-z0-9_]{2,23})\\+([a-f0-9]{32})@([a-z0-9.-]+)$",re.I),
+        _HEX_TOKEN=re.compile(r"^reply\+([a-f0-9]{40})@([a-z0-9.-]+)$",re.I),
+        _HANDLE_TOKEN=re.compile(r"^([a-z][a-z0-9_]{2,23})\+([a-f0-9]{32})@([a-z0-9.-]+)$",re.I),
         reply_domain=lambda:"reply.vfvid.com",inbound_configured=lambda:True,
         HTTPException=FakeHTTPException,parseaddr=__import__("email.utils",fromlist=["parseaddr"]).parseaddr,
     )
@@ -66,7 +66,7 @@ class AliasRegressions(unittest.TestCase):
         addr=env["create_reply_route"](db, owner_id="owner",
             sent_mail_id="mail",thread_id="thread",external_recipient="Friend@Example.com",
             stamp="now",sender_handle="@RobertTest22")
-        self.assertRegex(addr,r"^roberttest22\\+[0-9a-f]{32}@reply\\.vfvid\\.com$")
+        self.assertRegex(addr,r"^roberttest22\+[0-9a-f]{32}@reply\.vfvid\.com$")
         self.assertEqual(env["_candidate_routes"]([addr],"reply.vfvid.com"),
                          [addr.split("+")[1].split("@")[0]])
         self.assertEqual(db.cur.calls[0][1][4],"friend@example.com")
