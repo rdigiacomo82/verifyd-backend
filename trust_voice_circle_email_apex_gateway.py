@@ -262,8 +262,10 @@ def main() -> int:
         log.info("Apex mail batch status=%s processed=%d quarantined=%d",
                  result["status"],result["processed"],result["quarantined"])
         return 0
-    except Exception:
-        log.exception("Apex mail batch failed (non-sensitive exception type only)")
+    except Exception as exc:
+        # Never log provider exception messages: they may contain account names
+        # or other mailbox data. Logs contain a generic type only.
+        log.error("Apex mail batch failed: %s", type(exc).__name__)
         return 1
 
 
