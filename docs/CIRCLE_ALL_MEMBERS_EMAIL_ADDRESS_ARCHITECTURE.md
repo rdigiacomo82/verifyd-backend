@@ -1,78 +1,127 @@
-# VeriFYD Circle — Every member gets a handle-based email address
+# VeriFYD Circle: one automatic @vfvid.com address per registered member
 
-## Requirement
-This is **NOT** a `roberttest22` feature or a list of manually provisioned
-mailboxes. One identity handle maps deterministically to one public address:
-`@RobertTest22` → `roberttest22@vfvid.com`,
-`@AnnSLP` → `annslp@vfvid.com`.
+## Current status
+**Code prepared and tested off-line; production gateway is NOT enabled.**
+Do not advertise `handle@vfvid.com` until the Hostinger catch-all + trusted
+envelope-recipient test has succeeded. No root MX or DNS record changes.
 
-An identity's `handle_lower` is unique in `verifyd_identities`. When a new
-account registers, the mapping is automatic, without creating a Hostinger
-mailbox, Resend receiving route, or per-user environment variable.
+Every VeriFYD Circle account already has a unique canonical `handle_lower`.
+The gateway looks up an active, email-verified identity on each message; no
+Hostinger mailbox/alias/forwarder is created for individual members.
 
-## What this PR implements
-- A generic dynamic handle recipient router backed by current active, verified
-  identity records.
-- No per-account allowlist; one global *off-by-default* rollout gate
-  `VERIFYD_CIRCLE_EMAIL_PUBLIC_HANDLE_ENABLED`.
-- Exact-address parsing, reserved operational names and optional
-  `VERIFYD_CIRCLE_EMAIL_RESERVED_LOCALPARTS` for existing Hostinger role
-  mailboxes (not for member lists).
-- Per-sender and per-recipient rate limits; unverified external senders always
-  flagged; suspect mail to Spam; idempotent Resend event ledger.
-- Historic per-message secret reply aliases still accepted.
-- Current **tested receiving domain** is `reply.vfvid.com`. When globally
-  enabled, every eligible handle can receive `<handle>@reply.vfvid.com`.
-  The new Reply-To for each member changes to this short address.
-- Authenticated endpoint `GET /trust-voice/circle-email/my-address`
-  exposes the current member's short address when the feature is active.
-- Public-inbox attachment bytes remain withheld pending malware scan capability.
+Example:
+- `@RobertTest22` => `roberttest22@vfvid.com`
+- `@AnnSLP` => `annslp@vfvid.com`
 
-## Requirements before advertising @vfvid.com addresses
-**THIS PR DOES NOT IMPLEMENT @vfvid.com SMTP DELIVERY.**
-Current apex `vfvid.com` MX still points to Hostinger:
-- `@ MX 5 mx1.hostinger.com`
-- `@ MX 10 mx2.hostinger.com`
+Existing `vfvid.com` host-mail MX remains:
+`@ MX 5 mx1.hostinger.com`, `@ MX 10 mx2.hostinger.com`.
+Resend continues to own `reply.vfvid.com`. Do not touch SES feedback MX at
+`send.vfvid.com`.
 
-The verified `reply.vfvid.com` Resend inbound MX must also stay unchanged.
-The `send.vfvid.com` SES feedback MX is unrelated and must remain unchanged.
+## Catch-all gateway (single mailbox, no per-member provisioning)
 
-Hostinger confirms one catch-all mailbox per domain can collect mail sent to
-nonexistent `@vfvid.com` recipients. It can be piloted as a gateway **without
-per-user forwarders**, while existing named Hostinger mailboxes stay there.
-But it MUST NOT be presented as finished until we establish:
-1. Capture to one gateway mailbox for test `<handle>@vfvid.com` recipients.
-2. Obtain the **authoritative original SMTP envelope recipient** from the
-   trusted receiving gateway (not sender-provided `To:` headers alone).
-3. Enforce exact alias resolution, no role-address collisions and validate
-   unknown users are not stored.
-4. Authenticate the gateway-to-backend transport (IMAP or signed ingest);
-   honor provider authentication outcomes, validate message size/attachments.
-5. Test DMARC/SPF forwarding behavior; Hostinger warns forwarded mail can fail.
-6. Check mailbox and catch-all quotas, retry queues, deduplication and spam
-   defense under expected network growth.
+Hostinger confirms one catch-all can send email addressed to **non-existent
+Hostinger mailboxes** into a chosen existing Hostinger mailbox. Existing named
+business mailboxes continue receiving directly. This is a pilot ingress for
+every registered handle, but capacity/quotas may require an upgraded gateway.
 
-For substantial scale, adopt a provider-managed **domain-wide inbound
-gateway with recipient-aware split routing**: deliver existing company mailboxes
-to Hostinger, deliver member handles directly to the VeriFYD backend. Changing
-root MX may be warranted *only after* this split-delivery integration is
-verified with a rollback plan. Do not add a competing Resend MX at `@`; it
-may hijack existing Hostinger company mail.
+1. In Hostinger hPanel, **Emails > Mailboxes > vfvid.com**.
+2. Create one dedicated private *gateway mailbox*, for example
+   `circle-inbound-gateway@vfvid.com`. This mailbox counts as one Hostinger
+   mail account. Use a long unique password; do NOT paste it into ChatGPT.
+3. Navigate to **Catch-all email** and choose that new gateway mailbox.
+   Confirm via the verification message delivered to that mailbox.
+   **Do not change the root-domain MX**.
+4. Send a tiny test from Gmail to one new registered member such as
+   `roberttest22@vfvid.com`, and one different registered member.
+   They should appear in the one gateway mailbox.
+5. Open the test email in Hostinger Mail and choose **More (...) > Show
+   original**, download an `.eml`. Inspect the *topmost Received* hop.
+   It MUST contain the original SMTP recipient as `for <handle@vfvid.com>`
+   and name the trusted Hostinger mail server in its `by ...` field.
+   If not, **STOP**: visible `To:`, `Delivered-To:`, and
+   `X-Original-To:` are NOT independently trusted routing evidence.
+   Obtain a trusted SMTP envelope recipient from Hostinger or use a direct
+   domain-wide MX gateway instead. Do not weaken recipient validation.
 
-## Rollout controls
-1. CI tests for every-account dynamic mapping and existing Circle features.
-2. Deploy code with `VERIFYD_CIRCLE_EMAIL_PUBLIC_HANDLE_ENABLED` **unset**.
-3. Validate safe gateway and consent/account notices, reserved existing email
-   addresses, actual incoming public mail, thread handling, rate limits and
-   rollback against staging.
-4. After all tests and provider setup, turn on global mail routing. A new
-   registered handle automatically receives its public alias, with no manual
-   per-user tasks. Provide user-level spam, privacy and block controls.
+The real `.eml` is a prerequisite to establish Hostinger's actual header
+format. If sharing it for review, redact personal content and secrets.
 
-## Known pre-release limitations
-- Current direct mail at `<handle>@reply.vfvid.com` may arrive as a new
-  thread (message-ID threading still to be implemented).
-- The final `<handle>@vfvid.com` delivery gateway remains unimplemented.
-- Global feature is intentionally disabled until infrastructure is ready.
-- Receiving unsolicited mail for every registered handle requires proactive
-  spam, abuse, retention, throttling and opt-out design before broad launch.
+## Backend gateway
+New `trust_voice_circle_email_apex_gateway.py` uses TLS-verified Hostinger
+IMAP (`imap.hostinger.com:993`) with one read-only INBOX selection. Run it as
+a **separate single-instance Render cron job**, NOT inside existing
+DINOv2 / RQ background workers or the FastAPI web-service process.
+
+Command:
+`python trust_voice_circle_email_apex_gateway.py`
+
+Recommended schedule: once per minute, subject to available Render plan
+and mail volume. Dependencies are Python standard library and existing DB
+modules in `requirements.txt`. Do not create a paid Render cron until
+cost/plan approved.
+
+Its features:
+- disabled by default
+- exact trusted outermost Received hop checks (not visible To)
+- no reliance on sender-controlled mail headers
+- recipient must equal one valid canonical `<handle>@vfvid.com`
+- account lookup from actual `verifyd_identities` table, active + verified
+- sender/owner anti-abuse rates, spam classification
+- no public-attachment content downloads until scanning is ready
+- dedupe with provider ID keyed by IMAP mailbox+UIDVALIDITY+UID
+- transaction-serialized poller, durable UID watermark, quarantine metadata
+- bounded 30-message poll batches, 18MiB per mail
+- old Resend opaque reply routing continues unchanged
+
+## Required Render cron environment (set in dashboard only)
+These must be set on the dedicated cron service. Do not paste secrets here:
+`VERIFYD_CIRCLE_EMAIL_PUBLIC_HANDLE_ENABLED=true`
+`VERIFYD_CIRCLE_EMAIL_APEX_GATEWAY_ENABLED=true`
+`VERIFYD_CIRCLE_EMAIL_HOSTINGER_IMAP_USER=<gateway mailbox @vfvid.com>`
+`VERIFYD_CIRCLE_EMAIL_HOSTINGER_IMAP_PASSWORD=<secret>`
+`VERIFYD_CIRCLE_EMAIL_APEX_TRUSTED_RECEIVED_BY=<exact server hostname from .eml>`
+Plus existing secure DB environment/config via appropriate Render environment
+group (not a copy of credentials in source). Keep cron service at ONE replica.
+Set `VERIFYD_CIRCLE_EMAIL_RESERVED_LOCALPARTS` for existing Hostinger
+business-mail localparts, comma-separated. Do not use this as a member list.
+
+The backend web service also needs `VERIFYD_CIRCLE_EMAIL_PUBLIC_HANDLE_ENABLED=true`
+to accept short aliases at `reply.vfvid.com` and show them in account details.
+
+Do NOT set `VERIFYD_CIRCLE_EMAIL_APEX_ADVERTISE_ENABLED=true` on the web
+service until at least two real `@vfvid.com` deliveries succeed and inbound
+replies pass end-to-end validation. That flag changes *new* external Reply-To
+headers from token addresses to `handle@vfvid.com`.
+
+## Pilot acceptance checks
+- Test two distinct registered handles from Gmail and Outlook.
+- Verify they land in distinct Circle Inboxes, not the same account.
+- Verify existing Hostinger business mailbox remains untouched.
+- Verify unregistered/role local parts never resolve to a VeriFYD account.
+- Test forged `To`, `X-Original-To`, and fake older `Received` headers.
+- Test retries and re-run cron; exactly one imported message.
+- Test a reply after new outbound message and confirm routing.
+- Test spam and high-volume limits before broad enablement.
+- Verify unread notifications, attachment withholding, and Message-ID threading.
+- Document mail retention, account suspension, abuse reporting, opt-out.
+
+## Important production caveats
+- One catch-all mailbox may receive substantial spam and hit limits. This is
+  a **bootstrap**, not a validated unbounded high-volume gateway.
+- If Hostinger does not supply a secure original-envelope trace, the IMAP
+  gateway intentionally quarantines; DO NOT route by untrusted `To:`.
+- Long term: use provider-managed SMTP split delivery that preserves existing
+  Hostinger business mailboxes and delivers member aliases via a scalable
+  ingress. That will need provider design and staged MX migration.
+- The activation flag does not alone configure Hostinger. Never state that
+  arbitrary `@vfvid.com` mail works before the live test.
+- Turning off the web-service feature after advertising public addresses
+  may stop future replies; deploy a safe inbound-accept compatibility policy
+  before using a production kill switch.
+
+## Rollback
+Stop Cron and disable apex advertisement first. Keep
+`reply.vfvid.com` routes and standard outbound sending intact. Revisit
+quarantine records and the catch-all mailbox for any undelivered messages.
+Do not delete the dedicated mailbox before preserving correspondence.
