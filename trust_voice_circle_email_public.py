@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 import re
 import uuid
-from email.utils import parseaddr
+from email.utils import parseaddr, getaddresses
 
 from database import get_db, is_valid_email
 
@@ -48,7 +48,10 @@ def public_recipient_from_to(to_list, domain: str) -> str | None:
     addresses = to_list if isinstance(to_list, list) else [to_list]
     if len(addresses) != 1:
         return None
-    address = parseaddr(str(addresses[0] or ''))[1].strip().lower()
+    parsed = getaddresses([str(addresses[0] or '')])
+    if len(parsed) != 1:
+        return None
+    address = parsed[0][1].strip().lower()
     suffix = '@' + domain
     if not address.endswith(suffix):
         return None
@@ -78,6 +81,10 @@ def store_public_received(received: dict, provider_id: str, *, handle: str) -> t
     from trust_voice_circle_email import risk, utc
     from trust_voice_circle_email_inbound import _plain_body
 
+    # Defense in depth: the handler only operates for explicitly opted-in
+    # handles, even if invoked by a future code path.
+    if not public_handles_enabled() or handle not in _allowed_handles():
+        return None, None
     sender = parseaddr(str(received.get('from') or ''))[1].strip().lower()
     if not sender or not is_valid_email(sender) or len(sender) > 254:
         return None, None
