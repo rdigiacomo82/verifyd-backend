@@ -1,0 +1,34 @@
+name: Circle Email bulk Trash and Restore
+
+on:
+  push:
+    branches: [feature/circle-email-bulk-trash-restore-20261030]
+    paths:
+      - "trust_voice_circle_email.py"
+      - "tests/test_circle_email_bulk_actions.py"
+      - ".github/workflows/circle-email-bulk-check.yml"
+  pull_request:
+    paths:
+      - "trust_voice_circle_email.py"
+      - "tests/test_circle_email_bulk_actions.py"
+      - ".github/workflows/circle-email-bulk-check.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  bulk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Verify backend syntax
+        run: python -m py_compile trust_voice_circle_email.py
+      - name: Bulk Trash/Restore tests
+        run: python -m unittest discover -s tests -p 'test_circle_email_bulk_actions.py' -v
+      - name: Preserve outbound attachments and flexible message composition
+        run: |
+          python -m unittest discover -s tests -p 'test_circle_email_attachments.py' -v
+          python -m unittest discover -s tests -p 'test_circle_email_optional_body_sender.py' -v
