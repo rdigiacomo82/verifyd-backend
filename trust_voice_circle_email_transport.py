@@ -135,11 +135,24 @@ def _verify_cdn_url(url: str, provider_id: str, attachment_id: str) -> None:
         raise ValueError("unexpected_attachment_url")
     parsed = urllib.parse.urlsplit(url)
     expected_path = "/" + provider_id + "/attachments/" + attachment_id
-    if (parsed.scheme != "https" or
-        parsed.hostname != _CDN_HOST or
+    # Resend may use a signed CDN distribution whose path is opaque. Authorize
+    # that only when an operator has confirmed the *exact* hostname from a real
+    # Resend Receiving API response and set it in Render. Never accept wildcard
+    # hostnames or URLs from the browser.
+    additional = os.getenv("VERIFYD_CIRCLE_EMAIL_RECEIVED_ATTACHMENT_CDN_HOST", "").strip().lower()
+    approved_additional = (bool(re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]{1,240})[a-z0-9]",additional))
+                           and "." in additional
+                           and not additional.endswith((".local",".localhost",".internal"))
+                           and not re.fullmatch(r"(?:\d+\.){3}\d+",additional))
+    host=parsed.hostname
+    host_ok = (host == _CDN_HOST or (approved_additional and host == additional))
+    path_ok = (parsed.path == expected_path if host == _CDN_HOST else
+               bool(parsed.path.startswith("/") and parsed.path != "/" and
+                    not any(piece in (".","..") for piece in parsed.path.split("/"))))
+    if (parsed.scheme != "https" or not host_ok or not path_ok or
         parsed.port not in (None, 443) or
         parsed.username is not None or parsed.password is not None or
-        parsed.path != expected_path or parsed.fragment or not parsed.query):
+        parsed.fragment or not parsed.query):
         raise ValueError("unexpected_attachment_url")
 
 

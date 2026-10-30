@@ -27,7 +27,7 @@ from trust_voice_attachment_validation import validate_attachment_content, Attac
 from trust_voice_attachments import _get_attachment_client, _storage_configured, TRUST_VOICE_BUCKET
 
 router = APIRouter(tags=['VeriFYD Circle Email'])
-VERSION='0.3.5'
+VERSION='0.3.6'
 MAX_FILE_BYTES=8*1024*1024
 ALLOWED_FILES={'.pdf','.txt','.docx','.xlsx','.png','.jpg','.jpeg','.webp','.csv','.pptx','.mp3','.wav'}
 # Resend has a higher provider maximum, but limit raw Circle attachments to 16 MiB total.
@@ -203,6 +203,7 @@ def email_health():
       'external_inbound':'enabled' if enabled('VERIFYD_CIRCLE_EMAIL_INBOUND_ENABLED') else 'not_configured','private_attachments':_storage_configured(),
       'external_attachment_send':_storage_configured() and enabled('VERIFYD_CIRCLE_EMAIL_EXTERNAL_ENABLED'),
       'external_attachment_receive':_storage_configured() and enabled('VERIFYD_CIRCLE_EMAIL_INBOUND_ENABLED') and enabled('VERIFYD_CIRCLE_EMAIL_INBOUND_ATTACHMENTS_ENABLED'),
+      'inbound_attachment_recovery':_storage_configured() and enabled('VERIFYD_CIRCLE_EMAIL_INBOUND_ENABLED') and enabled('VERIFYD_CIRCLE_EMAIL_INBOUND_ATTACHMENT_RECOVERY_ENABLED'),
       'public_handle_email':'dynamic_all_verified_accounts_gated',
       'apex_public_reply_to_enabled':enabled('VERIFYD_CIRCLE_EMAIL_PUBLIC_HANDLE_ENABLED') and enabled('VERIFYD_CIRCLE_EMAIL_APEX_ADVERTISE_ENABLED'),
       'risk_classification':'rule_signals_not_ai_certification','attachment_malware_scanning':'not_available'}
@@ -321,6 +322,109 @@ def read(mail_id:str,authorization:Optional[str]=Header(default=None)):
             c.execute('UPDATE verifyd_circle_email_messages SET is_read=TRUE WHERE mail_id=%s',(mail_id,));row['is_read']=True
         attachments=files_for(db,[mail_id]).get(mail_id,[])
     return {'message':{**public_mail(row,True),'attachments':attachments}}
+
+class MailRecoverAttachments(BaseModel):
+    # Unscanned external file downloads require an explicit user acknowledgement.
+    acknowledge_unscanned: bool = False
+
+
+@router.post('/circle-email/messages/{mail_id}/attachments/recover')
+def recover_inbound_attachments(
+    mail_id:str, payload:MailRecoverAttachments,
+    authorization:Optional[str]=Header(default=None),
+):
+    """Recover a previously withheld attachment from a private Resend reply.
+
+    Never exposes public/unsolicited mailbox attachments, arbitrary provider
+    email IDs, or raw provider URLs to a client. The import is idempotent and
+    only reachable by the owner of the specific Circle mail copy.
+    """
+    feature()
+    if not (enabled('VERIFYD_CIRCLE_EMAIL_INBOUND_ENABLED')
+            and enabled('VERIFYD_CIRCLE_EMAIL_INBOUND_ATTACHMENT_RECOVERY_ENABLED')
+            and _storage_configured()):
+        fail('inbound_attachment_recovery_unavailable',
+             'Incoming attachment recovery has not been enabled.',503)
+    if not payload.acknowledge_unscanned:
+        fail('attachment_confirmation_required',
+             'These external attachments are not malware scanned. Confirm before retrieving them.',409)
+    if not re.fullmatch(r'tvcmail_[a-f0-9]{32}',mail_id):
+        fail('not_found','Email not found.',404)
+    identity=_identity_from_bearer(authorization);schema()
+    uid=str(identity['id'])
+    from trust_voice_circle_email_inbound import ensure_inbound_schema
+    ensure_inbound_schema()
+    # Only a previous *private token reply* is eligible. Public-handle mail
+    # is intentionally excluded until a separate malware-scanning rollout.
+    with get_db() as db:
+        c=db.cursor()
+        c.execute("""SELECT e.provider_email_id
+          FROM verifyd_circle_email_messages m
+          JOIN verifyd_circle_email_received_events e ON e.mail_id=m.mail_id
+          WHERE m.mail_id=%s AND m.owner_id=%s
+            AND m.delivery='received_external'
+            AND EXISTS (
+              SELECT 1 FROM verifyd_circle_email_reply_routes r
+              WHERE r.owner_id=m.owner_id AND r.thread_id=m.thread_id
+                AND m.sender_id=('external:' || r.external_recipient)
+                AND r.revoked_at IS NULL
+            ) LIMIT 1""",(mail_id,uid))
+        event=c.fetchone()
+        if not event:
+            fail('not_found','This message is not eligible for attachment recovery.',404)
+        provider_id=str(event['provider_email_id'])
+        from trust_voice_circle_email_transport import _RESEND_ID
+        if not _RESEND_ID.fullmatch(provider_id):
+            fail('not_found','No eligible provider message is available.',404)
+        existing=files_for(db,[mail_id]).get(mail_id,[])
+        # Do not trigger repeated downloads, storage charges or duplicate files.
+        if existing:
+            return {'ok':True,'status':'already_available','attachments':existing}
+    # Network and byte-validation occur without holding a pooled DB connection,
+    # preventing slow CDN downloads from exhausting the OTP/session DB pool.
+    from trust_voice_circle_email_transport import (
+        fetch_inbound_attachment_files, persist_inbound_attachments
+    )
+    fetched,omitted=fetch_inbound_attachment_files(provider_id,[{'recover':True}])
+    if not fetched:
+        return {'ok':True,'status':'none_available','omitted':omitted,'attachments':[]}
+    created_keys=[]
+    try:
+        with get_db() as db:
+            c=db.cursor()
+            c.execute("""SELECT m.mail_id
+              FROM verifyd_circle_email_messages m
+              WHERE m.mail_id=%s AND m.owner_id=%s
+                AND m.delivery='received_external'
+                AND EXISTS (
+                  SELECT 1 FROM verifyd_circle_email_reply_routes r
+                  WHERE r.owner_id=m.owner_id AND r.thread_id=m.thread_id
+                    AND m.sender_id=('external:' || r.external_recipient)
+                    AND r.revoked_at IS NULL
+                ) FOR UPDATE OF m""",(mail_id,uid))
+            if not c.fetchone():
+                fail('not_found','This message is no longer eligible.',404)
+            if files_for(db,[mail_id]).get(mail_id,[]):
+                return {'ok':True,'status':'already_available',
+                        'attachments':files_for(db,[mail_id]).get(mail_id,[])}
+            created_keys=persist_inbound_attachments(
+                db,files=fetched,owner_id=uid,mail_id=mail_id,stamp=utc()
+            )
+            # The existing body remains immutable. The UI suppresses the old
+            # withholding banner when attachments are now present.
+    except Exception:
+        if created_keys:
+            try:
+                client=_get_attachment_client()
+                for key in created_keys:
+                    try:client.delete_object(Bucket=TRUST_VOICE_BUCKET,Key=key)
+                    except Exception:pass
+            except Exception:pass
+        raise
+    with get_db() as db:
+        available=files_for(db,[mail_id]).get(mail_id,[])
+    return {'ok':True,'status':'recovered','attachments':available,'omitted':omitted}
+
 
 @router.post('/circle-email/messages/{mail_id}/action')
 def action(mail_id:str,payload:MailUpdate,authorization:Optional[str]=Header(default=None)):

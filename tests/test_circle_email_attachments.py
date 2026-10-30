@@ -128,6 +128,31 @@ class AttachmentTests(unittest.TestCase):
             with self.subTest(evil=evil), self.assertRaises(ValueError):
                 env["_verify_cdn_url"](evil,email_id,att_id)
 
+    def test_operator_approved_exact_resend_cdn_distribution_only(self):
+        from unittest.mock import patch
+        env=load_transport()
+        email_id="aaf8f78e-e2b4-4903-8423-76de7bffed2b"
+        attachment_id="2a0c9ce0-3112-4728-976e-47ddcd16a318"
+        signed="https://d111111abcdef8.cloudfront.net/opaque/file?Signature=example"
+        with patch.dict(os.environ,{
+            "VERIFYD_CIRCLE_EMAIL_RECEIVED_ATTACHMENT_CDN_HOST":"d111111abcdef8.cloudfront.net"
+        }):
+            env["_verify_cdn_url"](signed,email_id,attachment_id)
+            for bad in (
+                "https://d111111abcdef8.cloudfront.net.evil.org/opaque/file?Signature=example",
+                "https://other.cloudfront.net/opaque/file?Signature=example",
+                "https://127.0.0.1/opaque/file?Signature=example",
+                "http://d111111abcdef8.cloudfront.net/opaque/file?Signature=example",
+                "https://d111111abcdef8.cloudfront.net/opaque/file",
+            ):
+                with self.subTest(bad=bad),self.assertRaises(ValueError):
+                    env["_verify_cdn_url"](bad,email_id,attachment_id)
+        with patch.dict(os.environ,{
+            "VERIFYD_CIRCLE_EMAIL_RECEIVED_ATTACHMENT_CDN_HOST":"127.0.0.1"
+        }):
+            with self.assertRaises(ValueError):
+                env["_verify_cdn_url"]("https://127.0.0.1/file?Signature=example",email_id,attachment_id)
+
     def test_inbound_oversized_and_unsupported_files_omitted(self):
         env = load_transport()
         eid = "aaf8f78e-e2b4-4903-8423-76de7bffed2b"
