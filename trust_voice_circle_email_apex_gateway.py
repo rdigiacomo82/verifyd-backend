@@ -32,6 +32,16 @@ _FOR_ADDRESS = re.compile(r"\bfor\s+<?([a-z][a-z0-9_]{2,23}@vfvid\.com)>?(?=[\s;
 _UID_SIZE = re.compile(rb"RFC822\.SIZE\s+(\d+)")
 _MAX_BATCH = 30
 
+# Single-run, non-sensitive diagnostic stage. Never log messages, addresses,
+# server responses or IMAP provider exception texts in production logs.
+_STAGE = "startup"
+
+
+def _stage(name: str) -> None:
+    global _STAGE
+    _STAGE = name
+
+
 
 def _on(name: str) -> bool:
     return os.getenv(name, "").strip().lower() in ("1", "true", "yes", "on")
@@ -204,6 +214,19 @@ def _search_new_uids(conn, last: int, max_count: int = _MAX_BATCH) -> list[int]:
     return sorted(ids)[:min(_MAX_BATCH,max(1,max_count))]
 
 
+def _uidvalidity(conn) -> str:
+    """Handle imaplib UIDVALIDITY returned as bytes or str safely."""
+    status, data = conn.response("UIDVALIDITY")
+    if status != "UIDVALIDITY" or not data or len(data) != 1:
+        raise RuntimeError("Hostinger IMAP UIDVALIDITY unavailable")
+    item=data[0]
+    if isinstance(item, bytes):
+        item=item.decode("ascii")
+    if not isinstance(item, str) or not item.isascii() or not item.isdecimal():
+        raise RuntimeError("Hostinger IMAP UIDVALIDITY invalid")
+    return item
+
+
 def _fetch_size(conn, uid: int) -> int:
     status, data = conn.uid("fetch", str(uid), "(RFC822.SIZE)")
     if status != "OK":
@@ -235,7 +258,9 @@ def ingest_batch(max_count: int = _MAX_BATCH) -> dict:
     imap_user = os.environ["VERIFYD_CIRCLE_EMAIL_HOSTINGER_IMAP_USER"].strip().lower()
     password = os.environ["VERIFYD_CIRCLE_EMAIL_HOSTINGER_IMAP_PASSWORD"]
     mailbox_key = hashlib.sha256(imap_user.encode()).hexdigest()
+    _stage("schema")
     _schema()
+    _stage("advisory_lock")
     handled = quarantined = 0
     # Transaction-scoped lock keeps two concurrent cron invocations from
     # advancing the watermark past one another or skipping any message.
@@ -245,36 +270,45 @@ def ingest_batch(max_count: int = _MAX_BATCH) -> dict:
                      ("verifyd-apex:" + mailbox_key,))
         if not lock.fetchone()["ok"]:
             return {"status": "busy", "processed": 0, "quarantined": 0}
+        _stage("imap_connect")
         connection = imaplib.IMAP4_SSL(_IMAP_HOST, 993, ssl_context=ssl.create_default_context(),timeout=20)
         try:
+            _stage("imap_login")
             connection.login(imap_user, password)
+            _stage("imap_select")
             status, _ = connection.select("INBOX", readonly=True)
             if status != "OK":
                 raise RuntimeError("Could not select Hostinger catch-all INBOX")
-            _, data = connection.response("UIDVALIDITY")
-            valid = str((data or [b""])[0].decode("ascii") if data else "").strip()
-            if not valid.isdecimal():
-                raise RuntimeError("Hostinger IMAP UIDVALIDITY unavailable")
+            _stage("uid_validity")
+            valid = _uidvalidity(connection)
+            _stage("cursor")
             last = _check_cursor(mailbox_key,valid)
+            _stage("uid_search")
             uids = _search_new_uids(connection, last, max_count)
             for uid in uids:
                 provider_id = "hostinger-" + hashlib.sha256(
                     f"{mailbox_key}:{valid}:{uid}".encode("ascii")
                 ).hexdigest()
+                _stage("fetch_size")
                 size = _fetch_size(connection,uid)
                 if size < 1 or size > _MAX_RAW_BYTES:
                     _checkpoint(mailbox_key,valid,uid,"size_limit",provider_id)
                     quarantined += 1
                     continue
+                _stage("fetch_raw")
                 raw = _fetch_raw(connection,uid)
+                _stage("parse_catchall")
                 handle, received = parse_catchall(raw,_trusted_hosts())
                 if received is None:
+                    _stage("quarantine")
                     _checkpoint(mailbox_key,valid,uid,"recipient_unverified",provider_id)
                     quarantined += 1
                     continue
                 # store_public_received is idempotent on provider_id and
                 # resolves active account records in database, not headers.
+                _stage("store_received")
                 store_public_received(received,provider_id,handle=handle)
+                _stage("checkpoint")
                 _checkpoint(mailbox_key,valid,uid,None,provider_id)
                 handled += 1
         finally:
@@ -296,7 +330,7 @@ def main() -> int:
     except Exception as exc:
         # Never log provider exception messages: they may contain account names
         # or other mailbox data. Logs contain a generic type only.
-        log.error("Apex mail batch failed: %s", type(exc).__name__)
+        log.error("Apex mail batch failed stage=%s error=%s", _STAGE, type(exc).__name__)
         return 1
 
 
