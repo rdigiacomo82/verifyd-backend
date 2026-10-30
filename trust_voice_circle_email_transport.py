@@ -143,7 +143,7 @@ def _verify_cdn_url(url: str, provider_id: str, attachment_id: str) -> None:
     approved_additional = (bool(re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]{1,240})[a-z0-9]",additional))
                            and "." in additional
                            and not additional.endswith((".local",".localhost",".internal"))
-                           and not re.fullmatch(r"(?:\\d+\\.){3}\\d+",additional))
+                           and not re.fullmatch(r"(?:\d+\.){3}\d+",additional))
     host=parsed.hostname
     host_ok = (host == _CDN_HOST or (approved_additional and host == additional))
     path_ok = (parsed.path == expected_path if host == _CDN_HOST else
