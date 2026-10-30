@@ -333,6 +333,12 @@ async def send(payload:MailSend,tasks:BackgroundTasks,authorization:Optional[str
         state='failed'
     with get_db() as db:
         c=db.cursor();c.execute('UPDATE verifyd_circle_email_messages SET delivery=%s WHERE mail_id=%s AND owner_id=%s',(state,sent_id,uid))
+        if state=='failed' and rows:
+            # Preserve previously uploaded private files for a retry when the
+            # provider rejects the message. The failed Sent entry must not
+            # consume these file IDs permanently.
+            c.execute('''UPDATE verifyd_circle_email_files SET mail_id=NULL
+                  WHERE mail_id=%s AND owner_id=%s''',(sent_id,uid))
     if state=='failed':fail('delivery_failed','External provider could not accept this email. Please try again later.',503)
     return {'ok':True,'mail_id':sent_id,'delivery':state,'recipient':recipient,
             'notice':('External replies route to your VeriFYD Inbox.' if inbound_reply_active else 'Replies go to your verified email until inbound routing is enabled.')}
