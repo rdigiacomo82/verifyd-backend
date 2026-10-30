@@ -27,9 +27,9 @@ _APEX = "vfvid.com"
 _IMAP_HOST = "imap.hostinger.com"
 _MAX_RAW_BYTES = 18 * 1024 * 1024
 _LOCALPART = re.compile(r"^[a-z][a-z0-9_]{2,23}$")
-_TRUSTED_BY = re.compile(r"\\bby\\s+([a-z0-9][a-z0-9.-]+)", re.I)
-_FOR_ADDRESS = re.compile(r"\\bfor\\s+<?([a-z][a-z0-9_]{2,23}@vfvid\\.com)>?(?=[\\s;,]|$)", re.I)
-_UID_SIZE = re.compile(rb"RFC822\\.SIZE\\s+(\\d+)")
+_TRUSTED_BY = re.compile(r"\bby\s+([a-z0-9][a-z0-9.-]+)", re.I)
+_FOR_ADDRESS = re.compile(r"\bfor\s+<?([a-z][a-z0-9_]{2,23}@vfvid\.com)>?(?=[\s;,]|$)", re.I)
+_UID_SIZE = re.compile(rb"RFC822\.SIZE\s+(\d+)")
 _MAX_BATCH = 30
 
 
