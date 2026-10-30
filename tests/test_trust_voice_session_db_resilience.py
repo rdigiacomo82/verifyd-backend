@@ -93,6 +93,13 @@ class SessionReliabilityTests(unittest.TestCase):
             verify(make_token()[:-7]+"INVALID")
         self.assertEqual(ctx.exception.status_code,401)
 
+    def test_websocket_handshake_distinguishes_invalid_token_from_busy_db(self):
+        src=SIGNAL.read_text(encoding="utf8")
+        handshake=src[src.index('async def signaling_ws('):src.index('identity_id = (',src.index('async def signaling_ws('))]
+        self.assertIn('code=4401 if exc.status_code == 401 else 1013',handshake)
+        self.assertIn('except (psycopg2.Error, psycopg2.pool.PoolError):',handshake)
+        self.assertIn('await websocket.close(code=1013)',handshake)
+
     def test_pool_tolerates_short_peak_in_defaults(self):
         src=DB.read_text(encoding="utf8")
         self.assertIn('DB_POOL_MAX = _db_env_int(\n    "VERIFYD_DB_POOL_MAX",\n    16,',src)
