@@ -1,0 +1,38 @@
+name: Circle Inbox SQL percent regression
+
+on:
+  push:
+    branches: [fix/circle-inbox-percent-sql-20261030]
+    paths:
+      - "trust_voice_circle_email.py"
+      - "tests/test_circle_email_inbox_sql.py"
+      - "tests/test_circle_email_custom_folders.py"
+      - ".github/workflows/circle-email-inbox-sql-check.yml"
+  pull_request:
+    paths:
+      - "trust_voice_circle_email.py"
+      - "tests/test_circle_email_inbox_sql.py"
+      - "tests/test_circle_email_custom_folders.py"
+      - ".github/workflows/circle-email-inbox-sql-check.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Compile
+        run: python -m py_compile trust_voice_circle_email.py
+      - name: Inbox SQL regression
+        run: python -m unittest discover -s tests -p 'test_circle_email_inbox_sql.py' -v
+      - name: Custom folders, bulk delete, attachments and login
+        run: |
+          python -m unittest discover -s tests -p 'test_circle_email_custom_folders.py' -v
+          python -m unittest discover -s tests -p 'test_circle_email_bulk_actions.py' -v
+          python -m unittest discover -s tests -p 'test_circle_email_attachments.py' -v
+          python -m unittest discover -s tests -p 'test_trust_voice_session_db_resilience.py' -v

@@ -27,7 +27,7 @@ from trust_voice_attachment_validation import validate_attachment_content, Attac
 from trust_voice_attachments import _get_attachment_client, _storage_configured, TRUST_VOICE_BUCKET
 
 router = APIRouter(tags=['VeriFYD Circle Email'])
-VERSION='0.3.4'
+VERSION='0.3.5'
 MAX_FILE_BYTES=8*1024*1024
 ALLOWED_FILES={'.pdf','.txt','.docx','.xlsx','.png','.jpg','.jpeg','.webp','.csv','.pptx','.mp3','.wav'}
 # Resend has a higher provider maximum, but limit raw Circle attachments to 16 MiB total.
@@ -307,7 +307,7 @@ def inbox(folder:str=Query(default='inbox',max_length=50),q:str=Query(default=''
                 AND (subject ILIKE %s OR sender_handle ILIKE %s OR body ILIKE %s)
                 ORDER BY created_at DESC LIMIT 150''',(uid,folder,like,like,like))
         rows=[dict(x) for x in c.fetchall() or []]; a=files_for(db,[x['mail_id'] for x in rows]);
-        c.execute("SELECT COUNT(*) AS n FROM verifyd_circle_email_messages WHERE owner_id=%s AND (folder='inbox' OR folder LIKE 'custom:%') AND is_read=FALSE",(uid,));unread=int(c.fetchone()['n'])
+        c.execute("SELECT COUNT(*) AS n FROM verifyd_circle_email_messages WHERE owner_id=%s AND (folder='inbox' OR folder LIKE %s) AND is_read=FALSE",(uid,'custom:%'));unread=int(c.fetchone()['n'])
     return {'messages':[{**public_mail(x), 'preview':x['body'][:180], 'attachments':a.get(x['mail_id'],[])} for x in rows], 'unread':unread,'folder':folder}
 
 @router.get('/circle-email/messages/{mail_id}')
