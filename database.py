@@ -79,13 +79,13 @@ DB_POOL_MIN = _db_env_int(
 )
 DB_POOL_MAX = _db_env_int(
     "VERIFYD_DB_POOL_MAX",
-    10,
+    16,
     DB_POOL_MIN,
     50,
 )
 DB_POOL_WAIT_SECONDS = _db_env_float(
     "VERIFYD_DB_POOL_WAIT_SECONDS",
-    3.0,
+    8.0,
     0.25,
     15.0,
 )
