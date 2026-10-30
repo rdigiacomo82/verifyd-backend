@@ -87,6 +87,35 @@ class ApexGatewayTests(unittest.TestCase):
                          b"by de-fra-smtpin6.hostinger.io.attacker.test ")
         self.assertEqual(self.h["parse_catchall"](fake,verified),(None,None))
 
+    def test_outlook_multipart_iso_8859_1_with_hostinger_header(self):
+        # Hostinger's successful test was delivered as multipart/alternative
+        # from Outlook, with quoted-printable text and an HTML alternative.
+        raw=(
+            "Received: from mail-dl1-x1234.google.com "
+            "(mail-dl1-x1234.google.com [IPv6:2607:f8b0:4864:20::1234])\\n"
+            " by de-fra-smtpin6.hostinger.io (mx.hostinger.com) with ESMTPS "
+            "id 4jGQhR2nxLz4vxp\\n"
+            " for <roberttest22@vfvid.com>; Fri, 30 Oct 2026 15:56:55 +0000 (UTC)\\n"
+            "From: \\\"External Sender\\\" <external@example.com>\\n"
+            "To: <roberttest22@vfvid.com>\\n"
+            "Subject: One more time\\n"
+            "MIME-Version: 1.0\\n"
+            "Content-Type: multipart/alternative; boundary=BOUNDARY\\n"
+            "\\n--BOUNDARY\\n"
+            "Content-Type: text/plain; charset=iso-8859-1\\n"
+            "Content-Transfer-Encoding: quoted-printable\\n"
+            "\\nTesting\\n"
+            "--BOUNDARY\\n"
+            "Content-Type: text/html; charset=iso-8859-1\\n"
+            "\\n<html><body>Testing</body></html>\\n"
+            "--BOUNDARY--\\n"
+        ).encode("ascii")
+        handle,record=self.h["parse_catchall"](raw,frozenset({"de-fra-smtpin6.hostinger.io"}))
+        self.assertEqual(handle,"roberttest22")
+        self.assertEqual(record["from"],"external@example.com")
+        self.assertEqual(record["text"].strip(),"Testing")
+        self.assertIn("Testing",record["html"])
+
     def test_real_hostinger_server_allowlist_config(self):
         from unittest.mock import patch
         with patch.dict(os.environ,{"VERIFYD_CIRCLE_EMAIL_APEX_TRUSTED_RECEIVED_BY":
