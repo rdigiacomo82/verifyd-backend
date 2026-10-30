@@ -296,7 +296,8 @@ async def send(payload:MailSend,tasks:BackgroundTasks,authorization:Optional[str
             if inbound_reply_active:
                 from trust_voice_circle_email_inbound import create_reply_route
                 reply_address=create_reply_route(db,owner_id=uid,sent_mail_id=sent_id,
-                       thread_id=thread,external_recipient=recipient,stamp=now)
+                       thread_id=thread,external_recipient=recipient,stamp=now,
+                       sender_handle=str(actor.get('handle_lower') or actor.get('handle') or ''))
     if internal:
         try: tasks.add_task(_notify_recipient,tid,recv_id)
         except Exception:pass
