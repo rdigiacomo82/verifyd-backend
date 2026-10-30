@@ -44,6 +44,12 @@ def inbound_enabled() -> bool:
     return os.getenv('VERIFYD_CIRCLE_EMAIL_INBOUND_ENABLED', '').strip().lower() in ('1', 'true', 'yes', 'on')
 
 
+def inbound_attachments_enabled() -> bool:
+    # Deliberately opt-in. Do not put working text-email receiving at risk
+    # until real Resend/R2 attachment retrieval has been verified.
+    return os.getenv('VERIFYD_CIRCLE_EMAIL_INBOUND_ATTACHMENTS_ENABLED', '').strip().lower() in ('1', 'true', 'yes', 'on')
+
+
 def reply_domain() -> str:
     # Dedicated subdomain: never alter apex vfvid.com MX records.
     raw = (os.getenv('VERIFYD_CIRCLE_EMAIL_REPLY_DOMAIN', '') or 'reply.vfvid.com').strip().lower()
@@ -289,13 +295,21 @@ def _store_received(received: dict, provider_id: str) -> tuple[Optional[str],Opt
             from trust_voice_circle_email_transport import (
                 fetch_inbound_attachment_files, persist_inbound_attachments
             )
-            attached, omitted = fetch_inbound_attachment_files(provider_id, advertised)
-            if attached or omitted:
-                notice = ('[External attachments are not malware scanned. '
-                          'Download only after reviewing the warning.]')
-                if omitted:
-                    notice += f' [{omitted} attachment(s) withheld due to file restrictions.]'
+            if advertised and not inbound_attachments_enabled():
+                # Metadata-only mode preserves working replies until the
+                # attachment pipeline has passed a live provider/R2 test.
+                attached, omitted = [], len(advertised)
+                notice = (f'[{omitted} external attachment(s) withheld: '
+                          'incoming file downloads have not yet been activated.]')
                 body = (body[:max(0,12000-len(notice)-2)] + '\n\n' + notice)[:12000]
+            else:
+                attached, omitted = fetch_inbound_attachment_files(provider_id, advertised)
+                if attached or omitted:
+                    notice = ('[External attachments are not malware scanned. '
+                              'Download only after reviewing the warning.]')
+                    if omitted:
+                        notice += f' [{omitted} attachment(s) withheld due to file restrictions.]'
+                    body = (body[:max(0,12000-len(notice)-2)] + '\n\n' + notice)[:12000]
             cur.execute('''INSERT INTO verifyd_circle_email_messages
               (mail_id,thread_id,owner_id,sender_id,sender_handle,recipient,
                subject,body,folder,is_read,spam_flag,delivery,verdict,risk_notes,created_at)
@@ -333,7 +347,8 @@ def inbound_health():
             'receiving_key_mode':('dedicated' if os.getenv('VERIFYD_CIRCLE_EMAIL_RECEIVING_API_KEY','').strip() else 'shared'),
             'provider_read_permission':'not_verified_by_health',
             'routing':'handle_prefixed_opaque_reply_alias_legacy_compatible',
-            'external_attachments':'private_r2_download_with_unscanned_ack_required',
+            'external_attachments':('private_r2_download_with_unscanned_ack_required'
+                if inbound_attachments_enabled() else 'withheld_until_attachment_validation'),
             'external_attachment_max_files':3,
             'external_attachment_max_size_mb':8}
 
