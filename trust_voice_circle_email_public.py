@@ -54,6 +54,23 @@ def public_address_for_handle(handle: str, domain: str) -> str | None:
     return None
 
 
+def public_apex_address_for_handle(handle: str) -> str | None:
+    """Only advertise @vfvid.com after the catch-all gateway was validated.
+
+    A separate flag keeps outgoing Reply-To addresses usable throughout the
+    infrastructure rollout, and lets operators stop creating new apex replies
+    without immediately disabling receiving old apex messages.
+    """
+    name = str(handle or '').strip().lower().lstrip('@')
+    if (public_handles_enabled()
+            and os.getenv('VERIFYD_CIRCLE_EMAIL_APEX_ADVERTISE_ENABLED','').strip().lower()
+                  in ('1','true','yes','on')
+            and _HANDLE.fullmatch(name)
+            and name not in _reserved_aliases()):
+        return f'{name}@vfvid.com'
+    return None
+
+
 def public_recipient_from_to(to_list, domain: str) -> str | None:
     """Resolve one exact public address; reject multiple recipients or token aliases."""
     if not public_handles_enabled():
