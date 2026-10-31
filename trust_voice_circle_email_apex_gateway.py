@@ -275,8 +275,10 @@ def _fetch_raw(conn, uid: int) -> bytes:
 
 
 def _replay_policy_hash(trusted_hosts: frozenset[str]) -> str:
-    """Fingerprint the exact set of validated receiving servers."""
-    return hashlib.sha256(",".join(sorted(trusted_hosts)).encode("ascii")).hexdigest()
+    """Fingerprint the host allowlist AND the optional verified MX rule."""
+    enabled = _on("VERIFYD_CIRCLE_EMAIL_APEX_ROTATING_MX_ENABLED")
+    policy = "rotating-mx-v1=" + str(enabled) + "|hosts=" + ",".join(sorted(trusted_hosts))
+    return hashlib.sha256(policy.encode("ascii")).hexdigest()
 
 
 def _replay_needed(mailbox_key: str, valid: str, last_uid: int,
