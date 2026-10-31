@@ -249,9 +249,9 @@ def sync_state(authorization:Optional[str]=Header(default=None)):
           COUNT(*) FILTER (WHERE folder='trash') AS trash_count,
           COUNT(*) FILTER (WHERE folder='sent') AS sent_count,
           COUNT(*) FILTER (WHERE folder='archive') AS archive_count,
-          COUNT(*) FILTER (WHERE folder LIKE 'custom:%') AS custom_count,
+          COUNT(*) FILTER (WHERE LEFT(folder,7)='custom:') AS custom_count,
           COUNT(*) FILTER (WHERE is_read=FALSE AND
-                           (folder='inbox' OR folder LIKE 'custom:%')) AS unread,
+                           (folder='inbox' OR LEFT(folder,7)='custom:')) AS unread,
           COALESCE(MAX(created_at),'') AS latest_created_at
           FROM verifyd_circle_email_messages WHERE owner_id=%s""",(uid,))
         row=cur.fetchone() or {}
