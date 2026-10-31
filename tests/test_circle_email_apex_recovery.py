@@ -145,5 +145,58 @@ class ReplayTests(unittest.TestCase):
         self.assertEqual(cur.updates[0][1:], (False, provider_id))
 
 
+class ReplayWatermarkTests(unittest.TestCase):
+    """No IMAP rescan when both mailbox UID and exact trust list are unchanged."""
+
+    class Cursor:
+        def __init__(self, row):
+            self.row = row
+            self.commands = []
+
+        def execute(self, sql, args):
+            self.commands.append((sql, args))
+
+        def fetchone(self):
+            return self.row
+
+    def test_replay_idle_skip_and_new_mail_or_hostlist_recheck(self):
+        hosts = frozenset({"de-fra-smtpin6.hostinger.io"})
+        digest = gw._replay_policy_hash(hosts)
+        cur = self.Cursor({"replay_checked_uid": 841,
+                           "replay_policy_hash": digest})
+        with patch.dict(sys.modules, {
+            "database": types.SimpleNamespace(get_db=lambda: FakeDB(cur))
+        }):
+            self.assertFalse(gw._replay_needed("mailbox", "valid", 841, hosts))
+            self.assertTrue(gw._replay_needed("mailbox", "valid", 842, hosts))
+            self.assertTrue(gw._replay_needed(
+                "mailbox", "valid", 841,
+                hosts | {"fr-int-smtpin22.hostinger.io"}))
+        self.assertEqual(len(cur.commands), 3)
+
+    def test_replay_marks_completed_state_only_on_success(self):
+        hosts = frozenset({"de-fra-smtpin6.hostinger.io"})
+        cur = self.Cursor(None)
+        with patch.dict(sys.modules, {
+            "database": types.SimpleNamespace(get_db=lambda: FakeDB(cur))
+        }):
+            gw._mark_replay_checked("mailbox", "valid", 841, hosts)
+        self.assertEqual(len(cur.commands), 1)
+        _, args = cur.commands[0]
+        self.assertEqual(args, (841, gw._replay_policy_hash(hosts),
+                                "mailbox", "valid"))
+
+    def test_ingest_keeps_draining_full_replay_batches(self):
+        from pathlib import Path
+        source = (Path(__file__).resolve().parents[1] /
+                  "trust_voice_circle_email_apex_gateway.py").read_text()
+        self.assertIn("if _replay_needed(mailbox_key, valid, last, trusted_hosts):",
+                      source)
+        self.assertIn("if rechecked < _REPLAY_BATCH:", source)
+        self.assertIn("_mark_replay_checked(mailbox_key, valid, last, trusted_hosts)",
+                      source)
+        self.assertIn("_replay_recent_quarantine(", source)
+
+
 if __name__ == "__main__":
     unittest.main()
