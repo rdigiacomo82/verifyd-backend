@@ -92,6 +92,17 @@ class ListenerTests(unittest.TestCase):
             with patch.object(idle, "configured", return_value=False):
                 self.assertEqual(idle.main(), 2)
 
+    def test_wrong_mailbox_fails_closed(self):
+        with patch.dict(os.environ, {
+            "VERIFYD_CIRCLE_EMAIL_IDLE_ENABLED": "true",
+            "VERIFYD_CIRCLE_EMAIL_IDLE_EXPECTED_USER": "circleinbound@vfvid.com",
+            "VERIFYD_CIRCLE_EMAIL_HOSTINGER_IMAP_USER": "support@vfvid.com",
+        }):
+            with patch.object(idle, "configured", return_value=True):
+                with patch.object(idle.imaplib, "IMAP4_SSL") as connect:
+                    self.assertEqual(idle.main(), 2)
+                    connect.assert_not_called()
+
     def test_idle_uses_read_only_mailbox(self):
         class Idler:
             def __enter__(self):
