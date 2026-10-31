@@ -5,6 +5,7 @@ import os
 import pathlib
 import re
 import unittest
+from unittest.mock import patch
 from email import policy
 from email.parser import BytesParser
 
@@ -99,6 +100,45 @@ class ApexGatewayTests(unittest.TestCase):
         self.assertEqual(self.h["parse_catchall"](b"x"*(18*1024*1024+1),self.hosts),(None,None))
         raw=mail(top=top)
         self.assertEqual(self.h["parse_catchall"](raw,self.hosts)[1]["attachments"],[])
+
+    def test_rotating_hostinger_ingress_is_opt_in_and_first_hop_only(self):
+        top=("from gmail.com by fr-int-smtpin37.hostinger.io "
+             "(mx.hostinger.com) with ESMTPS for <annslp@vfvid.com>;")
+        raw=mail(top=top,to="unrelated@vfvid.com")
+        with patch.dict(os.environ,
+                        {"VERIFYD_CIRCLE_EMAIL_APEX_ROTATING_MX_ENABLED":"0"}):
+            self.assertEqual(self.h["parse_catchall"](raw,self.hosts),
+                             (None,None))
+        with patch.dict(os.environ,
+                        {"VERIFYD_CIRCLE_EMAIL_APEX_ROTATING_MX_ENABLED":"true"}):
+            handle, parsed=self.h["parse_catchall"](raw,self.hosts)
+            self.assertEqual(handle,"annslp")
+            self.assertEqual(parsed["to"],["annslp@vfvid.com"])
+            # A forged older Received hop cannot override the first hop.
+            older=mail(top="from x by unrelated.example for <annslp@vfvid.com>;",
+                       lower=top,to="annslp@vfvid.com")
+            self.assertEqual(self.h["parse_catchall"](older,self.hosts),
+                             (None,None))
+            # Suffix lookalikes and missing Hostinger MX marker fail closed.
+            for untrusted in (
+                "fr-int-smtpin37.hostinger.io.attacker.example",
+                "fr-int-smtpin37.attacker.example",
+                "us-ny-smtpin37.hostinger.io",
+                "fr-int-smtpin37.hostinger.io",
+            ):
+                bad=mail(top=f"from x by {untrusted} for <annslp@vfvid.com>;")
+                with self.subTest(untrusted=untrusted):
+                    self.assertEqual(self.h["parse_catchall"](bad,self.hosts),
+                                     (None,None))
+
+    def test_second_observed_hostinger_family_requires_mx_marker(self):
+        top=("from gmail.com by de-fra-smtpin92.hostinger.io "
+             "(mx.hostinger.com) for <annslp@vfvid.com>;")
+        with patch.dict(os.environ,
+                        {"VERIFYD_CIRCLE_EMAIL_APEX_ROTATING_MX_ENABLED":"yes"}):
+            self.assertEqual(
+                self.h["parse_catchall"](mail(top=top),self.hosts)[0],
+                "annslp")
 
     def test_cli_requires_global_gate_and_does_not_modify_workers(self):
         src=FILE.read_text(encoding="utf-8")
