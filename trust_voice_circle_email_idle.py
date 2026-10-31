@@ -93,6 +93,13 @@ def main() -> int:
     if sys.version_info < (3, 14):
         log.error("Hostinger IDLE requires Python 3.14+")
         return 2
+    expected = os.getenv("VERIFYD_CIRCLE_EMAIL_IDLE_EXPECTED_USER", "").strip().lower()
+    actual = os.getenv("VERIFYD_CIRCLE_EMAIL_HOSTINGER_IMAP_USER", "").strip().lower()
+    if not expected or actual != expected:
+        # A dedicated worker must NEVER silently attach to the unrelated
+        # operational/support inbox if the wrong Cron env is referenced.
+        log.error("Hostinger IDLE expected mailbox mismatch; refusing to start")
+        return 2
     signal.signal(signal.SIGTERM, _stop)
     signal.signal(signal.SIGINT, _stop)
     delay = _RETRY_SECONDS
