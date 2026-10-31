@@ -555,6 +555,11 @@ def ingest_batch(max_count: int = _MAX_BATCH) -> dict:
                     # Reserved aliases, unregistered accounts, duplicates and
                     # sender limits are not actual VeriFYD Inbox deliveries.
                     skipped += 1
+            _stage("recover_untracked")
+            repaired, repair_checked = _recover_recent_untracked(
+                connection, mailbox_key, valid,
+                max([last, *uids]), _trusted_hosts())
+            handled += repaired
             _stage("replay_quarantine")
             recovered = rechecked = 0
             trusted_hosts = _trusted_hosts()
@@ -572,7 +577,8 @@ def ingest_batch(max_count: int = _MAX_BATCH) -> dict:
             except (imaplib.IMAP4.error,OSError):
                 pass
     return {"status": "ok", "processed": handled, "quarantined": quarantined,
-            "skipped": skipped, "recovered": recovered, "rechecked": rechecked}
+            "skipped": skipped, "recovered": recovered, "rechecked": rechecked,
+            "repaired": repaired, "repair_checked": repair_checked}
 
 
 def main() -> int:
@@ -584,6 +590,8 @@ def main() -> int:
                  result["status"],result["processed"],result["quarantined"],result.get("skipped",0))
         log.info("Apex quarantine replay recovered=%d rechecked=%d",
                  result.get("recovered", 0), result.get("rechecked", 0))
+        log.info("Apex recent skipped recovery imported=%d checked=%d",
+                 result.get("repaired", 0), result.get("repair_checked", 0))
         return 0
     except Exception as exc:
         # Never log provider exception messages: they may contain account names
