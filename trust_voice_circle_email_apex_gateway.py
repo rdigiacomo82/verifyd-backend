@@ -603,7 +603,24 @@ def _probe_private_attachment_storage() -> None:
     from trust_voice_attachments import (
         _storage_configured, _get_attachment_client, TRUST_VOICE_BUCKET)
     if not _storage_configured():
+        # Only the public *names* of absent/blank settings are logged.
+        # The Render connector cannot read back env entries, so this provides
+        # a secure presence check without revealing any secret or its length.
+        required = (
+            ("R2_TRUST_VOICE_ACCOUNT_ID (or R2_ACCOUNT_ID)",
+             os.getenv("R2_TRUST_VOICE_ACCOUNT_ID", "").strip()
+             or os.getenv("R2_ACCOUNT_ID", "").strip()),
+            ("R2_TRUST_VOICE_ACCESS_KEY_ID",
+             os.getenv("R2_TRUST_VOICE_ACCESS_KEY_ID", "").strip()),
+            ("R2_TRUST_VOICE_SECRET_KEY",
+             os.getenv("R2_TRUST_VOICE_SECRET_KEY", "").strip()),
+            ("R2_TRUST_VOICE_BUCKET",
+             os.getenv("R2_TRUST_VOICE_BUCKET", "").strip()),
+        )
+        missing = [name for name, value in required if not value]
         log.warning("Circle public-email private R2 configured=False")
+        log.warning("Circle public-email R2 missing setting names=%s",
+                    ", ".join(missing) if missing else "none (verify module/runtime consistency)")
         return
     import secrets
     key = "circle-email/probes/" + secrets.token_hex(20)
