@@ -225,6 +225,48 @@ def fetch_inbound_attachment_files(provider_id: str, advertised: list) -> tuple[
     return files, omitted
 
 
+def extract_hostinger_mime_files(msg) -> tuple[list[dict], int]:
+    """Validate bounded MIME attachments already received over verified IMAPS.
+
+    Call only after the Hostinger outermost Received envelope recipient was
+    verified, and only with the separately enabled public-attachment flag.
+    Do not inline or preview. Private downloads require an explicit unscanned
+    acknowledgement until a real malware scanner is integrated.
+    """
+    files: list[dict] = []
+    omitted = 0
+    used = 0
+    parts_seen = 0
+    for part in msg.walk():
+        parts_seen += 1
+        if parts_seen > 128:
+            omitted += 1  # suspiciously complex MIME message
+            break
+        if part.is_multipart() or part.get_content_disposition() != "attachment":
+            continue
+        if len(files) >= MAX_FILES:
+            omitted += 1
+            continue
+        name = _safe_name(part.get_filename() or "")
+        ext = os.path.splitext(name)[1].lower()
+        if ext not in ALLOWED_EXTENSIONS:
+            omitted += 1
+            continue
+        try:
+            raw = part.get_payload(decode=True)
+            if (not isinstance(raw, bytes) or not raw or
+                    len(raw) > MAX_FILE_BYTES or len(raw) + used > MAX_TOTAL_BYTES):
+                omitted += 1
+                continue
+            content_type = _valid_bytes(raw, name, part.get_content_type())
+        except (ValueError, TypeError, LookupError, UnicodeError, AssertionError):
+            omitted += 1
+            continue
+        files.append({"filename": name, "content_type": content_type, "bytes": raw})
+        used += len(raw)
+    return files, omitted
+
+
 def persist_inbound_attachments(db, *, files: list[dict], owner_id: str,
                                 mail_id: str, stamp: str) -> list[str]:
     """Save validated external bytes privately and associate them with one inbox mail.
