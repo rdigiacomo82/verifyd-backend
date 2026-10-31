@@ -183,7 +183,7 @@ class CronWindowTests(unittest.TestCase):
             def __exit__(self, *_):
                 return False
         class FakeConn:
-            capabilities = (b"IDLE",)
+            capabilities = ("IDLE",)
             def __init__(self):
                 self.selected = []
                 self.logged_out = False
