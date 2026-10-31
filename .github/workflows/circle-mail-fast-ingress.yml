@@ -1,0 +1,36 @@
+name: VeriFYD Circle secure fast email ingress
+on:
+  pull_request:
+    paths:
+      - 'trust_voice_circle_email_idle.py'
+      - 'trust_voice_circle_email_apex_gateway.py'
+      - 'trust_voice_circle_email_public.py'
+      - 'trust_voice_circle_email_transport.py'
+      - 'requirements-circle-mail.txt'
+      - 'tests/test_circle_email_fast_ingress.py'
+      - '.github/workflows/circle-mail-fast-ingress.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'trust_voice_circle_email_idle.py'
+      - 'trust_voice_circle_email_apex_gateway.py'
+      - 'trust_voice_circle_email_public.py'
+      - 'trust_voice_circle_email_transport.py'
+      - 'requirements-circle-mail.txt'
+      - 'tests/test_circle_email_fast_ingress.py'
+permissions:
+  contents: read
+jobs:
+  secure-mail:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - run: python -m pip install -r requirements-circle-mail.txt
+      - run: python -m py_compile trust_voice_circle_email_idle.py trust_voice_circle_email_apex_gateway.py trust_voice_circle_email_public.py trust_voice_circle_email_transport.py
+      - run: python -m unittest discover -s tests -p 'test_circle_email_fast_ingress.py' -v
+      - run: python -m unittest discover -s tests -p 'test_circle_email_apex_gateway.py' -v
+      - run: python -m unittest discover -s tests -p 'test_circle_email_apex_import_counts.py' -v
+      - run: python -m unittest discover -s tests -p 'test_circle_email_sender_cap_recovery.py' -v

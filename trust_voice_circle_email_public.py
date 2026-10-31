@@ -131,39 +131,81 @@ def store_public_received(received: dict, provider_id: str, *, handle: str) -> t
         notes = 'Provider reports failed DMARC; ' + notes
     notes = 'Unsolicited public-handle email; sender unverified. ' + notes
     advertised = received.get('attachments') or []
+    files = []
     if isinstance(advertised, list) and advertised:
-        # Public address attachments require a separate malware scanning
-        # rollout. No provider/CDN file is downloaded in this stage.
-        notice = '[External attachments withheld: public mailbox malware scanning is not enabled.]'
+        # Sender-supplied JSON and headers never authorize attachment capture.
+        # Only the trusted Hostinger IMAP parser can supply this private MIME
+        # object after validating the original envelope recipient.
+        from trust_voice_attachments import _storage_configured
+        capture = (provider_id.startswith('hostinger-')
+                   and received.get('_hostinger_verified_mime') is not None
+                   and os.getenv('VERIFYD_CIRCLE_EMAIL_APEX_ATTACHMENT_CAPTURE_ENABLED','')
+                       .strip().lower() in ('1','true','yes','on')
+                   and _storage_configured())
+        if capture:
+            from trust_voice_circle_email_transport import extract_hostinger_mime_files
+            files, omitted = extract_hostinger_mime_files(
+                received['_hostinger_verified_mime'])
+            if files:
+                notice = ('[External attachments have not been malware scanned. '
+                          'Confirm before downloading; do not open unknown files.]')
+                if omitted:
+                    notice += f' [{omitted} attachment(s) withheld by file policy.]'
+            else:
+                notice = '[External attachments withheld: unsupported or unsafe files.]'
+        else:
+            notice = '[External attachments withheld: public mailbox malware scanning is not enabled.]'
         body = (body[:12000-len(notice)-2] + '\n\n' + notice)[:12000]
     now = utc()
-    with get_db() as db:
-        cur = db.cursor()
-        cur.execute("""SELECT id, handle_lower FROM verifyd_identities
-            WHERE handle_lower=%s AND email_verified=TRUE AND status='active'
-            LIMIT 1""", (handle,))
-        owner = cur.fetchone()
-        if not owner:
-            return None, None
-        uid = str(owner['id'])
-        # Serialize public mail intake per owner to reduce rate-limit races.
-        cur.execute('SELECT pg_advisory_xact_lock(hashtext(%s))', ('circle-public-mail:' + uid,))
-        cur.execute('SELECT 1 FROM verifyd_circle_email_received_events WHERE provider_email_id=%s',
-                    (provider_id,))
-        if cur.fetchone():
-            return None, None
-        if not _public_spam_limits(cur, uid, sender):
-            return None, None
-        mail_id = 'tvcmail_' + uuid.uuid4().hex
-        thread_id = 'tvcemail_' + uuid.uuid4().hex
-        folder = 'spam' if verdict == 'suspicious' else 'inbox'
-        cur.execute("""INSERT INTO verifyd_circle_email_messages
-            (mail_id,thread_id,owner_id,sender_id,sender_handle,recipient,
-             subject,body,folder,is_read,spam_flag,delivery,verdict,risk_notes,created_at)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,FALSE,%s,'received_external',%s,%s,%s)""",
-            (mail_id,thread_id,uid,'external:'+sender,sender,'@'+handle,
-             subject,body,folder,verdict=='suspicious',verdict,notes,now))
-        cur.execute("""INSERT INTO verifyd_circle_email_received_events
-            (provider_email_id,mail_id,created_at) VALUES (%s,%s,%s)""",
-            (provider_id,mail_id,now))
+    created_keys = []
+    try:
+        with get_db() as db:
+            cur = db.cursor()
+            cur.execute("""SELECT id, handle_lower FROM verifyd_identities
+                WHERE handle_lower=%s AND email_verified=TRUE AND status='active'
+                LIMIT 1""", (handle,))
+            owner = cur.fetchone()
+            if not owner:
+                return None, None
+            uid = str(owner['id'])
+            # Serialize public mail intake per owner to reduce rate-limit races.
+            cur.execute('SELECT pg_advisory_xact_lock(hashtext(%s))', ('circle-public-mail:' + uid,))
+            cur.execute('SELECT 1 FROM verifyd_circle_email_received_events WHERE provider_email_id=%s',
+                        (provider_id,))
+            if cur.fetchone():
+                return None, None
+            if not _public_spam_limits(cur, uid, sender):
+                return None, None
+            mail_id = 'tvcmail_' + uuid.uuid4().hex
+            thread_id = 'tvcemail_' + uuid.uuid4().hex
+            folder = 'spam' if verdict == 'suspicious' else 'inbox'
+            cur.execute("""INSERT INTO verifyd_circle_email_messages
+                (mail_id,thread_id,owner_id,sender_id,sender_handle,recipient,
+                 subject,body,folder,is_read,spam_flag,delivery,verdict,risk_notes,created_at)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,FALSE,%s,'received_external',%s,%s,%s)""",
+                (mail_id,thread_id,uid,'external:'+sender,sender,'@'+handle,
+                 subject,body,folder,verdict=='suspicious',verdict,notes,now))
+            if files:
+                from trust_voice_circle_email_transport import persist_inbound_attachments
+                created_keys = persist_inbound_attachments(
+                    db, files=files, owner_id=uid, mail_id=mail_id, stamp=now)
+            cur.execute("""INSERT INTO verifyd_circle_email_received_events
+                (provider_email_id,mail_id,created_at) VALUES (%s,%s,%s)""",
+                (provider_id,mail_id,now))
+    except Exception:
+        # If the DB transaction fails after an R2 upload, do not leave
+        # orphaned private files. No unverified mail is ever sent to another
+        # Circle account through this path.
+        if created_keys:
+            try:
+                from trust_voice_attachments import _get_attachment_client, TRUST_VOICE_BUCKET
+                client = _get_attachment_client()
+                for key in created_keys:
+                    try:
+                        client.delete_object(Bucket=TRUST_VOICE_BUCKET, Key=key)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        raise
     return uid,mail_id

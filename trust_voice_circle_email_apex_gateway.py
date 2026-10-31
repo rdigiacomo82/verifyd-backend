@@ -143,9 +143,13 @@ def parse_catchall(raw: bytes, trusted_hosts: frozenset[str]):
         "subject": subject,
         "text": str(text or "")[:12000],
         "html": str(html_text or "")[:200000],
-        # Attachments deliberately withheld for unsolicited public email.
         "attachments": [{"withheld": True}] if files else [],
     }
+    # The parsed MIME object is internal to this trusted IMAP importer.
+    # An explicit separate flag and configured private storage are required
+    # before even considering public-message attachment retrieval.
+    if files and _on("VERIFYD_CIRCLE_EMAIL_APEX_ATTACHMENT_CAPTURE_ENABLED"):
+        received["_hostinger_verified_mime"] = msg
     return handle, received
 
 
@@ -518,6 +522,12 @@ def ingest_batch(max_count: int = _MAX_BATCH) -> dict:
             status, _ = connection.select("INBOX", readonly=True)
             if status != "OK":
                 raise RuntimeError("Could not select Hostinger catch-all INBOX")
+            if _on("VERIFYD_CIRCLE_EMAIL_IDLE_PROBE_ENABLED"):
+                # Non-sensitive capability only. Test provider support on the
+                # existing cron BEFORE provisioning an always-on worker.
+                advertised = connection.capabilities
+                log.info("Hostinger IMAP IDLE advertised=%s",
+                         b"IDLE" in advertised or "IDLE" in advertised)
             _stage("uid_validity")
             valid = _uidvalidity(connection)
             _stage("cursor")
