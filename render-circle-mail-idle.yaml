@@ -1,0 +1,77 @@
+# Standalone Blueprint: only NEW private background worker. Do NOT use render.yaml
+# (render.yaml configures the separate, existing analysis web service).
+# Render Dashboard > New > Blueprint > this repository > Blueprint Path:
+# render-circle-mail-idle.yaml
+services:
+  - type: worker
+    name: verifyd-circle-mail-idle
+    runtime: python
+    region: ohio
+    plan: starter
+    repo: https://github.com/rdigiacomo82/verifyd-backend
+    branch: main
+    buildCommand: pip install -r requirements-circle-mail.txt
+    startCommand: python trust_voice_circle_email_idle.py
+    buildFilter:
+      paths:
+        - trust_voice_circle_email_idle.py
+        - trust_voice_circle_email_apex_gateway.py
+        - trust_voice_circle_email_public.py
+        - trust_voice_circle_email_inbound.py
+        - trust_voice_circle_email.py
+        - trust_voice_circle_email_transport.py
+        - trust_voice_attachments.py
+        - trust_voice_attachment_validation.py
+        - database.py
+        - requirements-circle-mail.txt
+    envVars:
+      # Listener runs only as a dedicated worker and remains read-only in IMAP.
+      - key: VERIFYD_CIRCLE_EMAIL_IDLE_ENABLED
+        value: "true"
+      - key: VERIFYD_CIRCLE_EMAIL_IDLE_EXPECTED_USER
+        value: circleinbound@vfvid.com
+      # Never download unsolicited files until external-file validation and
+      # storage permissions pass live tests and the operator opts in.
+      - key: VERIFYD_CIRCLE_EMAIL_APEX_ATTACHMENT_CAPTURE_ENABLED
+        value: "false"
+      - key: VERIFYD_DB_POOL_MIN
+        value: "1"
+      - key: VERIFYD_DB_POOL_MAX
+        value: "4"
+      # Reference existing, working Cron secrets inside Render. No credential
+      # values are copied to git, chat, logs, or deploy settings manually.
+      - key: DATABASE_URL
+        fromService:
+          type: cron
+          name: verifyd-circle-hostinger-inbound
+          envVarKey: DATABASE_URL
+      - key: VERIFYD_CIRCLE_EMAIL_HOSTINGER_IMAP_USER
+        fromService:
+          type: cron
+          name: verifyd-circle-hostinger-inbound
+          envVarKey: VERIFYD_CIRCLE_EMAIL_HOSTINGER_IMAP_USER
+      - key: VERIFYD_CIRCLE_EMAIL_HOSTINGER_IMAP_PASSWORD
+        fromService:
+          type: cron
+          name: verifyd-circle-hostinger-inbound
+          envVarKey: VERIFYD_CIRCLE_EMAIL_HOSTINGER_IMAP_PASSWORD
+      - key: VERIFYD_CIRCLE_EMAIL_PUBLIC_HANDLE_ENABLED
+        fromService:
+          type: cron
+          name: verifyd-circle-hostinger-inbound
+          envVarKey: VERIFYD_CIRCLE_EMAIL_PUBLIC_HANDLE_ENABLED
+      - key: VERIFYD_CIRCLE_EMAIL_APEX_GATEWAY_ENABLED
+        fromService:
+          type: cron
+          name: verifyd-circle-hostinger-inbound
+          envVarKey: VERIFYD_CIRCLE_EMAIL_APEX_GATEWAY_ENABLED
+      - key: VERIFYD_CIRCLE_EMAIL_APEX_TRUSTED_RECEIVED_BY
+        fromService:
+          type: cron
+          name: verifyd-circle-hostinger-inbound
+          envVarKey: VERIFYD_CIRCLE_EMAIL_APEX_TRUSTED_RECEIVED_BY
+      - key: VERIFYD_CIRCLE_EMAIL_APEX_ROTATING_MX_ENABLED
+        fromService:
+          type: cron
+          name: verifyd-circle-hostinger-inbound
+          envVarKey: VERIFYD_CIRCLE_EMAIL_APEX_ROTATING_MX_ENABLED
