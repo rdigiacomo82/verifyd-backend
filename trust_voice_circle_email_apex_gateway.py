@@ -143,9 +143,13 @@ def parse_catchall(raw: bytes, trusted_hosts: frozenset[str]):
         "subject": subject,
         "text": str(text or "")[:12000],
         "html": str(html_text or "")[:200000],
-        # Attachments deliberately withheld for unsolicited public email.
         "attachments": [{"withheld": True}] if files else [],
     }
+    # The parsed MIME object is internal to this trusted IMAP importer.
+    # An explicit separate flag and configured private storage are required
+    # before even considering public-message attachment retrieval.
+    if files and _on("VERIFYD_CIRCLE_EMAIL_APEX_ATTACHMENT_CAPTURE_ENABLED"):
+        received["_hostinger_verified_mime"] = msg
     return handle, received
 
 
