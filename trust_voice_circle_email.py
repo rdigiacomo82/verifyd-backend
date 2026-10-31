@@ -699,7 +699,7 @@ async def send(payload:MailSend,tasks:BackgroundTasks,authorization:Optional[str
         attachment_payload=prepare_outbound_attachments(rows)
         send_params={'from':from_address,'to':[recipient],
           'reply_to':reply_to,
-          'subject':subject,'text':((body + '\n\n') if body else '') + reply_note}
+          'subject':subject,'text':reply_note + (('\n\n' + body) if body else '')}
         if attachment_payload:
             send_params['attachments']=attachment_payload
         result=resend.Emails.send(send_params)
