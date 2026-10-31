@@ -99,6 +99,24 @@ class PrivateStorageProbeTest(unittest.TestCase):
                     gateway._probe_private_attachment_storage()
                     mock.assert_not_called()
 
+    def test_missing_r2_diagnostic_logs_only_variable_names(self):
+        fake_secret = "never-print-this-fake-access-key"
+        env = {
+            "VERIFYD_CIRCLE_EMAIL_APEX_R2_PROBE_ENABLED": "true",
+            "R2_ACCOUNT_ID": "test-account-id",
+            "R2_TRUST_VOICE_ACCESS_KEY_ID": fake_secret,
+        }
+        with patch.dict(os.environ, env, clear=True):
+            with patch("trust_voice_attachments._storage_configured", return_value=False):
+                with self.assertLogs("verifyd.circle_email.apex_gateway", level="WARNING") as messages:
+                    gateway._probe_private_attachment_storage()
+        output = "\\n".join(messages.output)
+        self.assertIn("R2_TRUST_VOICE_SECRET_KEY", output)
+        self.assertIn("R2_TRUST_VOICE_BUCKET", output)
+        self.assertNotIn(fake_secret, output)
+        self.assertNotIn("R2_TRUST_VOICE_ACCESS_KEY_ID,", output)
+        self.assertNotIn("R2_TRUST_VOICE_ACCOUNT_ID (or R2_ACCOUNT_ID)", output)
+
     def test_probe_reads_back_and_deletes_private_object(self):
         class Body:
             def read(self, _):
