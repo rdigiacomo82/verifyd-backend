@@ -15,8 +15,11 @@ from email.utils import parseaddr, getaddresses
 from database import get_db, is_valid_email
 
 _HANDLE = re.compile(r'^[a-z][a-z0-9_]{2,23}$')
+# Keep the total per-account flood cap at 60 external emails per rolling day.
+# The former 8-per-sender threshold unexpectedly rejected ordinary threads
+# and test messages, even after they were moved to Trash.
 _MAX_OWNER_DAY = 60
-_MAX_SENDER_DAY = 8
+_MAX_SENDER_DAY = 30
 
 
 def public_handles_enabled() -> bool:

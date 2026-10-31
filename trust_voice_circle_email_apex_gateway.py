@@ -171,6 +171,8 @@ def _schema():
             ADD COLUMN IF NOT EXISTS replay_checked_uid BIGINT NOT NULL DEFAULT 0""")
         c.execute("""ALTER TABLE verifyd_circle_email_apex_cursor
             ADD COLUMN IF NOT EXISTS replay_policy_hash TEXT""")
+        c.execute("""ALTER TABLE verifyd_circle_email_apex_cursor
+            ADD COLUMN IF NOT EXISTS skipped_repair_version TEXT""")
 
 
 def _check_cursor(mailbox_hash: str, uidvalidity: str) -> int:
@@ -407,6 +409,85 @@ def _replay_recent_quarantine(conn, mailbox_key: str, valid: str,
     return recovered, checked
 
 
+_SKIPPED_REPAIR_VERSION = "sender-limit-30-v1"
+
+
+def _recover_recent_untracked(conn, mailbox_key: str, valid: str,
+                              last_uid: int,
+                              trusted_hosts: frozenset[str]) -> tuple[int, int]:
+    """One-time, bounded recovery of already-checkpointed untracked mail.
+
+    Prior gateway versions advanced the UID cursor on sender-rate-limit
+    failures without recording the failure in quarantine. Search only the
+    newest 12 already-checkpointed messages, and exclude both previously
+    delivered and quarantined IDs. The original Hostinger Received proof,
+    active-verified-account check, rate limits and provider ID uniqueness
+    are the same as the main import path. Never move, delete or mark mail.
+    """
+    if last_uid < 1 or not trusted_hosts:
+        return 0, 0
+    from database import get_db
+    from trust_voice_circle_email_public import store_public_received
+
+    with get_db() as db:
+        cur = db.cursor()
+        cur.execute("""SELECT skipped_repair_version
+            FROM verifyd_circle_email_apex_cursor
+            WHERE mailbox_hash=%s AND uid_validity=%s""",
+                    (mailbox_key, valid))
+        row = cur.fetchone()
+        if row and row["skipped_repair_version"] == _SKIPPED_REPAIR_VERSION:
+            return 0, 0
+
+    # Only recent, already checkpointed UIDs; no cursor rewind.
+    recent = _recent_processed_uids(conn, last_uid, window=12)[:12]
+    provider_for_uid = {
+        uid: "hostinger-" + hashlib.sha256(
+            f"{mailbox_key}:{valid}:{uid}".encode("ascii")).hexdigest()
+        for uid in recent
+    }
+    if provider_for_uid:
+        with get_db() as db:
+            cur = db.cursor()
+            ids = list(provider_for_uid.values())
+            cur.execute("""SELECT provider_email_id AS pid
+                FROM verifyd_circle_email_received_events
+                WHERE provider_email_id = ANY(%s)
+                UNION SELECT provider_id AS pid
+                FROM verifyd_circle_email_apex_quarantine
+                WHERE provider_id = ANY(%s)""", (ids, ids))
+            known = {r["pid"] for r in cur.fetchall()}
+    else:
+        known = set()
+
+    checked = imported = 0
+    for uid in recent:
+        provider_id = provider_for_uid[uid]
+        if provider_id in known:
+            continue
+        _stage("untracked_repair_fetch")
+        size = _fetch_size(conn, uid)
+        if 0 < size <= _MAX_RAW_BYTES:
+            raw = _fetch_raw(conn, uid)
+            handle, received = parse_catchall(raw, trusted_hosts)
+            if received is not None:
+                _stage("untracked_repair_store")
+                owner, mail_id = store_public_received(
+                    received, provider_id, handle=handle)
+                if owner and mail_id:
+                    imported += 1
+        checked += 1
+
+    # Set only after all candidates were examined without exception.
+    _stage("untracked_repair_complete")
+    with get_db() as db:
+        db.cursor().execute("""UPDATE verifyd_circle_email_apex_cursor
+            SET skipped_repair_version=%s
+            WHERE mailbox_hash=%s AND uid_validity=%s""",
+            (_SKIPPED_REPAIR_VERSION, mailbox_key, valid))
+    return imported, checked
+
+
 def ingest_batch(max_count: int = _MAX_BATCH) -> dict:
     """Read one bounded IMAP batch; checkpoint only after each message commits."""
     from database import get_db
@@ -474,6 +555,11 @@ def ingest_batch(max_count: int = _MAX_BATCH) -> dict:
                     # Reserved aliases, unregistered accounts, duplicates and
                     # sender limits are not actual VeriFYD Inbox deliveries.
                     skipped += 1
+            _stage("recover_untracked")
+            repaired, repair_checked = _recover_recent_untracked(
+                connection, mailbox_key, valid,
+                max([last, *uids]), _trusted_hosts())
+            handled += repaired
             _stage("replay_quarantine")
             recovered = rechecked = 0
             trusted_hosts = _trusted_hosts()
@@ -491,7 +577,8 @@ def ingest_batch(max_count: int = _MAX_BATCH) -> dict:
             except (imaplib.IMAP4.error,OSError):
                 pass
     return {"status": "ok", "processed": handled, "quarantined": quarantined,
-            "skipped": skipped, "recovered": recovered, "rechecked": rechecked}
+            "skipped": skipped, "recovered": recovered, "rechecked": rechecked,
+            "repaired": repaired, "repair_checked": repair_checked}
 
 
 def main() -> int:
@@ -503,6 +590,8 @@ def main() -> int:
                  result["status"],result["processed"],result["quarantined"],result.get("skipped",0))
         log.info("Apex quarantine replay recovered=%d rechecked=%d",
                  result.get("recovered", 0), result.get("rechecked", 0))
+        log.info("Apex recent skipped recovery imported=%d checked=%d",
+                 result.get("repaired", 0), result.get("repair_checked", 0))
         return 0
     except Exception as exc:
         # Never log provider exception messages: they may contain account names

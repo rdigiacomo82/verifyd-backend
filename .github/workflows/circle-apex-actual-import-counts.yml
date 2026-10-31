@@ -5,6 +5,8 @@ on:
   pull_request:
     paths:
       - 'trust_voice_circle_email_apex_gateway.py'
+      - 'trust_voice_circle_email_public.py'
+      - 'tests/test_circle_email_sender_cap_recovery.py'
       - 'tests/test_circle_email_apex_import_counts.py'
 permissions:
   contents: read
@@ -22,3 +24,4 @@ jobs:
       - run: python -m unittest discover -s tests -p 'test_circle_email_apex_imap_uids.py' -v
       - run: python -m unittest discover -s tests -p 'test_circle_email_apex_diagnostics.py' -v
       - run: python -m unittest discover -s tests -p 'test_circle_email_apex_recovery.py' -v
+      - run: python -m unittest discover -s tests -p 'test_circle_email_sender_cap_recovery.py' -v
