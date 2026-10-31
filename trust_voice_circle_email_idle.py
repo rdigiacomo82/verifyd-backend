@@ -18,6 +18,7 @@ import signal
 import ssl
 import sys
 import threading
+import time
 
 from trust_voice_circle_email_apex_gateway import (
     _IMAP_HOST, _on, configured, ingest_batch,
@@ -83,6 +84,85 @@ def _watch_connection() -> None:
             connection.logout()
         except (OSError, imaplib.IMAP4.error):
             pass
+
+
+def _next_cron_cutoff_utc(now: float, *, reserve_seconds: int = 40,
+                          max_seconds: int = 235) -> float:
+    """UTC five-minute slot with a safety margin for Render cron shutdown.
+
+    Avoids stretching a scheduled run into the next cron slot. The ordinary
+    five-minute batch still runs even if this optional listening fails.
+    """
+    next_slot = (int(now // 300) + 1) * 300
+    return min(now + max_seconds, next_slot - reserve_seconds)
+
+
+def watch_current_cron_window() -> None:
+    """Bounded IMAP IDLE on the EXISTING five-minute cron, without a new service.
+
+    Never attempts to run indefinitely or modify messages. While this
+    optional listener is waiting, Render charges for active cron runtime,
+    so it is guarded by an opt-in env flag and a hard five-minute-slot
+    cutoff. On any failure the cron still exits normally and retries on
+    its next scheduled run.
+    """
+    if not _on("VERIFYD_CIRCLE_EMAIL_APEX_FAST_WINDOW_ENABLED"):
+        return
+    if sys.version_info < (3, 14):
+        log.warning("Hostinger cron fast listener requires Python 3.14+")
+        return
+    expected = os.getenv("VERIFYD_CIRCLE_EMAIL_IDLE_EXPECTED_USER",
+                         "circleinbound@vfvid.com").strip().lower()
+    actual = os.getenv("VERIFYD_CIRCLE_EMAIL_HOSTINGER_IMAP_USER",
+                       "").strip().lower()
+    if not expected or actual != expected:
+        log.warning("Hostinger cron fast listener mailbox mismatch; disabled")
+        return
+    seconds = _next_cron_cutoff_utc(time.time()) - time.time()
+    if seconds < 8:
+        log.info("Hostinger cron fast listener skipped; too near next run")
+        return
+    deadline = time.monotonic() + seconds
+    connection = None
+    try:
+        connection = imaplib.IMAP4_SSL(
+            _IMAP_HOST, 993, ssl_context=ssl.create_default_context(), timeout=30)
+        connection.login(actual,
+                         os.environ["VERIFYD_CIRCLE_EMAIL_HOSTINGER_IMAP_PASSWORD"])
+        status, _ = connection.select("INBOX", readonly=True)
+        if status != "OK" or b"IDLE" not in connection.capabilities:
+            raise RuntimeError("cron_idle_not_available")
+        if not callable(getattr(connection, "idle", None)):
+            raise RuntimeError("cron_idle_python_unavailable")
+        log.info("Hostinger cron fast listener active")
+        while not _STOP.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining < 2:
+                break
+            notified = False
+            # Recheck every ~30 seconds even if a provider notification is
+            # lost. Only a short amount of time is billed while idling.
+            with connection.idle(duration=min(30, remaining)) as idler:
+                for kind, _ in idler:
+                    if kind in ("EXISTS", "RECENT", b"EXISTS", b"RECENT"):
+                        notified = True
+                        break
+            if _STOP.is_set() or deadline - time.monotonic() < 2:
+                break
+            _ingest()
+            if notified:
+                log.info("Hostinger cron fast listener received new-mail signal")
+        log.info("Hostinger cron fast listener complete")
+    except (OSError, imaplib.IMAP4.error, RuntimeError, ValueError, KeyError) as exc:
+        # Never log raw IMAP details, sender data or credentials.
+        log.warning("Hostinger cron fast listener unavailable reason=%s",
+                    type(exc).__name__)
+    finally:
+        if connection is not None:
+            try:
+                connection.logout()
+            except (OSError, imaplib.IMAP4.error):
+                pass
 
 
 def main() -> int:

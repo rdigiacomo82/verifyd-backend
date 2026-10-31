@@ -147,5 +147,94 @@ class ListenerTests(unittest.TestCase):
             idle._STOP.clear()
 
 
+class CronWindowTests(unittest.TestCase):
+    def test_utc_deadline_reserves_time_before_next_cron(self):
+        self.assertEqual(idle._next_cron_cutoff_utc(3000.0), 3235.0)
+        self.assertEqual(idle._next_cron_cutoff_utc(3275.0), 3260.0)
+        self.assertEqual(idle._next_cron_cutoff_utc(3110.0), 3260.0)
+
+    def test_opt_in_off_does_not_connect(self):
+        with patch.dict(os.environ, {
+            "VERIFYD_CIRCLE_EMAIL_APEX_FAST_WINDOW_ENABLED": "false",
+        }):
+            with patch.object(idle.imaplib, "IMAP4_SSL") as connect:
+                idle.watch_current_cron_window()
+                connect.assert_not_called()
+
+    def test_wrong_mailbox_refuses_to_connect(self):
+        with patch.dict(os.environ, {
+            "VERIFYD_CIRCLE_EMAIL_APEX_FAST_WINDOW_ENABLED": "true",
+            "VERIFYD_CIRCLE_EMAIL_IDLE_EXPECTED_USER": "circleinbound@vfvid.com",
+            "VERIFYD_CIRCLE_EMAIL_HOSTINGER_IMAP_USER": "support@vfvid.com",
+        }):
+            with patch.object(idle.imaplib, "IMAP4_SSL") as connect:
+                idle.watch_current_cron_window()
+                connect.assert_not_called()
+
+    def test_cron_listener_reads_only_and_wakes_once(self):
+        class Clock:
+            t = 0.0
+            def monotonic(self):
+                return self.t
+        clock = Clock()
+        class Idler:
+            def __enter__(self):
+                return iter([("EXISTS", [b"18"])])
+            def __exit__(self, *_):
+                return False
+        class FakeConn:
+            capabilities = (b"IDLE",)
+            def __init__(self):
+                self.selected = []
+                self.logged_out = False
+                self.durations = []
+            def login(self, *_):
+                return "OK", []
+            def select(self, name, readonly=False):
+                self.selected.append((name, readonly))
+                return "OK", []
+            def idle(self, duration=None):
+                self.durations.append(duration)
+                return Idler()
+            def logout(self):
+                self.logged_out = True
+        fake = FakeConn()
+        def on_ingest():
+            clock.t += 240.0
+        with patch.dict(os.environ, {
+            "VERIFYD_CIRCLE_EMAIL_APEX_FAST_WINDOW_ENABLED": "true",
+            "VERIFYD_CIRCLE_EMAIL_IDLE_EXPECTED_USER": "circleinbound@vfvid.com",
+            "VERIFYD_CIRCLE_EMAIL_HOSTINGER_IMAP_USER": "circleinbound@vfvid.com",
+            "VERIFYD_CIRCLE_EMAIL_HOSTINGER_IMAP_PASSWORD": "mock-password",
+        }):
+            with patch.object(idle.time, "time", return_value=3010.0):
+                with patch.object(idle.time, "monotonic", side_effect=clock.monotonic):
+                    with patch.object(idle.imaplib, "IMAP4_SSL", return_value=fake):
+                        with patch.object(idle, "_ingest", side_effect=on_ingest) as ingest:
+                            idle.watch_current_cron_window()
+        self.assertEqual(fake.selected, [("INBOX", True)])
+        self.assertTrue(fake.logged_out)
+        self.assertEqual(ingest.call_count, 1)
+        self.assertEqual(fake.durations, [30])
+
+    def test_cron_gateway_calls_watcher_only_after_success(self):
+        import trust_voice_circle_email_apex_gateway as gateway
+        with patch.dict(os.environ, {
+            "VERIFYD_CIRCLE_EMAIL_APEX_FAST_WINDOW_ENABLED": "true",
+        }):
+            with patch.object(gateway, "ingest_batch",
+                              return_value={"status": "ok", "processed": 0,
+                                            "quarantined": 0, "skipped": 0}):
+                with patch.object(gateway, "_probe_private_attachment_storage"):
+                    with patch.object(idle, "watch_current_cron_window") as listener:
+                        self.assertEqual(gateway.main(), 0)
+                        listener.assert_called_once()
+            with patch.object(gateway, "ingest_batch",
+                              side_effect=RuntimeError("fake failure")):
+                with patch.object(idle, "watch_current_cron_window") as listener:
+                    self.assertEqual(gateway.main(), 1)
+                    listener.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

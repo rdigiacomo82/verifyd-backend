@@ -26,6 +26,41 @@ pip install -r requirements-circle-mail.txt
 
 Do not change its start command, schedule, database credentials, recipient flags or IMAP credentials. Run a manual *new incoming email* test after each change. The CI's Python 3.14 job imports/tests the mail stack from this reduced dependency file; full `requirements.txt` remains untouched for detection workers.
 
+## Phase A2 — bounded IMAP IDLE in the existing cron (no new service)
+
+For users who cannot provision the dedicated worker, a cost-aware interim
+fast mode is available **inside the already-running Hostinger cron**. It has
+been deployed with the default setting **off**. After successful regression
+tests, enable on Render service `verifyd-circle-hostinger-inbound`:
+
+```text
+VERIFYD_CIRCLE_EMAIL_APEX_FAST_WINDOW_ENABLED=true
+```
+
+The cron keeps `*/5 * * * *` and its normal first batch unchanged. After
+the first successful import, it holds a separate **read-only** Hostinger
+IMAP IDLE connection and wakes on new-message notifications, with a 30-second
+catch-up check to cover missed provider signals. It **always exits** before
+the next five-minute UTC schedule boundary (40-second margin; maximum 235
+seconds). A failed listener logs only a generic error type and exits; the
+next cron run still imports outstanding mail. The existing verified original
+recipient, sender limits, attachment validation, PostgreSQL cursor and
+private R2 storage remain untouched.
+
+**Important cost tradeoff:** Render charges cron by *active runtime*. This
+mode can increase monthly cron spend compared with a ~30-second import
+every five minutes. At a rate of $0.00016 per active minute, running for
+~235 of every 300 seconds could incur approximately $5.40/month of cron
+compute plus small execution overhead, versus the $1/month minimum for
+brief runs. Actual charges vary by plan, runtime and billing period;
+check the connected service's pricing before long-term use. It creates
+no new Render service or separate worker charge.
+
+To roll back immediately set the same flag to `false` and deploy; the
+ordinary five-minute cron resumes. When a dedicated IMAP IDLE worker
+becomes healthy, disable the cron fast-window flag to avoid duplicate
+idle connections and unnecessary active runtime charges.
+
 ## Phase B — create the IDLE worker via its isolated Blueprint
 
 The source file is **`render-circle-mail-idle.yaml`**, not the existing

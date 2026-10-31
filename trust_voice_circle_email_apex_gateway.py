@@ -665,6 +665,12 @@ def main() -> int:
                  result.get("recovered", 0), result.get("rechecked", 0))
         log.info("Apex recent skipped recovery imported=%d checked=%d",
                  result.get("repaired", 0), result.get("repair_checked", 0))
+        # Optional bounded IDLE listener shares this cron's existing R2,
+        # database, IMAP and recipient-proof settings. The regular scheduled
+        # import is always completed FIRST and remains the fallback.
+        if result["status"] == "ok" and _on("VERIFYD_CIRCLE_EMAIL_APEX_FAST_WINDOW_ENABLED"):
+            from trust_voice_circle_email_idle import watch_current_cron_window
+            watch_current_cron_window()
         return 0
     except Exception as exc:
         # Never log provider exception messages: they may contain account names
