@@ -26,20 +26,45 @@ pip install -r requirements-circle-mail.txt
 
 Do not change its start command, schedule, database credentials, recipient flags or IMAP credentials. Run a manual *new incoming email* test after each change. The CI's Python 3.14 job imports/tests the mail stack from this reduced dependency file; full `requirements.txt` remains untouched for detection workers.
 
-## Phase B — fast IMAP listener (requires explicit new paid worker)
+## Phase B — create the IDLE worker via its isolated Blueprint
 
-If provider IDLE capability is confirmed, add an **always-on Render Background Worker** with:
-* Name: `verifyd-circle-mail-idle`
-* Repo: `rdigiacomo82/verifyd-backend`, main
-* Runtime: **Python 3.14+**; same Ohio region as database
-* Plan: Starter (512 MB, ordinarily about $7/month; check account billing)
-* Build command: `pip install -r requirements-circle-mail.txt`
-* Start command: `python trust_voice_circle_email_idle.py`
-* Environment values: the same private `DATABASE_URL`, `VERIFYD_CIRCLE_EMAIL_HOSTINGER_IMAP_USER`, `VERIFYD_CIRCLE_EMAIL_HOSTINGER_IMAP_PASSWORD`, `VERIFYD_CIRCLE_EMAIL_PUBLIC_HANDLE_ENABLED`, `VERIFYD_CIRCLE_EMAIL_APEX_GATEWAY_ENABLED`, `VERIFYD_CIRCLE_EMAIL_APEX_TRUSTED_RECEIVED_BY`, `VERIFYD_CIRCLE_EMAIL_APEX_ROTATING_MX_ENABLED`, any configured reserved local parts and `VERIFYD_CIRCLE_EMAIL_REPLY_DOMAIN` from the cron. Set `VERIFYD_CIRCLE_EMAIL_IDLE_ENABLED=true` **only on this worker**. Store secrets only in Render, never in docs, chat or Git.
-* Keep the original cron running as fallback. Both call the same ingest function and serialize per mailbox in PostgreSQL.
-* Validate that `Hostinger IDLE wakeup processed` appears promptly on a new test email, and no duplicate `provider_email_id` events exist. Then verify messages arrive in the correct member's inbox.
+The source file is **`render-circle-mail-idle.yaml`**, not the existing
+`render.yaml`. The existing root `render.yaml` describes the main analysis
+web backend and MUST NOT be used for creating the mail worker.
 
-Do not re-use any analysis/document detection worker for this purpose. Don't run it as a sleeping Free web service; a continuous connection needs an always-on worker.
+Hostinger has already advertised `IDLE` in several successful importer runs.
+The worker is ready to be provisioned after Blueprint CI passes.
+
+1. In Render Dashboard select **New → Blueprint**.
+2. Select GitHub repository `rdigiacomo82/verifyd-backend`, branch `main`.
+3. In **Blueprint Path**, enter `render-circle-mail-idle.yaml`.
+4. Confirm the proposed changes list contains ONLY one new background worker:
+   `verifyd-circle-mail-idle`, in Ohio, Starter plan. If it lists any existing
+   web service, other worker, database, disk, or cron as changed: **do not deploy**.
+5. The blueprint references existing cron env variables via `fromService`.
+   Their secret values never appear in the YAML, chat or Git. Render must allow
+   those references in this workspace; if it rejects a reference, fix the
+   service reference **in Render**, never paste a secret into chat.
+6. Deploy the Blueprint; the new Starter worker adds a separately billed,
+   always-on service (check the exact price displayed in your Render account).
+7. Verify logs show `Hostinger IDLE ingest status=ok` and later
+   `Hostinger IDLE wakeup processed` when a NEW test email is sent. Confirm the
+   matching registered member's Inbox receives the email, and one provider
+   event ID was recorded, with no duplicate messages.
+
+The worker sets `VERIFYD_CIRCLE_EMAIL_IDLE_EXPECTED_USER=circleinbound@vfvid.com`.
+If its copied credentials unexpectedly refer to another mailbox such as
+`support@vfvid.com`, it **refuses to start**. It uses a read-only IMAP
+connection, and the importer's existing PostgreSQL advisory lock allows the
+five-minute cron to continue serving as a fallback.
+
+At first deployment the worker intentionally sets
+`VERIFYD_CIRCLE_EMAIL_APEX_ATTACHMENT_CAPTURE_ENABLED=false`. This phase
+improves mail delivery latency, NOT inbound attachment availability.
+
+If Render refuses `fromService` links to the existing cron, stop and show
+the configuration error (without any secret values). Avoid creating a
+nonfunctional paid worker with blank credentials.
 
 ## Phase C — inbound attachment capture (OFF by default)
 
