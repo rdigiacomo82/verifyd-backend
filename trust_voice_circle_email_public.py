@@ -186,9 +186,28 @@ def store_public_received(received: dict, provider_id: str, *, handle: str) -> t
                 (mail_id,thread_id,uid,'external:'+sender,sender,'@'+handle,
                  subject,body,folder,verdict=='suspicious',verdict,notes,now))
             if files:
-                from trust_voice_circle_email_transport import persist_inbound_attachments
-                created_keys = persist_inbound_attachments(
-                    db, files=files, owner_id=uid, mail_id=mail_id, stamp=now)
+                # External storage must NEVER prevent delivery of the email.
+                # A savepoint lets us keep the message if R2/attachment metadata
+                # fails, even if psycopg marks the transaction as aborted.
+                cur.execute('SAVEPOINT circle_email_external_file_write')
+                try:
+                    from trust_voice_circle_email_transport import persist_inbound_attachments
+                    created_keys = persist_inbound_attachments(
+                        db, files=files, owner_id=uid, mail_id=mail_id, stamp=now)
+                except Exception as exc:
+                    cur.execute('ROLLBACK TO SAVEPOINT circle_email_external_file_write')
+                    warning = '[Attachment storage unavailable; files withheld.]'
+                    cur.execute('UPDATE verifyd_circle_email_messages SET body=%s WHERE mail_id=%s AND owner_id=%s',
+                                ((body[:12000-len(warning)-2] + '\\n\\n' + warning)[:12000],
+                                 mail_id, uid))
+                    # Generic type only, never log sender, name, contents or R2 key.
+                    import logging
+                    logging.getLogger('verifyd.circle_email.attachments').warning(
+                        'Hostinger attachment storage failed safely type=%s',
+                        type(exc).__name__)
+                    created_keys = []
+                finally:
+                    cur.execute('RELEASE SAVEPOINT circle_email_external_file_write')
             cur.execute("""INSERT INTO verifyd_circle_email_received_events
                 (provider_email_id,mail_id,created_at) VALUES (%s,%s,%s)""",
                 (provider_id,mail_id,now))
