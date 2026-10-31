@@ -153,6 +153,10 @@ def _schema():
             ADD COLUMN IF NOT EXISTS last_replay_trust_hash TEXT""")
         c.execute("""ALTER TABLE verifyd_circle_email_apex_quarantine
             ADD COLUMN IF NOT EXISTS recovered_at TIMESTAMPTZ""")
+        c.execute("""ALTER TABLE verifyd_circle_email_apex_cursor
+            ADD COLUMN IF NOT EXISTS replay_checked_uid BIGINT NOT NULL DEFAULT 0""")
+        c.execute("""ALTER TABLE verifyd_circle_email_apex_cursor
+            ADD COLUMN IF NOT EXISTS replay_policy_hash TEXT""")
 
 
 def _check_cursor(mailbox_hash: str, uidvalidity: str) -> int:
