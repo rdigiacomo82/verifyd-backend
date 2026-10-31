@@ -260,6 +260,36 @@ def _fetch_raw(conn, uid: int) -> bytes:
 
 
 
+def _replay_policy_hash(trusted_hosts: frozenset[str]) -> str:
+    """Fingerprint the exact set of validated receiving servers."""
+    return hashlib.sha256(",".join(sorted(trusted_hosts)).encode("ascii")).hexdigest()
+
+
+def _replay_needed(mailbox_key: str, valid: str, last_uid: int,
+                   trusted_hosts: frozenset[str]) -> bool:
+    """Skip old-mail IMAP search when neither cursor nor trust list changed."""
+    from database import get_db
+    with get_db() as db:
+        cur = db.cursor()
+        cur.execute("""SELECT replay_checked_uid, replay_policy_hash
+            FROM verifyd_circle_email_apex_cursor
+            WHERE mailbox_hash=%s AND uid_validity=%s""", (mailbox_key, valid))
+        row = cur.fetchone()
+    return (not row
+            or int(row["replay_checked_uid"]) != last_uid
+            or row["replay_policy_hash"] != _replay_policy_hash(trusted_hosts))
+
+
+def _mark_replay_checked(mailbox_key: str, valid: str, last_uid: int,
+                         trusted_hosts: frozenset[str]) -> None:
+    from database import get_db
+    with get_db() as db:
+        db.cursor().execute("""UPDATE verifyd_circle_email_apex_cursor
+            SET replay_checked_uid=%s, replay_policy_hash=%s
+            WHERE mailbox_hash=%s AND uid_validity=%s""",
+            (last_uid, _replay_policy_hash(trusted_hosts), mailbox_key, valid))
+
+
 def _recent_processed_uids(conn, last_uid: int,
                            window: int = _REPLAY_WINDOW_UIDS) -> list[int]:
     """Only list existing, already checkpointed IMAP UIDs in a bounded window."""
@@ -305,8 +335,7 @@ def _replay_recent_quarantine(conn, mailbox_key: str, valid: str,
     from database import get_db
     from trust_voice_circle_email_public import store_public_received
 
-    hosts_hash = hashlib.sha256(
-        ",".join(sorted(trusted_hosts)).encode("ascii")).hexdigest()
+    hosts_hash = _replay_policy_hash(trusted_hosts)
     recent = _recent_processed_uids(conn, last_uid)
     provider_for_uid = {
         uid: "hostinger-" + hashlib.sha256(
