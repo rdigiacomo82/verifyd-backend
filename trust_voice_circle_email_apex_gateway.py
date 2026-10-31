@@ -459,8 +459,15 @@ def ingest_batch(max_count: int = _MAX_BATCH) -> dict:
                     # sender limits are not actual VeriFYD Inbox deliveries.
                     skipped += 1
             _stage("replay_quarantine")
-            recovered, rechecked = _replay_recent_quarantine(
-                connection, mailbox_key, valid, last, _trusted_hosts())
+            recovered = rechecked = 0
+            trusted_hosts = _trusted_hosts()
+            if _replay_needed(mailbox_key, valid, last, trusted_hosts):
+                recovered, rechecked = _replay_recent_quarantine(
+                    connection, mailbox_key, valid, last, trusted_hosts)
+                # A full batch may leave more quarantines to check.
+                # Keep replaying until fewer than the batch limit remain.
+                if rechecked < _REPLAY_BATCH:
+                    _mark_replay_checked(mailbox_key, valid, last, trusted_hosts)
             handled += recovered
         finally:
             try:
