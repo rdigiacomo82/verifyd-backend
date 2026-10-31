@@ -86,8 +86,22 @@ def original_envelope_recipient(message: email.message.Message,
         return None
     top = str(received[0])
     server = _TRUSTED_BY.search(top)
-    if not server or server.group(1).rstrip(".").lower() not in trusted_hosts:
+    if not server:
         return None
+    host = server.group(1).rstrip(".").lower()
+    if host not in trusted_hosts:
+        # Opt-in, narrowly scoped to the TWO Hostinger ingress server families
+        # actually observed in the original outermost Received hop. The MX
+        # marker and verified envelope recipient are still mandatory.
+        rotating = os.getenv(
+            "VERIFYD_CIRCLE_EMAIL_APEX_ROTATING_MX_ENABLED", ""
+        ).strip().lower() in ("1", "true", "yes", "on")
+        if not (rotating
+                and re.fullmatch(
+                    r"(?:de-fra|fr-int)-smtpin[1-9][0-9]{0,2}\.hostinger\.io",
+                    host)
+                and re.search(r"\(\s*mx\.hostinger\.com\s*\)", top, re.I)):
+            return None
     match = _FOR_ADDRESS.search(top)
     if not match:
         return None
