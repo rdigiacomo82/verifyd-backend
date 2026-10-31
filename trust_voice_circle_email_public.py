@@ -144,8 +144,16 @@ def store_public_received(received: dict, provider_id: str, *, handle: str) -> t
                    and _storage_configured())
         if capture:
             from trust_voice_circle_email_transport import extract_hostinger_mime_files
-            files, omitted = extract_hostinger_mime_files(
-                received['_hostinger_verified_mime'])
+            try:
+                files, omitted = extract_hostinger_mime_files(
+                    received['_hostinger_verified_mime'])
+            except Exception as exc:
+                # Complex or broken MIME must never block the email text.
+                files, omitted = [], 1
+                import logging
+                logging.getLogger('verifyd.circle_email.attachments').warning(
+                    'Hostinger MIME extraction failed safely type=%s',
+                    type(exc).__name__)
             if files:
                 notice = ('[External attachments have not been malware scanned. '
                           'Confirm before downloading; do not open unknown files.]')
