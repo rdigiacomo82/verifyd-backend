@@ -130,7 +130,7 @@ def watch_current_cron_window() -> None:
         connection.login(actual,
                          os.environ["VERIFYD_CIRCLE_EMAIL_HOSTINGER_IMAP_PASSWORD"])
         status, _ = connection.select("INBOX", readonly=True)
-        if status != "OK" or b"IDLE" not in connection.capabilities:
+        if status != "OK" or not (b"IDLE" in connection.capabilities or "IDLE" in connection.capabilities):
             raise RuntimeError("cron_idle_not_available")
         if not callable(getattr(connection, "idle", None)):
             raise RuntimeError("cron_idle_python_unavailable")
