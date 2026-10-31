@@ -16,7 +16,7 @@ from email.utils import parseaddr
 from typing import Literal, Optional
 
 from fastapi import APIRouter, BackgroundTasks, File, Header, HTTPException, Query, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 from database import get_db, is_valid_email
@@ -224,6 +224,50 @@ def my_address(authorization:Optional[str]=Header(default=None)):
                else None)
     return {'internal_handle':'@'+handle,'public_email_address':available,
             'public_email_enabled':bool(available)}
+
+
+@router.get('/circle-email/sync-state')
+def sync_state(authorization:Optional[str]=Header(default=None)):
+    """Cheap authenticated inbox-change signal for the web/PWA mail listener.
+
+    This is intentionally independent of websocket process memory: external
+    Hostinger cron/IDLE workers write to PostgreSQL, not the API process.
+    No message text or sender identities are returned, and no full mailbox is
+    transferred on an unchanged poll. The frontend refreshes existing list
+    endpoints only when this revision changes.
+    """
+    feature()
+    identity=_identity_from_bearer(authorization)
+    schema()
+    uid=str(identity['id'])
+    with get_db() as db:
+        cur=db.cursor()
+        cur.execute("""SELECT
+          COUNT(*) AS total_count,
+          COUNT(*) FILTER (WHERE folder='inbox') AS inbox_count,
+          COUNT(*) FILTER (WHERE folder='spam') AS spam_count,
+          COUNT(*) FILTER (WHERE folder='trash') AS trash_count,
+          COUNT(*) FILTER (WHERE folder='sent') AS sent_count,
+          COUNT(*) FILTER (WHERE folder='archive') AS archive_count,
+          COUNT(*) FILTER (WHERE LEFT(folder,7)='custom:') AS custom_count,
+          COUNT(*) FILTER (WHERE is_read=FALSE AND
+                           (folder='inbox' OR LEFT(folder,7)='custom:')) AS unread,
+          COALESCE(MAX(created_at),'') AS latest_created_at
+          FROM verifyd_circle_email_messages WHERE owner_id=%s""",(uid,))
+        row=cur.fetchone() or {}
+    keys=('total_count','inbox_count','spam_count','trash_count',
+          'sent_count','archive_count','custom_count','unread')
+    counts=[int(row.get(key) or 0) for key in keys]
+    latest=str(row.get('latest_created_at') or '')
+    # Never include the owner ID in a client-visible revision.
+    revision=hashlib.sha256((latest+'|'+','.join(map(str,counts)))
+                            .encode('utf-8')).hexdigest()[:24]
+    return JSONResponse({'revision':revision,
+                         'unread':counts[-1],
+                         'inbox_count':counts[1],
+                         'latest_created_at':latest},
+                        headers={'Cache-Control':'private, no-store',
+                                 'X-Content-Type-Options':'nosniff'})
 
 
 @router.get('/circle-email/folders')

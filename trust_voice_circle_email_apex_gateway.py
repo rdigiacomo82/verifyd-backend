@@ -591,10 +591,56 @@ def ingest_batch(max_count: int = _MAX_BATCH) -> dict:
             "repaired": repaired, "repair_checked": repair_checked}
 
 
+def _probe_private_attachment_storage() -> None:
+    """Optional, reversible R2 round-trip diagnostic with no email content.
+
+    Runs only with explicit probe flag; does not enable mail attachments.
+    Writes a unique tiny private object, verifies its bytes, and deletes it.
+    Never log credentials, object names, inbox recipients, or provider errors.
+    """
+    if not _on("VERIFYD_CIRCLE_EMAIL_APEX_R2_PROBE_ENABLED"):
+        return
+    from trust_voice_attachments import (
+        _storage_configured, _get_attachment_client, TRUST_VOICE_BUCKET)
+    if not _storage_configured():
+        log.warning("Circle public-email private R2 configured=False")
+        return
+    import secrets
+    key = "circle-email/probes/" + secrets.token_hex(20)
+    payload = b"verifyd-circle-mail-storage-probe-v1"
+    client = None
+    created = False
+    passed = False
+    try:
+        client = _get_attachment_client()
+        client.put_object(Bucket=TRUST_VOICE_BUCKET, Key=key, Body=payload,
+                          ContentType="application/octet-stream")
+        created = True
+        item = client.get_object(Bucket=TRUST_VOICE_BUCKET, Key=key)
+        try:
+            read_back = item["Body"].read(len(payload) + 1)
+        finally:
+            item["Body"].close()
+        passed = read_back == payload
+    except Exception as exc:
+        log.warning("Circle public-email private R2 probe failed type=%s",
+                    type(exc).__name__)
+    finally:
+        if created and client is not None:
+            try:
+                client.delete_object(Bucket=TRUST_VOICE_BUCKET, Key=key)
+            except Exception as exc:
+                passed = False
+                log.warning("Circle public-email R2 cleanup failed type=%s",
+                            type(exc).__name__)
+    log.info("Circle public-email private R2 verified=%s", passed)
+
+
 def main() -> int:
     logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper())
     try:
         result = ingest_batch()
+        _probe_private_attachment_storage()
         # No addresses, bodies, authentication secrets or message headers in logs.
         log.info("Apex mail batch status=%s imported=%d quarantined=%d skipped=%d",
                  result["status"],result["processed"],result["quarantined"],result.get("skipped",0))

@@ -144,8 +144,16 @@ def store_public_received(received: dict, provider_id: str, *, handle: str) -> t
                    and _storage_configured())
         if capture:
             from trust_voice_circle_email_transport import extract_hostinger_mime_files
-            files, omitted = extract_hostinger_mime_files(
-                received['_hostinger_verified_mime'])
+            try:
+                files, omitted = extract_hostinger_mime_files(
+                    received['_hostinger_verified_mime'])
+            except Exception as exc:
+                # Complex or broken MIME must never block the email text.
+                files, omitted = [], 1
+                import logging
+                logging.getLogger('verifyd.circle_email.attachments').warning(
+                    'Hostinger MIME extraction failed safely type=%s',
+                    type(exc).__name__)
             if files:
                 notice = ('[External attachments have not been malware scanned. '
                           'Confirm before downloading; do not open unknown files.]')
@@ -186,9 +194,28 @@ def store_public_received(received: dict, provider_id: str, *, handle: str) -> t
                 (mail_id,thread_id,uid,'external:'+sender,sender,'@'+handle,
                  subject,body,folder,verdict=='suspicious',verdict,notes,now))
             if files:
-                from trust_voice_circle_email_transport import persist_inbound_attachments
-                created_keys = persist_inbound_attachments(
-                    db, files=files, owner_id=uid, mail_id=mail_id, stamp=now)
+                # External storage must NEVER prevent delivery of the email.
+                # A savepoint lets us keep the message if R2/attachment metadata
+                # fails, even if psycopg marks the transaction as aborted.
+                cur.execute('SAVEPOINT circle_email_external_file_write')
+                try:
+                    from trust_voice_circle_email_transport import persist_inbound_attachments
+                    created_keys = persist_inbound_attachments(
+                        db, files=files, owner_id=uid, mail_id=mail_id, stamp=now)
+                except Exception as exc:
+                    cur.execute('ROLLBACK TO SAVEPOINT circle_email_external_file_write')
+                    warning = '[Attachment storage unavailable; files withheld.]'
+                    cur.execute('UPDATE verifyd_circle_email_messages SET body=%s WHERE mail_id=%s AND owner_id=%s',
+                                ((body[:12000-len(warning)-2] + '\\n\\n' + warning)[:12000],
+                                 mail_id, uid))
+                    # Generic type only, never log sender, name, contents or R2 key.
+                    import logging
+                    logging.getLogger('verifyd.circle_email.attachments').warning(
+                        'Hostinger attachment storage failed safely type=%s',
+                        type(exc).__name__)
+                    created_keys = []
+                finally:
+                    cur.execute('RELEASE SAVEPOINT circle_email_external_file_write')
             cur.execute("""INSERT INTO verifyd_circle_email_received_events
                 (provider_email_id,mail_id,created_at) VALUES (%s,%s,%s)""",
                 (provider_id,mail_id,now))
