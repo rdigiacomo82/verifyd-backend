@@ -171,6 +171,8 @@ def _schema():
             ADD COLUMN IF NOT EXISTS replay_checked_uid BIGINT NOT NULL DEFAULT 0""")
         c.execute("""ALTER TABLE verifyd_circle_email_apex_cursor
             ADD COLUMN IF NOT EXISTS replay_policy_hash TEXT""")
+        c.execute("""ALTER TABLE verifyd_circle_email_apex_cursor
+            ADD COLUMN IF NOT EXISTS skipped_repair_version TEXT""")
 
 
 def _check_cursor(mailbox_hash: str, uidvalidity: str) -> int:
