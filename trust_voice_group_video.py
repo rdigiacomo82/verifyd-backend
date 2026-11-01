@@ -11,9 +11,9 @@ import logging
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Literal, Optional
 
-from fastapi import APIRouter, BackgroundTasks, Header, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Query
 from livekit import api
 from livekit.api import CreateRoomRequest, DeleteRoomRequest, ListRoomsRequest
 
@@ -33,7 +33,7 @@ from trust_voice_group_video_recording import enforce_recording_join_policy
 log = logging.getLogger('verifyd.trust_voice.group_video')
 router = APIRouter(prefix='/trust-voice', tags=['Trust Voice Group Video'])
 
-FEATURE_VERSION = '0.1.3'
+FEATURE_VERSION = '0.1.4'
 DEFAULT_SESSION_MINUTES = 120
 DEFAULT_TOKEN_MINUTES = 60
 DEFAULT_EMPTY_TIMEOUT_SECONDS = 300
@@ -137,6 +137,12 @@ def ensure_schema() -> None:
                 ended_reason TEXT
             )
         ''')
+        # Existing group video sessions predate audio-only group calling.
+        # The migration is additive and leaves old sessions as video.
+        cur.execute('''
+            ALTER TABLE verifyd_voice_group_video_sessions
+            ADD COLUMN IF NOT EXISTS call_mode TEXT NOT NULL DEFAULT 'video'
+        ''')
         cur.execute('''
             CREATE INDEX IF NOT EXISTS idx_verifyd_voice_group_video_lookup
             ON verifyd_voice_group_video_sessions (conversation_id, status, started_at DESC)
@@ -192,6 +198,7 @@ def _public_session(session: dict) -> dict:
         'session_id': session.get('session_id') or '',
         'group_id': session.get('conversation_id') or '',
         'status': session.get('status') or 'active',
+        'call_mode': 'audio' if session.get('call_mode') == 'audio' else 'video',
         'started_by': _public_contact(starter) if starter else None,
         'started_at': session.get('started_at') or '',
         'expires_at': session.get('expires_at') or '',
@@ -340,7 +347,7 @@ async def video_status(conversation_id: str, authorization: Optional[str] = Head
 
 
 @router.post('/groups/{conversation_id}/video/start')
-async def video_start(conversation_id: str, background_tasks: BackgroundTasks, authorization: Optional[str] = Header(default=None)):
+async def video_start(conversation_id: str, background_tasks: BackgroundTasks, authorization: Optional[str] = Header(default=None), call_mode: Literal['audio', 'video'] = Query('video')):
     _require_available()
     identity = _identity_from_bearer(authorization)
     identity_id = str(identity['id'])
@@ -375,9 +382,9 @@ async def video_start(conversation_id: str, background_tasks: BackgroundTasks, a
                 INSERT INTO verifyd_voice_group_video_sessions (
                     session_id, conversation_id, room_name, started_by_identity_id,
                     status, started_at, expires_at, ended_at,
-                    ended_by_identity_id, ended_reason
-                ) VALUES (%s,%s,%s,%s,'active',%s,%s,NULL,NULL,NULL)
-            ''', (session_id, conversation_id, room_name, identity_id, started_at.isoformat(), expires_at.isoformat()))
+                    ended_by_identity_id, ended_reason, call_mode
+                ) VALUES (%s,%s,%s,%s,'active',%s,%s,NULL,NULL,NULL,%s)
+            ''', (session_id, conversation_id, room_name, identity_id, started_at.isoformat(), expires_at.isoformat(), call_mode))
     except Exception:
         await _delete_room_quietly(room_name)
         raise
