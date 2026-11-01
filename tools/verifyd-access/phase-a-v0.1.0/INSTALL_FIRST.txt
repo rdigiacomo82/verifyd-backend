@@ -1,0 +1,37 @@
+VeriFYD Access — Standalone Website Accessibility Prototype v0.1.0
+
+This is NOT a Horizons replacement and should NOT be pasted into VeriFYD Circle.
+Your old Apple Adaptive Keyboard project is paused, not deleted.
+
+WINDOWS — CHROME
+1. Download and extract VeriFYD_Access_Phase_A_v0.1.0.zip.
+2. Open Chrome and navigate to chrome://extensions.
+3. Turn on Developer mode.
+4. Choose Load unpacked.
+5. Select the folder named extension inside the extracted ZIP.
+6. Navigate to a typical http/https webpage.
+7. Click the VeriFYD Access browser extension icon.
+8. Use large on-screen controls or F7 Next / F8 Select / F9 auto-scan.
+9. Optionally use Ctrl+Shift+9 to toggle on/off if Chrome allows the shortcut.
+
+WINDOWS — EDGE
+1. Open edge://extensions.
+2. Enable Developer mode, click Load unpacked, choose the extension folder.
+3. The remaining steps are the same as Chrome.
+
+RECOMMENDED FIRST TEST
+- Use a simple public information page, not email, banking or a healthcare portal.
+- Next highlights link/button, Select activates.
+- Choose Pointer and use arrows to move the virtual pointer, Select to click.
+- Select a normal text field, use Keyboard to type.
+- Try Scan: Slow, Pointer: Fine and optional speech output.
+- The 3.2-second Dwell option is OFF by default; test only after you are comfortable.
+- Pause stops automated selection and cursor actions.
+
+LIMITATIONS
+- v0.1.0 does NOT include webcam-based gaze/blinks or real cross-app system mouse control.
+- Modern browser extensions are blocked from special browser pages and protected dialogs.
+- This version is for desktop Chrome/Edge testing. Safari/iPad needs a packaged extension build and actual-device testing.
+- No live account integrations, tokens, Render changes or Horizons changes are required.
+
+See README.md, PHASE_B_INTEGRATION.md and TEST_REPORT.md for implementation and next steps.

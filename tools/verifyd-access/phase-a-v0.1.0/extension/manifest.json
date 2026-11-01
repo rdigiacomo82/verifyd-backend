@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "VeriFYD Access (Prototype)",
+  "short_name": "VeriFYD Access",
+  "description": "Opt-in accessible web navigation: large controls, switch scanning, a virtual pointer and a local on-screen keyboard. No camera in this prototype.",
+  "version": "0.1.0",
+  "minimum_chrome_version": "100",
+  "permissions": ["activeTab", "scripting"],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_title": "Start or stop VeriFYD Access on this tab" },
+  "commands": {
+    "toggle-verifiyd-access": {
+      "suggested_key": { "default": "Ctrl+Shift+9", "mac": "Command+Shift+9" },
+      "description": "Toggle VeriFYD Access on the active website"
+    }
+  }
+}

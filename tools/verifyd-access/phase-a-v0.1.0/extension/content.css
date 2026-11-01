@@ -1,0 +1,96 @@
+/* VeriFYD Access styles: prefixed, never changes host website styling. */
+#verifiyd-access-root {
+  all: initial;
+  position: fixed !important;
+  inset: 0 !important;
+  z-index: 2147483646 !important;
+  pointer-events: none !important;
+  color: #f8fafc !important;
+  font: 500 14px/1.45 system-ui,-apple-system,Segoe UI,Arial,sans-serif !important;
+}
+#verifiyd-access-root *, #verifiyd-access-root *::before, #verifiyd-access-root *::after {
+  box-sizing: border-box !important;
+  font-family: inherit !important;
+}
+#verifiyd-access-root button {
+  cursor: pointer !important;
+  -webkit-tap-highlight-color: transparent !important;
+}
+#verifiyd-access-root .vfa-panel {
+  position: fixed !important;
+  bottom: 16px !important;
+  right: 16px !important;
+  width: min(410px, calc(100vw - 28px)) !important;
+  max-height: min(90vh, 750px) !important;
+  overflow-y: auto !important;
+  pointer-events: auto !important;
+  background: rgba(7, 13, 25, 0.97) !important;
+  color: #f8fafc !important;
+  border: 1.5px solid #345a7a !important;
+  border-radius: 19px !important;
+  padding: 13px !important;
+  box-shadow: 0 16px 48px rgba(0,0,0,.48) !important;
+  text-align: left !important;
+}
+#verifiyd-access-root .vfa-heading { display:flex !important; align-items:center !important; gap:10px !important; padding:0 3px 8px !important; }
+#verifiyd-access-root .vfa-logo {
+  display:grid !important; place-items:center !important; height:42px !important; width:42px !important;
+  background:#102e51 !important; color:#5ac0ff !important; border:1px solid #4577aa !important;
+  border-radius:14px !important; font-size:26px !important; font-weight:bold !important;
+}
+#verifiyd-access-root .vfa-heading-text { flex:1 !important; min-width:0 !important; }
+#verifiyd-access-root .vfa-heading-text strong { font-weight:750 !important; font-size:17px !important; display:block !important; color:#fff !important; }
+#verifiyd-access-root .vfa-heading-text small { display:block !important; font-size:11px !important; color:#a7bed6 !important; }
+#verifiyd-access-root .vfa-heading button, #verifiyd-access-root .vfa-kb-header button {
+  border:1px solid #526175 !important; background:#182031 !important; color:#fff !important;
+  border-radius:9px !important; min-width:40px !important; min-height:40px !important; font-size:24px !important;
+}
+#verifiyd-access-root .vfa-status {
+  min-height:52px !important; padding:11px 12px !important; background:#101e31 !important;
+  border:1px solid #2e536e !important; border-radius:11px !important; color:#d5ecff !important;
+  font-size:13px !important; line-height:1.4 !important; overflow-wrap:anywhere !important;
+}
+#verifiyd-access-root .vfa-modes, #verifiyd-access-root .vfa-actions { display:grid !important; grid-template-columns: repeat(2, minmax(0,1fr)) !important; gap:8px !important; margin-top:10px !important; }
+#verifiyd-access-root .vfa-panel button {
+  appearance:none !important; border:1px solid #506780 !important; background:#182a43 !important;
+  color:#e6f3ff !important; border-radius:12px !important; padding:10px 8px !important;
+  min-height:48px !important; min-width:0 !important; line-height:1.25 !important;
+  font-size:14px !important; font-weight:650 !important; text-align:center !important;
+}
+#verifiyd-access-root .vfa-panel button:hover { background:#244367 !important; border-color:#91cdfc !important; }
+#verifiyd-access-root .vfa-panel button:focus-visible { outline:4px solid #fde047 !important; outline-offset:2px !important; }
+#verifiyd-access-root .vfa-panel button[aria-pressed="true"] { background:#214d69 !important; border:2px solid #60c7fb !important; }
+#verifiyd-access-root .vfa-panel button.vfa-primary { background:#045b4e !important; border-color:#18b9a3 !important; color:#ecfdf5 !important; }
+#verifiyd-access-root .vfa-actions small { display:inline-block !important; font-size:11px !important; color:#a8c6da !important; margin-left:3px !important; }
+#verifiyd-access-root .vfa-direction { margin:10px 0 !important; text-align:center !important; }
+#verifiyd-access-root .vfa-direction button { width:64px !important; height:54px !important; font-size:23px !important; margin:2px !important; }
+#verifiyd-access-root .vfa-direction > div { display:flex !important; justify-content:center !important; gap:18px !important; }
+#verifiyd-access-root .vfa-footer { color:#a1b6ce !important; text-align:center !important; font-size:11px !important; line-height:1.5 !important; margin-top:12px !important; }
+#verifiyd-access-root .vfa-highlight {
+  position:fixed !important; width:0; height:0; top:0; left:0; z-index:0;
+  border:4px solid #facc15 !important; box-shadow:0 0 0 2px #071018,0 0 20px rgba(250,204,21,.6) !important;
+  border-radius:9px !important; opacity:0 !important; pointer-events:none !important;
+  transform:translate(-9999px,-9999px);
+}
+#verifiyd-access-root .vfa-highlight.vfa-visible { opacity:1 !important; }
+#verifiyd-access-root .vfa-pointer {
+  position:fixed !important; top:0 !important; left:0 !important; width:30px !important; height:30px !important;
+  border:3px solid #facc15 !important; border-radius:50% !important; background:rgba(31,87,143,.22) !important;
+  pointer-events:none !important; opacity:0 !important; transform:translate(-9999px,-9999px);
+  box-shadow:0 0 0 2px #061421,0 0 18px rgba(250,204,21,.6) !important;
+}
+#verifiyd-access-root .vfa-pointer span { display:block !important; width:6px !important; height:6px !important; border-radius:50% !important; background:#facc15 !important; margin:9px !important; }
+#verifiyd-access-root .vfa-pointer.vfa-visible { opacity:1 !important; }
+#verifiyd-access-root .vfa-keyboard { border:1px solid #385c76 !important; background:#0d192a !important; padding:10px 5px !important; border-radius:12px !important; margin-top:12px !important; }
+#verifiyd-access-root .vfa-kb-header { display:flex !important; align-items:center !important; justify-content:space-between !important; margin-bottom:8px !important; padding:0 5px !important; }
+#verifiyd-access-root .vfa-keyrow { display:flex !important; justify-content:center !important; flex-wrap:nowrap !important; gap:3px !important; margin-top:5px !important; }
+#verifiyd-access-root .vfa-keyrow button.vfa-key {
+  min-width:0 !important; flex:1 !important; border-radius:7px !important; min-height:42px !important;
+  padding:8px 0 !important; font-size:13px !important; background:#23405d !important;
+}
+#verifiyd-access-root .vfa-keyrow-extra button.vfa-key { font-size:11px !important; flex:1 1 0 !important; }
+#verifiyd-access-root [hidden] { display:none !important; }
+@media (max-width:500px) {
+  #verifiyd-access-root .vfa-panel { right:7px !important; bottom:7px !important; width:calc(100vw - 14px) !important; max-height:70vh !important; padding:9px !important; }
+}
+@media (prefers-reduced-motion:reduce) { #verifiyd-access-root * { scroll-behavior:auto !important; transition:none !important; } }

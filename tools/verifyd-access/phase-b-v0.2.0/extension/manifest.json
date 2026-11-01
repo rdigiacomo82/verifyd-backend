@@ -1,0 +1,31 @@
+{
+  "manifest_version": 3,
+  "name": "VeriFYD Access \u2014 Eye Gaze Beta",
+  "short_name": "VeriFYD Access",
+  "description": "On-demand local Eye Gaze and blink browser controls with optional offline MediaPipe assets. Camera opt-in; video stays on device.",
+  "version": "0.2.0",
+  "minimum_chrome_version": "116",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "windows"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Start or stop VeriFYD Access on this tab"
+  },
+  "commands": {
+    "toggle-verifiyd-access": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+9",
+        "mac": "Command+Shift+9"
+      },
+      "description": "Toggle VeriFYD Access on the active website"
+    }
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  }
+}

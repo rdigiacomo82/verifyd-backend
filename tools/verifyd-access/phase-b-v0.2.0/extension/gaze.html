@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'">
+<title>VeriFYD Access · Private Eye Gaze Camera</title>
+<link rel="stylesheet" href="gaze.css">
+</head>
+<body>
+<header><div class="logo">✓</div><div><h1>VeriFYD Access</h1><p>Private camera · On-device only</p></div></header>
+<p id="status" role="status" aria-live="polite">Camera is off. Click Start camera to begin.</p>
+<video id="preview" muted autoplay playsinline aria-label="Local mirrored face preview" hidden></video>
+<div class="controls"><button id="start">Start camera</button><button id="stop" disabled>Camera off</button></div>
+<p class="help">This is a trusted extension window. No camera permission is granted to the website. After the camera starts, return your eyes to the website and select <strong>Calibrate gaze</strong> in the VeriFYD Access panel.</p>
+<p class="help">Look toward the website's yellow calibration dots while keeping your head steady. Double-blink selects. The camera closes when you leave this window or stop it.</p>
+<button id="done">Close camera window</button>
+<script src="gaze-core.js"></script>
+<script src="gaze.js"></script>
+</body>
+</html>

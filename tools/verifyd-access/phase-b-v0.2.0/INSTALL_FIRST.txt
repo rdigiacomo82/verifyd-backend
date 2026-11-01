@@ -1,0 +1,16 @@
+VERIFIED ACCESS PHASE B — START HERE
+
+1. Unzip VeriFYD_Access_Phase_B_v0.2.0.zip.
+2. Install missing Google MediaPipe model runtime binaries:
+   Windows: powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\Install-MediaPipe-Assets.ps1
+   Mac: bash scripts/install-mediapipe-assets.sh
+3. In Chrome/Edge load the local 'extension' folder from extensions > Developer mode > Load unpacked.
+4. Open a trusted HTTPS website and click the VeriFYD Access extension icon.
+5. Test Next/Select and switching first. Then select Start camera, open the trusted camera window,
+   grant camera access there, return to the website, and select Calibrate gaze.
+6. Follow 5 yellow dots with your eyes. In Pointer mode double blink selects.
+   In Controls mode single blink = Next, double blink = Select.
+7. Stop camera or Pause when not actively using Eye Gaze.
+
+Camera tracking requires binaries not supplied in this zip. That is intentional and documented.
+This does not modify/publish vfvid.com/voice and does not resume the Apple keyboard project.
