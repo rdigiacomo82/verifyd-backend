@@ -67,4 +67,4 @@ class GroupCallModeTests(unittest.TestCase):
         self.assertEqual(len(inserts), 1)
         self.assertEqual(inserts[0][1][-1], "audio")
         self.assertEqual(len(pending.tasks), 1)
-        self.assertEqual(pending.tasks[0].kwargs.get("payload", {}).get("session", {}).get("call_mode"), "audio")
+        self.assertEqual(pending.tasks[0].args[1]["session"]["call_mode"], "audio")
