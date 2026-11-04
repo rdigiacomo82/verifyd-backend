@@ -10,8 +10,10 @@ is required before any location-sharing endpoint is available.
 """
 from __future__ import annotations
 
+import hashlib
 import math
 import os
+import secrets
 import threading
 from datetime import datetime, timedelta, timezone
 from typing import Literal, Optional
@@ -101,6 +103,15 @@ def _schema() -> None:
                     longitude DOUBLE PRECISION NOT NULL,
                     accuracy_m DOUBLE PRECISION NULL,
                     recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS verifyd_circle_location_native_tokens (
+                    owner_identity_id TEXT PRIMARY KEY,
+                    token_hash TEXT NOT NULL UNIQUE,
+                    session_id TEXT NOT NULL,
+                    expires_at TIMESTAMPTZ NOT NULL,
+                    issued_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 )
             """)
         _SCHEMA_READY = True
@@ -218,6 +229,10 @@ def set_sharing(
             "DELETE FROM verifyd_circle_location_grants WHERE owner_identity_id=%s",
             (owner_id,),
         )
+        # Clear prior location and invalidate native writers whenever consent
+        # or recipients change; a previous position must not leak to new viewers.
+        cur.execute("DELETE FROM verifyd_circle_location_native_tokens WHERE owner_identity_id=%s", (owner_id,))
+        cur.execute("DELETE FROM verifyd_circle_latest_locations WHERE owner_identity_id=%s", (owner_id,))
         if body.enabled:
             for member_id in grants:
                 cur.execute("""
@@ -257,6 +272,7 @@ def stop_sharing(response: Response, authorization: Optional[str] = Header(defau
             "DELETE FROM verifyd_circle_latest_locations WHERE owner_identity_id=%s",
             (owner_id,),
         )
+        cur.execute("DELETE FROM verifyd_circle_location_native_tokens WHERE owner_identity_id=%s", (owner_id,))
     return {"ok": True, "enabled": False}
 
 
