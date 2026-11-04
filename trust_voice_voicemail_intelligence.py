@@ -41,6 +41,24 @@ def _require_enabled() -> None:
         raise HTTPException(404, detail={"error": "voicemail_analysis_unavailable"})
 
 
+def _pilot_handles() -> set[str]:
+    raw = os.environ.get("VERIFYD_VOICEMAIL_INTELLIGENCE_PILOT_HANDLES", "")
+    return {x.strip().lower().lstrip("@") for x in raw.split(",") if x.strip()}
+
+
+def _in_pilot(identity: dict) -> bool:
+    allowed = _pilot_handles()
+    if not allowed:
+        return True
+    handle = str(identity.get("handle_lower") or identity.get("handle") or "").lower().strip().lstrip("@")
+    return bool(handle and handle in allowed)
+
+
+def _require_pilot(identity: dict) -> None:
+    if not _in_pilot(identity):
+        raise HTTPException(404, detail={"error": "voicemail_analysis_unavailable"})
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -252,10 +270,17 @@ class AnalyzeConsent(BaseModel):
 
 
 @router.get("/health")
-def voicemail_intelligence_health():
+def voicemail_intelligence_health(authorization: Optional[str] = Header(default=None)):
+    effective = _enabled()
+    # Only an authenticated pilot participant can see this feature as enabled.
+    if effective and _pilot_handles():
+        try:
+            effective = _in_pilot(_owner(authorization))
+        except Exception:
+            effective = False
     return {
         "feature": "voicemail_intelligence",
-        "enabled": _enabled(),
+        "enabled": effective,
         "mode": "recipient_initiated",
         "transcription_configured": bool(os.environ.get("OPENAI_API_KEY")),
         "public_business_ingestion": False,
@@ -266,6 +291,7 @@ def voicemail_intelligence_health():
 def voicemail_inbox_state(authorization: Optional[str] = Header(default=None)):
     _require_enabled()
     owner = _owner(authorization)
+    _require_pilot(owner)
     _schema()
     with get_db() as conn:
         cur = conn.cursor()
@@ -300,6 +326,7 @@ def voicemail_inbox_state(authorization: Optional[str] = Header(default=None)):
 def get_voicemail_review(attachment_id: str, authorization: Optional[str] = Header(default=None)):
     _require_enabled()
     owner = _owner(authorization)
+    _require_pilot(owner)
     _incoming_voicemail(attachment_id, str(owner["id"]))
     _schema()
     record = _review_state(attachment_id, str(owner["id"]))
@@ -315,6 +342,7 @@ def request_voicemail_review(
 ):
     _require_enabled()
     owner = _owner(authorization)
+    _require_pilot(owner)
     owner_id = str(owner["id"])
     _incoming_voicemail(attachment_id, owner_id)
     if not consent.consent_to_external_transcription:
@@ -376,6 +404,7 @@ def delete_voicemail_for_recipient(
     """
     _require_enabled()
     owner = _owner(authorization)
+    _require_pilot(owner)
     owner_id = str(owner["id"])
     _incoming_voicemail(attachment_id, owner_id)
     _schema()
@@ -399,6 +428,7 @@ def restore_voicemail_for_recipient(
 ):
     _require_enabled()
     owner = _owner(authorization)
+    _require_pilot(owner)
     owner_id = str(owner["id"])
     _incoming_voicemail(attachment_id, owner_id)
     _schema()
