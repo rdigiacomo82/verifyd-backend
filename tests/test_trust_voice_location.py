@@ -128,6 +128,24 @@ class LocationSecurityTest(unittest.TestCase):
     def setUp(self):
         self.module = load_location()
 
+    def test_public_status_is_off_without_schema_when_flag_disabled(self):
+        calls = []
+        self.module._schema = lambda: calls.append("schema")
+        with patch.dict(os.environ, {"VERIFYD_TRUST_VOICE_LOCATION_ENABLED": "0"}):
+            response = Response()
+            result = self.module.location_status(response)
+        self.assertEqual(result, {"enabled": False, "ready": False})
+        self.assertEqual(calls, [])
+        self.assertEqual(response.headers.get("Cache-Control"), "private, no-store")
+
+    def test_enabled_status_creates_isolated_schema_before_user_session(self):
+        calls = []
+        self.module._schema = lambda: calls.append("schema")
+        with patch.dict(os.environ, {"VERIFYD_TRUST_VOICE_LOCATION_ENABLED": "1"}):
+            result = self.module.location_status(Response())
+        self.assertEqual(result, {"enabled": True, "ready": True})
+        self.assertEqual(calls, ["schema"])
+
     def test_feature_disabled_by_default_without_access_or_database(self):
         with patch.dict(os.environ, {"VERIFYD_TRUST_VOICE_LOCATION_ENABLED": "0"}):
             for fn, args in [

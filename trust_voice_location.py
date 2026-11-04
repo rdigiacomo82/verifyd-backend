@@ -154,6 +154,20 @@ def _purge_expired(cur) -> None:
     """)
 
 
+@router.get("/status")
+def location_status(response: Response):
+    """Non-sensitive readiness check; never enables or starts user tracking.
+
+    When the feature flag is on, eagerly creates only the isolated location
+    tables before a real signed-in user attempts the first share.
+    """
+    _no_cache(response)
+    if not _enabled():
+        return {"enabled": False, "ready": False}
+    _schema()
+    return {"enabled": True, "ready": True}
+
+
 @router.get("/sharing")
 def get_sharing(response: Response, authorization: Optional[str] = Header(default=None)):
     owner = _identity(authorization)
