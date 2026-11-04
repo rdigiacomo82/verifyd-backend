@@ -46,7 +46,8 @@ code, hs, response = call('OPTIONS','/sharing',None,{
     'Access-Control-Request-Method':'PUT',
     'Access-Control-Request-Headers':'authorization,content-type',
 })
-print('CORS preflight:',code, 'allow-origin', hs.get('Access-Control-Allow-Origin'))
-if code != 200 or hs.get('Access-Control-Allow-Origin') != 'https://vfvid.com':
+cors_headers = {str(k).lower(): v for k,v in hs.items()}
+print('CORS preflight:',code, 'allow-origin', cors_headers.get('access-control-allow-origin'))
+if code != 200 or cors_headers.get('access-control-allow-origin') != 'https://vfvid.com':
     sys.exit('Location frontend cannot pass cross-origin preflight')
 print('PASS: feature enabled, database ready, unauthenticated access denied, CORS allowed')
