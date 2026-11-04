@@ -125,7 +125,7 @@ class PilotAuthorizationTests(unittest.TestCase):
         namespace["_enabled"] = lambda: True
         namespace["_owner"] = lambda auth: {"handle_lower": "roberttest22"} if auth == "test_valid" else {"handle_lower": "outsider"}
         code = ast.Module(body=[ast.ImportFrom(module="__future__",names=[ast.alias(name="annotations")],level=0), *nodes], type_ignores=[])
-        exec(compile(code, "<pilot-rules>", "exec"), namespace)
+        exec(compile(ast.fix_missing_locations(code), "<pilot-rules>", "exec"), namespace)
         self.ns = namespace
         self.HTTPException = HTTPException
 
