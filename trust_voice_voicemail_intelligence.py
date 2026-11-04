@@ -226,9 +226,13 @@ def process_voicemail_review(attachment_id: str, owner_id: str) -> dict:
             "advisory": "AI and spam detection are estimates, not proof of safety, identity or synthetic speech.",
         }
         # Delete is idempotent and wins against an in-flight analysis.
-        if not _set_state(attachment_id, owner_id, "completed", result):
+        # Preserve a useful blue advisory when transcription fails, but allow
+        # the recipient to retry later rather than permanently caching an
+        # incomplete result as if speech-to-text succeeded.
+        final_status = "completed" if transcript_status == "available" else "partial"
+        if not _set_state(attachment_id, owner_id, final_status, result):
             return {"ok": False, "reason": "deleted_during_analysis"}
-        return {"ok": True, "status": "completed"}
+        return {"ok": True, "status": final_status}
     except Exception:
         log.exception("Private voicemail review failed attachment_id=%s", attachment_id)
         _set_state(attachment_id, owner_id, "failed", {
@@ -272,7 +276,7 @@ def voicemail_inbox_state(authorization: Optional[str] = Header(default=None)):
         rows = cur.fetchall() or []
     summaries = {}
     for record in rows:
-        if record["deleted_at"] or record["status"] != "completed" or not record["result_json"]:
+        if record["deleted_at"] or record["status"] not in {"completed", "partial"} or not record["result_json"]:
             continue
         try:
             analysis = json.loads(record["result_json"])
