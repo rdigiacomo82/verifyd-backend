@@ -124,6 +124,9 @@ class PilotAuthorizationTests(unittest.TestCase):
         namespace["HTTPException"] = HTTPException
         namespace["_enabled"] = lambda: True
         namespace["_owner"] = lambda auth: {"handle_lower": "roberttest22"} if auth == "test_valid" else {"handle_lower": "outsider"}
+        # Compile the original function bodies without FastAPI decorators.
+        for node in nodes:
+            node.decorator_list = []
         code = ast.Module(body=[ast.ImportFrom(module="__future__",names=[ast.alias(name="annotations")],level=0), *nodes], type_ignores=[])
         exec(compile(ast.fix_missing_locations(code), "<pilot-rules>", "exec"), namespace)
         self.ns = namespace
