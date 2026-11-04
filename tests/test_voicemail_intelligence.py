@@ -95,6 +95,8 @@ class AccessControlTests(unittest.TestCase):
         self.assertIn("REFERENCES verifyd_voice_attachments(attachment_id) ON DELETE CASCADE", code)
         self.assertIn("REFERENCES verifyd_identities(id) ON DELETE CASCADE", code)
         self.assertIn("AND deleted_at IS NULL", code)
+        self.assertIn("review_summaries", code)
+        self.assertIn("consent_to_external_transcription", code)
 
     def test_router_is_feature_gated_and_not_public_business_api(self):
         code = (ROOT / "trust_voice_voicemail_intelligence.py").read_text()
