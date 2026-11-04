@@ -91,6 +91,12 @@ class RealPostgresLocationIntegration(unittest.TestCase):
         self.location._identity = lambda _: {"id":"owner", "status":"active"}
         with _db() as conn:
             cur = conn.cursor()
+            # Recreate the synthetic identity removed by the cascade test.
+            cur.execute("""
+                INSERT INTO verifyd_identities(id,handle,display_name,status)
+                VALUES ('owner','owner','Owner','active')
+                ON CONFLICT (id) DO UPDATE SET status='active'
+            """)
             for table in (
                 "verifyd_circle_location_native_tokens",
                 "verifyd_circle_latest_locations",
