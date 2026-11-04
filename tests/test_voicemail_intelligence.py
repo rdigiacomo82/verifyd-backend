@@ -109,5 +109,49 @@ class AccessControlTests(unittest.TestCase):
         self.assertNotIn('@router.post("/business/', code)
 
 
+class PilotAuthorizationTests(unittest.TestCase):
+    def setUp(self):
+        import os
+        import ast
+        source = (ROOT / "trust_voice_voicemail_intelligence.py").read_text()
+        parsed = ast.parse(source)
+        nodes = [n for n in parsed.body if isinstance(n, ast.FunctionDef) and
+                 n.name in {"_pilot_handles", "_in_pilot", "_require_pilot", "voicemail_intelligence_health"}]
+        namespace = {"os": os, "Optional": Optional, "Header": lambda default=None: default}
+        class HTTPException(Exception):
+            def __init__(self, status_code, detail=None):
+                self.status_code, self.detail = status_code, detail
+        namespace["HTTPException"] = HTTPException
+        namespace["_enabled"] = lambda: True
+        namespace["_owner"] = lambda auth: {"handle_lower": "roberttest22"} if auth == "test_valid" else {"handle_lower": "outsider"}
+        # Compile the original function bodies without FastAPI decorators.
+        for node in nodes:
+            node.decorator_list = []
+        code = ast.Module(body=[ast.ImportFrom(module="__future__",names=[ast.alias(name="annotations")],level=0), *nodes], type_ignores=[])
+        exec(compile(ast.fix_missing_locations(code), "<pilot-rules>", "exec"), namespace)
+        self.ns = namespace
+        self.HTTPException = HTTPException
+
+    def test_health_only_enables_allowlisted_identity(self):
+        from unittest.mock import patch
+        with patch.dict("os.environ", {"VERIFYD_VOICEMAIL_INTELLIGENCE_PILOT_HANDLES": "@RobertTest22,@DatabyDesign"}):
+            self.assertTrue(self.ns["voicemail_intelligence_health"](authorization="test_valid")["enabled"])
+            self.assertFalse(self.ns["voicemail_intelligence_health"](authorization="somebody_else")["enabled"])
+            self.assertFalse(self.ns["voicemail_intelligence_health"](authorization=None)["enabled"])
+
+    def test_server_enforces_pilot_not_only_frontend(self):
+        from unittest.mock import patch
+        with patch.dict("os.environ", {"VERIFYD_VOICEMAIL_INTELLIGENCE_PILOT_HANDLES": "roberttest22,databydesign"}):
+            self.ns["_require_pilot"]({"handle_lower":"databydesign"})
+            with self.assertRaises(self.HTTPException) as err:
+                self.ns["_require_pilot"]({"handle_lower":"outsider"})
+            self.assertEqual(err.exception.status_code, 404)
+
+    def test_all_five_private_operations_check_pilot(self):
+        source = (ROOT / "trust_voice_voicemail_intelligence.py").read_text()
+        self.assertEqual(source.count("    _require_pilot(owner)\n"), 5)
+        self.assertIn("VERIFYD_VOICEMAIL_INTELLIGENCE_PILOT_HANDLES", source)
+
+
 if __name__ == "__main__":
     unittest.main()
