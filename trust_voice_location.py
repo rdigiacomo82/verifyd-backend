@@ -57,6 +57,10 @@ def _identity(authorization: Optional[str]) -> dict:
         raise HTTPException(401, detail={"error": "session_required"})
     try:
         payload = _verify_token(token)
+    except HTTPException:
+        # Preserve 503 from the persistent-session database; never sign the user
+        # out because Render or Postgres temporarily cannot validate a token.
+        raise
     except Exception:
         raise HTTPException(401, detail={"error": "session_required"})
     user = _identity_by_id(str(payload.get("identity_id") or ""))
@@ -393,7 +397,7 @@ class NativePositionUpdate(BaseModel):
     latitude: float = Field(ge=-90, le=90)
     longitude: float = Field(ge=-180, le=180)
     accuracy: Optional[float] = Field(default=None, ge=0, le=100000)
-    time: float = Field(ge=0)
+    time: Optional[float] = Field(default=None, ge=0)
 
 
 @router.post("/native-token")
@@ -468,18 +472,23 @@ def upload_native_position(
     token = supplied[7:].strip() if supplied.lower().startswith("bearer ") else ""
     if not token.startswith("loc_") or len(token) > 120:
         raise HTTPException(401, detail={"error": "invalid_location_upload_token"})
+    # Capgo's documented Location.time field can be null. Null timestamps
+    # indicate that native reported the fix without provider time; use server
+    # receipt time, but validate an actual timestamp when it is available.
     if not all(math.isfinite(v) for v in (
-        body.latitude, body.longitude, body.time,
-        *( [body.accuracy] if body.accuracy is not None else [] )
+        body.latitude, body.longitude,
+        *([body.time] if body.time is not None else []),
+        *([body.accuracy] if body.accuracy is not None else []),
     )):
         raise HTTPException(422, detail={"error": "invalid_native_position"})
     now = _now()
-    try:
-        produced = datetime.fromtimestamp(body.time / 1000, tz=timezone.utc)
-    except (ValueError, OverflowError, OSError):
-        raise HTTPException(422, detail={"error": "invalid_position_time"})
-    if not -60 <= (now - produced).total_seconds() <= 300:
-        raise HTTPException(422, detail={"error": "stale_position"})
+    if body.time is not None:
+        try:
+            produced = datetime.fromtimestamp(body.time / 1000, tz=timezone.utc)
+        except (ValueError, OverflowError, OSError):
+            raise HTTPException(422, detail={"error": "invalid_position_time"})
+        if not -60 <= (now - produced).total_seconds() <= 300:
+            raise HTTPException(422, detail={"error": "stale_position"})
     _schema()
     digest = hashlib.sha256(token.encode("ascii")).hexdigest()
     with get_db() as conn:

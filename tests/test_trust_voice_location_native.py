@@ -87,6 +87,21 @@ class NativeLocationSecurityTests(unittest.TestCase):
             self.assertEqual(e.exception.status_code, 401)
         self.assertFalse(any("INSERT INTO verifyd_circle_latest_locations" in sql for sql, _ in cursor.statements))
 
+    def test_null_native_timestamp_is_supported_without_location_history(self):
+        cursor = NativeCursor(
+            share={"enabled": True, "precision_mode": "approximate", "expires_at": None},
+            token_owner="owner",
+            session_active=True,
+        )
+        self.install_cursor(cursor)
+        point = types.SimpleNamespace(latitude=40.11231, longitude=-73.82451, accuracy=None, time=None)
+        with patch.dict(os.environ, {"VERIFYD_TRUST_VOICE_LOCATION_ENABLED": "1"}):
+            result = self.location.upload_native_position(point, Response(), authorization="Bearer loc_native")
+        self.assertTrue(result["ok"])
+        writes = [(sql, args) for sql, args in cursor.statements if "INSERT INTO verifyd_circle_latest_locations" in sql]
+        self.assertEqual(len(writes), 1)
+        self.assertEqual(writes[0][1][1:4], (40.11, -73.82, None))
+
     def test_approximate_native_upload_redacts_coordinates(self):
         cursor = NativeCursor(
             share={"enabled": True, "precision_mode": "approximate", "expires_at": None},
