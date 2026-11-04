@@ -1,0 +1,28 @@
+name: Verify Circle Location Phase A Security
+
+on:
+  push:
+    paths:
+      - 'trust_voice_location.py'
+      - 'tests/test_trust_voice_location.py'
+      - '.github/workflows/location-phase-a-security.yml'
+  pull_request:
+    paths:
+      - 'trust_voice_location.py'
+      - 'tests/test_trust_voice_location.py'
+      - '.github/workflows/location-phase-a-security.yml'
+
+jobs:
+  location-security:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Compile location and security tests
+        run: python -m py_compile trust_voice_location.py tests/test_trust_voice_location.py
+      - name: Run isolated location security regression tests
+        run: python -m unittest discover -s tests -p 'test_trust_voice_location.py' -v
