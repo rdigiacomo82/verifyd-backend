@@ -76,6 +76,26 @@ def _preload_deepfake() -> bool:
         return False
 
 
+def _resolve_voicemail_audio_tools() -> None:
+    """Resolve ffmpeg bundled by build.sh even when runtime PATH omits it.
+
+    Only sets paths if an operator hasn't explicitly configured FFMPEG_BIN or
+    FFPROBE_BIN and the respective executable isn't otherwise on PATH.
+    """
+    import shutil
+
+    directory = "/opt/render/project/.render/ffmpeg"
+    for env_key, binary_name in (
+        ("FFMPEG_BIN", "ffmpeg"),
+        ("FFPROBE_BIN", "ffprobe"),
+    ):
+        if os.environ.get(env_key) or shutil.which(binary_name):
+            continue
+        binary = os.path.join(directory, binary_name)
+        if os.path.isfile(binary) and os.access(binary, os.X_OK):
+            os.environ[env_key] = binary
+
+
 def _log_voicemail_readiness(queue_names: list[str]) -> None:
     """Report capability flags only — never log API credentials or voicemail data.
 
@@ -112,6 +132,8 @@ def main() -> int:
     ]
     if not queue_names:
         queue_names = ["verifyd"]
+
+    _resolve_voicemail_audio_tools()
 
     _preload_dinov2()
     _preload_deepfake()
