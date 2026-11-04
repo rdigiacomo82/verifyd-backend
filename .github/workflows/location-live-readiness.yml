@@ -1,0 +1,27 @@
+name: Circle Location Live Readiness Check
+
+on:
+  push:
+    paths:
+      - 'tests/location_live_smoke.py'
+      - '.github/workflows/location-live-readiness.yml'
+  pull_request:
+    paths:
+      - 'tests/location_live_smoke.py'
+      - '.github/workflows/location-live-readiness.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  readiness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify enabled schema, anonymous denial and cross-origin access
+        run: python tests/location_live_smoke.py
