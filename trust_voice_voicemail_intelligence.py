@@ -48,8 +48,10 @@ def _pilot_handles() -> set[str]:
 
 def _in_pilot(identity: dict) -> bool:
     allowed = _pilot_handles()
+    # Fail closed when no approved test handles have been configured.
+    # Broader rollout requires an explicit, reviewed change.
     if not allowed:
-        return True
+        return False
     handle = str(identity.get("handle_lower") or identity.get("handle") or "").lower().strip().lstrip("@")
     return bool(handle and handle in allowed)
 
@@ -273,7 +275,7 @@ class AnalyzeConsent(BaseModel):
 def voicemail_intelligence_health(authorization: Optional[str] = Header(default=None)):
     effective = _enabled()
     # Only an authenticated pilot participant can see this feature as enabled.
-    if effective and _pilot_handles():
+    if effective:
         try:
             effective = _in_pilot(_owner(authorization))
         except Exception:
