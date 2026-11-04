@@ -89,7 +89,7 @@ class Connection:
         return self._cursor
 
 
-def load_location():
+def load_location(skip_schema=False):
     fake_fastapi = types.ModuleType("fastapi")
     fake_fastapi.APIRouter = Router
     fake_fastapi.Header = lambda default=None: default
@@ -120,7 +120,8 @@ def load_location():
         spec = importlib.util.spec_from_file_location("location_under_test", BACKEND)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-    module._schema = lambda: None
+    if not skip_schema:
+        module._schema = lambda: None
     return module
 
 
