@@ -263,13 +263,29 @@ def voicemail_inbox_state(authorization: Optional[str] = Header(default=None)):
     with get_db() as conn:
         cur = conn.cursor()
         cur.execute("""
-            SELECT attachment_id,status,deleted_at FROM verifyd_voice_voicemail_reviews
+            SELECT attachment_id,status,deleted_at,result_json FROM verifyd_voice_voicemail_reviews
             WHERE recipient_identity_id=%s ORDER BY updated_at DESC LIMIT 500
         """, (str(owner["id"]),))
         rows = cur.fetchall() or []
+    summaries = {}
+    for record in rows:
+        if record["deleted_at"] or record["status"] != "completed" or not record["result_json"]:
+            continue
+        try:
+            analysis = json.loads(record["result_json"])
+            risk = analysis.get("risk") or {}
+            summaries[str(record["attachment_id"])] = {
+                "level": risk.get("level", "blue"),
+                "title": str(risk.get("title") or "Review message")[:100],
+                "explanation": str((risk.get("explanations") or [""])[0])[:170],
+                "transcript_excerpt": str(analysis.get("transcript") or "")[:180],
+            }
+        except (ValueError, TypeError, AttributeError):
+            continue
     return {
         "deleted_attachment_ids": [str(x["attachment_id"]) for x in rows if x["deleted_at"]],
         "review_statuses": {str(x["attachment_id"]): x["status"] for x in rows if not x["deleted_at"]},
+        "review_summaries": summaries,
     }
 
 
