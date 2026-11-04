@@ -44,6 +44,29 @@ class NativeLocationSecurityTests(unittest.TestCase):
                 self.location.upload_native_position(point, Response(), authorization="Bearer loc_bad")
             self.assertEqual(e.exception.status_code, 404)
 
+    def test_timed_share_cannot_issue_background_upload_token(self):
+        # The backend must not leave an expired device-level location watcher
+        # operating for hours after the server share expires.
+        from datetime import datetime, timedelta, timezone
+        cursor = NativeCursor(share={
+            "enabled": True,
+            "expires_at": datetime.now(timezone.utc) + timedelta(hours=1),
+        })
+        self.install_cursor(cursor)
+        self.location._verify_token = lambda token: {
+            "identity_id": "owner", "session_id": "sess_owner"
+        }
+        with patch.dict(os.environ, {"VERIFYD_TRUST_VOICE_LOCATION_ENABLED": "1"}):
+            with self.assertRaises(HTTPException) as error:
+                self.location.issue_native_upload_token(
+                    Response(), authorization="Bearer valid"
+                )
+            self.assertEqual(error.exception.status_code, 403)
+        self.assertFalse(any(
+            "INSERT INTO verifyd_circle_location_native_tokens" in sql
+            for sql, _ in cursor.statements
+        ))
+
     def test_rejects_primary_session_token_for_native_upload(self):
         point = types.SimpleNamespace(latitude=40.1, longitude=-73.1, accuracy=None, time=time.time()*1000)
         with patch.dict(os.environ, {"VERIFYD_TRUST_VOICE_LOCATION_ENABLED": "1"}):
