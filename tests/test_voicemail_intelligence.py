@@ -90,6 +90,12 @@ class AccessControlTests(unittest.TestCase):
     def test_receiver_is_authorized_only_after_conversation_membership(self):
         self.assertEqual(self.get("attachment", "receiver")["message_id"], "message")
 
+    def test_account_and_attachment_deletion_cleanup_is_cascade(self):
+        code = (ROOT / "trust_voice_voicemail_intelligence.py").read_text()
+        self.assertIn("REFERENCES verifyd_voice_attachments(attachment_id) ON DELETE CASCADE", code)
+        self.assertIn("REFERENCES verifyd_identities(id) ON DELETE CASCADE", code)
+        self.assertIn("AND deleted_at IS NULL", code)
+
     def test_router_is_feature_gated_and_not_public_business_api(self):
         code = (ROOT / "trust_voice_voicemail_intelligence.py").read_text()
         main = (ROOT / "main.py").read_text()
