@@ -54,6 +54,7 @@ def _schema() -> None:
                 attachment_id TEXT NOT NULL REFERENCES verifyd_voice_attachments(attachment_id) ON DELETE CASCADE,
                 recipient_identity_id TEXT NOT NULL REFERENCES verifyd_identities(id) ON DELETE CASCADE,
                 status TEXT NOT NULL DEFAULT 'not_started',
+                attempt_count INTEGER NOT NULL DEFAULT 0,
                 result_json TEXT,
                 deleted_at TEXT,
                 created_at TEXT NOT NULL,
@@ -167,6 +168,8 @@ def process_voicemail_review(attachment_id: str, owner_id: str) -> dict:
     """Worker entry point. An earlier 'Delete' invalidates pending jobs."""
     temp_path = ""
     try:
+        if not _enabled():
+            return {"ok": False, "reason": "feature_disabled"}
         review = _review_state(attachment_id, owner_id)
         if not review or review.get("deleted_at") or review.get("status") not in {"queued", "analyzing"}:
             return {"ok": False, "reason": "not_pending"}
@@ -325,7 +328,7 @@ def request_voicemail_review(
             ON CONFLICT (attachment_id,recipient_identity_id) DO NOTHING
         """, (attachment_id, owner_id, now, now))
         cur.execute("""
-            SELECT status,deleted_at FROM verifyd_voice_voicemail_reviews
+            SELECT status,deleted_at,attempt_count FROM verifyd_voice_voicemail_reviews
             WHERE attachment_id=%s AND recipient_identity_id=%s FOR UPDATE
         """, (attachment_id, owner_id))
         existing = cur.fetchone()
@@ -333,9 +336,11 @@ def request_voicemail_review(
             raise HTTPException(404, detail={"error": "voicemail_not_found"})
         if existing["status"] in {"queued", "analyzing", "completed"}:
             return {"ok": True, "queued": False, "status": existing["status"]}
+        if int(existing["attempt_count"] or 0) >= 3:
+            raise HTTPException(429, detail={"error": "analysis_retry_limit"})
         cur.execute("""
             UPDATE verifyd_voice_voicemail_reviews
-            SET status='queued',result_json=NULL,updated_at=%s
+            SET status='queued',result_json=NULL,attempt_count=attempt_count+1,updated_at=%s
             WHERE attachment_id=%s AND recipient_identity_id=%s AND deleted_at IS NULL
         """, (now, attachment_id, owner_id))
     try:
