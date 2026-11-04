@@ -384,3 +384,155 @@ def visible_locations(response: Response, authorization: Optional[str] = Header(
             "stale": age is None or age > STALE_AFTER_SECONDS,
         })
     return {"locations": data}
+
+
+# The native bridge never stores the user's primary session token in the
+# background-location provider. Instead it receives a narrow upload-only
+# token bound to the revocable session that issued it.
+class NativePositionUpdate(BaseModel):
+    latitude: float = Field(ge=-90, le=90)
+    longitude: float = Field(ge=-180, le=180)
+    accuracy: Optional[float] = Field(default=None, ge=0, le=100000)
+    time: float = Field(ge=0)
+
+
+@router.post("/native-token")
+def issue_native_upload_token(
+    response: Response,
+    authorization: Optional[str] = Header(default=None),
+):
+    owner = _identity(authorization)
+    _no_cache(response)
+    _schema()
+    auth = authorization.split(" ", 1)[1].strip()
+    payload = _verify_token(auth)
+    session_id = str(payload.get("session_id") or "")
+    if not session_id:
+        raise HTTPException(403, detail={"error": "persistent_session_required"})
+    owner_id = str(owner["id"])
+    now = _now()
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT enabled,expires_at FROM verifyd_circle_location_shares
+            WHERE owner_identity_id=%s FOR UPDATE
+        """, (owner_id,))
+        share = cur.fetchone()
+        if not share or not share["enabled"] or (
+            share["expires_at"] and share["expires_at"] <= now
+        ):
+            raise HTTPException(403, detail={"error": "sharing_disabled"})
+        expiry = now + timedelta(days=30)
+        if share["expires_at"]:
+            expiry = min(expiry, share["expires_at"])
+        raw = "loc_" + secrets.token_urlsafe(32)
+        digest = hashlib.sha256(raw.encode("ascii")).hexdigest()
+        cur.execute("""
+            INSERT INTO verifyd_circle_location_native_tokens
+                (owner_identity_id,token_hash,session_id,expires_at,issued_at)
+            VALUES (%s,%s,%s,%s,NOW())
+            ON CONFLICT(owner_identity_id) DO UPDATE SET
+                token_hash=EXCLUDED.token_hash,
+                session_id=EXCLUDED.session_id,
+                expires_at=EXCLUDED.expires_at,issued_at=NOW()
+        """, (owner_id, digest, session_id, expiry))
+    return {"upload_token": raw, "expires_at": _iso(expiry)}
+
+
+@router.delete("/native-token")
+def revoke_native_upload_token(
+    response: Response,
+    authorization: Optional[str] = Header(default=None),
+):
+    owner = _identity(authorization)
+    _no_cache(response)
+    _schema()
+    with get_db() as conn:
+        conn.cursor().execute(
+            "DELETE FROM verifyd_circle_location_native_tokens WHERE owner_identity_id=%s",
+            (str(owner["id"]),),
+        )
+    return {"ok": True}
+
+
+@router.post("/native-position")
+def upload_native_position(
+    body: NativePositionUpdate,
+    response: Response,
+    authorization: Optional[str] = Header(default=None),
+):
+    if not _enabled():
+        raise HTTPException(404, detail={"error": "feature_unavailable"})
+    _no_cache(response)
+    supplied = str(authorization or "").strip()
+    token = supplied[7:].strip() if supplied.lower().startswith("bearer ") else ""
+    if not token.startswith("loc_") or len(token) > 120:
+        raise HTTPException(401, detail={"error": "invalid_location_upload_token"})
+    if not all(math.isfinite(v) for v in (
+        body.latitude, body.longitude, body.time,
+        *( [body.accuracy] if body.accuracy is not None else [] )
+    )):
+        raise HTTPException(422, detail={"error": "invalid_native_position"})
+    now = _now()
+    try:
+        produced = datetime.fromtimestamp(body.time / 1000, tz=timezone.utc)
+    except (ValueError, OverflowError, OSError):
+        raise HTTPException(422, detail={"error": "invalid_position_time"})
+    if not -60 <= (now - produced).total_seconds() <= 300:
+        raise HTTPException(422, detail={"error": "stale_position"})
+    _schema()
+    digest = hashlib.sha256(token.encode("ascii")).hexdigest()
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT owner_identity_id FROM verifyd_circle_location_native_tokens
+            WHERE token_hash=%s AND expires_at>NOW()
+        """, (digest,))
+        token_row = cur.fetchone()
+        if not token_row:
+            raise HTTPException(401, detail={"error": "invalid_location_upload_token"})
+        owner_id = str(token_row["owner_identity_id"])
+        # Serialize uploads with Stop Sharing and changes to recipients.
+        cur.execute("""
+            SELECT enabled,precision_mode,expires_at
+            FROM verifyd_circle_location_shares
+            WHERE owner_identity_id=%s FOR UPDATE
+        """, (owner_id,))
+        share = cur.fetchone()
+        if not share or not share["enabled"] or (
+            share["expires_at"] and share["expires_at"] <= now
+        ):
+            raise HTTPException(403, detail={"error": "sharing_disabled"})
+        # Recheck credential AFTER share lock, and check account/session revoke.
+        cur.execute("""
+            SELECT 1 FROM verifyd_circle_location_native_tokens t
+            JOIN verifyd_voice_sessions sess ON sess.session_id=t.session_id
+            JOIN verifyd_identities ident ON ident.id=t.owner_identity_id
+            WHERE t.owner_identity_id=%s AND t.token_hash=%s
+              AND t.expires_at>NOW() AND sess.revoked_at IS NULL
+              AND sess.identity_id=t.owner_identity_id
+              AND ident.status='active'
+            LIMIT 1
+        """, (owner_id, digest))
+        if not cur.fetchone():
+            raise HTTPException(401, detail={"error": "invalid_location_upload_token"})
+        cur.execute("""
+            SELECT recorded_at FROM verifyd_circle_latest_locations
+            WHERE owner_identity_id=%s
+        """, (owner_id,))
+        prior = cur.fetchone()
+        if prior and (now - prior["recorded_at"]).total_seconds() < 10:
+            return {"ok": True, "throttled": True}
+        approximate = share["precision_mode"] == "approximate"
+        lat = round(body.latitude, 2) if approximate else body.latitude
+        lon = round(body.longitude, 2) if approximate else body.longitude
+        accuracy = None if approximate else body.accuracy
+        cur.execute("""
+            INSERT INTO verifyd_circle_latest_locations
+                (owner_identity_id,latitude,longitude,accuracy_m,recorded_at)
+            VALUES (%s,%s,%s,%s,NOW())
+            ON CONFLICT(owner_identity_id) DO UPDATE SET
+                latitude=EXCLUDED.latitude,longitude=EXCLUDED.longitude,
+                accuracy_m=EXCLUDED.accuracy_m,recorded_at=NOW()
+        """, (owner_id, lat, lon, accuracy))
+    return {"ok": True, "throttled": False}
