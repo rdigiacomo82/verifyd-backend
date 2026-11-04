@@ -4,6 +4,7 @@ import pathlib
 import unittest
 from contextlib import contextmanager
 from types import SimpleNamespace
+from typing import Optional
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 from trust_voice_voicemail_risk import review_voicemail_content
@@ -68,6 +69,7 @@ class AccessControlTests(unittest.TestCase):
 
         namespace.update({
             "HTTPException": HTTPException,
+            "Optional": Optional,
             "_require_attachment_member": lambda aid, owner: {
                 "attachment_id": aid, "conversation_id": "conversation",
                 "message_id": "message", "filename": "VeriFYD_Voicemail_123.webm",
