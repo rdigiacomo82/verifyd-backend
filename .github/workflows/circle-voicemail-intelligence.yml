@@ -1,0 +1,34 @@
+name: Verify Circle Voicemail Intelligence
+
+on:
+  pull_request:
+    paths:
+      - 'trust_voice_voicemail_intelligence.py'
+      - 'trust_voice_voicemail_risk.py'
+      - 'tests/test_voicemail_intelligence.py'
+      - 'main.py'
+      - '.github/workflows/circle-voicemail-intelligence.yml'
+  push:
+    paths:
+      - 'trust_voice_voicemail_intelligence.py'
+      - 'trust_voice_voicemail_risk.py'
+      - 'tests/test_voicemail_intelligence.py'
+      - 'main.py'
+      - '.github/workflows/circle-voicemail-intelligence.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  guards-and-risk-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Syntax check without starting production services
+        run: python -m py_compile trust_voice_voicemail_intelligence.py trust_voice_voicemail_risk.py tests/test_voicemail_intelligence.py
+      - name: Risk coloring and access-control unit tests
+        run: python -m unittest discover -s tests -p test_voicemail_intelligence.py -v
