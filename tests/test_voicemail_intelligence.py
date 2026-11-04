@@ -147,6 +147,12 @@ class PilotAuthorizationTests(unittest.TestCase):
                 self.ns["_require_pilot"]({"handle_lower":"outsider"})
             self.assertEqual(err.exception.status_code, 404)
 
+    def test_missing_allowlist_fail_closed(self):
+        from unittest.mock import patch
+        with patch.dict("os.environ", {"VERIFYD_VOICEMAIL_INTELLIGENCE_PILOT_HANDLES": ""}):
+            self.assertFalse(self.ns["_in_pilot"]({"handle_lower": "roberttest22"}))
+            self.assertFalse(self.ns["voicemail_intelligence_health"](authorization="test_valid")["enabled"])
+
     def test_all_five_private_operations_check_pilot(self):
         source = (ROOT / "trust_voice_voicemail_intelligence.py").read_text()
         self.assertEqual(source.count("    _require_pilot(owner)\n"), 5)
