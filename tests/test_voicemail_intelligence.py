@@ -96,6 +96,7 @@ class AccessControlTests(unittest.TestCase):
         self.assertIn("REFERENCES verifyd_identities(id) ON DELETE CASCADE", code)
         self.assertIn("AND deleted_at IS NULL", code)
         self.assertIn("review_summaries", code)
+        self.assertIn('final_status = "completed" if transcript_status == "available" else "partial"', code)
         self.assertIn("consent_to_external_transcription", code)
 
     def test_router_is_feature_gated_and_not_public_business_api(self):
