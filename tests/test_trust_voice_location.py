@@ -209,6 +209,14 @@ class LocationSecurityTest(unittest.TestCase):
         self.assertEqual(len(insert), 1)
         self.assertEqual(insert[0][1][1:4], (40.71, -73.99, None))
 
+    def test_account_deletion_cascades_all_location_rows(self):
+        source = BACKEND.read_text(encoding="utf-8")
+        # Three owner-keyed tables and both columns of the grants table.
+        self.assertGreaterEqual(
+            source.count("REFERENCES verifyd_identities(id) ON DELETE CASCADE"), 5
+        )
+        self.assertIn("i.status='active'", source)
+
     def test_visible_results_require_membership_and_expiry_filters(self):
         source = BACKEND.read_text(encoding="utf-8")
         self.assertIn("m.member_identity_id=%s", source)

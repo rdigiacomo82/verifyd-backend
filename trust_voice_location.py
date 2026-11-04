@@ -81,7 +81,7 @@ def _schema() -> None:
             cur = conn.cursor()
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS verifyd_circle_location_shares (
-                    owner_identity_id TEXT PRIMARY KEY,
+                    owner_identity_id TEXT PRIMARY KEY REFERENCES verifyd_identities(id) ON DELETE CASCADE,
                     enabled BOOLEAN NOT NULL DEFAULT FALSE,
                     share_scope TEXT NOT NULL DEFAULT 'selected',
                     precision_mode TEXT NOT NULL DEFAULT 'approximate',
@@ -91,8 +91,8 @@ def _schema() -> None:
             """)
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS verifyd_circle_location_grants (
-                    owner_identity_id TEXT NOT NULL,
-                    viewer_identity_id TEXT NOT NULL,
+                    owner_identity_id TEXT NOT NULL REFERENCES verifyd_identities(id) ON DELETE CASCADE,
+                    viewer_identity_id TEXT NOT NULL REFERENCES verifyd_identities(id) ON DELETE CASCADE,
                     PRIMARY KEY (owner_identity_id, viewer_identity_id)
                 )
             """)
@@ -102,7 +102,7 @@ def _schema() -> None:
             """)
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS verifyd_circle_latest_locations (
-                    owner_identity_id TEXT PRIMARY KEY,
+                    owner_identity_id TEXT PRIMARY KEY REFERENCES verifyd_identities(id) ON DELETE CASCADE,
                     latitude DOUBLE PRECISION NOT NULL,
                     longitude DOUBLE PRECISION NOT NULL,
                     accuracy_m DOUBLE PRECISION NULL,
@@ -111,7 +111,7 @@ def _schema() -> None:
             """)
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS verifyd_circle_location_native_tokens (
-                    owner_identity_id TEXT PRIMARY KEY,
+                    owner_identity_id TEXT PRIMARY KEY REFERENCES verifyd_identities(id) ON DELETE CASCADE,
                     token_hash TEXT NOT NULL UNIQUE,
                     session_id TEXT NOT NULL,
                     expires_at TIMESTAMPTZ NOT NULL,
@@ -146,6 +146,7 @@ def _purge_expired(cur) -> None:
         WHERE p.recorded_at < NOW() - INTERVAL '24 hours'
           OR NOT EXISTS (
             SELECT 1 FROM verifyd_circle_location_shares s
+            JOIN verifyd_identities i ON i.id=s.owner_identity_id AND i.status='active'
             WHERE s.owner_identity_id=p.owner_identity_id
               AND s.enabled=TRUE
               AND (s.expires_at IS NULL OR s.expires_at > NOW())
