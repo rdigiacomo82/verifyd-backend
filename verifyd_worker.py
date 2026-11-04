@@ -76,6 +76,30 @@ def _preload_deepfake() -> bool:
         return False
 
 
+def _log_voicemail_readiness(queue_names: list[str]) -> None:
+    """Report capability flags only — never log API credentials or voicemail data.
+
+    The service can be healthy while its separate RQ worker lacks ffmpeg,
+    speech-to-text credentials, or the queue the API uses.
+    """
+    import importlib.util
+    import shutil
+
+    required_queue = os.getenv("VERIFYD_TRUST_VOICE_ANALYSIS_QUEUE", "verifyd").strip() or "verifyd"
+    checks = {
+        "enabled_on_worker": os.getenv("VERIFYD_VOICEMAIL_INTELLIGENCE_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on"),
+        "transcription_key_present": bool(os.getenv("OPENAI_API_KEY")),
+        "ffmpeg_available": bool(shutil.which(os.getenv("FFMPEG_BIN", "ffmpeg"))),
+        "openai_library_present": importlib.util.find_spec("openai") is not None,
+        "audio_detector_dependencies_present": all(
+            importlib.util.find_spec(name) is not None
+            for name in ("numpy", "librosa", "soundfile", "boto3")
+        ),
+        "analysis_queue_consumed": required_queue in queue_names,
+    }
+    log.info("Voicemail Intelligence worker readiness (no user data): %s", checks)
+
+
 def main() -> int:
     from redis import Redis
     from rq import Queue, Worker
@@ -91,6 +115,11 @@ def main() -> int:
 
     _preload_dinov2()
     _preload_deepfake()
+
+    try:
+        _log_voicemail_readiness(queue_names)
+    except Exception:
+        log.exception("Optional voicemail worker readiness probe failed; continuing RQ worker")
 
     connection = Redis.from_url(redis_url)
     queues = [Queue(name, connection=connection) for name in queue_names]
