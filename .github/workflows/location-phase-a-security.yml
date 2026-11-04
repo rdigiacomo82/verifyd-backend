@@ -5,11 +5,13 @@ on:
     paths:
       - 'trust_voice_location.py'
       - 'tests/test_trust_voice_location.py'
+      - 'tests/test_trust_voice_location_native.py'
       - '.github/workflows/location-phase-a-security.yml'
   pull_request:
     paths:
       - 'trust_voice_location.py'
       - 'tests/test_trust_voice_location.py'
+      - 'tests/test_trust_voice_location_native.py'
       - '.github/workflows/location-phase-a-security.yml'
 
 jobs:
@@ -23,6 +25,6 @@ jobs:
         with:
           python-version: '3.12'
       - name: Compile location and security tests
-        run: python -m py_compile trust_voice_location.py tests/test_trust_voice_location.py
+        run: python -m py_compile trust_voice_location.py tests/test_trust_voice_location.py tests/test_trust_voice_location_native.py
       - name: Run isolated location security regression tests
-        run: python -m unittest discover -s tests -p 'test_trust_voice_location.py' -v
+        run: python -m unittest discover -s tests -p 'test_trust_voice_location*.py' -v
