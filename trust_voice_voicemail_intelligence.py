@@ -51,8 +51,8 @@ def _schema() -> None:
         cur = conn.cursor()
         cur.execute("""
             CREATE TABLE IF NOT EXISTS verifyd_voice_voicemail_reviews (
-                attachment_id TEXT NOT NULL,
-                recipient_identity_id TEXT NOT NULL,
+                attachment_id TEXT NOT NULL REFERENCES verifyd_voice_attachments(attachment_id) ON DELETE CASCADE,
+                recipient_identity_id TEXT NOT NULL REFERENCES verifyd_identities(id) ON DELETE CASCADE,
                 status TEXT NOT NULL DEFAULT 'not_started',
                 result_json TEXT,
                 deleted_at TEXT,
