@@ -441,6 +441,15 @@ def issue_native_upload_token(
             share["expires_at"] and share["expires_at"] <= now
         ):
             raise HTTPException(403, detail={"error": "sharing_disabled"})
+        # Background tracking must stop locally on consent expiration, not
+        # merely be rejected by this server. Until native OS-side auto-stop
+        # is implemented and device-tested, issue background credentials only
+        # for indefinite, user-revocable sharing. Finite shares keep working
+        # through the existing foreground /position endpoint.
+        if share["expires_at"] is not None:
+            raise HTTPException(
+                403, detail={"error": "native_background_requires_ongoing_sharing"}
+            )
         expiry = now + timedelta(days=30)
         if share["expires_at"]:
             expiry = min(expiry, share["expires_at"])
