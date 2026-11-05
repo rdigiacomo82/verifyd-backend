@@ -116,8 +116,41 @@ def _log_voicemail_readiness(queue_names: list[str]) -> None:
             for name in ("numpy", "librosa", "soundfile", "boto3")
         ),
         "analysis_queue_consumed": required_queue in queue_names,
+        "database_configured": bool(os.getenv("DATABASE_URL")),
+        "private_voicemail_r2_configured": bool(
+            (os.getenv("R2_TRUST_VOICE_ACCOUNT_ID") or os.getenv("R2_ACCOUNT_ID"))
+            and os.getenv("R2_TRUST_VOICE_ACCESS_KEY_ID")
+            and os.getenv("R2_TRUST_VOICE_SECRET_KEY")
+            and os.getenv("R2_TRUST_VOICE_BUCKET")
+        ),
+        "pilot_allowlist_present": bool(
+            os.getenv("VERIFYD_VOICEMAIL_INTELLIGENCE_PILOT_HANDLES", "").strip()
+        ),
     }
     log.info("Voicemail Intelligence worker readiness (no user data): %s", checks)
+
+
+def _initialize_voicemail_schema_if_enabled() -> None:
+    """Verify isolated recipient-review table without reading any voicemail.
+
+    A successful initialization is a deployment prerequisite. Failures are
+    logged without crashing the existing worker, so calls/messages and other
+    queued VeriFYD analyses continue to run.
+    """
+    enabled = os.getenv("VERIFYD_VOICEMAIL_INTELLIGENCE_ENABLED", "0").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
+    allowlist = os.getenv("VERIFYD_VOICEMAIL_INTELLIGENCE_PILOT_HANDLES", "").strip()
+    if not (enabled and allowlist):
+        log.info("Voicemail Intelligence review schema bootstrap skipped (pilot off)")
+        return
+    try:
+        from trust_voice_voicemail_intelligence import _schema
+        _schema()
+        log.info("Voicemail Intelligence recipient-review schema ready")
+    except Exception as exc:
+        # Avoid logging SQL parameters, database URLs or customer data.
+        log.error("Voicemail Intelligence schema bootstrap unavailable: %s", type(exc).__name__)
 
 
 def main() -> int:
@@ -142,6 +175,8 @@ def main() -> int:
         _log_voicemail_readiness(queue_names)
     except Exception:
         log.exception("Optional voicemail worker readiness probe failed; continuing RQ worker")
+
+    _initialize_voicemail_schema_if_enabled()
 
     connection = Redis.from_url(redis_url)
     queues = [Queue(name, connection=connection) for name in queue_names]
