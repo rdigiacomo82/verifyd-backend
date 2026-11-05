@@ -1,5 +1,6 @@
 """Server-authoritative Trust Voice identity blocking. A block suppresses direct contact both ways."""
 import os
+import threading
 from datetime import datetime, timezone
 from typing import Optional
 from fastapi import APIRouter, Header, HTTPException
@@ -7,6 +8,8 @@ from pydantic import BaseModel, Field
 from database import get_db
 
 router = APIRouter(prefix="/trust-voice", tags=["Trust Voice Blocking"])
+_block_schema_ready = False
+_block_schema_lock = threading.Lock()
 
 def blocking_enabled() -> bool:
     return os.environ.get("VERIFYD_CIRCLE_BLOCKING_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on")
@@ -16,16 +19,24 @@ def require_blocking_enabled():
         raise HTTPException(status_code=503, detail={"error": "blocking_not_enabled"})
 
 def ensure_block_schema():
-    with get_db() as conn:
-        cur = conn.cursor()
-        cur.execute("""CREATE TABLE IF NOT EXISTS verifyd_voice_blocks (
-            blocker_identity_id TEXT NOT NULL,
-            blocked_identity_id TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            PRIMARY KEY (blocker_identity_id, blocked_identity_id),
-            CHECK (blocker_identity_id <> blocked_identity_id)
-        )""")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_verifyd_voice_blocks_target ON verifyd_voice_blocks (blocked_identity_id, blocker_identity_id)")
+    """Initialize only once per application process, without repeated DDL on every call."""
+    global _block_schema_ready
+    if _block_schema_ready:
+        return
+    with _block_schema_lock:
+        if _block_schema_ready:
+            return
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("""CREATE TABLE IF NOT EXISTS verifyd_voice_blocks (
+                blocker_identity_id TEXT NOT NULL REFERENCES verifyd_identities(id) ON DELETE CASCADE,
+                blocked_identity_id TEXT NOT NULL REFERENCES verifyd_identities(id) ON DELETE CASCADE,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (blocker_identity_id, blocked_identity_id),
+                CHECK (blocker_identity_id <> blocked_identity_id)
+            )""")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_verifyd_voice_blocks_target ON verifyd_voice_blocks (blocked_identity_id, blocker_identity_id)")
+        _block_schema_ready = True
 
 def identities_blocked(a: str, b: str) -> bool:
     if not blocking_enabled() or not a or not b or a == b:
