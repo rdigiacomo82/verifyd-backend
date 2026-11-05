@@ -90,6 +90,11 @@ class AccessControlTests(unittest.TestCase):
     def test_receiver_is_authorized_only_after_conversation_membership(self):
         self.assertEqual(self.get("attachment", "receiver")["message_id"], "message")
 
+    def test_pilot_has_two_bounded_recovery_retries_after_db_tls_outage(self):
+        code = (ROOT / "trust_voice_voicemail_intelligence.py").read_text()
+        self.assertIn("MAX_REVIEW_ATTEMPTS = 5", code)
+        self.assertIn('if int(existing["attempt_count"] or 0) >= MAX_REVIEW_ATTEMPTS:', code)
+
     def test_background_worker_rechecks_recipient_and_pilot(self):
         code = (ROOT / "trust_voice_voicemail_intelligence.py").read_text()
         self.assertIn('recipient = _identity_by_id(str(owner_id))', code)
