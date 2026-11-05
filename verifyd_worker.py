@@ -151,6 +151,22 @@ def _initialize_voicemail_schema_if_enabled() -> None:
     except Exception as exc:
         # Avoid logging SQL parameters, database URLs or customer data.
         log.error("Voicemail Intelligence schema bootstrap unavailable: %s", type(exc).__name__)
+    finally:
+        # RQ forks a child for each job. A psycopg2 TLS connection created
+        # during schema bootstrap MUST NOT survive in the parent pool; if
+        # inherited by multiple job children it corrupts the PostgreSQL SSL
+        # stream ("bad record mac" / "SSL SYSCALL EOF"). Close it in the parent
+        # BEFORE Worker.work() begins forking. Each job then creates its own
+        # fresh, process-local pool using existing get_db().
+        try:
+            from database import close_db_pool
+            close_db_pool()
+            log.info("Voicemail bootstrap DB pool closed before RQ worker forks")
+        except Exception as exc:
+            # Fail closed for voicemail job creation if the parent pool could
+            # not be discarded, without stopping unrelated RQ consumers.
+            log.error("Voicemail bootstrap DB pool close failed: %s", type(exc).__name__)
+            os.environ["VERIFYD_VOICEMAIL_INTELLIGENCE_ENABLED"] = "0"
 
 
 def main() -> int:
