@@ -105,7 +105,14 @@ def _incoming_voicemail(attachment_id: str, owner_id: str) -> dict:
             WHERE message_id=%s AND conversation_id=%s LIMIT 1
         """, (row["message_id"], row["conversation_id"]))
         msg = cur.fetchone()
-    if not msg or msg.get("deleted_at") or str(msg["sender_identity_id"]) == str(owner_id):
+    if (
+        not msg
+        or msg.get("deleted_at")
+        or str(msg["sender_identity_id"]) == str(owner_id)
+        or str(msg["sender_identity_id"]) != str(row.get("uploader_identity_id"))
+    ):
+        # An attachment must match the actual message sender. Do not analyze
+        # unrelated audio merely because its filename resembles a voicemail.
         raise HTTPException(404, detail={"error": "voicemail_not_found"})
     return row
 
@@ -190,6 +197,12 @@ def process_voicemail_review(attachment_id: str, owner_id: str) -> dict:
     try:
         if not _enabled():
             return {"ok": False, "reason": "feature_disabled"}
+        # Recheck authorization in the background worker, since pilot access
+        # or the recipient's account may be revoked after RQ enqueue.
+        from trust_voice_signaling import _identity_by_id
+        recipient = _identity_by_id(str(owner_id))
+        if not recipient or not _in_pilot(recipient):
+            return {"ok": False, "reason": "pilot_access_revoked"}
         review = _review_state(attachment_id, owner_id)
         if not review or review.get("deleted_at") or review.get("status") not in {"queued", "analyzing"}:
             return {"ok": False, "reason": "not_pending"}
