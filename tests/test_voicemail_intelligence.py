@@ -90,6 +90,12 @@ class AccessControlTests(unittest.TestCase):
     def test_receiver_is_authorized_only_after_conversation_membership(self):
         self.assertEqual(self.get("attachment", "receiver")["message_id"], "message")
 
+    def test_background_worker_rechecks_recipient_and_pilot(self):
+        code = (ROOT / "trust_voice_voicemail_intelligence.py").read_text()
+        self.assertIn('recipient = _identity_by_id(str(owner_id))', code)
+        self.assertIn('if not recipient or not _in_pilot(recipient):', code)
+        self.assertIn('str(msg["sender_identity_id"]) != str(row.get("uploader_identity_id"))', code)
+
     def test_account_and_attachment_deletion_cleanup_is_cascade(self):
         code = (ROOT / "trust_voice_voicemail_intelligence.py").read_text()
         self.assertIn("REFERENCES verifyd_voice_attachments(attachment_id) ON DELETE CASCADE", code)
