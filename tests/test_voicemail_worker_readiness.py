@@ -64,6 +64,56 @@ class VoicemailWorkerReadinessTests(unittest.TestCase):
             self.assertEqual(os.environ["FFMPEG_BIN"], "/usr/local/bin/custom_ffmpeg")
             self.assertEqual(os.environ["FFPROBE_BIN"], "/usr/local/bin/custom_ffprobe")
 
+    def test_schema_bootstrap_requires_active_allowlisted_pilot(self):
+        import os
+        import sys
+        import types
+        helper = next(n for n in TREE.body if isinstance(n, ast.FunctionDef)
+                      and n.name == "_initialize_voicemail_schema_if_enabled")
+        log = Mock()
+        namespace = {"os": os, "log": log}
+        exec(compile(ast.Module(body=[helper], type_ignores=[]), "<schema-bootstrap>", "exec"), namespace)
+        module = types.ModuleType("trust_voice_voicemail_intelligence")
+        module._schema = Mock()
+        with patch.dict(sys.modules, {"trust_voice_voicemail_intelligence": module}):
+            with patch.dict(os.environ, {
+                "VERIFYD_VOICEMAIL_INTELLIGENCE_ENABLED": "1",
+                "VERIFYD_VOICEMAIL_INTELLIGENCE_PILOT_HANDLES": ""
+            }):
+                namespace["_initialize_voicemail_schema_if_enabled"]()
+                module._schema.assert_not_called()
+            with patch.dict(os.environ, {
+                "VERIFYD_VOICEMAIL_INTELLIGENCE_ENABLED": "1",
+                "VERIFYD_VOICEMAIL_INTELLIGENCE_PILOT_HANDLES": "roberttest22,databydesign"
+            }):
+                namespace["_initialize_voicemail_schema_if_enabled"]()
+                module._schema.assert_called_once()
+                log.info.assert_any_call("Voicemail Intelligence recipient-review schema ready")
+
+    def test_storage_readiness_reports_presence_not_secret_values(self):
+        import os
+        helper = next(n for n in TREE.body if isinstance(n, ast.FunctionDef)
+                      and n.name == "_log_voicemail_readiness")
+        log = Mock()
+        namespace = {"os": os, "log": log}
+        exec(compile(ast.Module(body=[helper], type_ignores=[]), "<worker-readiness>", "exec"), namespace)
+        with patch.dict(os.environ, {
+            "R2_ACCOUNT_ID": "example",
+            "R2_TRUST_VOICE_ACCESS_KEY_ID": "TEST_ACCESS_ID_DO_NOT_LOG",
+            "R2_TRUST_VOICE_SECRET_KEY": "TEST_SECRET_DO_NOT_LOG",
+            "R2_TRUST_VOICE_BUCKET": "test-private",
+            "DATABASE_URL": "postgres://credentials-do-not-log",
+        }), patch.object(shutil, "which", return_value="/usr/bin/ffmpeg"), patch.object(
+            importlib.util, "find_spec", return_value=Mock()
+        ):
+            namespace["_log_voicemail_readiness"](["verifyd"])
+        checks = log.info.call_args.args[1]
+        self.assertTrue(checks["private_voicemail_r2_configured"])
+        self.assertTrue(checks["database_configured"])
+        self.assertTrue(all(isinstance(x, bool) for x in checks.values()))
+        self.assertNotIn("TEST_SECRET_DO_NOT_LOG", str(checks))
+        self.assertNotIn("credentials-do-not-log", str(checks))
+
     def test_mismatched_queue_is_not_ready(self):
         fn = next(n for n in TREE.body if isinstance(n, ast.FunctionDef) and n.name == "_log_voicemail_readiness")
         logger = Mock()
