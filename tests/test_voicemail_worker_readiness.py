@@ -75,20 +75,50 @@ class VoicemailWorkerReadinessTests(unittest.TestCase):
         exec(compile(ast.Module(body=[helper], type_ignores=[]), "<schema-bootstrap>", "exec"), namespace)
         module = types.ModuleType("trust_voice_voicemail_intelligence")
         module._schema = Mock()
-        with patch.dict(sys.modules, {"trust_voice_voicemail_intelligence": module}):
+        database = types.ModuleType("database")
+        database.close_db_pool = Mock()
+        with patch.dict(sys.modules, {
+            "trust_voice_voicemail_intelligence": module,
+            "database": database,
+        }):
             with patch.dict(os.environ, {
                 "VERIFYD_VOICEMAIL_INTELLIGENCE_ENABLED": "1",
                 "VERIFYD_VOICEMAIL_INTELLIGENCE_PILOT_HANDLES": ""
             }):
                 namespace["_initialize_voicemail_schema_if_enabled"]()
                 module._schema.assert_not_called()
+                database.close_db_pool.assert_not_called()
             with patch.dict(os.environ, {
                 "VERIFYD_VOICEMAIL_INTELLIGENCE_ENABLED": "1",
                 "VERIFYD_VOICEMAIL_INTELLIGENCE_PILOT_HANDLES": "roberttest22,databydesign"
             }):
                 namespace["_initialize_voicemail_schema_if_enabled"]()
                 module._schema.assert_called_once()
+                database.close_db_pool.assert_called_once()
                 log.info.assert_any_call("Voicemail Intelligence recipient-review schema ready")
+                log.info.assert_any_call("Voicemail bootstrap DB pool closed before RQ worker forks")
+
+    def test_schema_failure_still_closes_parent_tls_pool_before_fork(self):
+        import os
+        import sys
+        import types
+        helper = next(n for n in TREE.body if isinstance(n, ast.FunctionDef)
+                      and n.name == "_initialize_voicemail_schema_if_enabled")
+        logger = Mock()
+        namespace = {"os": os, "log": logger}
+        exec(compile(ast.Module(body=[helper], type_ignores=[]), "<schema-bootstrap>", "exec"), namespace)
+        module = types.ModuleType("trust_voice_voicemail_intelligence")
+        module._schema = Mock(side_effect=RuntimeError("simulated SQL outage"))
+        database = types.ModuleType("database")
+        database.close_db_pool = Mock()
+        with patch.dict(sys.modules, {"trust_voice_voicemail_intelligence": module, "database": database}):
+            with patch.dict(os.environ, {
+                "VERIFYD_VOICEMAIL_INTELLIGENCE_ENABLED": "1",
+                "VERIFYD_VOICEMAIL_INTELLIGENCE_PILOT_HANDLES": "roberttest22,databydesign",
+            }):
+                namespace["_initialize_voicemail_schema_if_enabled"]()
+        database.close_db_pool.assert_called_once()
+        logger.error.assert_any_call("Voicemail Intelligence schema bootstrap unavailable: %s", "RuntimeError")
 
     def test_storage_readiness_reports_presence_not_secret_values(self):
         import os
