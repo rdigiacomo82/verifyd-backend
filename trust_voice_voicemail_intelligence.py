@@ -30,6 +30,10 @@ log = logging.getLogger("verifyd.voice.voicemail_review")
 router = APIRouter(prefix="/trust-voice/voicemail", tags=["Trust Voice Voicemail Intelligence"])
 MAX_BYTES = 25 * 1024 * 1024
 PREFIX = "VeriFYD_Voicemail_"
+# Pilot recovery allowance: two additional consented attempts for users who
+# exhausted the old 3-attempt limit during the 2026-11-05 RQ/DB pool outage.
+# Remains strictly bounded and only accessible to the server-side pilot list.
+MAX_REVIEW_ATTEMPTS = 5
 
 
 def _enabled() -> bool:
@@ -383,7 +387,7 @@ def request_voicemail_review(
             raise HTTPException(404, detail={"error": "voicemail_not_found"})
         if existing["status"] in {"queued", "analyzing", "completed"}:
             return {"ok": True, "queued": False, "status": existing["status"]}
-        if int(existing["attempt_count"] or 0) >= 3:
+        if int(existing["attempt_count"] or 0) >= MAX_REVIEW_ATTEMPTS:
             raise HTTPException(429, detail={"error": "analysis_retry_limit"})
         cur.execute("""
             UPDATE verifyd_voice_voicemail_reviews
