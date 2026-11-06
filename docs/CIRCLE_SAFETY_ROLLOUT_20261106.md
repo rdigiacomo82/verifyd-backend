@@ -5,8 +5,8 @@
 ## Deployment gate
 
 - Keep draft PR #55 unmerged until the updated `TrustVoiceCircleSafety.jsx` has passed Hostinger Horizons preview and two-account tests.
-- Feature flag `VERIFYD_CIRCLE_SAFETY_ENABLED` defaults to `0`. When merging is approved, deploy to **Robert's workspace → verifyd-backend web service** and **do not change the default flag** initially.
-- Ensure existing `VERIFYD_TRUST_VOICE_LOCATION_ENABLED` and Trust Voice Web Push are configured before a consented pilot.
+- Feature flag `VERIFYD_CIRCLE_SAFETY_ENABLED` defaults to `0`. A second **mandatory fail-closed** environment setting, `VERIFYD_CIRCLE_SAFETY_PILOT_HANDLES`, must contain approved handles (comma-separated, without `@`) before any user can access the safety API. For the two verified internal test identities, use `roberttest22,databydesign`. Set these on **Robert's workspace → verifyd-backend web service** only. The existing worker and unrelated services do not need the flag.
+- Ensure existing `VERIFYD_TRUST_VOICE_LOCATION_ENABLED` and Trust Voice Web Push are configured before a consented pilot. The monitored pilot member must independently opt into precise sharing and allow range monitoring. Safety is not intended for emergency-service dispatch.
 - To disable quickly, set `VERIFYD_CIRCLE_SAFETY_ENABLED=0`; this does not change existing calling or location sharing.
 - Do not enable globally until consent, authentication, rate limits, privacy purging, and push delivery have been tested across two devices and account sign-outs.
 
