@@ -137,6 +137,69 @@ class LabTests(unittest.TestCase):
         self.client.post(f'/lab/sessions/{sid}/close', headers=self.cred)
         self.assertEqual(self.client.post(f'/lab/sessions/{sid}/sip-probe', headers=self.cred).status_code, 409)
 
+    def test_simulated_933_includes_only_fictional_placeholder_values(self):
+        from gateway.simulated_933 import simulate_933_readback
+        result = simulate_933_readback('provisioned')
+        self.assertEqual(result['test_number_label'], '933')
+        self.assertEqual(result['mode'], 'OFFLINE_SIMULATED_933')
+        self.assertEqual(result['status'], 'simulated_ready')
+        self.assertFalse(result['carrier_connected'])
+        self.assertFalse(result['real_933_call_placed'])
+        self.assertFalse(result['real_911_call_placed'])
+        self.assertFalse(result['audio_connected'])
+        self.assertFalse(result['real_emergency_service_validated'])
+        self.assertIn('SIMULATED-', result['readback']['callback'])
+        self.assertIn('SIMULATED-', result['readback']['address'])
+
+    def test_simulated_933_reports_missing_callback_and_address(self):
+        from gateway.simulated_933 import simulate_933_readback
+        no_callback = simulate_933_readback('missing_callback')
+        no_address = simulate_933_readback('missing_address')
+        self.assertEqual(no_callback['status'], 'simulated_failure')
+        self.assertIsNone(no_callback['readback']['callback'])
+        self.assertEqual(no_address['status'], 'simulated_failure')
+        self.assertIsNone(no_address['readback']['address'])
+
+    def test_933_action_rejects_real_telephone_or_location_data(self):
+        sid = self.client.post('/lab/sessions', headers=self.cred, json={}).json()['id']
+        for body in [
+            {'dial': '933'}, {'dial': '911'},
+            {'callback': '+12125550123'},
+            {'emergency_address': 'Some street address'},
+            {'latitude': 40.0}, {'scenario': 'call_carrier'},
+        ]:
+            result = self.client.post(f'/lab/sessions/{sid}/simulate-933', headers=self.cred, json=body)
+            self.assertEqual(result.status_code, 422, body)
+
+    def test_933_lab_endpoint_requires_auth_and_enablement(self):
+        sid = self.client.post('/lab/sessions', headers=self.cred, json={}).json()['id']
+        path = f'/lab/sessions/{sid}/simulate-933'
+        self.assertEqual(self.client.post(path, json={}).status_code, 401)
+        with patch.dict(os.environ, {'VERIFYD_EMERGENCY_LAB_ENABLED': '0'}):
+            self.assertEqual(self.client.post(path, json={}, headers=self.cred).status_code, 404)
+        r = self.client.post(path, json={}, headers=self.cred)
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()['session_id'], sid)
+        self.client.post(f'/lab/sessions/{sid}/close', headers=self.cred)
+        self.assertEqual(self.client.post(path, json={}, headers=self.cred).status_code, 409)
+
+    def test_933_websocket_mock_never_dials(self):
+        sid = self.client.post('/lab/sessions', headers=self.cred, json={}).json()['id']
+        with self.client.websocket_connect(f'/lab/ws/{sid}') as ws:
+            ws.send_json({'type': 'lab_auth', 'key': TEST_KEY})
+            self.assertEqual(ws.receive_json()['type'], 'lab_ready')
+            ws.send_json({'type': 'simulate_933', 'scenario': 'unregistered'})
+            result = ws.receive_json()
+            self.assertEqual(result['type'], 'simulated_933_result')
+            self.assertFalse(result['result']['carrier_connected'])
+            self.assertEqual(result['result']['status'], 'simulated_failure')
+            ws.send_json({'type': 'simulate_933', 'scenario': 'provisioned', 'callback': '+12125550123'})
+            self.assertEqual(ws.receive_json()['error'], 'synthetic_scenario_only')
+            ws.send_json({'type': 'dial', 'number': '933'})
+            self.assertEqual(ws.receive_json()['error'], 'test_actions_only')
+            ws.send_json({'type': 'close'})
+            self.assertEqual(ws.receive_json()['type'], 'session_closed')
+
     def test_unknown_session_no_leak(self):
         self.assertEqual(self.client.get('/lab/sessions/not_real', headers=self.cred).status_code, 404)
 
