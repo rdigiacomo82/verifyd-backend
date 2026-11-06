@@ -63,6 +63,7 @@ class PostgresVoicemailTests(unittest.TestCase):
                 self.status_code, self.detail = status_code, detail
         space = {
             "get_db": _db, "json": json, "datetime": datetime, "timezone": timezone,
+            "Header": lambda default=None: default,
             "CONSENT_VERSION": "voicemail-intelligence-2026-11-v1",
             "HTTPException": ExpectedDenial,
             "_require_enabled": lambda: None, "_require_pilot": lambda owner: None,
