@@ -25,10 +25,9 @@ services:
   sip:
     image: livekit/sip:v1.23
     network_mode: host
-    environment:
-      SIP_CONFIG_FILE: /lab/sip.yaml
     volumes:
-      - ./.generated/sip.yaml:/lab/sip.yaml:ro
+      # SIP image expects /sip/config.yaml; custom SIP_CONFIG_FILE was ignored.
+      - ./.generated/sip.yaml:/sip/config.yaml:ro
     depends_on: [livekit]
     restart: "on-failure:3"
   asterisk:
@@ -38,4 +37,5 @@ services:
       - ./asterisk/pjsip.conf:/etc/asterisk/pjsip.conf:ro
       - ./asterisk/extensions.conf:/etc/asterisk/extensions.conf:ro
       - ./asterisk/rtp.conf:/etc/asterisk/rtp.conf:ro
+      - ./asterisk/modules.conf:/etc/asterisk/modules.conf:ro
     restart: "no"
