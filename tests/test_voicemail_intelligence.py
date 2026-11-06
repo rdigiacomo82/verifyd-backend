@@ -166,7 +166,7 @@ class PilotAuthorizationTests(unittest.TestCase):
 
     def test_all_five_private_operations_check_pilot(self):
         source = (ROOT / "trust_voice_voicemail_intelligence.py").read_text()
-        self.assertEqual(source.count("    _require_pilot(owner)\n"), 5)
+        self.assertGreaterEqual(source.count("    _require_pilot(owner)\n"), 7)
         self.assertIn("VERIFYD_VOICEMAIL_INTELLIGENCE_PILOT_HANDLES", source)
 
 
