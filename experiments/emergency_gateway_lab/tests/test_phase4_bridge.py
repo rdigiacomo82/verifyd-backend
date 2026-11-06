@@ -119,6 +119,16 @@ class Phase4BridgeTests(unittest.TestCase):
         self.assertNotIn('tel:', source)
         self.assertIn('setMicrophoneEnabled(true)', source)
 
+    def test_runtime_container_mounts_private_sip_config(self):
+        root = Path(b.__file__).resolve().parent
+        compose = (root / 'compose.yaml').read_text()
+        self.assertIn('./.generated/sip.yaml:/sip/config.yaml:ro', compose)
+        self.assertNotIn('SIP_CONFIG_FILE: /lab/sip.yaml', compose)
+        modules = (root / 'asterisk/modules.conf').read_text()
+        for name in ('chan_iax2.so', 'pbx_dundi.so', 'chan_unistim.so'):
+            self.assertIn('noload => ' + name, modules)
+        self.assertIn('./asterisk/modules.conf:/etc/asterisk/modules.conf:ro', compose)
+
     def test_compose_no_public_port_publication(self):
         c=(Path(b.__file__).resolve().parent/'compose.yaml').read_text()
         self.assertEqual(c.count('network_mode: host'),4)
