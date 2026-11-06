@@ -61,6 +61,36 @@ class CircleSafetyUnitTests(unittest.TestCase):
             self.assertEqual(c.exception.status_code, 404)
             self.assertEqual(safety.run_safety_dispatch_once(), 0)
 
+    def test_pilot_fails_closed_without_an_explicit_handle_allowlist(self):
+        with patch.dict(os.environ, {'VERIFYD_CIRCLE_SAFETY_ENABLED': '1',
+                                     'VERIFYD_CIRCLE_SAFETY_PILOT_HANDLES': ''}), \
+             patch.object(safety, '_identity_from_bearer', return_value={
+                 'id': 'sender', 'handle': 'pilot', 'status': 'active'
+             }):
+            self.assertFalse(safety._pilot_allowed({'handle': 'pilot'}))
+            with self.assertRaises(HTTPException) as denied:
+                safety._owner('Bearer placeholder')
+            self.assertEqual(denied.exception.status_code, 404)
+
+    def test_pilot_allows_only_selected_handles(self):
+        with patch.dict(os.environ, {'VERIFYD_CIRCLE_SAFETY_ENABLED': '1',
+                                     'VERIFYD_CIRCLE_SAFETY_PILOT_HANDLES': '@ALICE, bob'}), \
+             patch.object(safety, '_identity_from_bearer', return_value={
+                 'id': 'alice-id', 'handle': 'Alice', 'status': 'active'
+             }):
+            self.assertEqual(safety._owner('Bearer placeholder')['id'], 'alice-id')
+            self.assertTrue(safety._pilot_allowed({'handle': 'bob'}))
+            self.assertFalse(safety._pilot_allowed({'handle': 'charlie'}))
+
+    def test_pilot_denies_nonmember_location_before_query(self):
+        with patch.dict(os.environ, {'VERIFYD_CIRCLE_SAFETY_PILOT_HANDLES': 'watcher'}), \
+             patch.object(safety, '_identity_by_id', side_effect=lambda who: {
+                 'id': who, 'handle': who, 'status': 'active'
+             }), \
+             patch.object(safety, 'get_db') as db:
+            self.assertFalse(safety._location_granted('nonpilot', 'watcher'))
+            db.assert_not_called()
+
     def test_geodesic_distance_and_coordinate_validation(self):
         self.assertLess(safety._distance_m(40.7, -73.9, 40.7, -73.9), 1)
         self.assertTrue(110000 < safety._distance_m(0, 0, 1, 0) < 112000)
