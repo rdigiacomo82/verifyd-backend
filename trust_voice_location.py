@@ -264,6 +264,14 @@ def set_sharing(
                 "DELETE FROM verifyd_circle_latest_locations WHERE owner_identity_id=%s",
                 (owner_id,),
             )
+    # Optional privacy cleanup for separately consented range alerts.
+    # Failure must never block the user's ability to revoke or change sharing.
+    try:
+        from trust_voice_circle_safety import invalidate_range_for_owner
+        invalidate_range_for_owner(owner_id)
+    except Exception:
+        import logging
+        logging.getLogger("verifyd.circle.safety").exception("Range alert consent cleanup unavailable")
     return {
         "ok": True, "enabled": body.enabled,
         "scope": body.scope, "expires_at": _iso(expiry),
@@ -292,6 +300,12 @@ def stop_sharing(response: Response, authorization: Optional[str] = Header(defau
             (owner_id,),
         )
         cur.execute("DELETE FROM verifyd_circle_location_native_tokens WHERE owner_identity_id=%s", (owner_id,))
+    try:
+        from trust_voice_circle_safety import invalidate_range_for_owner
+        invalidate_range_for_owner(owner_id)
+    except Exception:
+        import logging
+        logging.getLogger("verifyd.circle.safety").exception("Range alert revocation cleanup unavailable")
     return {"ok": True, "enabled": False}
 
 
