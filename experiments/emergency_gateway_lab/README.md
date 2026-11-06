@@ -1,4 +1,4 @@
-# VeriFYD Emergency Gateway — LAB v0.1
+# VeriFYD Emergency Gateway — LAB v0.2 (933 simulator)
 
 **NOT an emergency service. DO NOT USE TO REQUEST EMERGENCY HELP.**
 
@@ -10,9 +10,20 @@ A separate, local-only proof of concept for VeriFYD Circle's future emergency vo
 - Synthetic session creation, state lookup, close, 3-minute expiry, bounded session count.
 - Authenticated WebSocket lab signaling (`/lab/ws/{sid}`) that refuses any dialing command.
 - SIP **OPTIONS** probe to a local IPv4 loopback-only mock SIP endpoint (`127.0.0.1:5099`). A 200 reply proves a SIP signaling message was received, **NOT** a phone call or audio session.
+- Offline simulated **933** readback: synthetic callback and address placeholders with fixed success/failure scenarios; no SIP INVITE, provider routing, real phone numbers or live audio.
 - Unit and API tests for fail-closed design, synthetic-location-only payloads, authentication and loopback SIP.
 
-**Not implemented:** SIP INVITE calling, RTP media, LiveKit SIP bridging, real phone numbers, PSTN, E911, dispatchable location, ANI, ALI, PSAP routing, emergency callback, failover, carrier connectivity, any public deployment.
+**Not implemented:** SIP INVITE calling, RTP media, LiveKit SIP bridging, real phone numbers, live 933 dialing, PSTN, E911, dispatchable location, ANI, ALI, PSAP routing, emergency callback, failover, carrier connectivity, any public deployment.
+
+## Why we simulate 933 before placing a real test call
+
+**933 is a provider-specific emergency service test**, not a globally accessible phone number. Telnyx and Bandwidth document it for E911-enabled SIP trunks and provisioned endpoint/callback information. Their automated readback typically verifies the callback number and the registered emergency location; it does **not** contact a dispatcher. Their docs are linked in `docs/933_CARRIER_TEST_CHECKLIST.md`.
+
+The new simulator tests four states (`provisioned`, `missing_callback`, `missing_address`, `unregistered`) with **fictional text values only** and carries the explicit flags `real_933_call_placed: false`, `carrier_connected: false`, `real_emergency_service_validated: false`.
+
+`POST /lab/sessions/{id}/simulate-933` accepts only `{ "scenario": "provisioned" }` or another fixed scenario; unknown fields, destinations, telephone numbers and coordinates are rejected. The local console also has a button **Simulate 933 readback (NO CALL)**.
+
+**Do not change the lab to dial an external 933 endpoint without a separate authorized test SIP trunk, verified test caller ID/emergency address, and a deployment and safety review.** This proof of concept does not validate any public 911 connection.
 
 ## Run locally only
 
