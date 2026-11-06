@@ -13,6 +13,7 @@ import os
 import secrets
 import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -33,6 +34,10 @@ MIN_RADIUS_M = 100
 MAX_RADIUS_M = 32187  # 20 miles
 PIN_ROUNDS = 260000
 MAX_RECIPIENTS = 50
+# Isolate network push I/O from calling, location and calendar request threads.
+# Best effort: active incidents remain queryable and the scheduler retries.
+_PUSH_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="verifyd-circle-safety-push")
+_PUSH_SLOTS = threading.BoundedSemaphore(200)
 
 
 def _enabled():
@@ -190,13 +195,29 @@ def _location_granted(target_id, viewer_id, *, require_precise=True):
 
 
 def _push(identity_id, *, kind, title, body, event_id):
+    """Queue bounded best-effort push without blocking calls or location updates."""
+    if not _PUSH_SLOTS.acquire(blocking=False):
+        log.warning("Circle Safety push capacity reached; recipient can still view the incident in app")
+        return False
+
+    def deliver():
+        try:
+            from trust_voice_push import notify_identity_push
+            notify_identity_push(identity_id, notification_type=kind, title=title,
+                                 body=body, url="/voice", tag=f"circle-safety-{event_id}",
+                                 data={"safety_event_id": event_id}, ttl=600)
+        except Exception:
+            log.warning("Safety push delivery unavailable", exc_info=True)
+        finally:
+            _PUSH_SLOTS.release()
+
     try:
-        from trust_voice_push import notify_identity_push
-        notify_identity_push(identity_id, notification_type=kind, title=title,
-                             body=body, url="/voice", tag=f"circle-safety-{event_id}",
-                             data={"safety_event_id": event_id}, ttl=600)
+        _PUSH_POOL.submit(deliver)
+        return True
     except Exception:
-        log.warning("Safety push delivery unavailable", exc_info=True)
+        _PUSH_SLOTS.release()
+        log.warning("Circle Safety push enqueue unavailable", exc_info=True)
+        return False
 
 
 def _public_actor(actor_id):
