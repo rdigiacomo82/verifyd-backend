@@ -111,6 +111,8 @@ class Phase4BridgeTests(unittest.TestCase):
         self.assertIn('listen_ip: 127.0.0.1', s)
         self.assertIn('use_external_ip: false', s)
         self.assertIn('rtp_port: 11000-11099', s)
+        # Ephemeral one-call runner gets full CPU threshold, never production settings.
+        self.assertIn('max_cpu_utilization: 1.0', s)
 
     def test_frontend_has_no_api_secret_or_trunk_controls(self):
         source=(Path(b.__file__).resolve().parent/'web/main.js').read_text()
