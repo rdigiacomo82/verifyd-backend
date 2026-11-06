@@ -49,11 +49,27 @@ def _required():
         raise HTTPException(404, detail={"error": "circle_safety_unavailable"})
 
 
+def _pilot_handles():
+    """Explicit pilot allowlist; the safety feature fails closed if unset."""
+    return {
+        value.strip().lower().lstrip("@")
+        for value in os.environ.get("VERIFYD_CIRCLE_SAFETY_PILOT_HANDLES", "").split(",")
+        if value.strip()
+    }
+
+
+def _pilot_allowed(user):
+    handle = str(user.get("handle_lower") or user.get("handle") or "").strip().lower().lstrip("@")
+    return bool(handle and handle in _pilot_handles())
+
+
 def _owner(auth):
     _required()
     user = _identity_from_bearer(auth)
     if str(user.get("status") or "active") != "active":
         raise HTTPException(401, detail={"error": "session_required"})
+    if not _pilot_allowed(user):
+        raise HTTPException(404, detail={"error": "circle_safety_unavailable"})
     return user
 
 
@@ -174,6 +190,11 @@ def _distance_m(lat1, lon1, lat2, lon2):
 
 def _location_granted(target_id, viewer_id, *, require_precise=True):
     """Match existing location /visible access check, including target's consent."""
+    # The pilot must not reveal a non-pilot user's position to a pilot viewer.
+    if not _pilot_allowed(_identity_by_id(str(target_id)) or {}):
+        return False
+    if not _pilot_allowed(_identity_by_id(str(viewer_id)) or {}):
+        return False
     if identities_blocked(target_id, viewer_id):
         return False
     if not trust_circle_contains(target_id, viewer_id) or not trust_circle_contains(viewer_id, target_id):
@@ -228,7 +249,9 @@ def _safety_push_authorized(identity_id, kind, event_id):
             if not row:
                 return False
             sender_id = str(row["sender_id"])
-            return bool(trust_circle_contains(sender_id, str(identity_id))
+            return bool(_pilot_allowed(_identity_by_id(sender_id) or {})
+                        and _pilot_allowed(_identity_by_id(str(identity_id)) or {})
+                        and trust_circle_contains(sender_id, str(identity_id))
                         and not identities_blocked(sender_id, str(identity_id)))
     return False
 
@@ -583,7 +606,8 @@ def start_distress(data: DistressStart, authorization: Optional[str] = Header(de
         cur.execute("SELECT member_identity_id FROM verifyd_trust_circle_members WHERE owner_identity_id=%s LIMIT 100", (sender_id,))
         candidate_ids = list({str(r["member_identity_id"]) for r in (cur.fetchall() or [])})
         recipients = [rid for rid in candidate_ids if rid != sender_id and not identities_blocked(sender_id, rid)
-                      and (_identity_by_id(rid) or {}).get("status", "active") == "active"][:MAX_RECIPIENTS]
+                      and _pilot_allowed(_identity_by_id(rid) or {})
+                       and (_identity_by_id(rid) or {}).get("status", "active") == "active"][:MAX_RECIPIENTS]
         if not recipients:
             raise HTTPException(409, detail={"error": "no_eligible_circle_recipients"})
         cur.execute("""
@@ -697,7 +721,7 @@ def mute_distress(incident_id: str, authorization: Optional[str] = Header(defaul
 
 def run_safety_dispatch_once():
     """Called by existing web push scheduler. Atomic claims prevent repeat blasts."""
-    if not _enabled():
+    if not _enabled() or not _pilot_handles():
         return 0
     _schema()
     due = []
