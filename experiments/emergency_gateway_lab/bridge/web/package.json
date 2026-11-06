@@ -1,0 +1,16 @@
+{
+  "name": "verifyd-private-echo-client",
+  "version": "0.4.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 5175",
+    "build": "vite build"
+  },
+  "dependencies": {
+    "livekit-client": "^2.15.0"
+  },
+  "devDependencies": {
+    "vite": "^7.1.0"
+  }
+}
