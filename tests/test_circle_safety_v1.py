@@ -139,6 +139,28 @@ class CircleSafetyUnitTests(unittest.TestCase):
             self.assertTrue(connection.committed, 'Failed PIN must be recorded before 403, not rolled back')
             self.assertTrue(any('pin_fail_count=%s' in sql for sql,_ in cursor.queries))
 
+    def test_queued_distress_push_dropped_after_stop_or_mute(self):
+        class Cursor:
+            def execute(self, sql, params=()): self.query = sql
+            def fetchone(self): return None  # stopped or muted recipient
+
+        with patch.object(safety, '_enabled', return_value=True), \
+             patch.object(safety, '_schema'), \
+             patch.object(safety, 'get_db', return_value=FakeConnection(Cursor())):
+            self.assertFalse(safety._safety_push_authorized('recipient', 'circle_distress', 'incident'))
+            self.assertFalse(safety._safety_push_authorized('recipient', 'circle_distress_clear', 'incident'))
+
+    def test_queued_range_push_dropped_after_permission_revoked(self):
+        class Cursor:
+            def execute(self, sql, params=()): pass
+            def fetchone(self): return {'actor_id': 'target'}
+
+        with patch.object(safety, '_enabled', return_value=True), \
+             patch.object(safety, '_schema'), \
+             patch.object(safety, 'get_db', return_value=FakeConnection(Cursor())), \
+             patch.object(safety, '_location_granted', return_value=False):
+            self.assertFalse(safety._safety_push_authorized('watcher', 'circle_range_exit', 'alert'))
+
     def test_safety_push_does_not_block_location_and_call_threads(self):
         with patch.object(safety._PUSH_SLOTS, 'acquire', return_value=True), \
              patch.object(safety._PUSH_POOL, 'submit') as submit:
