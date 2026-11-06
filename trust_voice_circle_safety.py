@@ -369,6 +369,28 @@ def delete_zone(target_id: str, authorization: Optional[str] = Header(default=No
     return {"ok": True}
 
 
+def invalidate_range_for_owner(owner_id: str):
+    """Privacy cleanup when existing location-sharing settings change.
+
+    Remove cached range-alert coordinates and require a fresh inside fix.
+    The original location-sharing operation succeeds even if this optional
+    cleanup fails; no new coordinates can be read without current consent.
+    """
+    if not _enabled():
+        return
+    _schema()
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "DELETE FROM verifyd_circle_safety_alerts WHERE actor_id=%s AND kind='range_exit'",
+            (str(owner_id),),
+        )
+        cur.execute(
+            "UPDATE verifyd_circle_safety_zones SET last_state='unknown',updated_at=NOW() WHERE target_id=%s",
+            (str(owner_id),),
+        )
+
+
 def evaluate_range_position(target_id: str):
     """Best-effort on each accepted location upload; first observation arms zone."""
     if not _enabled():
