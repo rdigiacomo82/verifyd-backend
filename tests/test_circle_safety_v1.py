@@ -139,6 +139,22 @@ class CircleSafetyUnitTests(unittest.TestCase):
             self.assertTrue(connection.committed, 'Failed PIN must be recorded before 403, not rolled back')
             self.assertTrue(any('pin_fail_count=%s' in sql for sql,_ in cursor.queries))
 
+    def test_safety_push_does_not_block_location_and_call_threads(self):
+        with patch.object(safety._PUSH_SLOTS, 'acquire', return_value=True), \
+             patch.object(safety._PUSH_POOL, 'submit') as submit:
+            result = safety._push('recipient', kind='circle_distress',
+                                  title='Alert', body='Test', event_id='123')
+        self.assertTrue(result)
+        submit.assert_called_once()
+
+    def test_safety_push_is_bounded_when_capacity_exhausted(self):
+        with patch.object(safety._PUSH_SLOTS, 'acquire', return_value=False), \
+             patch.object(safety._PUSH_POOL, 'submit') as submit:
+            result = safety._push('recipient', kind='circle_range_exit',
+                                  title='Alert', body='Test', event_id='456')
+        self.assertFalse(result)
+        submit.assert_not_called()
+
     def test_distress_has_hard_maximum_one_hour_and_recipient_mute(self):
         source = MOD.read_text()
         self.assertIn("NOW()+INTERVAL '1 hour'", source)
