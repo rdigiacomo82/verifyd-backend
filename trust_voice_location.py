@@ -341,6 +341,13 @@ def update_position(
                 latitude=EXCLUDED.latitude,longitude=EXCLUDED.longitude,
                 accuracy_m=EXCLUDED.accuracy_m,recorded_at=NOW()
         """, (owner_id, lat, lon, accuracy))
+    # Optional, best-effort geofence check. Never interrupt location uploads.
+    try:
+        from trust_voice_circle_safety import evaluate_range_position
+        evaluate_range_position(owner_id)
+    except Exception:
+        import logging
+        logging.getLogger("verifyd.circle.safety").exception("Range evaluation unavailable")
     return {"ok": True, "throttled": False}
 
 
@@ -568,4 +575,11 @@ def upload_native_position(
                 latitude=EXCLUDED.latitude,longitude=EXCLUDED.longitude,
                 accuracy_m=EXCLUDED.accuracy_m,recorded_at=NOW()
         """, (owner_id, lat, lon, accuracy))
+    # Native updates feed the same opt-in range boundary check.
+    try:
+        from trust_voice_circle_safety import evaluate_range_position
+        evaluate_range_position(owner_id)
+    except Exception:
+        import logging
+        logging.getLogger("verifyd.circle.safety").exception("Native range evaluation unavailable")
     return {"ok": True, "throttled": False}
