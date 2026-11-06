@@ -1,0 +1,29 @@
+name: VeriFYD Emergency Gateway LAB-only validation
+on:
+  push:
+    branches:
+      - 'experiment/verifyd-emergency-gateway-lab-v0-1'
+  pull_request:
+    paths:
+      - 'experiments/emergency_gateway_lab/**'
+      - '.github/workflows/verifyd-emergency-lab.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-lab-only:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install lab-only test deps
+        run: pip install -r experiments/emergency_gateway_lab/requirements-lab.txt
+      - name: Verify isolated lab syntax and routing tests
+        working-directory: experiments/emergency_gateway_lab
+        run: |
+          python -m compileall -q gateway tests
+          python -m unittest discover -s tests -v
