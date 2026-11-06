@@ -1,3 +1,37 @@
+# VeriFYD Emergency Gateway — Lab v0.4 (PRIVATE LiveKit-to-Asterisk echo test)
+
+**NOT AN EMERGENCY CALLING SERVICE. NO 911, 933, PSTN, LOCATION ROUTING, or PUBLIC SIP.**
+
+Phase 4 adds an **independent, Linux-only, localhost-bound LiveKit + LiveKit SIP + Asterisk echo-extension lab** under `bridge/`. This is the first phase that can, **once the Docker stack is successfully run and tested on a suitable Linux host**, carry real microphone-to-speaker sound through LiveKit and SIP. It is **not verified live yet** because Docker is unavailable in the development environment. The previous v0.1–v0.3 isolated experiments remain intact.
+
+The only callable SIP destination is the private extension **6000**, implemented as an Asterisk `Echo()` app; a separate browser with a 5-minute microphone-only room JWT provides audio input. `phase4_bridge.py` generates private credentials, obtains a test token and sends one fixed SIP participant request when the operator explicitly confirms it.
+
+**Quick start (Linux host with Docker Engine/Compose, Python 3.11+, Node.js 20.19+):**
+
+```bash
+python bridge/phase4_bridge.py init
+# Check 5060 UDP, 5070 UDP, 7880 TCP, 7882 UDP, 6379 TCP, and the lab RTP ranges are unused.
+docker compose -f bridge/compose.yaml up -d
+python bridge/phase4_bridge.py doctor
+cd bridge/web
+npm install
+npm run dev
+# Open http://127.0.0.1:5175 in a browser ON THE SAME LINUX MACHINE.
+# In a second terminal at the project root:
+python bridge/phase4_bridge.py token
+# Paste that token into the local browser. Enable microphone.
+python bridge/phase4_bridge.py call-echo --confirm-private-echo
+# Speak. Asterisk Echo() should return your voice to the browser. Headphones recommended.
+# After testing:
+docker compose -f bridge/compose.yaml down
+```
+
+**Do not put `.generated/credentials.json`, API keys, call tokens, or the lab on production Render or vfvid.com.** The application never dials 933; earlier offline 933 scenarios are unchanged. **Run only on a trusted Linux test machine, not a public VM or exposed server.** Docker's `network_mode: host` has different behavior on Windows/Mac Docker Desktop; Linux is the supported target for this configuration. For a Windows/Mac computer, use a dedicated Linux VM and its browser console, or wait until the environment is validated.
+
+See `docs/PHASE4_PRIVATE_LIVEKIT_ECHO.md` for architecture, constraints and step-by-step troubleshooting.
+
+---
+
 # VeriFYD Emergency Gateway — LAB v0.3 (private SIP/RTP audio simulation)
 
 **NOT an emergency service. DO NOT USE TO REQUEST EMERGENCY HELP.**
