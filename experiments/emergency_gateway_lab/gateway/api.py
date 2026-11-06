@@ -16,9 +16,10 @@ from pydantic import BaseModel, ConfigDict, Field
 from .lab_core import LabStore
 from .sip_loopback import run_options_probe
 from .simulated_933 import Scenario, simulate_933_readback
+from .private_sip_rtp import run_private_audio_test
 
 app = FastAPI(title='VeriFYD Emergency Gateway — LAB ONLY', docs_url=None, redoc_url=None,
-              description='Test signaling only; not a 911 calling service.')
+              description='Local-only synthetic SIP/RTP testing; not a 911 calling service.')
 store = LabStore()
 
 
@@ -58,7 +59,8 @@ def console():
 def health(x_verifyd_lab_key: str | None = Header(default=None)):
     _guard(x_verifyd_lab_key)
     return {'ok': True, 'mode': 'synthetic_test_only', 'real_911_enabled': False,
-            'sip_invite_enabled': False, 'audio_enabled': False}
+            'sip_invite_enabled': False, 'audio_enabled': False,
+            'private_loopback_sip_rtp_test_available': True, 'livekit_connected': False}
 
 
 @app.post('/lab/sessions')
@@ -102,6 +104,31 @@ def simulate_933(sid: str, body: Simulate933Body,
     if item.status == 'closed':
         raise HTTPException(status_code=409, detail='lab_session_closed')
     result = simulate_933_readback(body.scenario)
+    result['session_id'] = item.id
+    return result
+
+
+class PrivateAudioBody(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    # No destination, phone number, SIP URI, ICE candidate, user audio or address.
+    scenario: str = Field(default='synthetic_two_way_pcmu', pattern=r'^synthetic_two_way_pcmu$')
+
+
+@app.post('/lab/sessions/{sid}/private-audio-test')
+async def private_audio_test(sid: str, body: PrivateAudioBody,
+                             x_verifyd_lab_key: str | None = Header(default=None)):
+    _guard(x_verifyd_lab_key)
+    item = _session_or_404(sid)
+    if item.status == 'closed':
+        raise HTTPException(status_code=409, detail='lab_session_closed')
+    try:
+        result = await run_private_audio_test()
+    except RuntimeError as exc:
+        if str(exc) == 'lab_audio_test_busy':
+            raise HTTPException(status_code=429, detail='lab_audio_test_busy')
+        raise HTTPException(status_code=503, detail='private_audio_test_failed') from exc
+    except (OSError, asyncio.TimeoutError) as exc:
+        raise HTTPException(status_code=503, detail='private_audio_test_unavailable') from exc
     result['session_id'] = item.id
     return result
 
@@ -168,6 +195,22 @@ async def ws_lab(websocket: WebSocket, sid: str):
                     await websocket.send_json({'type': 'simulated_933_result', 'result': result})
                 except ValueError:
                     await websocket.send_json({'type': 'error', 'error': 'synthetic_scenario_only'})
+            elif message.get('type') == 'private_audio_test':
+                if set(message) != {'type'}:
+                    await websocket.send_json({'type': 'error', 'error': 'synthetic_media_only'})
+                    continue
+                session = _session_or_404(sid)
+                if session.status == 'closed':
+                    await websocket.send_json({'type': 'error', 'error': 'lab_session_closed'})
+                    continue
+                try:
+                    result = await run_private_audio_test()
+                    result['session_id'] = session.id
+                    await websocket.send_json({'type': 'private_audio_result', 'result': result})
+                except RuntimeError as exc:
+                    await websocket.send_json({'type': 'error', 'error': 'lab_audio_test_busy' if str(exc) == 'lab_audio_test_busy' else 'private_audio_test_failed'})
+                except (OSError, asyncio.TimeoutError):
+                    await websocket.send_json({'type': 'error', 'error': 'private_audio_test_unavailable'})
             elif message.get('type') == 'close':
                 await websocket.send_json({'type': 'session_closed', 'session': store.close(sid).public()})
                 await websocket.close(code=1000)
