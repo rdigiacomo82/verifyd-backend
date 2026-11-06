@@ -211,7 +211,7 @@ class RangeConsent(BaseModel):
 
 class PinChange(BaseModel):
     pin: str = Field(min_length=4, max_length=8, pattern=r"^[0-9]{4,8}$")
-    current_pin: Optional[str] = None
+    current_pin: Optional[str] = Field(default=None, max_length=8)
 
 
 class ZoneUpdate(BaseModel):
@@ -415,7 +415,8 @@ def dismiss_alert(alert_id: str, authorization: Optional[str] = Header(default=N
 
 def _active_incident_for(cur, sender_id):
     cur.execute("""
-        UPDATE verifyd_circle_safety_incidents SET status='expired',ended_at=NOW()
+        UPDATE verifyd_circle_safety_incidents SET status='expired',ended_at=NOW(),
+            latitude=NULL,longitude=NULL,accuracy_m=NULL
         WHERE sender_id=%s AND status='active' AND expires_at <= NOW()
     """, (sender_id,))
     cur.execute("SELECT * FROM verifyd_circle_safety_incidents WHERE sender_id=%s AND status='active' AND expires_at>NOW() ORDER BY created_at DESC LIMIT 1", (sender_id,))
