@@ -75,6 +75,9 @@ sip_port: 5060
 listen_ip: 127.0.0.1
 rtp_port: 11000-11099
 use_external_ip: false
+# 1.0 is a lab-only one-call threshold for resource-constrained ephemeral runners.
+# Never apply this value to production SIP deployments.
+max_cpu_utilization: 1.0
 log_level: info
 '''
     _private_file(GENERATED / 'livekit.yaml', livekit)
