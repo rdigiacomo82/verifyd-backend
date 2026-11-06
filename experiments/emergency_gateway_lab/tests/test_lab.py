@@ -200,6 +200,80 @@ class LabTests(unittest.TestCase):
             ws.send_json({'type': 'close'})
             self.assertEqual(ws.receive_json()['type'], 'session_closed')
 
+    def test_pcmu_codec_and_rtp_sample_validation(self):
+        from gateway.private_sip_rtp import pcm16_to_mulaw, mulaw_to_pcm16, make_rtp_packet, decode_rtp_packet
+        self.assertEqual(pcm16_to_mulaw(0), 0xff)
+        self.assertEqual(mulaw_to_pcm16(0xff), 0)
+        for n in (-20000, -10000, -2000, 2000, 10000, 20000):
+            self.assertLess(abs(mulaw_to_pcm16(pcm16_to_mulaw(n)) - n), 800)
+        packet = make_rtp_packet(sequence=0, ssrc=123, tone_hz=440)
+        seq, ssrc, energy = decode_rtp_packet(packet)
+        self.assertEqual((seq, ssrc), (0, 123))
+        self.assertGreater(energy, 500)
+        with self.assertRaises(ValueError):
+            make_rtp_packet(sequence=100000, ssrc=123, tone_hz=440)
+        with self.assertRaises(ValueError):
+            make_rtp_packet(sequence=0, ssrc=123, tone_hz=900)
+        with self.assertRaises(ValueError):
+            decode_rtp_packet(b'\x80' * 12)
+
+    def test_real_two_way_synthetic_rtp_on_loopback(self):
+        from gateway.private_sip_rtp import run_private_audio_test
+        result = asyncio.run(run_private_audio_test(packets=8))
+        self.assertTrue(result['ok'], result)
+        self.assertEqual(result['sip_dialog'], 'invite_200_ack_bye_completed')
+        self.assertEqual(result['codec'], 'PCMU/8000')
+        self.assertEqual(result['sdp_address'], '127.0.0.1')
+        self.assertEqual(result['client_receives_lab_tone']['packets_received'], 8)
+        self.assertEqual(result['lab_receives_client_tone']['packets_received'], 8)
+        self.assertEqual(result['client_receives_lab_tone']['packet_loss'], 0)
+        self.assertEqual(result['lab_receives_client_tone']['packet_loss'], 0)
+        self.assertTrue(result['media_transport_connected'])
+        self.assertFalse(result['livekit_connected'])
+        self.assertFalse(result['carrier_connected'])
+        self.assertFalse(result['real_933_call_placed'])
+        self.assertFalse(result['real_911_call_placed'])
+
+    def test_private_media_http_endpoint_auth_gate_and_body_restrictions(self):
+        sid = self.client.post('/lab/sessions', headers=self.cred, json={}).json()['id']
+        path = f'/lab/sessions/{sid}/private-audio-test'
+        self.assertEqual(self.client.post(path, json={}).status_code, 401)
+        with patch.dict(os.environ, {'VERIFYD_EMERGENCY_LAB_ENABLED': '0'}):
+            self.assertEqual(self.client.post(path, json={}, headers=self.cred).status_code, 404)
+        for body in ({'number': '911'}, {'number': '933'},
+                     {'sip_uri': 'sip:911@example.com'}, {'latitude': 40.0},
+                     {'scenario': 'real_caller'}, {'destination': '+12125550100'}):
+            self.assertEqual(self.client.post(path, json=body, headers=self.cred).status_code, 422, body)
+        result = self.client.post(path, json={'scenario': 'synthetic_two_way_pcmu'}, headers=self.cred)
+        self.assertEqual(result.status_code, 200, result.text)
+        self.assertTrue(result.json()['media_transport_connected'])
+        self.assertFalse(result.json()['livekit_connected'])
+        self.client.post(f'/lab/sessions/{sid}/close', headers=self.cred)
+        self.assertEqual(self.client.post(path, json={}, headers=self.cred).status_code, 409)
+
+    def test_private_media_websocket_rejects_dial_or_location_payloads(self):
+        sid = self.client.post('/lab/sessions', headers=self.cred, json={}).json()['id']
+        with self.client.websocket_connect(f'/lab/ws/{sid}') as ws:
+            ws.send_json({'type': 'lab_auth', 'key': TEST_KEY})
+            self.assertEqual(ws.receive_json()['type'], 'lab_ready')
+            ws.send_json({'type': 'private_audio_test', 'target': '933'})
+            self.assertEqual(ws.receive_json()['error'], 'synthetic_media_only')
+            ws.send_json({'type': 'private_audio_test'})
+            response = ws.receive_json()
+            self.assertEqual(response['type'], 'private_audio_result')
+            self.assertTrue(response['result']['media_transport_connected'])
+            self.assertFalse(response['result']['real_911_call_placed'])
+            ws.send_json({'type': 'close'})
+            self.assertEqual(ws.receive_json()['type'], 'session_closed')
+
+    def test_private_media_refuses_unapproved_payloads_from_udp_peer(self):
+        from gateway.private_sip_rtp import RtpSink
+        sink = RtpSink(peer=('127.0.0.1', 30000))
+        sink.datagram_received(b'HELLO', ('203.0.113.10', 30000))
+        sink.datagram_received(b'INVITE sip:911@127.0.0.1', ('127.0.0.1', 30000))
+        self.assertEqual(sink.rejected, 2)
+        self.assertEqual(sink.received, {})
+
     def test_unknown_session_no_leak(self):
         self.assertEqual(self.client.get('/lab/sessions/not_real', headers=self.cred).status_code, 404)
 
