@@ -34,6 +34,7 @@ PREFIX = "VeriFYD_Voicemail_"
 # exhausted the old 3-attempt limit during the 2026-11-05 RQ/DB pool outage.
 # Remains strictly bounded and only accessible to the server-side pilot list.
 MAX_REVIEW_ATTEMPTS = 5
+CONSENT_VERSION = "voicemail-intelligence-2026-11-v1"
 
 
 def _enabled() -> bool:
@@ -90,10 +91,53 @@ def _schema() -> None:
             CREATE INDEX IF NOT EXISTS idx_verifyd_voice_vm_reviews_recipient
             ON verifyd_voice_voicemail_reviews (recipient_identity_id, updated_at)
         """)
+        cur.execute("""
+            ALTER TABLE verifyd_voice_voicemail_reviews
+            ADD COLUMN IF NOT EXISTS consent_mode TEXT NOT NULL DEFAULT 'legacy_per_message'
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS verifyd_voice_voicemail_consents (
+                identity_id TEXT PRIMARY KEY REFERENCES verifyd_identities(id) ON DELETE CASCADE,
+                consent_version TEXT NOT NULL,
+                granted BOOLEAN NOT NULL,
+                consented_at TEXT,
+                revoked_at TEXT,
+                updated_at TEXT NOT NULL
+            )
+        """)
 
 
 def _owner(authorization: Optional[str]) -> dict:
     return _identity_from_bearer(authorization)
+
+
+def _consent_row(owner_id: str) -> dict | None:
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT consent_version,granted,consented_at,revoked_at,updated_at
+            FROM verifyd_voice_voicemail_consents WHERE identity_id=%s
+        """, (owner_id,))
+        row = cur.fetchone()
+    return dict(row) if row else None
+
+
+def _consent_active(owner_id: str) -> bool:
+    row = _consent_row(owner_id)
+    return bool(row and row.get("granted") and row.get("consent_version") == CONSENT_VERSION)
+
+
+def _consent_public(row: dict | None) -> dict:
+    return {
+        "consent_granted": bool(
+            row and row.get("granted") and row.get("consent_version") == CONSENT_VERSION
+        ),
+        "disclosure_version": CONSENT_VERSION,
+        "transcription_provider": "OpenAI",
+        "manual_analysis_only": True,
+        "consented_at": row.get("consented_at") if row else None,
+        "revoked_at": row.get("revoked_at") if row else None,
+    }
 
 
 def _incoming_voicemail(attachment_id: str, owner_id: str) -> dict:
@@ -125,7 +169,7 @@ def _review_state(attachment_id: str, owner_id: str) -> dict | None:
     with get_db() as conn:
         cur = conn.cursor()
         cur.execute("""
-            SELECT status,result_json,deleted_at,updated_at
+            SELECT status,result_json,deleted_at,updated_at,consent_mode
             FROM verifyd_voice_voicemail_reviews
             WHERE attachment_id=%s AND recipient_identity_id=%s
         """, (attachment_id, owner_id))
@@ -156,7 +200,7 @@ def _set_state(attachment_id: str, owner_id: str, status: str, result: dict | No
             UPDATE verifyd_voice_voicemail_reviews
             SET status=%s,result_json=%s,updated_at=%s
             WHERE attachment_id=%s AND recipient_identity_id=%s
-              AND deleted_at IS NULL
+              AND deleted_at IS NULL AND status != 'consent_revoked'
         """, (
             status, json.dumps(result, ensure_ascii=False) if result is not None else None,
             _now(), attachment_id, owner_id,
@@ -210,6 +254,8 @@ def process_voicemail_review(attachment_id: str, owner_id: str) -> dict:
         review = _review_state(attachment_id, owner_id)
         if not review or review.get("deleted_at") or review.get("status") not in {"queued", "analyzing"}:
             return {"ok": False, "reason": "not_pending"}
+        if review.get("consent_mode") == "account" and not _consent_active(owner_id):
+            return {"ok": False, "reason": "account_consent_revoked"}
         row = _incoming_voicemail(attachment_id, owner_id)
         if not _set_state(attachment_id, owner_id, "analyzing"):
             return {"ok": False, "reason": "deleted"}
@@ -233,6 +279,10 @@ def process_voicemail_review(attachment_id: str, owner_id: str) -> dict:
         if checked.get("media_category") != "audio":
             raise RuntimeError("voicemail_media_invalid")
 
+        # A queued consented job must not send audio to an external provider
+        # after the user disables the account-level feature.
+        if review.get("consent_mode") == "account" and not _consent_active(owner_id):
+            return {"ok": False, "reason": "account_consent_revoked"}
         transcript = ""
         transcript_status = "available"
         try:
@@ -267,8 +317,10 @@ def process_voicemail_review(attachment_id: str, owner_id: str) -> dict:
         # the recipient to retry later rather than permanently caching an
         # incomplete result as if speech-to-text succeeded.
         final_status = "completed" if transcript_status == "available" else "partial"
+        if review.get("consent_mode") == "account" and not _consent_active(owner_id):
+            return {"ok": False, "reason": "account_consent_revoked"}
         if not _set_state(attachment_id, owner_id, final_status, result):
-            return {"ok": False, "reason": "deleted_during_analysis"}
+            return {"ok": False, "reason": "deleted_or_consent_revoked"}
         return {"ok": True, "status": final_status}
     except Exception:
         log.exception("Private voicemail review failed attachment_id=%s", attachment_id)
@@ -285,7 +337,67 @@ def process_voicemail_review(attachment_id: str, owner_id: str) -> dict:
 
 
 class AnalyzeConsent(BaseModel):
+    # Older clients obtain per-voicemail informed consent through their
+    # confirmation UI. New clients send {} and rely on account-level consent.
     consent_to_external_transcription: bool = False
+
+
+class AccountConsentUpdate(BaseModel):
+    enabled: bool
+    acknowledge_external_processing: bool = False
+
+
+@router.get("/consent")
+def get_voicemail_account_consent(authorization: Optional[str] = Header(default=None)):
+    _require_enabled()
+    owner = _owner(authorization)
+    _require_pilot(owner)
+    _schema()
+    return _consent_public(_consent_row(str(owner["id"])))
+
+
+@router.put("/consent")
+def update_voicemail_account_consent(
+    update: AccountConsentUpdate, authorization: Optional[str] = Header(default=None),
+):
+    _require_enabled()
+    owner = _owner(authorization)
+    _require_pilot(owner)
+    if update.enabled and not update.acknowledge_external_processing:
+        raise HTTPException(400, detail={"error": "external_processing_acknowledgement_required"})
+    _schema()
+    owner_id = str(owner["id"])
+    now = _now()
+    with get_db() as conn:
+        cur = conn.cursor()
+        if update.enabled:
+            cur.execute("""
+                INSERT INTO verifyd_voice_voicemail_consents
+                    (identity_id,consent_version,granted,consented_at,revoked_at,updated_at)
+                VALUES (%s,%s,TRUE,%s,NULL,%s)
+                ON CONFLICT(identity_id) DO UPDATE SET
+                    consent_version=EXCLUDED.consent_version,
+                    granted=TRUE,consented_at=EXCLUDED.consented_at,
+                    revoked_at=NULL,updated_at=EXCLUDED.updated_at
+            """, (owner_id, CONSENT_VERSION, now, now))
+        else:
+            cur.execute("""
+                INSERT INTO verifyd_voice_voicemail_consents
+                    (identity_id,consent_version,granted,consented_at,revoked_at,updated_at)
+                VALUES (%s,%s,FALSE,NULL,%s,%s)
+                ON CONFLICT(identity_id) DO UPDATE SET
+                    granted=FALSE,revoked_at=EXCLUDED.revoked_at,
+                    updated_at=EXCLUDED.updated_at
+            """, (owner_id, CONSENT_VERSION, now, now))
+            # The RQ worker rechecks consent. Also close queued requests
+            # and prevent already-running jobs from saving a late result.
+            cur.execute("""
+                UPDATE verifyd_voice_voicemail_reviews
+                SET status='consent_revoked', result_json=NULL, updated_at=%s
+                WHERE recipient_identity_id=%s AND consent_mode='account'
+                AND status IN ('queued','analyzing') AND deleted_at IS NULL
+            """, (now, owner_id))
+    return _consent_public(_consent_row(owner_id))
 
 
 @router.get("/health")
@@ -364,11 +476,15 @@ def request_voicemail_review(
     _require_pilot(owner)
     owner_id = str(owner["id"])
     _incoming_voicemail(attachment_id, owner_id)
-    if not consent.consent_to_external_transcription:
-        raise HTTPException(400, detail={"error": "transcription_consent_required"})
+    _schema()
+    account_consent = _consent_active(owner_id)
+    if not account_consent and not consent.consent_to_external_transcription:
+        raise HTTPException(403, detail={"error": "account_voicemail_consent_required"})
+    # Legacy per-message affirmative consent remains compatible until old
+    # clients have been upgraded. It is NOT stored as permanent account consent.
+    consent_mode = "account" if account_consent else "legacy_per_message"
     if not os.environ.get("OPENAI_API_KEY"):
         raise HTTPException(503, detail={"error": "transcription_not_configured"})
-    _schema()
     now = _now()
     with get_db() as conn:
         cur = conn.cursor()
@@ -391,9 +507,10 @@ def request_voicemail_review(
             raise HTTPException(429, detail={"error": "analysis_retry_limit"})
         cur.execute("""
             UPDATE verifyd_voice_voicemail_reviews
-            SET status='queued',result_json=NULL,attempt_count=attempt_count+1,updated_at=%s
+            SET status='queued',result_json=NULL,attempt_count=attempt_count+1,
+                consent_mode=%s,updated_at=%s
             WHERE attachment_id=%s AND recipient_identity_id=%s AND deleted_at IS NULL
-        """, (now, attachment_id, owner_id))
+        """, (consent_mode, now, attachment_id, owner_id))
     try:
         import redis
         from rq import Queue
