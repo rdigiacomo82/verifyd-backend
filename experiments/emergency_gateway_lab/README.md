@@ -1,3 +1,11 @@
+# Phase 5 update — ephemeral GitHub Actions headless echo validation
+
+The experimental branch now has an Ubuntu-hosted GitHub Actions test of **real WebRTC + SIP + Asterisk Echo() audio** using a synthetic local test tone. The job runs Docker on a disposable runner, uses new lab-only credentials, and tears itself down. It does not require Docker/WSL on Windows and does not contact public phone numbers, 933, 911 or any carrier. A successful headless test is **not** a human microphone test.
+
+Follow the CI result in the existing draft PR. Source: `.github/workflows/verifyd-private-sip-echo.yml`, `bridge/headless_echo_ci.py`, and `docs/PHASE5_EPHEMERAL_LINUX_CI.md`.
+
+---
+
 # VeriFYD Emergency Gateway — Lab v0.4 (PRIVATE LiveKit-to-Asterisk echo test)
 
 **NOT AN EMERGENCY CALLING SERVICE. NO 911, 933, PSTN, LOCATION ROUTING, or PUBLIC SIP.**
