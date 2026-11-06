@@ -62,6 +62,23 @@ curl -s -X POST -H "x-verifyd-lab-key: $VERIFYD_EMERGENCY_LAB_KEY" "http://127.0
 
 For a visual test console, open `http://127.0.0.1:8099/lab/console` in the same computer and paste the lab-only key. Nothing in the console can dial a phone number.
 
+To try the **933 simulation** from the console:
+
+1. Choose **Create synthetic session**.
+2. Choose **933 simulation scenario**: provisioned / missing callback / missing address / unregistered endpoint.
+3. Select **Simulate 933 readback (NO CALL)**.
+4. Confirm that the output states `carrier_connected: false`, `real_933_call_placed: false`, and `real_emergency_service_validated: false`.
+
+For Windows PowerShell, replace the two `export` commands above with:
+
+```powershell
+$env:VERIFYD_EMERGENCY_LAB_ENABLED = '1'
+$env:VERIFYD_EMERGENCY_LAB_KEY = '<a strong randomly generated lab-only key at least 32 characters>'
+```
+
+Use **two PowerShell terminals with the same test-only environment variables**, then run the same Python module commands for the SIP mock server and the FastAPI lab server. Keep both servers listening only on `127.0.0.1`.
+
+
 Expected: `sip_probe_status: "sip_options_acknowledged"`, `real_emergency_call: false`, and `media_connected: false`. If the mock server is not running, status is `sip_probe_unavailable`.
 
 Test:
