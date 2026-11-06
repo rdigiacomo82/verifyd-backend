@@ -287,6 +287,41 @@ def update_pin(data: PinChange, authorization: Optional[str] = Header(default=No
     return {"pin_configured": True}
 
 
+@router.get("/eligible")
+def eligible_range_contacts(authorization: Optional[str] = Header(default=None)):
+    """Only list Trust Circle contacts who explicitly permit range monitoring.
+
+    Existing location consent is necessary but not sufficient. No coordinates
+    are returned by this endpoint. This endpoint is unavailable when Safety is off.
+    """
+    owner = _owner(authorization)
+    _schema()
+    try:
+        from trust_voice_location import _enabled as location_enabled, _schema as location_schema
+        if not location_enabled():
+            return {"eligible": [], "location_enabled": False}
+        location_schema()
+    except ImportError:
+        return {"eligible": [], "location_enabled": False}
+    viewer_id = str(owner["id"])
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT member_identity_id FROM verifyd_trust_circle_members
+            WHERE owner_identity_id=%s LIMIT 100
+        """, (viewer_id,))
+        ids = [str(row["member_identity_id"]) for row in (cur.fetchall() or [])]
+    eligible = []
+    for target_id in dict.fromkeys(ids):
+        if target_id == viewer_id or not _location_granted(target_id, viewer_id):
+            continue
+        person = _identity_by_id(target_id)
+        if not person or str(person.get("status") or "active") != "active":
+            continue
+        eligible.append({**_public_actor(target_id), "precision": "precise"})
+    return {"eligible": eligible, "location_enabled": True}
+
+
 @router.get("/zones")
 def get_zones(authorization: Optional[str] = Header(default=None)):
     owner = _owner(authorization)
