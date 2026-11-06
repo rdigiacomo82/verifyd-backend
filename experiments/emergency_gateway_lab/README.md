@@ -1,4 +1,4 @@
-# VeriFYD Emergency Gateway — LAB v0.2 (933 simulator)
+# VeriFYD Emergency Gateway — LAB v0.3 (private SIP/RTP audio simulation)
 
 **NOT an emergency service. DO NOT USE TO REQUEST EMERGENCY HELP.**
 
@@ -10,10 +10,11 @@ A separate, local-only proof of concept for VeriFYD Circle's future emergency vo
 - Synthetic session creation, state lookup, close, 3-minute expiry, bounded session count.
 - Authenticated WebSocket lab signaling (`/lab/ws/{sid}`) that refuses any dialing command.
 - SIP **OPTIONS** probe to a local IPv4 loopback-only mock SIP endpoint (`127.0.0.1:5099`). A 200 reply proves a SIP signaling message was received, **NOT** a phone call or audio session.
-- Offline simulated **933** readback: synthetic callback and address placeholders with fixed success/failure scenarios; no SIP INVITE, provider routing, real phone numbers or live audio.
+- Offline simulated **933** readback: synthetic callback and address placeholders with fixed success/failure scenarios; no provider routing or real phone numbers.
+- **Local two-way synthetic audio**: a separate SIP `INVITE / 200 OK with SDP / ACK / BYE` dialog and 25 two-way PCMU RTP frames, all on IPv4 loopback. This is not human speech or a connection to LiveKit. New route: `POST /lab/sessions/{id}/private-audio-test`; WebSocket action `private_audio_test`; local CLI below.
 - Unit and API tests for fail-closed design, synthetic-location-only payloads, authentication and loopback SIP.
 
-**Not implemented:** SIP INVITE calling, RTP media, LiveKit SIP bridging, real phone numbers, live 933 dialing, PSTN, E911, dispatchable location, ANI, ALI, PSAP routing, emergency callback, failover, carrier connectivity, any public deployment.
+**Not implemented:** live human calling, external SIP INVITE calling, LiveKit SIP bridging, real phone numbers, live 933 dialing, PSTN, E911, dispatchable location, ANI, ALI, PSAP routing, emergency callback, failover, carrier connectivity, any public deployment.
 
 ## Why we simulate 933 before placing a real test call
 
@@ -60,7 +61,7 @@ Copy a returned session `id` to the next example (`SESSION_ID` is a local demo-o
 curl -s -X POST -H "x-verifyd-lab-key: $VERIFYD_EMERGENCY_LAB_KEY" "http://127.0.0.1:8099/lab/sessions/$SESSION_ID/sip-probe"
 ```
 
-For a visual test console, open `http://127.0.0.1:8099/lab/console` in the same computer and paste the lab-only key. Nothing in the console can dial a phone number.
+For a visual test console, open `http://127.0.0.1:8099/lab/console` in the same computer and paste the lab-only key. Nothing in the console can dial a phone number. The audio test button only sends short synthetic audio tones between two localhost UDP sockets.
 
 To try the **933 simulation** from the console:
 
@@ -81,7 +82,17 @@ Use **two PowerShell terminals with the same test-only environment variables**, 
 
 Expected: `sip_probe_status: "sip_options_acknowledged"`, `real_emergency_call: false`, and `media_connected: false`. If the mock server is not running, status is `sip_probe_unavailable`.
 
-Test:
+Test private synthetic two-way SIP/RTP audio without running the API (this also works on Windows):
+
+```bash
+python -m gateway.private_audio_cli
+```
+
+Expected: `mode=PRIVATE_LOCAL_SIP_RTP_SYNTHETIC_AUDIO`, `sip_dialog=invite_200_ack_bye_completed`, 25 RTP packets received per direction, `media_transport_connected=true`, `livekit_connected=false`, `carrier_connected=false`, and `real_933_call_placed=false`. `media_transport_connected` refers **only** to test tones between localhost ports. No user can talk to another person using this route.
+
+The local web console also has **Test two-way synthetic SIP/RTP audio (LOCAL ONLY)**. Create a synthetic session first. The action requires the same strong lab-only key and rejects any field specifying a phone number, destination, address, SIP URI or real coordinates. 
+
+Test the full suite:
 
 ```bash
 python -m unittest discover -s tests -v
@@ -90,11 +101,11 @@ python -m compileall -q gateway tests
 
 ## Why this architecture
 
-The current Circle frontend already uses the **Render** backend WebSocket `wss://verifyd-backend.onrender.com/trust-voice/ws`, WebRTC for direct calls, and **LiveKit** for group video. We will keep those working paths untouched. The proof-of-concept's isolated API/WebSocket demonstrates control-plane session and signaling techniques without impersonating a real 911 connection. Media bridging into SIP needs a separate phase and an environment that supports public SIP/RTP UDP traffic; Render's normal HTTPS web service cannot be assumed to expose these UDP ports.
+The current Circle frontend already uses the **Render** backend WebSocket `wss://verifyd-backend.onrender.com/trust-voice/ws`, WebRTC for direct calls, and **LiveKit** for group video. We will keep those working paths untouched. The isolated API/WebSocket demonstrates control-plane session, a mock SIP dialog and two-way test-tone RTP between sockets without impersonating a real 911 connection. See `docs/PHASE3_LIVEKIT_BRIDGE_READINESS.md` for the next private LiveKit-to-PBX stage. Media bridging into SIP needs a separate phase and an environment that supports public SIP/RTP UDP traffic; Render's normal HTTPS web service cannot be assumed to expose these UDP ports.
 
-## Proposed next milestone (separate decision)
+## Proposed next milestone (separate deployment and operator authorization)
 
-- Deploy a private **non-production** LiveKit SIP/FreeSWITCH or Asterisk topology to a UDP-capable lab host and verify two-way **test-only audio** on a clearly labeled test extension.
+- Deploy a private **non-production** LiveKit SIP/FreeSWITCH or Asterisk topology to a UDP-capable lab host and verify **actual human** two-way test audio on a clearly labeled test extension. The current synthetic RTP test is a prerequisite, not a substitute.
 - Implement strong **account identity and session authorization** tied to the Circle backend; no debug lab secret in production frontend.
 - Implement test-only location, no real location transmitted externally.
 - Secure SIP, media, firewall restrictions, metrics, observability, operational controls; keep a hard outbound destination allowlist.
