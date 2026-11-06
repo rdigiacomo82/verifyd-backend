@@ -78,6 +78,40 @@ class CircleSafetyUnitTests(unittest.TestCase):
         with self.assertRaises(ValidationError): safety.PinChange(pin='123')
         with self.assertRaises(ValidationError): safety.PinChange(pin='AB1234')
 
+    def test_eligible_range_contacts_only_returns_consented_members(self):
+        location_module = types.ModuleType('trust_voice_location')
+        location_module._enabled = lambda: True
+        location_module._schema = lambda: None
+
+        class EligibleCursor:
+            def execute(self, sql, params=()): pass
+            def fetchall(self): return [
+                {'member_identity_id': 'approved'},
+                {'member_identity_id': 'not_approved'},
+            ]
+
+        with patch.dict(sys.modules, {'trust_voice_location': location_module}), \
+             patch.object(safety, '_owner', return_value={'id': 'watcher'}), \
+             patch.object(safety, '_schema'), \
+             patch.object(safety, 'get_db', return_value=FakeConnection(EligibleCursor())), \
+             patch.object(safety, '_identity_by_id', side_effect=lambda ident: {'id': ident, 'handle': ident, 'status': 'active'}), \
+             patch.object(safety, '_location_granted', side_effect=lambda ident, viewer: ident == 'approved'):
+            eligible = safety.eligible_range_contacts(authorization='Bearer fake')
+        self.assertEqual([m['identity_id'] for m in eligible['eligible']], ['approved'])
+        self.assertTrue(eligible['location_enabled'])
+        self.assertEqual(eligible['eligible'][0]['precision'], 'precise')
+
+    def test_eligible_list_requires_existing_location_feature(self):
+        location_module = types.ModuleType('trust_voice_location')
+        location_module._enabled = lambda: False
+        location_module._schema = Mock()
+        with patch.dict(sys.modules, {'trust_voice_location': location_module}), \
+             patch.object(safety, '_owner', return_value={'id': 'watcher'}), \
+             patch.object(safety, '_schema'):
+            result = safety.eligible_range_contacts(authorization='Bearer fake')
+        self.assertEqual(result, {'eligible': [], 'location_enabled': False})
+        location_module._schema.assert_not_called()
+
     def test_invalid_zone_cannot_monitor_without_separate_permission(self):
         with patch.object(safety, '_owner', return_value={'id': 'watcher'}), \
              patch.object(safety, '_schema'), \
