@@ -194,6 +194,45 @@ def _location_granted(target_id, viewer_id, *, require_precise=True):
         return bool(cur.fetchone())
 
 
+def _safety_push_authorized(identity_id, kind, event_id):
+    """Recheck recipient, consent and incident state immediately before delivery.
+
+    A queued red notification must not escape after a sender stops distress,
+    a recipient mutes, or a monitored contact revokes location permission.
+    """
+    if not _enabled():
+        return False
+    _schema()
+    with get_db() as conn:
+        cur = conn.cursor()
+        if kind == "circle_range_exit":
+            cur.execute("""
+                SELECT actor_id FROM verifyd_circle_safety_alerts
+                WHERE alert_id=%s AND recipient_id=%s AND dismissed_at IS NULL
+                  AND created_at>NOW()-INTERVAL '24 hours'
+            """, (str(event_id), str(identity_id)))
+            row = cur.fetchone()
+            return bool(row and _location_granted(str(row["actor_id"]), str(identity_id)))
+        if kind in {"circle_distress", "circle_distress_clear"}:
+            status_rule = (
+                "i.status='active' AND i.expires_at>NOW()"
+                if kind == "circle_distress" else "i.status='stopped'"
+            )
+            cur.execute(f"""
+                SELECT i.sender_id FROM verifyd_circle_safety_incidents i
+                JOIN verifyd_circle_safety_recipients r ON r.incident_id=i.incident_id
+                WHERE i.incident_id=%s AND r.recipient_id=%s AND r.muted=FALSE
+                  AND ({status_rule})
+            """, (str(event_id), str(identity_id)))
+            row = cur.fetchone()
+            if not row:
+                return False
+            sender_id = str(row["sender_id"])
+            return bool(trust_circle_contains(sender_id, str(identity_id))
+                        and not identities_blocked(sender_id, str(identity_id)))
+    return False
+
+
 def _push(identity_id, *, kind, title, body, event_id):
     """Queue bounded best-effort push without blocking calls or location updates."""
     if not _PUSH_SLOTS.acquire(blocking=False):
@@ -202,6 +241,8 @@ def _push(identity_id, *, kind, title, body, event_id):
 
     def deliver():
         try:
+            if not _safety_push_authorized(identity_id, kind, event_id):
+                return
             from trust_voice_push import notify_identity_push
             notify_identity_push(identity_id, notification_type=kind, title=title,
                                  body=body, url="/voice", tag=f"circle-safety-{event_id}",
