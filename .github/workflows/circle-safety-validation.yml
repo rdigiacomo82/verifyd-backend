@@ -1,0 +1,31 @@
+name: Circle Safety isolated validation
+
+on:
+  push:
+    branches:
+      - feature/circle-safety-geofence-distress-20261106
+  pull_request:
+    paths:
+      - trust_voice_circle_safety.py
+      - trust_voice_location.py
+      - trust_voice_push.py
+      - tests/test_circle_safety_v1.py
+      - .github/workflows/circle-safety-validation.yml
+  workflow_dispatch:
+
+jobs:
+  circle-safety-unittests:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install isolated test dependencies
+        run: python -m pip install 'fastapi>=0.100,<1' 'pydantic>=2,<3'
+      - name: Compile safety code
+        run: python -m py_compile trust_voice_circle_safety.py trust_voice_location.py trust_voice_push.py tests/test_circle_safety_v1.py
+      - name: Run isolated security and behavior tests
+        run: python -m unittest discover -s tests -p 'test_circle_safety_v1.py' -v

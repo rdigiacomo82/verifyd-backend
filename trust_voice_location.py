@@ -264,6 +264,14 @@ def set_sharing(
                 "DELETE FROM verifyd_circle_latest_locations WHERE owner_identity_id=%s",
                 (owner_id,),
             )
+    # Optional privacy cleanup for separately consented range alerts.
+    # Failure must never block the user's ability to revoke or change sharing.
+    try:
+        from trust_voice_circle_safety import invalidate_range_for_owner
+        invalidate_range_for_owner(owner_id)
+    except Exception:
+        import logging
+        logging.getLogger("verifyd.circle.safety").exception("Range alert consent cleanup unavailable")
     return {
         "ok": True, "enabled": body.enabled,
         "scope": body.scope, "expires_at": _iso(expiry),
@@ -292,6 +300,12 @@ def stop_sharing(response: Response, authorization: Optional[str] = Header(defau
             (owner_id,),
         )
         cur.execute("DELETE FROM verifyd_circle_location_native_tokens WHERE owner_identity_id=%s", (owner_id,))
+    try:
+        from trust_voice_circle_safety import invalidate_range_for_owner
+        invalidate_range_for_owner(owner_id)
+    except Exception:
+        import logging
+        logging.getLogger("verifyd.circle.safety").exception("Range alert revocation cleanup unavailable")
     return {"ok": True, "enabled": False}
 
 
@@ -341,6 +355,13 @@ def update_position(
                 latitude=EXCLUDED.latitude,longitude=EXCLUDED.longitude,
                 accuracy_m=EXCLUDED.accuracy_m,recorded_at=NOW()
         """, (owner_id, lat, lon, accuracy))
+    # Optional, best-effort geofence check. Never interrupt location uploads.
+    try:
+        from trust_voice_circle_safety import evaluate_range_position
+        evaluate_range_position(owner_id)
+    except Exception:
+        import logging
+        logging.getLogger("verifyd.circle.safety").exception("Range evaluation unavailable")
     return {"ok": True, "throttled": False}
 
 
@@ -568,4 +589,11 @@ def upload_native_position(
                 latitude=EXCLUDED.latitude,longitude=EXCLUDED.longitude,
                 accuracy_m=EXCLUDED.accuracy_m,recorded_at=NOW()
         """, (owner_id, lat, lon, accuracy))
+    # Native updates feed the same opt-in range boundary check.
+    try:
+        from trust_voice_circle_safety import evaluate_range_position
+        evaluate_range_position(owner_id)
+    except Exception:
+        import logging
+        logging.getLogger("verifyd.circle.safety").exception("Native range evaluation unavailable")
     return {"ok": True, "throttled": False}
