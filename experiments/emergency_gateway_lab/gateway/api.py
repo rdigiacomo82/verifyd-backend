@@ -15,6 +15,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, ConfigDict, Field
 from .lab_core import LabStore
 from .sip_loopback import run_options_probe
+from .simulated_933 import Scenario, simulate_933_readback
 
 app = FastAPI(title='VeriFYD Emergency Gateway — LAB ONLY', docs_url=None, redoc_url=None,
               description='Test signaling only; not a 911 calling service.')
@@ -27,6 +28,11 @@ def _guard(key: str | None) -> None:
     expected = os.getenv('VERIFYD_EMERGENCY_LAB_KEY', '')
     if len(expected) < 32 or not key or not hmac.compare_digest(expected, key):
         raise HTTPException(status_code=401, detail='lab_key_required')
+
+
+class Simulate933Body(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    scenario: Scenario = 'provisioned'
 
 
 class StartBody(BaseModel):
@@ -88,6 +94,18 @@ async def sip_probe(sid: str, x_verifyd_lab_key: str | None = Header(default=Non
     return store.set_probe(sid, 'sip_options_acknowledged' if result else 'sip_probe_unavailable').public()
 
 
+@app.post('/lab/sessions/{sid}/simulate-933')
+def simulate_933(sid: str, body: Simulate933Body,
+                 x_verifyd_lab_key: str | None = Header(default=None)):
+    _guard(x_verifyd_lab_key)
+    item = _session_or_404(sid)
+    if item.status == 'closed':
+        raise HTTPException(status_code=409, detail='lab_session_closed')
+    result = simulate_933_readback(body.scenario)
+    result['session_id'] = item.id
+    return result
+
+
 @app.post('/lab/sessions/{sid}/close')
 def close(sid: str, x_verifyd_lab_key: str | None = Header(default=None)):
     _guard(x_verifyd_lab_key)
@@ -134,6 +152,22 @@ async def ws_lab(websocket: WebSocket, sid: str):
                 result = await run_options_probe()
                 item = store.set_probe(sid, 'sip_options_acknowledged' if result else 'sip_probe_unavailable')
                 await websocket.send_json({'type': 'sip_probe_result', 'session': item.public()})
+            elif message.get('type') == 'simulate_933':
+                try:
+                    # Reject even unused caller, address and routing fields.
+                    # A simulated test must not silently accept real identities.
+                    if set(message) - {'type', 'scenario'}:
+                        raise ValueError('Only synthetic scenario fields allowed')
+                    session = _session_or_404(sid)
+                    if session.status == 'closed':
+                        await websocket.send_json({'type': 'error', 'error': 'lab_session_closed'})
+                        continue
+                    scenario = message.get('scenario', 'provisioned')
+                    result = simulate_933_readback(scenario)
+                    result['session_id'] = session.id
+                    await websocket.send_json({'type': 'simulated_933_result', 'result': result})
+                except ValueError:
+                    await websocket.send_json({'type': 'error', 'error': 'synthetic_scenario_only'})
             elif message.get('type') == 'close':
                 await websocket.send_json({'type': 'session_closed', 'session': store.close(sid).public()})
                 await websocket.close(code=1000)
