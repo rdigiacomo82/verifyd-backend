@@ -8,6 +8,10 @@ on:
       - 'experiments/emergency_gateway_lab/bridge/**'
       - 'experiments/emergency_gateway_lab/tests/**'
       - '.github/workflows/verifyd-private-sip-echo.yml'
+  pull_request:
+    paths:
+      - 'experiments/emergency_gateway_lab/bridge/**'
+      - '.github/workflows/verifyd-private-sip-echo.yml'
   workflow_dispatch:
 
 permissions:
