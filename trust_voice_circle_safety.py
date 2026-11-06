@@ -74,6 +74,8 @@ def _schema():
                     identity_id TEXT PRIMARY KEY REFERENCES verifyd_identities(id) ON DELETE CASCADE,
                     allow_range_alerts BOOLEAN NOT NULL DEFAULT FALSE,
                     pin_salt TEXT, pin_digest TEXT,
+                    pin_change_fail_count INTEGER NOT NULL DEFAULT 0,
+                    pin_change_locked_until TIMESTAMPTZ,
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 )
             """)
@@ -259,19 +261,29 @@ def update_pin(data: PinChange, authorization: Optional[str] = Header(default=No
     owner = _owner(authorization)
     _schema()
     owner_id = str(owner["id"])
+    denied = False
     with get_db() as conn:
         cur = conn.cursor()
-        cur.execute("SELECT pin_salt,pin_digest FROM verifyd_circle_safety_settings WHERE identity_id=%s FOR UPDATE", (owner_id,))
+        cur.execute("SELECT pin_salt,pin_digest,pin_change_fail_count,pin_change_locked_until FROM verifyd_circle_safety_settings WHERE identity_id=%s FOR UPDATE", (owner_id,))
         old = cur.fetchone() or {}
+        if old.get("pin_change_locked_until") and old["pin_change_locked_until"] > _now():
+            raise HTTPException(429, detail={"error": "pin_temporarily_locked"})
         if old.get("pin_digest") and not _check_pin(str(data.current_pin or ""), old):
-            raise HTTPException(403, detail={"error": "current_pin_required"})
-        salt = secrets.token_hex(16)
-        digest = _hash_pin(data.pin, salt)
-        cur.execute("""
-            INSERT INTO verifyd_circle_safety_settings(identity_id,pin_salt,pin_digest)
-            VALUES(%s,%s,%s) ON CONFLICT(identity_id) DO UPDATE SET
-            pin_salt=EXCLUDED.pin_salt,pin_digest=EXCLUDED.pin_digest,updated_at=NOW()
-        """, (owner_id, salt, digest))
+            count = int(old.get("pin_change_fail_count") or 0) + 1
+            until = _now() + timedelta(seconds=60) if count % 5 == 0 else None
+            cur.execute("UPDATE verifyd_circle_safety_settings SET pin_change_fail_count=%s,pin_change_locked_until=%s WHERE identity_id=%s", (count, until, owner_id))
+            denied = True
+        else:
+            salt = secrets.token_hex(16)
+            digest = _hash_pin(data.pin, salt)
+            cur.execute("""
+                INSERT INTO verifyd_circle_safety_settings(identity_id,pin_salt,pin_digest)
+                VALUES(%s,%s,%s) ON CONFLICT(identity_id) DO UPDATE SET
+                pin_salt=EXCLUDED.pin_salt,pin_digest=EXCLUDED.pin_digest,
+                pin_change_fail_count=0,pin_change_locked_until=NULL,updated_at=NOW()
+            """, (owner_id, salt, digest))
+    if denied:
+        raise HTTPException(403, detail={"error": "current_pin_required"})
     return {"pin_configured": True}
 
 
@@ -462,6 +474,8 @@ def start_distress(data: DistressStart, authorization: Optional[str] = Header(de
         for rid in recipients:
             cur.execute("INSERT INTO verifyd_circle_safety_recipients(incident_id,recipient_id) VALUES(%s,%s)", (incident_id, rid))
     for rid in recipients:
+        if not trust_circle_contains(sender_id, rid) or identities_blocked(sender_id, rid):
+            continue
         _push(rid, kind="circle_distress", title="DISTRESS — VeriFYD Circle",
               body=f"@{owner.get('handle') or ''} triggered a distress alert. Open Circle for their last reported location. Not a 911 call.", event_id=incident_id)
     return {"ok": True, "already_active": False, "incident": {
