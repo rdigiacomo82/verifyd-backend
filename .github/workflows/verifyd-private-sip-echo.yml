@@ -1,0 +1,67 @@
+name: VeriFYD Private LiveKit SIP Echo (Ephemeral Linux)
+
+on:
+  push:
+    branches:
+      - 'experiment/verifyd-emergency-gateway-lab-v0-1'
+    paths:
+      - 'experiments/emergency_gateway_lab/bridge/**'
+      - 'experiments/emergency_gateway_lab/tests/**'
+      - '.github/workflows/verifyd-private-sip-echo.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verifyd-private-echo-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  run-private-media-loopback:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 19
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Validate lab safety configuration
+        working-directory: experiments/emergency_gateway_lab
+        run: |
+          python -m compileall -q gateway bridge tests
+          python -m unittest discover -s tests -q
+      - name: Install headless LiveKit client (test-only)
+        run: python -m pip install 'livekit>=1.0,<2.0'
+      - name: Generate isolated random lab credentials
+        working-directory: experiments/emergency_gateway_lab
+        run: python bridge/phase4_bridge.py init
+      - name: Validate and launch temporary Docker stack
+        working-directory: experiments/emergency_gateway_lab
+        run: |
+          docker compose -f bridge/compose.yaml config -q
+          docker compose -f bridge/compose.yaml pull
+          docker compose -f bridge/compose.yaml up -d
+      - name: Wait for local LiveKit and Redis health
+        working-directory: experiments/emergency_gateway_lab
+        run: |
+          for i in $(seq 1 50); do
+            if python -c "import socket; s=socket.socket(); s.settimeout(1); s.connect(('127.0.0.1',7880)); s.close(); t=socket.socket(); t.settimeout(1); t.connect(('127.0.0.1',6379)); t.close()"; then
+              echo "LiveKit and Redis ports reachable on loopback"; break
+            fi
+            sleep 2
+          done
+          python bridge/phase4_bridge.py doctor
+      - name: Verify true LiveKit-SIP-Asterisk two-way echo
+        working-directory: experiments/emergency_gateway_lab
+        run: python bridge/headless_echo_ci.py
+      - name: Diagnose local services (never print private credentials)
+        if: always()
+        working-directory: experiments/emergency_gateway_lab
+        run: |
+          docker compose -f bridge/compose.yaml ps || true
+          docker compose -f bridge/compose.yaml logs --tail=80 livekit sip asterisk || true
+      - name: Tear down private lab
+        if: always()
+        working-directory: experiments/emergency_gateway_lab
+        run: docker compose -f bridge/compose.yaml down --remove-orphans || true
