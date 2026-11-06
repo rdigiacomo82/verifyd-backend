@@ -1,0 +1,1 @@
+"""VeriFYD Emergency Gateway lab-only proof of concept (no public emergency dialing)."""
