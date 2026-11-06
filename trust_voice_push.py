@@ -929,10 +929,18 @@ def _dispatch_ready_meeting_results() -> int:
 
 
 def run_push_dispatch_once() -> dict:
-    return {
+    result = {
         "scheduled_reminders": _dispatch_due_schedule_reminders(),
         "meeting_results": _dispatch_ready_meeting_results(),
     }
+    # Isolated add-on: feature-gated distress reminders, bounded to one hour.
+    # Failure must never interrupt existing calendar or meeting notifications.
+    try:
+        from trust_voice_circle_safety import run_safety_dispatch_once
+        result["circle_safety_reminders"] = run_safety_dispatch_once()
+    except Exception:
+        log.warning("Circle Safety reminder dispatch unavailable", exc_info=True)
+    return result
 
 
 def _scheduler_loop() -> None:
