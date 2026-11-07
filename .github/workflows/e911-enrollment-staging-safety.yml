@@ -1,0 +1,35 @@
+name: VeriFYD E911 enrollment STAGING — fail closed
+on:
+  push:
+    branches:
+      - 'feature/e911-enrollment-backend-disabled-*'
+    paths:
+      - trust_voice_emergency_enrollment.py
+      - tests/test_trust_voice_emergency_enrollment.py
+      - tests/test_emergency_router_linkage.py
+      - main.py
+      - .github/workflows/e911-enrollment-staging-safety.yml
+  pull_request:
+    paths:
+      - trust_voice_emergency_enrollment.py
+      - tests/test_trust_voice_emergency_enrollment.py
+      - tests/test_emergency_router_linkage.py
+      - main.py
+      - .github/workflows/e911-enrollment-staging-safety.yml
+permissions:
+  contents: read
+jobs:
+  safe-enrollment-only:
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install isolated test dependencies
+        run: python -m pip install 'fastapi>=0.110,<1' 'httpx>=0.25,<1' 'pydantic>=2,<3' 'cryptography>=42,<47' 'pytest>=8,<10'
+      - name: Compile and test no-dial enrollment module
+        run: |
+          python -m py_compile trust_voice_emergency_enrollment.py
+          python -m pytest -q tests/test_trust_voice_emergency_enrollment.py tests/test_emergency_router_linkage.py
