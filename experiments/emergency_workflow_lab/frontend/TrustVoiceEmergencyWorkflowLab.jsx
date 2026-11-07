@@ -55,8 +55,16 @@ export default function TrustVoiceEmergencyWorkflowLab({ open, onClose, sessionT
     closeRef.current?.focus();
     if (!sessionToken) { setError('A signed-in Circle session is required.'); return undefined; }
     let active = true;
-    request('/status').then((v) => {
-      if (active) setConnected(v.mode === 'TRAINING_SIMULATION_ONLY' && v.dispatch_connected === false);
+    request('/status').then(async (v) => {
+      if (!active) return;
+      const safe = v.mode === 'TRAINING_SIMULATION_ONLY' && v.dispatch_connected === false;
+      setConnected(safe);
+      if (safe) {
+        const current = await request('/incidents/current');
+        if (active && current.mode === 'TRAINING_SIMULATION_ONLY' && current.dispatch_connected === false) {
+          setIncident(current.incident || null);
+        }
+      }
     }).catch((e) => { if (active) setError(e.message); });
     return () => { active = false; };
   }, [open, sessionToken, request]);
@@ -143,7 +151,10 @@ export default function TrustVoiceEmergencyWorkflowLab({ open, onClose, sessionT
             <button type="button" onClick={finish} disabled={busy}
               className="min-h-14 w-full rounded-xl border border-white/40 p-3 font-semibold disabled:opacity-40">End practice conversation</button>
           </>}
-          {incident.status === 'simulation_closed' && <p className="font-bold text-amber-100">Practice finished. No emergency message was delivered.</p>}
+          {incident.status === 'simulation_closed' && <>
+            <p className="font-bold text-amber-100">Practice finished. No emergency message was delivered.</p>
+            <button type="button" onClick={() => setIncident(null)} className="min-h-14 w-full rounded-xl border border-amber-200 p-3 font-bold">Start another fictitious practice</button>
+          </>}
         </div>}
         <button type="button" onClick={onClose} className="mt-6 min-h-12 w-full rounded-xl border border-white/40 px-4 py-3 font-semibold">Close training lab</button>
       </section>
