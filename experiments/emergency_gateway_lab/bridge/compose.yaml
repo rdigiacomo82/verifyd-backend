@@ -1,0 +1,41 @@
+# VERiFYD PHASE 4: Linux LOCALHOST-ONLY experiment. No public ports, PSTN or E911.
+# Docker Desktop host networking on Mac/Windows differs; use a Linux lab host.
+name: verifyd-private-voice-lab
+services:
+  redis:
+    image: redis:7.4-alpine
+    network_mode: host
+    command: ["redis-server", "--bind", "127.0.0.1", "--protected-mode", "yes", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "-h", "127.0.0.1", "ping"]
+      interval: 3s
+      timeout: 2s
+      retries: 12
+    restart: "no"
+  livekit:
+    image: livekit/livekit-server:v1.9
+    network_mode: host
+    command: ["--config", "/lab/livekit.yaml"]
+    volumes:
+      - ./.generated/livekit.yaml:/lab/livekit.yaml:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: "on-failure:3"
+  sip:
+    image: livekit/sip:v1.23
+    network_mode: host
+    volumes:
+      # SIP image expects /sip/config.yaml; custom SIP_CONFIG_FILE was ignored.
+      - ./.generated/sip.yaml:/sip/config.yaml:ro
+    depends_on: [livekit]
+    restart: "on-failure:3"
+  asterisk:
+    image: andrius/asterisk:22
+    network_mode: host
+    volumes:
+      - ./asterisk/pjsip.conf:/etc/asterisk/pjsip.conf:ro
+      - ./asterisk/extensions.conf:/etc/asterisk/extensions.conf:ro
+      - ./asterisk/rtp.conf:/etc/asterisk/rtp.conf:ro
+      - ./asterisk/modules.conf:/etc/asterisk/modules.conf:ro
+    restart: "no"
