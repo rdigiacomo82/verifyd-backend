@@ -33,11 +33,11 @@ Current source baseline: Horizons full export `2026-11-06T230524.482.zip`.
 
 ## How to validate
 
-1. Run `python -m pytest -q tests/test_emergency_workflow_lab.py`: 22 test cases.
+1. Run `python -m pytest -q tests/test_emergency_workflow_lab.py`: 23 API test cases plus 6 frontend-static checks.
 2. Run `python -m py_compile verifyd_emergency_workflow_lab.py`.
 3. Build the Horizons dev app with the new component and guarded import; do not publish without a complete build/regression review.
 4. With the backend flag OFF, confirm all lab endpoints return 404 and the production frontend contains no lab button.
-5. In a private staging instance, use only a synthetic Circle account; enable only that identity ID. Verify `GET /status`, `POST /incidents`, `POST /messages`, `POST /close`, loss of session permission, cross-account isolation, expiration, accessibility and network failure.
+5. In a private staging instance, use only a synthetic Circle account; enable only that identity ID. Verify `GET /status`, `POST /incidents`, `GET /incidents/current`, `POST /messages`, `POST /close`, loss of session permission, cross-account isolation, expiration, accessibility and network failure.
 6. Confirm all statuses make clear **no dispatch**. Do not send SMS to 911, call 911, or enter real emergency information in tests.
 
 ## Next phase — not implemented
