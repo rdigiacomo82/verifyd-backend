@@ -127,6 +127,18 @@ def create_incident(payload: CreateScenario, authorization: str | None = Header(
         return _view(incident)
 
 
+@router.get("/incidents/current")
+def current_training(authorization: str | None = Header(default=None)):
+    owner = _allowed(authorization)
+    with _lock:
+        _purge(time.time())
+        active = next((i for i in _simulations.values()
+                       if i["owner"] == owner and i["status"] != "simulation_closed"), None)
+        return {"incident": _view(active) if active else None,
+                "mode": "TRAINING_SIMULATION_ONLY",
+                "dispatch_connected": False}
+
+
 @router.get("/incidents/{incident_id}")
 def read_incident(incident_id: str, authorization: str | None = Header(default=None)):
     owner = _allowed(authorization)
