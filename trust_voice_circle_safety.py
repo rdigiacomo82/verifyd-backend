@@ -15,7 +15,7 @@ import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
@@ -42,6 +42,10 @@ _PUSH_SLOTS = threading.BoundedSemaphore(200)
 
 def _enabled():
     return os.environ.get("VERIFYD_CIRCLE_SAFETY_ENABLED", "0").lower().strip() in {"1", "true", "yes", "on"}
+
+
+def _silent_mode_enabled():
+    return _enabled() and os.environ.get('VERIFYD_CIRCLE_SILENT_DISTRESS_ENABLED', '').strip().lower() in {'1', 'true', 'yes', 'on'}
 
 
 def _required():
@@ -146,6 +150,7 @@ def _schema():
                     pin_locked_until TIMESTAMPTZ
                 )
             """)
+            cur.execute("ALTER TABLE verifyd_circle_safety_incidents ADD COLUMN IF NOT EXISTS mode TEXT NOT NULL DEFAULT 'standard'")
             cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_verifyd_safety_one_active_incident ON verifyd_circle_safety_incidents(sender_id) WHERE status='active'")
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS verifyd_circle_safety_recipients (
@@ -306,6 +311,7 @@ class ZoneUpdate(BaseModel):
 
 
 class DistressStart(BaseModel):
+    mode: Literal['standard', 'silent'] = 'standard'
     latitude: Optional[float] = Field(default=None, ge=-90, le=90)
     longitude: Optional[float] = Field(default=None, ge=-180, le=180)
     accuracy_m: Optional[float] = Field(default=None, ge=0, le=100000)
@@ -321,7 +327,8 @@ def safety_settings(authorization: Optional[str] = Header(default=None)):
     _schema()
     row = _settings(str(owner["id"]))
     return {"enabled": True, "allow_range_alerts": bool(row.get("allow_range_alerts")),
-            "pin_configured": bool(row.get("pin_digest")), "max_distress_minutes": 60}
+            "pin_configured": bool(row.get("pin_digest")), "max_distress_minutes": 60,
+            "silent_mode_supported": _silent_mode_enabled()}
 
 
 @router.put("/settings/range-consent")
@@ -578,12 +585,15 @@ def current_distress(authorization: Optional[str] = Header(default=None)):
 def _sender_incident(row):
     return {"incident_id": row["incident_id"], "created_at": _iso(row["created_at"]),
             "expires_at": _iso(row["expires_at"]), "latitude": row["latitude"],
-            "longitude": row["longitude"], "status": row["status"]}
+            "longitude": row["longitude"], "status": row["status"],
+            "mode": row.get("mode") or "standard"}
 
 
 @router.post("/distress")
 def start_distress(data: DistressStart, authorization: Optional[str] = Header(default=None)):
     owner = _owner(authorization)
+    if data.mode == 'silent' and not _silent_mode_enabled():
+        raise HTTPException(404, detail={'error': 'silent_distress_unavailable'})
     _schema()
     sender_id = str(owner["id"])
     if (data.latitude is None) != (data.longitude is None):
@@ -611,20 +621,20 @@ def start_distress(data: DistressStart, authorization: Optional[str] = Header(de
         if not recipients:
             raise HTTPException(409, detail={"error": "no_eligible_circle_recipients"})
         cur.execute("""
-            INSERT INTO verifyd_circle_safety_incidents(incident_id,sender_id,latitude,longitude,accuracy_m,created_at,last_position_at,expires_at,next_push_at)
-            VALUES(%s,%s,%s,%s,%s,NOW(),%s,NOW()+INTERVAL '1 hour',NOW()+INTERVAL '5 minutes')
+            INSERT INTO verifyd_circle_safety_incidents(incident_id,sender_id,latitude,longitude,accuracy_m,created_at,last_position_at,expires_at,next_push_at,mode)
+            VALUES(%s,%s,%s,%s,%s,NOW(),%s,NOW()+INTERVAL '1 hour',NOW()+INTERVAL '5 minutes',%s)
         """, (incident_id, sender_id, data.latitude, data.longitude, data.accuracy_m,
-              _now() if data.latitude is not None else None))
+              _now() if data.latitude is not None else None, data.mode))
         for rid in recipients:
             cur.execute("INSERT INTO verifyd_circle_safety_recipients(incident_id,recipient_id) VALUES(%s,%s)", (incident_id, rid))
     for rid in recipients:
         if not trust_circle_contains(sender_id, rid) or identities_blocked(sender_id, rid):
             continue
-        _push(rid, kind="circle_distress", title="DISTRESS — VeriFYD Circle",
+        _push(rid, kind="circle_distress", title=("SILENT DISTRESS — VeriFYD Circle" if data.mode == "silent" else "DISTRESS — VeriFYD Circle"),
               body=f"@{owner.get('handle') or ''} triggered a distress alert. Open Circle for their last reported location. Not a 911 call.", event_id=incident_id)
     return {"ok": True, "already_active": False, "incident": {
         "incident_id": incident_id, "status": "active", "created_at": _iso(_now()),
-        "expires_at": _iso(_now()+timedelta(hours=1)), "latitude": data.latitude, "longitude": data.longitude}}
+        "expires_at": _iso(_now()+timedelta(hours=1)), "latitude": data.latitude, "longitude": data.longitude, "mode": data.mode}}
 
 
 @router.put("/distress/{incident_id}/position")
@@ -692,7 +702,7 @@ def distress_inbox(authorization: Optional[str] = Header(default=None)):
         cur = conn.cursor()
         cur.execute("""
             SELECT i.incident_id,i.sender_id,i.created_at,i.expires_at,i.latitude,i.longitude,
-                   i.last_position_at
+                   i.last_position_at,i.mode,i.accuracy_m
             FROM verifyd_circle_safety_incidents i
             JOIN verifyd_circle_safety_recipients r ON r.incident_id=i.incident_id
             WHERE r.recipient_id=%s AND r.muted=FALSE AND i.status='active' AND i.expires_at>NOW()
@@ -704,6 +714,7 @@ def distress_inbox(authorization: Optional[str] = Header(default=None)):
         if trust_circle_contains(str(r["sender_id"]), recipient_id) and not identities_blocked(str(r["sender_id"]), recipient_id):
             incidents.append({"incident_id": r["incident_id"], "sender": _public_actor(r["sender_id"]),
                               "latitude": r["latitude"], "longitude": r["longitude"],
+                              "mode": r.get("mode") or "standard", "accuracy_m": r.get("accuracy_m"),
                               "last_position_at": _iso(r["last_position_at"]),
                               "created_at": _iso(r["created_at"]), "expires_at": _iso(r["expires_at"])})
     return {"incidents": incidents}
