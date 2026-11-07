@@ -1,0 +1,54 @@
+name: VeriFYD owned emergency workflow simulation LAB safety
+on:
+  push:
+    branches:
+      - 'experiment/verifyd-emergency-workflow-lab-v0-1'
+  pull_request:
+    paths:
+      - 'verifyd_emergency_workflow_lab.py'
+      - 'tests/test_emergency_workflow_lab.py'
+      - '.github/workflows/emergency-workflow-lab-safety.yml'
+      - 'main.py'
+      - 'experiments/emergency_workflow_lab/frontend/**'
+      - 'tests/test_emergency_workflow_frontend_static.py'
+permissions:
+  contents: read
+jobs:
+  workflow-simulation-only:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install isolated lab test dependencies only
+        run: python -m pip install 'fastapi>=0.110,<1' 'pydantic>=2,<3' 'httpx>=0.25,<1' 'pytest>=8,<10'
+      - name: Compile router and run tests
+        run: |
+          python -m py_compile verifyd_emergency_workflow_lab.py
+          python -m pytest -q tests/test_emergency_workflow_lab.py tests/test_emergency_workflow_frontend_static.py
+      - name: Ensure default fail closed in source
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          app=Path('main.py').read_text()
+          assert 'from verifyd_emergency_workflow_lab import router as emergency_workflow_lab_router' in app
+          assert 'app.include_router(emergency_workflow_lab_router)' in app
+          code=Path('verifyd_emergency_workflow_lab.py').read_text()
+          assert 'VERIFYD_EMERGENCY_WORKFLOW_LAB_ENABLED' in code
+          assert 'TRAINING_SIMULATION_ONLY' in code
+          assert 'dispatch_connected": False' in code
+          PY
+      - name: Syntax parse new JSX with Babel (no app build)
+        run: |
+          mkdir -p "$RUNNER_TEMP/verifyd-js-check"
+          cd "$RUNNER_TEMP/verifyd-js-check"
+          npm install --no-save --no-audit --no-fund @babel/parser@7.27.0
+          node - "$GITHUB_WORKSPACE/experiments/emergency_workflow_lab/frontend/TrustVoiceEmergencyWorkflowLab.jsx" <<'JS'
+          const fs=require('fs');
+          const parser=require('@babel/parser');
+          const f=process.argv[2];
+          parser.parse(fs.readFileSync(f,'utf8'),{sourceType:'module',plugins:['jsx']});
+          console.log('New lab JSX parsed successfully.');
+          JS
