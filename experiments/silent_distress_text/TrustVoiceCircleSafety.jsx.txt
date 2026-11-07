@@ -1,0 +1,650 @@
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { AlertTriangle, BellRing, Lock, MapPin, RefreshCw } from 'lucide-react';
+
+// The silent mode must never become an accidental production 911 feature.
+const SILENT_DISTRESS_UI_ENABLED = import.meta.env.DEV && import.meta.env.VITE_VERIFYD_SILENT_DISTRESS_ENABLED === 'true';
+
+const API = 'https://verifyd-backend.onrender.com';
+const SAFETY_BASE = `${API}/trust-voice/safety`;
+
+const input = 'min-h-[48px] w-full rounded-xl border border-white/20 bg-white/5 px-4 py-3 text-sm text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400';
+const btn = 'min-h-[48px] rounded-xl border border-white/20 bg-white/10 px-4 py-3 text-sm font-semibold text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 disabled:opacity-40';
+
+function name(identity) {
+  if (!identity) return 'Unknown';
+  if (identity.display_name) return identity.display_name;
+  if (identity.handle) return `@${identity.handle}`;
+  return 'Unknown';
+}
+
+function fmt(iso) {
+  if (!iso) return '';
+  try {
+    return new Date(iso).toLocaleString();
+  } catch {
+    return '';
+  }
+}
+
+function mapLink(lat, lng) {
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  return `https://www.openstreetmap.org/?mlat=${encodeURIComponent(lat)}&mlon=${encodeURIComponent(lng)}#map=16/${encodeURIComponent(lat)}/${encodeURIComponent(lng)}`;
+}
+
+// Format location details for a recipient's *manual* emergency escalation.
+// A text to 911 can route to the RECIPIENT's jurisdiction, not the sender's.
+// Text-to-911 guidance: plain location first; never rely on a web link.
+function prepareThirdPartyEmergencyText(incident) {
+  const lat = Number(incident.latitude);
+  const lon = Number(incident.longitude);
+  const hasPosition = Number.isFinite(lat) && Number.isFinite(lon)
+    && incident.latitude !== null && incident.longitude !== null;
+  const senderName = name(incident.sender).replace(/[\r\n]/g, ' ').slice(0, 80);
+  const location = hasPosition ? `${lat.toFixed(6)}, ${lon.toFixed(6)}` : 'UNKNOWN (ask for location)';
+  const accuracy = Number(incident.accuracy_m);
+  const accuracyInfo = incident.accuracy_m !== null && incident.accuracy_m !== undefined
+    && Number.isFinite(accuracy) ? `GPS accuracy approx ${Math.round(accuracy)} meters.` : 'GPS accuracy unknown.';
+  const updated = incident.last_position_at ? `Last updated ${fmt(incident.last_position_at)}.` : 'Location time not available.';
+  return `I am reporting a distress alert from my trusted contact ${senderName}. I am NOT at their location. Their last reported location is latitude/longitude ${location}. ${accuracyInfo} ${updated} I may be in a different 911 jurisdiction; please advise how to reach the correct emergency center.`;
+}
+
+// Display all of the signed-in user's Trust Circle members, whether or not they
+// have already permitted precise range monitoring. No location coordinates are
+// fetched from the contact roster itself.
+function normalizeCircleContact(member) {
+  const identity = member?.identity || member || {};
+  const identity_id = String(identity.identity_id || identity.id || member?.member_identity_id || member?.identity_id || '');
+  const handle = String(identity.handle || member?.handle || '').replace(/^@/, '');
+  return {
+    identity_id,
+    handle,
+    display_name: identity.display_name || member?.presentation?.display_label || member?.display_name || handle,
+  };
+}
+
+async function safetyFetch(sessionToken, path, options = {}) {
+  const res = await fetch(`${SAFETY_BASE}${path}`, {
+    ...options,
+    cache: 'no-store',
+    headers: {
+      Authorization: `Bearer ${sessionToken}`,
+      ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+      ...(options.headers || {}),
+    },
+  });
+  let body = null;
+  try {
+    body = await res.json();
+  } catch {
+    body = null;
+  }
+  if (!res.ok) {
+    const detail = body?.detail || body?.message;
+    const reason = typeof detail === 'string'
+      ? detail
+      : (detail && typeof detail === 'object' && typeof detail.error === 'string'
+        ? detail.error : null);
+    const explanations = {
+      circle_safety_unavailable: 'Circle Safety is not yet enabled on the VeriFYD server.',
+      target_must_opt_in_and_share_precise_location: 'This contact must enable precise location sharing and allow range alerts in their own Circle Safety settings.',
+      configure_distress_pin_first: 'Set a 4–8 digit distress PIN in Circle Safety settings before sending an alert.',
+      no_eligible_circle_recipients: 'Add at least one eligible member to your Trust Circle before sending an alert.',
+      current_pin_required: 'The current PIN was not accepted.',
+      incorrect_distress_pin: 'Incorrect PIN. Your distress alert remains active.',
+      pin_temporarily_locked: 'Too many PIN attempts. Try again after one minute.',
+      distress_cooldown: 'A recent distress alert was sent. Try again shortly.',
+    };
+    const err = new Error(explanations[reason] || (reason ? reason.replaceAll('_', ' ') : `Circle Safety could not complete this request (${res.status}).`));
+    err.status = res.status;
+    throw err;
+  }
+  return body;
+}
+
+function gpsOnce(timeout = 8000) {
+  return new Promise((resolve, reject) => {
+    if (!navigator.geolocation) {
+      reject(new Error('Geolocation unavailable.'));
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      (p) =>
+        resolve({
+          latitude: p.coords.latitude,
+          longitude: p.coords.longitude,
+          accuracy_m: p.coords.accuracy,
+        }),
+      (e) => reject(e),
+      { enableHighAccuracy: true, maximumAge: 0, timeout }
+    );
+  });
+}
+
+export function TrustVoiceCircleSafetySettings({ sessionToken, onRequestDistress, onRequestSilentDistress, onRequestEmergency911 }) {
+  const [settings, setSettings] = useState(null);
+  const [rangeConsentBusy, setRangeConsentBusy] = useState(false);
+  const [eligible, setEligible] = useState([]);
+  const [circleContacts, setCircleContacts] = useState([]);
+  const [circleError, setCircleError] = useState('');
+  // The All option covers all CURRENTLY eligible contacts. New permissions
+  // require saving the boundary again; there is no covert future tracking.
+  const [selectionMode, setSelectionMode] = useState('all');
+  const [selectedIds, setSelectedIds] = useState([]);
+  const [zones, setZones] = useState([]);
+  const [miles, setMiles] = useState('1.0');
+  const [oldPin, setOldPin] = useState('');
+  const [pin, setPin] = useState('');
+  const [confirmDistress, setConfirmDistress] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [info, setInfo] = useState('');
+
+  const reload = useCallback(async () => {
+    if (!sessionToken) return;
+    setError('');
+    try {
+      const [settingsResult, eligibleResult, zonesResult] = await Promise.all([
+        safetyFetch(sessionToken, '/settings'),
+        safetyFetch(sessionToken, '/eligible'),
+        safetyFetch(sessionToken, '/zones'),
+      ]);
+      setSettings(settingsResult);
+      const permitted = eligibleResult.members || eligibleResult.eligible || [];
+      setEligible(permitted);
+      setZones(zonesResult.zones || []);
+
+      // Existing Trust Circle API returns EVERY member, not just members whose
+      // location-sharing permissions are already enabled. This avoids an empty
+      // dropdown when a contact is still configuring precise sharing.
+      try {
+        const response = await fetch(`${API}/trust-voice/trust-circle`, {
+          headers: { Authorization: `Bearer ${sessionToken}` },
+          cache: 'no-store',
+        });
+        if (!response.ok) throw new Error(`Trust Circle contacts unavailable (${response.status}).`);
+        const list = await response.json();
+        const rows = Array.isArray(list) ? list : (list.members || list.items || []);
+        const unique = new Map();
+        for (const row of rows) {
+          const contact = normalizeCircleContact(row);
+          if (contact.identity_id && contact.handle) unique.set(contact.identity_id, contact);
+        }
+        setCircleContacts([...unique.values()]);
+        setCircleError('');
+      } catch (contactErr) {
+        // An isolated roster failure must not hide an otherwise functional
+        // safety panel or corrupt saved zone configurations.
+        setCircleContacts(permitted.map(normalizeCircleContact)
+          .filter((member) => member.identity_id && member.handle));
+        setCircleError(`${contactErr.message} Showing available sharing contacts only. Select Refresh to try again.`);
+      }
+    } catch (err) {
+      if (err.status === 404) {
+        setError('Circle Safety is not yet enabled for your account on the VeriFYD server.');
+      } else {
+        setError(err.message);
+      }
+    }
+  }, [sessionToken]);
+
+  useEffect(() => {
+    reload();
+  }, [reload]);
+
+  const submit = useCallback(
+    async (fn, successMsg) => {
+      setBusy(true);
+      setError('');
+      setInfo('');
+      try {
+        await fn();
+        if (successMsg) setInfo(successMsg);
+        await reload();
+      } catch (err) {
+        setError(err.message);
+      } finally {
+        setBusy(false);
+      }
+    },
+    [reload]
+  );
+
+  const readyIdSet = new Set(eligible.map((member) => String(member.identity_id || member.id)));
+  const selectedContacts = selectionMode === 'all'
+    ? circleContacts
+    : circleContacts.filter((contact) => selectedIds.includes(contact.identity_id));
+  const readyContacts = selectedContacts.filter((contact) => readyIdSet.has(contact.identity_id));
+  const awaitingContacts = selectedContacts.filter((contact) => !readyIdSet.has(contact.identity_id));
+
+  const armRange = useCallback(async () => {
+    setBusy(true);
+    setError('');
+    setInfo('');
+    try {
+      const radiusMiles = Number(miles);
+      if (!Number.isFinite(radiusMiles) || radiusMiles < 0.1 || radiusMiles > 20) {
+        throw new Error('Enter a radius between 0.1 and 20 miles.');
+      }
+      if (selectedContacts.length === 0) {
+        throw new Error('Choose Everyone in My Trust Circle or select one or more contacts first.');
+      }
+      if (readyContacts.length === 0) {
+        throw new Error('None of the selected contacts can be monitored yet. Each must share precise location with you, allow range alerts, and be a mutual Trust Circle member.');
+      }
+      if (readyContacts.length > 20) {
+        throw new Error('Range alerts currently support up to 20 monitored contacts. Choose Specific Contacts to select 20 or fewer.');
+      }
+      const pos = await gpsOnce();
+      const payload = JSON.stringify({
+        radius_m: Math.round(radiusMiles * 1609.344),
+        center_lat: pos.latitude,
+        center_lon: pos.longitude,
+      });
+      const successes = [];
+      const failures = [];
+      // Sequentially respect the backend's per-user limit and reduce spikes.
+      // Partial success is reported rather than pretending all zones were saved.
+      for (const contact of readyContacts) {
+        try {
+          await safetyFetch(sessionToken, `/zones/${encodeURIComponent(contact.identity_id)}`, {
+            method: 'PUT', body: payload,
+          });
+          successes.push(contact);
+        } catch (err) {
+          failures.push(`${name(contact)}: ${err.message}`);
+        }
+      }
+      await reload();
+      if (successes.length) {
+        const count = successes.length;
+        setInfo(`${count} range ${count === 1 ? 'boundary' : 'boundaries'} saved at your current location.${awaitingContacts.length ? ` ${awaitingContacts.length} contact(s) still need permission and were skipped.` : ''}`);
+      }
+      if (failures.length) setError(`Some boundaries were not saved: ${failures.join('; ')}`);
+    } catch (err) {
+      setError(err.message || 'Could not save range boundaries.');
+    } finally {
+      setBusy(false);
+    }
+  }, [miles, selectedContacts, readyContacts, awaitingContacts.length, sessionToken, reload]);
+
+  return (
+    <section className="space-y-4 text-white" aria-label="Circle Safety & Distress">
+      <div className="flex items-center gap-2">
+        <Lock className="h-5 w-5 text-sky-300" />
+        <h4 className="font-semibold">Circle Safety & Distress</h4>
+      </div>
+      <p className="text-sm text-zinc-300">
+        Set up range boundaries around trusted contacts and configure a distress disengagement PIN.
+        Distress alerts notify your Trust Circle — they do not contact emergency services.
+      </p>
+      {error && (
+        <p role="alert" className="rounded-xl border border-red-500/40 p-3 text-sm text-red-200">
+          {error}
+        </p>
+      )}
+      {info && (
+        <p role="status" className="rounded-xl border border-sky-500/40 p-3 text-sm text-sky-200">
+          {info}
+        </p>
+      )}
+
+      <div className="space-y-3 rounded-2xl border border-white/10 p-4">
+        <div className="rounded-xl border border-sky-400/30 bg-sky-900/15 px-3 py-3">
+          <label className="flex cursor-pointer items-center justify-between gap-3">
+            <span className="flex-1 text-sm">
+              <strong className="block font-semibold">Allow my Circle to set range alerts</strong>
+              <span className="mt-1 block text-xs text-zinc-300">Separate from normal location sharing. Only mutual Trust Circle contacts whom you share precise location with can monitor a range; you can turn this off at any time.</span>
+            </span>
+            <input type="checkbox" className="h-6 w-6 shrink-0 accent-sky-500"
+              checked={Boolean(settings?.allow_range_alerts)}
+              disabled={!settings || busy || rangeConsentBusy}
+              onChange={async (event) => {
+                const enabled = event.target.checked;
+                setRangeConsentBusy(true); setError(''); setInfo('');
+                try {
+                  await safetyFetch(sessionToken, '/settings/range-consent', {
+                    method: 'PUT', body: JSON.stringify({ enabled }),
+                  });
+                  setSettings(previous => ({ ...(previous || {}), allow_range_alerts: enabled }));
+                  setInfo(enabled ? 'Range alert permission enabled.' : 'Range alert permission disabled. Existing pending range alerts for your location were cleared.');
+                  await reload();
+                } catch (err) { setError(err.message); }
+                finally { setRangeConsentBusy(false); }
+              }}
+            />
+          </label>
+        </div>
+        <div className="flex items-center justify-between gap-2">
+          <h4 className="flex items-center gap-2 font-semibold">
+            <MapPin className="h-5 w-5" />
+            Range boundaries
+          </h4>
+          <button type="button" className={btn} disabled={busy} onClick={reload}>
+            <RefreshCw className="h-4 w-4" aria-label="Refresh" />
+          </button>
+        </div>
+        <p className="text-sm text-zinc-300">
+          Get notified when a sharing contact leaves a defined area around your current device location.
+        </p>
+        <fieldset className="space-y-3 rounded-xl border border-white/15 p-3">
+          <legend className="px-1 text-sm font-semibold">Who should I receive range alerts for?</legend>
+          <label className="flex min-h-[48px] cursor-pointer items-center gap-3 rounded-lg px-2 py-1">
+            <input type="radio" name="circle-range-scope" className="h-5 w-5 accent-sky-500"
+              checked={selectionMode === 'all'} disabled={busy}
+              onChange={() => setSelectionMode('all')} />
+            <span className="text-sm">Everyone in My Trust Circle</span>
+          </label>
+          <label className="flex min-h-[48px] cursor-pointer items-center gap-3 rounded-lg px-2 py-1">
+            <input type="radio" name="circle-range-scope" className="h-5 w-5 accent-sky-500"
+              checked={selectionMode === 'specific'} disabled={busy}
+              onChange={() => setSelectionMode('specific')} />
+            <span className="text-sm">Select Specific Contacts</span>
+          </label>
+          {circleError && <p className="rounded-lg border border-amber-500/40 p-2 text-xs text-amber-200" role="status">{circleError}</p>}
+          {circleContacts.length > 0 ? (
+            <div className="max-h-64 space-y-1 overflow-y-auto rounded-xl border border-white/10 bg-black/15 p-2" role="group" aria-label="Trust Circle contacts">
+              {circleContacts.map((contact) => {
+                const ready = readyIdSet.has(contact.identity_id);
+                return (
+                  <label key={contact.identity_id} className="flex min-h-[52px] items-center gap-3 rounded-lg p-2 hover:bg-white/5">
+                    {selectionMode === 'specific'
+                      ? <input type="checkbox" className="h-5 w-5 shrink-0 accent-sky-500"
+                          checked={selectedIds.includes(contact.identity_id)} disabled={busy}
+                          onChange={(event) => setSelectedIds((previous) => event.target.checked
+                            ? [...new Set([...previous, contact.identity_id])]
+                            : previous.filter((id) => id !== contact.identity_id))} />
+                      : <span aria-hidden="true" className="w-5 shrink-0 text-center text-sky-300">•</span>}
+                    <span className="min-w-0 flex-1 text-sm">
+                      <span className="block truncate font-medium">{name(contact)}{contact.handle ? ` (@${contact.handle})` : ''}</span>
+                      <span className={`block text-xs ${ready ? 'text-emerald-300' : 'text-amber-300'}`}>
+                        {ready ? 'Ready for range alerts' : 'Awaiting precise sharing, range permission, or mutual Circle access'}
+                      </span>
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+          ) : (
+            <p className="text-sm text-zinc-300">No Trust Circle contacts were found. Add contacts to your Trust Circle, then select Refresh.</p>
+          )}
+          <p className="text-xs text-zinc-400">
+            {readyContacts.length} of {selectedContacts.length} selected contact(s) currently ready for monitoring.
+            {awaitingContacts.length > 0 ? ` ${awaitingContacts.length} contact(s) need permission; they remain visible but will not be tracked.` : ''}
+          </p>
+        </fieldset>
+        <label className="block text-sm">Radius (miles) around your current device location
+          <input type="number" className={`${input} mt-1`} min="0.1" max="20" step="0.1" value={miles} onChange={e => setMiles(e.target.value)} />
+        </label>
+        <button className={`${btn} w-full bg-sky-700/40`} type="button"
+          disabled={busy || !readyContacts.length}
+          onClick={armRange}>
+          {busy ? 'Saving…' : `Save ${readyContacts.length > 1 ? 'boundaries' : 'boundary'} at my current location`}
+        </button>
+        <p className="text-xs text-zinc-400">
+          Everyone selects all CURRENTLY eligible contacts. Newly eligible members are never added automatically — return here and save again to include them. The boundary center stays fixed. An alert requires a reliable inside position followed by an outside position; GPS drift and stale/offline locations do not trigger alerts.
+        </p>
+        {!eligible.length && <p className="text-xs text-amber-200">No contacts have enabled the required precise sharing and range permissions yet. The new contact list above still shows your Trust Circle so you can choose whom you want to monitor once they opt in.</p>}
+        {zones.map(z => <div key={z.zone_id} className="flex flex-wrap items-center justify-between gap-2 border-t border-white/10 py-2">
+          <span>{name(z.target)} — {(z.radius_m/1609.344).toFixed(1)} mi — {z.last_state || 'unknown'}</span>
+          <button type="button" disabled={busy} className={`${btn} text-red-200`} onClick={() => submit(
+            () => safetyFetch(sessionToken, `/zones/${encodeURIComponent(z.target_id)}`, { method: 'DELETE' }), 'Range deleted.')}>
+            Remove
+          </button>
+        </div>)}
+      </div>
+
+      <div className="space-y-3 rounded-2xl border border-red-500/30 p-4">
+        <h4 className="flex items-center gap-2 font-semibold"><Lock className="h-5 w-5"/>Distress disengagement PIN</h4>
+        <p className="text-zinc-300">{settings?.pin_configured ? 'PIN configured. Enter the current PIN to change it.' : 'Create a 4–8 digit PIN before using distress.'} Only you can stop your alert with this PIN; it expires automatically after one hour.</p>
+        {settings?.pin_configured && <input aria-label="Current distress PIN" type="password" inputMode="numeric" autoComplete="off" className={input} value={oldPin} placeholder="Current PIN" maxLength={8} onChange={e => setOldPin(e.target.value.replace(/\D/g, ''))}/>}
+        <input aria-label="New distress PIN" type="password" inputMode="numeric" autoComplete="off" className={input} value={pin} placeholder="New 4–8 digit PIN" maxLength={8} onChange={e => setPin(e.target.value.replace(/\D/g, ''))}/>
+        <button className={`${btn} w-full`} type="button" disabled={busy || !/^\d{4,8}$/.test(pin)} onClick={() => submit(async () => {
+          await safetyFetch(sessionToken, '/settings/pin', { method: 'PUT', body: JSON.stringify({ pin, current_pin: oldPin || null }) });
+          setPin(''); setOldPin('');
+        }, 'Distress PIN saved securely.')}>Save PIN</button>
+        <button type="button" className={`${btn} w-full border-red-500/50 bg-red-900/40 text-red-100`} onClick={() => setConfirmDistress(true)}>
+          <AlertTriangle className="mr-2 inline h-5 w-5"/>Accessible distress option (tap to confirm)
+        </button>
+        {SILENT_DISTRESS_UI_ENABLED && settings?.silent_mode_supported === true && (
+          <button type="button" className={`${btn} w-full border-zinc-400/50 bg-zinc-800/90 text-white`}
+            onClick={() => onRequestSilentDistress?.()}
+            aria-label="Activate silent distress to your Trust Circle; screen switches to PIN entry">
+            Silent Distress — no audible or visual alert inside Circle on this device
+          </button>
+        )}
+        {SILENT_DISTRESS_UI_ENABLED && <p className="text-xs text-zinc-400">Set up your PIN, permissions and contacts in advance. The device OS may still display location-permission prompts or other notifications; this cannot silence your whole phone. Circle Distress does not contact 911.</p>}
+        {confirmDistress && <div className="space-y-3 rounded-xl border border-red-400/60 bg-red-900/30 p-3" role="dialog" aria-label="Confirm distress alert">
+          <p className="font-semibold text-red-100">Send distress to your Trust Circle?</p>
+          <p className="text-sm text-zinc-200">This may notify all eligible members and share your current location with them. It does NOT contact emergency services.</p>
+          <div className="flex gap-2">
+            <button type="button" className={`${btn} flex-1 bg-red-700`} onClick={() => { setConfirmDistress(false); onRequestDistress?.(); }}>Send distress</button>
+            <button type="button" className={`${btn} flex-1`} onClick={() => setConfirmDistress(false)}>Cancel</button>
+          </div>
+        </div>}
+        <button type="button" className={`${btn} w-full border-red-300/75 bg-red-800/40 text-red-100`}
+          onClick={() => onRequestEmergency911?.('distress')} aria-label="911 emergency calling information and confirmation preview">
+          <AlertTriangle className="mr-2 inline h-5 w-5" aria-hidden="true" /> 911 — Emergency call preview (unavailable)
+        </button>
+        <p className="text-xs font-semibold text-red-200">911 service is NOT connected. This opens a confirmation preview only. Circle Distress alerts remain a separate service and do not contact emergency responders.</p>
+        <p className="text-xs text-zinc-400">You can also press and hold the Call button for 5 seconds. A short tap still opens Call normally. Recipients can mute their own alerts at any time.</p>
+      </div>
+    </section>
+  );
+}
+
+export function TrustVoiceCircleSafetyOverlay({ sessionToken, requestNonce, silentRequestNonce = 0, onRequestEmergency911 }) {
+  const [active, setActive] = useState(null);
+  const [inbox, setInbox] = useState([]);
+  const [alerts, setAlerts] = useState([]);
+  const [stopPin, setStopPin] = useState('');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [available, setAvailable] = useState(null);
+  const [preparedIncidentId, setPreparedIncidentId] = useState(null);
+  const [copyStatus, setCopyStatus] = useState('');
+  const [silentPending, setSilentPending] = useState(false);
+  const [silentAttemptError, setSilentAttemptError] = useState('');
+  const requestSeen = useRef(requestNonce);
+  const silentRequestSeen = useRef(silentRequestNonce);
+  const inFlight = useRef(false);
+
+  const reload = useCallback(async () => {
+    if (!sessionToken) { setActive(null); setInbox([]); setAlerts([]); return; }
+    try {
+      const [mine, theirs, range] = await Promise.all([
+        safetyFetch(sessionToken, '/distress/current'),
+        safetyFetch(sessionToken, '/distress/inbox'),
+        safetyFetch(sessionToken, '/alerts'),
+      ]);
+      setActive(mine.incident || null); setInbox(theirs.incidents || []); setAlerts(range.alerts || []);
+      setAvailable(true);
+    } catch (err) { if (err.status === 404) setAvailable(false); }
+  }, [sessionToken]);
+
+  useEffect(() => {
+    reload();
+    if (!sessionToken) return;
+    // When backend is still staged/disabled, reduce polling to one attempt
+    // per minute rather than hitting three non-existent endpoints every 15s.
+    const id = window.setInterval(reload, available === false ? 60000 : 15000);
+    document.addEventListener('visibilitychange', reload);
+    return () => { clearInterval(id); document.removeEventListener('visibilitychange', reload); };
+  }, [reload, sessionToken, available]);
+
+  const send = useCallback(async (mode = 'standard') => {
+    if (!sessionToken || inFlight.current) return;
+    inFlight.current = true;
+    setBusy(true); setError('');
+    if (mode === 'silent') { setSilentPending(true); setSilentAttemptError(''); }
+    try {
+      // Fail closed against older backends that ignore an unknown `mode` field:
+      // silently falling back to standard UI could expose the sender.
+      if (mode === 'silent') {
+        const capabilities = await safetyFetch(sessionToken, '/settings');
+        if (capabilities?.silent_mode_supported !== true) {
+          throw new Error('Silent mode is not available on this server. No alert was sent.');
+        }
+      }
+      // IMPORTANT: even if GPS is denied, send an alert WITHOUT location.
+      let position = {};
+      try { position = await gpsOnce(4000); } catch { /* allow distress without GPS */ }
+      const result = await safetyFetch(sessionToken, '/distress', { method: 'POST', body: JSON.stringify({ ...position, mode }) });
+      setActive(result.incident);
+      // If an earlier STANDARD alert already existed, the server must not
+      // falsely report that a new silent alert was created.
+      if (mode === 'silent' && result.incident?.mode !== 'silent') {
+        setSilentAttemptError('A different distress alert was already active. Silent mode was not confirmed.');
+      }
+      await reload();
+    } catch (err) {
+      if (mode === 'silent') setSilentAttemptError(err.message || 'No alert was sent.');
+      else setError(err.message);
+    }
+    finally { setBusy(false); setSilentPending(false); inFlight.current = false; }
+  }, [sessionToken, reload]);
+
+  useEffect(() => {
+    if (requestNonce === requestSeen.current) return;
+    requestSeen.current = requestNonce;
+    send('standard');
+  }, [requestNonce, send]);
+
+  useEffect(() => {
+    if (silentRequestNonce === silentRequestSeen.current) return;
+    silentRequestSeen.current = silentRequestNonce;
+    if (SILENT_DISTRESS_UI_ENABLED) send('silent');
+  }, [silentRequestNonce, send]);
+
+  // Update the sender's emergency position while this app page remains open.
+  // This does NOT claim iOS background tracking when the app is suspended.
+  useEffect(() => {
+    if (!active?.incident_id || !sessionToken || !navigator.geolocation) return;
+    let lastSent = 0;
+    const watch = navigator.geolocation.watchPosition(({ coords }) => {
+      if (Date.now() - lastSent < 15000) return;
+      lastSent = Date.now();
+      safetyFetch(sessionToken, `/distress/${encodeURIComponent(active.incident_id)}/position`, {
+        method: 'PUT', body: JSON.stringify({ latitude: coords.latitude, longitude: coords.longitude, accuracy_m: coords.accuracy }),
+      }).catch(() => {});
+    }, () => {}, { enableHighAccuracy: true, maximumAge: 10000, timeout: 30000 });
+    return () => navigator.geolocation.clearWatch(watch);
+  }, [active?.incident_id, sessionToken]);
+
+  const act = async (action) => {
+    setBusy(true); setError('');
+    try { await action(); await reload(); }
+    catch (err) { setError(err.message); }
+    finally { setBusy(false); }
+  };
+
+  const copyEmergencyText = useCallback(async (incident, includeLink = false) => {
+    const text = prepareThirdPartyEmergencyText(incident);
+    const link = mapLink(incident.latitude, incident.longitude);
+    const value = includeLink && link ? `${text}\nMap link (only if dispatcher requests): ${link}` : text;
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error('Clipboard unavailable');
+      await navigator.clipboard.writeText(value);
+      setCopyStatus('Copied. You must send it yourself using an available phone. Nothing was delivered by VeriFYD.');
+    } catch {
+      setCopyStatus('Clipboard unavailable. Select and manually copy the message displayed below.');
+    }
+  }, []);
+
+  if (!sessionToken) return null;
+  if (SILENT_DISTRESS_UI_ENABLED && !active && (silentPending || silentAttemptError)) return (
+    <div className="fixed inset-0 z-[200000] flex items-center justify-center bg-[#101214] p-6" role="dialog" aria-modal="true" aria-label="Connection status">
+      <div className="w-full max-w-sm space-y-4 text-center text-zinc-200">
+        {silentPending ? <p role="status">Connecting…</p> : <>
+          <p role="alert" className="text-sm">Contacts were NOT notified. {silentAttemptError}</p>
+          <button className="min-h-[48px] w-full rounded-xl border border-zinc-500 bg-zinc-800 px-4" type="button" onClick={() => send('silent')}>Retry</button>
+          <button className="min-h-[48px] w-full rounded-xl border border-zinc-500 bg-zinc-900 px-4" type="button" onClick={() => setSilentAttemptError('')}>Return</button>
+        </>}
+      </div>
+    </div>
+  );
+  // The sender's silent distress UI intentionally shows ONLY the disengage PIN
+  // and Enter. No red banner, audible chime, map, notification or animation.
+  // Browser/OS notifications or location permission prompts are NOT controlled here.
+  if (active?.mode === 'silent') return (
+    <div className="fixed inset-0 z-[200000] flex items-center justify-center bg-[#101214] p-6" role="dialog" aria-modal="true" aria-label="PIN entry">
+      <form className="w-full max-w-sm space-y-3" onSubmit={(e) => { e.preventDefault(); act(async () => {
+        await safetyFetch(sessionToken, `/distress/${encodeURIComponent(active.incident_id)}/stop`, {
+          method: 'POST', body: JSON.stringify({ pin: stopPin })
+        });
+        setStopPin('');
+      }); }}>
+        <label htmlFor="verifyd-silent-pin" className="block text-center text-base text-zinc-300">Enter PIN</label>
+        <input id="verifyd-silent-pin" autoComplete="off" inputMode="numeric" type="password"
+          aria-label="Enter disengagement PIN" value={stopPin} maxLength={8}
+          onChange={(e) => setStopPin(e.target.value.replace(/\D/g, ''))}
+          className="min-h-[56px] w-full rounded-xl border border-zinc-700 bg-zinc-900 px-4 text-center text-xl text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400" />
+        <button type="submit" disabled={busy || stopPin.length < 4}
+          className="min-h-[52px] w-full rounded-xl border border-zinc-600 bg-zinc-800 px-4 text-lg font-semibold text-zinc-100 disabled:opacity-60">Enter</button>
+        {error && <p className="text-center text-sm text-zinc-400" role="status">PIN not accepted or temporarily unavailable.</p>}
+      </form>
+    </div>
+  );
+  const shouldShow = Boolean(active || inbox.length || alerts.length || busy || error);
+  return shouldShow ? (
+    <div className="fixed inset-x-2 top-2 z-[95] mx-auto flex max-h-[85dvh] max-w-xl flex-col gap-2 overflow-y-auto rounded-2xl border border-red-600/50 bg-[#160a0d] p-3 text-white shadow-2xl sm:inset-x-auto sm:right-4 sm:left-auto sm:w-[440px]" role="region" aria-label="Circle Safety alerts">
+      {error && <p className="rounded-lg bg-red-700/50 p-2 text-sm" role="alert">{error}<button className="ml-3 underline" onClick={() => setError('')}>Dismiss</button></p>}
+      {busy && <p role="status" className="text-sm">Updating Circle Safety…</p>}
+      {active && <div className="rounded-xl border border-red-500 p-3">
+        <h3 className="flex items-center gap-2 font-bold text-red-200"><AlertTriangle className="h-5 w-5"/> Your distress alert is active</h3>
+        <p className="mt-1 text-xs">Your distress alert is active. Members may receive notifications depending on device permissions and connectivity. Reminder attempts end at {fmt(active.expires_at)}. Enter your PIN to stop sooner. This is not emergency-services dispatch.</p>
+        <form className="mt-3 flex gap-2" onSubmit={e => { e.preventDefault(); act(async () => {
+          await safetyFetch(sessionToken, `/distress/${encodeURIComponent(active.incident_id)}/stop`, { method: 'POST', body: JSON.stringify({ pin: stopPin }) });
+          setStopPin('');
+        }); }}>
+          <input className={`${input} flex-1`} type="password" inputMode="numeric" autoComplete="off" aria-label="Distress disengagement PIN" placeholder="Disengagement PIN" maxLength={8} value={stopPin} onChange={e => setStopPin(e.target.value.replace(/\D/g, ''))} required />
+          <button className={btn} disabled={busy || stopPin.length < 4} type="submit">Stop</button>
+        </form>
+        <button type="button" className={`${btn} mt-3 w-full border-red-200 bg-red-950 text-white`}
+          onClick={() => onRequestEmergency911?.('distress')}>
+          911 — Review emergency option (not connected)
+        </button>
+        <p className="mt-1 text-xs text-red-200">Your Circle distress alert is separate from 911. This preview will NOT contact dispatch.</p>
+      </div>}
+      {inbox.map(a => <div key={a.incident_id} className="motion-safe:animate-pulse motion-reduce:animate-none rounded-xl border-2 border-red-400 bg-red-700/70 p-3 shadow-[0_0_20px_rgba(239,68,68,0.45)]" role="alert" aria-live="assertive">
+        <h3 className="flex items-center gap-2 text-lg font-black"><BellRing className="h-5 w-5"/> {a.mode === 'silent' ? 'SILENT DISTRESS' : 'DISTRESS'} — {name(a.sender)}</h3>
+        <p className="mt-1 text-sm">Sent {fmt(a.created_at)} · ends by {fmt(a.expires_at)}.</p>
+        {mapLink(a.latitude, a.longitude) ? <a className="mt-2 inline-flex min-h-[44px] items-center gap-2 rounded-lg bg-white px-3 py-2 font-semibold text-red-900" href={mapLink(a.latitude, a.longitude)} target="_blank" rel="noopener noreferrer"><MapPin className="h-4 w-4"/> Open last reported location</a>
+          : <p className="text-sm">Location was not available when this alert was sent.</p>}
+        {a.last_position_at && <p className="text-xs">Last GPS update: {fmt(a.last_position_at)}</p>}
+        <details className="mt-3 rounded-xl border border-white/30 bg-black/30 p-3" open={preparedIncidentId === a.incident_id}>
+          <summary className="cursor-pointer font-bold text-white" onClick={(event) => {
+            event.preventDefault();
+            setPreparedIncidentId(preparedIncidentId === a.incident_id ? null : a.incident_id);
+            setCopyStatus('');
+          }}>Prepare emergency message with last known location</summary>
+          {preparedIncidentId === a.incident_id && <div className="mt-3 space-y-2">
+            <p className="text-xs text-white">VeriFYD has NOT sent this to 911. Texting 911 from your own phone may reach the 911 center near YOU, not the person in distress. Tell the operator you are reporting for someone in a different location.</p>
+            <textarea readOnly rows={6} className={`${input} resize-y text-sm`} aria-label="Emergency message for manual copying"
+              value={prepareThirdPartyEmergencyText(a)} onFocus={(event) => event.target.select()} />
+            <button type="button" className={`${btn} w-full bg-zinc-900`} onClick={() => copyEmergencyText(a)}>Copy plain-text message</button>
+            {mapLink(a.latitude, a.longitude) && <button type="button" className={`${btn} w-full bg-zinc-900`}
+              onClick={() => copyEmergencyText(a, true)}>Copy text with map link — only if 911 requests one</button>}
+            <a href="sms:911" className={`${btn} block text-center bg-zinc-900`}>
+              Open your phone's Text-to-911 app (does not send)
+            </a>
+            <p className="text-xs text-white">Paste the message and SEND it yourself only during a real emergency where Text-to-911 is supported. Keep communicating with the dispatcher. If you can call, call; if the distress is in another area, request transfer to the correct jurisdiction.</p>
+            {copyStatus && <p className="text-xs text-zinc-200" role="status">{copyStatus}</p>}
+          </div>}
+        </details>
+        <button type="button" className={`${btn} mt-2 w-full border-red-200 bg-red-950 text-white`}
+          onClick={() => onRequestEmergency911?.('distress')} aria-label="Review 911 option for this distress alert — preview only">
+          911 — Review emergency option (not connected)
+        </button>
+        <p className="mt-1 text-xs font-semibold text-red-100">Opening this 911 option will NOT call emergency services or automatically forward the distress incident.</p>
+        <button type="button" className={`${btn} mt-2 w-full bg-black/30`} disabled={busy} onClick={() => act(() => safetyFetch(sessionToken, `/distress/${encodeURIComponent(a.incident_id)}/mute`, { method: 'POST' }))}>Stop receiving this distress alert</button>
+      </div>)}
+      {alerts.map(a => <div key={a.alert_id} className="rounded-xl border border-amber-400/60 bg-amber-800/30 p-3 text-sm" role="alert">
+        <h3 className="font-bold">Range exit — {name(a.actor)}</h3>
+        <p>{fmt(a.created_at)}</p>
+        {mapLink(a.latitude, a.longitude) && <a className="block min-h-[40px] py-2 text-sky-200 underline" href={mapLink(a.latitude, a.longitude)} target="_blank" rel="noopener noreferrer">View shared location on map</a>}
+        <button className={`${btn} mt-1 w-full`} disabled={busy} type="button" onClick={() => act(() => safetyFetch(sessionToken, `/alerts/${encodeURIComponent(a.alert_id)}/dismiss`, { method: 'POST' }))}>Dismiss this range alert</button>
+      </div>)}
+      {available && !active && !inbox.length && !alerts.length && <button type="button" className={btn} onClick={() => setError('')}>Close</button>}
+    </div>
+  ) : null;
+}
