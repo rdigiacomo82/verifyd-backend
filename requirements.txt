@@ -89,3 +89,6 @@ livekit-api==1.2.1
 
 # Trust Voice browser Web Push (VAPID + encrypted payloads)
 pywebpush==2.5.0
+
+# OFF-BY-DEFAULT VeriFYD E911 enrollment staging: field-level encryption (NOT 911 routing)
+cryptography>=42,<47
