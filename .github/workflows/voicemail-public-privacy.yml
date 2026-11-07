@@ -1,0 +1,19 @@
+name: Voicemail Public Privacy Readiness
+on:
+  pull_request:
+    paths:
+      - 'tests/voicemail_public_privacy_probe.py'
+      - '.github/workflows/voicemail-public-privacy.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  public-content:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python tests/voicemail_public_privacy_probe.py
