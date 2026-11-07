@@ -611,7 +611,7 @@ export function TrustVoiceCircleSafetyOverlay({ sessionToken, requestNonce, sile
         {mapLink(a.latitude, a.longitude) ? <a className="mt-2 inline-flex min-h-[44px] items-center gap-2 rounded-lg bg-white px-3 py-2 font-semibold text-red-900" href={mapLink(a.latitude, a.longitude)} target="_blank" rel="noopener noreferrer"><MapPin className="h-4 w-4"/> Open last reported location</a>
           : <p className="text-sm">Location was not available when this alert was sent.</p>}
         {a.last_position_at && <p className="text-xs">Last GPS update: {fmt(a.last_position_at)}</p>}
-        <details className="mt-3 rounded-xl border border-white/30 bg-black/30 p-3" open={preparedIncidentId === a.incident_id}>
+        {SILENT_DISTRESS_UI_ENABLED && a.mode === 'silent' && <details className="mt-3 rounded-xl border border-white/30 bg-black/30 p-3" open={preparedIncidentId === a.incident_id}>
           <summary className="cursor-pointer font-bold text-white" onClick={(event) => {
             event.preventDefault();
             setPreparedIncidentId(preparedIncidentId === a.incident_id ? null : a.incident_id);
@@ -630,7 +630,7 @@ export function TrustVoiceCircleSafetyOverlay({ sessionToken, requestNonce, sile
             <p className="text-xs text-white">Paste the message and SEND it yourself only during a real emergency where Text-to-911 is supported. Keep communicating with the dispatcher. If you can call, call; if the distress is in another area, request transfer to the correct jurisdiction.</p>
             {copyStatus && <p className="text-xs text-zinc-200" role="status">{copyStatus}</p>}
           </div>}
-        </details>
+        </details>}
         <button type="button" className={`${btn} mt-2 w-full border-red-200 bg-red-950 text-white`}
           onClick={() => onRequestEmergency911?.('distress')} aria-label="Review 911 option for this distress alert — preview only">
           911 — Review emergency option (not connected)
