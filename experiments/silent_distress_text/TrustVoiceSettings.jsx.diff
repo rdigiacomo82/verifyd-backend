@@ -1,0 +1,19 @@
+--- a/TrustVoiceSettings.jsx
++++ b/TrustVoiceSettings.jsx
+@@ -575,6 +575,7 @@
+   // notifications
+   sessionToken,
+   onRequestDistress,
++  onRequestSilentDistress,
+   onRequestEmergency911,
+   onSocialSaved,
+   // accessibility / assist / adaptive
+@@ -759,7 +760,7 @@
+           )}
+ 
+           {activePanel === 'circle-safety' && (
+-            <TrustVoiceCircleSafetySettings sessionToken={sessionToken} onRequestDistress={onRequestDistress} onRequestEmergency911={onRequestEmergency911} />
++            <TrustVoiceCircleSafetySettings sessionToken={sessionToken} onRequestDistress={onRequestDistress} onRequestSilentDistress={onRequestSilentDistress} onRequestEmergency911={onRequestEmergency911} />
+           )}
+ 
+           {activePanel === 'emergency-enrollment' && (
