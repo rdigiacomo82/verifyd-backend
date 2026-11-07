@@ -68,6 +68,7 @@ from trust_voice_attachment_analysis import router as trust_voice_attachment_ana
 from trust_voice_location import router as trust_voice_location_router
 from trust_voice_voicemail_intelligence import router as trust_voice_voicemail_intelligence_router
 from trust_voice_circle_safety import router as trust_voice_circle_safety_router
+from trust_voice_private_gateway_staging import router as private_gateway_staging_router
 
 log = logging.getLogger("verifyd.main")
 
@@ -306,6 +307,8 @@ app.include_router(trust_voice_location_router)
 app.include_router(trust_voice_voicemail_intelligence_router)
 # VERIFYD_CIRCLE_SAFETY_V1 -- isolated, opt-in, disabled by default
 app.include_router(trust_voice_circle_safety_router)
+# VERIFYD_PRIVATE_GATEWAY_STAGING_V1 — OFF by default, bearer + allowlist, never dials.
+app.include_router(private_gateway_staging_router)
 
 # VERIFYD_MAIL_SHIELD_STATIC_ICONS_V1
 # Public static assets for Microsoft Outlook add-in validation icons.
@@ -351,6 +354,12 @@ LABEL_UI = {
 # ─────────────────────────────────────────────
 #  CORS
 # ─────────────────────────────────────────────
+# Local test-host permission exists ONLY while private staging is explicitly enabled.
+_PRIVATE_GATEWAY_DEV_CORS = (
+    ['http://127.0.0.1:3000']
+    if os.environ.get('VERIFYD_PRIVATE_GATEWAY_STAGE_ENABLED', '').strip().lower() in {'1', 'true', 'yes', 'on'}
+    else []
+)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -359,7 +368,7 @@ app.add_middleware(
         "http://localhost:5173",
         "http://localhost:3000",
         "http://127.0.0.1:5173",
-    ],
+    ] + _PRIVATE_GATEWAY_DEV_CORS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
