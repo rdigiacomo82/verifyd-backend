@@ -1,0 +1,45 @@
+--- a/apps/web/src/pages/TrustVoiceBeta.jsx
++++ b/apps/web/src/pages/TrustVoiceBeta.jsx
+@@ -92,6 +92,7 @@
+ import { BlockUserModal, ReportUserModal } from '@/components/TrustVoiceSafety';
+ import TrustVoiceSettings from '@/components/TrustVoiceSettings';
+ import { TrustVoiceCircleSafetyOverlay } from '@/components/TrustVoiceCircleSafety.jsx';
++import TrustVoiceEmergencyWorkflowLab from '@/components/TrustVoiceEmergencyWorkflowLab.jsx';
+ import useCircleDistressLongPress from '@/hooks/useCircleDistressLongPress.js';
+ import { useTrustVoiceAccessibility } from '@/utils/trustVoiceAccessibility';
+ import { useTrustVoiceLocale } from '@/hooks/useTrustVoiceLocale';
+@@ -3363,6 +3364,10 @@
+   const [presenceState, setPresenceState] = useState(null); // null | 'checking' | true | false
+   const [presenceError, setPresenceError] = useState(null);
+   // 911 UI preview only. No E911 provider, SIP destination, or outgoing call API.
++  const [emergencyWorkflowLabOpen, setEmergencyWorkflowLabOpen] = useState(false);
++  const emergencyWorkflowLabEnabled = import.meta.env.DEV &&
++    import.meta.env.VITE_VERIFYD_EMERGENCY_WORKFLOW_LAB_ENABLED === 'true' &&
++    typeof window !== 'undefined' && ['localhost', '127.0.0.1'].includes(window.location.hostname);
+   const [emergency911Open, setEmergency911Open] = useState(false);
+   const [emergency911Source, setEmergency911Source] = useState('call');
+   const [showQuick911, setShowQuick911] = useState(false);
+@@ -10822,6 +10827,9 @@
+   return (
+     <>
+       <TrustVoiceCircleSafetyOverlay sessionToken={sessionIdentity ? sessionToken : null} requestNonce={safetyRequestNonce} onRequestEmergency911={requestEmergency911} />
++      {emergencyWorkflowLabEnabled && sessionIdentity && (
++        <TrustVoiceEmergencyWorkflowLab open={emergencyWorkflowLabOpen} onClose={() => setEmergencyWorkflowLabOpen(false)} sessionToken={sessionToken} />
++      )}
+       <TrustVoiceEmergency911Dialog open={Boolean(sessionIdentity && emergency911Open)}
+         onClose={closeEmergency911} source={emergency911Source} />
+       {sessionIdentity && sessionToken && voicemailTarget && (
+@@ -12304,6 +12312,13 @@
+                         <p className="text-sm leading-relaxed text-zinc-400">
+                           Enter an exact Trust Voice handle to check availability. Entering 911 or @911 opens an emergency access warning; VeriFYD cannot place 911 calls yet.
+                         </p>
++                        {emergencyWorkflowLabEnabled && (
++                          <button type="button" onClick={() => setEmergencyWorkflowLabOpen(true)}
++                            className="mt-4 inline-flex min-h-[56px] w-full items-center justify-center gap-2 rounded-xl border border-amber-400 bg-amber-950/50 px-4 py-3 text-base font-bold text-amber-100 focus-visible:outline focus-visible:outline-4 focus-visible:outline-yellow-300"
++                            aria-label="Practice accessible emergency messages — simulation only, not 911">
++                            Emergency Messaging Practice Lab — NOT 911
++                          </button>
++                        )}
+                         {(showQuick911 || isEmergency911Target(callHandle)) && (
+                           <button type="button" onClick={() => requestEmergency911('call')}
+                             className="mt-4 inline-flex min-h-[56px] w-full items-center justify-center gap-2 rounded-xl border-2 border-red-400 bg-red-950/70 px-4 py-3 text-base font-extrabold text-red-100 focus-visible:outline focus-visible:outline-4 focus-visible:outline-yellow-300">
