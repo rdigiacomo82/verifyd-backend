@@ -203,3 +203,16 @@ def test_no_production_default():
     assert 'VERIFYD_EMERGENCY_WORKFLOW_LAB_ENABLED' in s
     assert 'VERIFYD_EMERGENCY_WORKFLOW_LAB_IDS' in s
     assert 'TRAINING_SIMULATION_ONLY' in s
+
+
+def test_current_training_resume(ctx):
+    client,_=ctx
+    assert client.get(BASE+'/incidents/current',headers=HEAD).json()['incident'] is None
+    i=make(client).json()['id']
+    current=client.get(BASE+'/incidents/current',headers=HEAD)
+    assert current.status_code==200
+    d=current.json()
+    assert d['incident']['id']==i
+    assert d['dispatch_connected'] is False
+    client.post(f'{BASE}/incidents/{i}/close',headers=HEAD)
+    assert client.get(BASE+'/incidents/current',headers=HEAD).json()['incident'] is None
