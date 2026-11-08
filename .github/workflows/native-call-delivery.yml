@@ -1,0 +1,44 @@
+name: Native iOS call delivery
+on:
+  push:
+    paths:
+      - 'native_call_contract.py'
+      - 'trust_voice_native_calls.py'
+      - 'trust_voice_signaling.py'
+      - 'tests/test_native_call*.py'
+      - 'tests/test_trust_voice_incoming_call_push_pilot.py'
+      - 'tests/test_trust_voice_session_db_resilience.py'
+      - 'tests/test_circle_security_regressions.py'
+      - '.github/workflows/native-call-delivery.yml'
+      - 'requirements-native-calls.txt'
+  pull_request:
+    paths:
+      - 'native_call_contract.py'
+      - 'trust_voice_native_calls.py'
+      - 'trust_voice_signaling.py'
+      - 'tests/test_native_call*.py'
+      - 'tests/test_trust_voice_incoming_call_push_pilot.py'
+      - 'tests/test_trust_voice_session_db_resilience.py'
+      - 'tests/test_circle_security_regressions.py'
+      - '.github/workflows/native-call-delivery.yml'
+      - 'requirements-native-calls.txt'
+permissions:
+  contents: read
+jobs:
+  native-calls:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements-native-calls.txt
+      - name: Native delivery, authentication and signaling regressions
+        env:
+          PYTHONPATH: .
+        run: |
+          python -m py_compile native_call_contract.py trust_voice_native_calls.py trust_voice_signaling.py main.py
+          python -m unittest discover -s tests -p 'test_native_call*.py' -v
+          python -m unittest discover -s tests -p 'test_trust_voice_incoming_call_push_pilot.py' -v
+          python -m unittest discover -s tests -p 'test_trust_voice_session_db_resilience.py' -v
+          python -m unittest discover -s tests -p 'test_circle_security_regressions.py' -v

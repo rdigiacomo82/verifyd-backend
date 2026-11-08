@@ -89,3 +89,7 @@ livekit-api==1.2.1
 
 # Trust Voice browser Web Push (VAPID + encrypted payloads)
 pywebpush==2.5.0
+
+# iOS VoIP APNs HTTP/2 and ES256 provider authentication
+httpx[http2]>=0.27.0,<1
+cryptography>=43.0.0
