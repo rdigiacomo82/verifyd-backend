@@ -163,5 +163,73 @@ class IncomingPushPilotTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("if msg_type == \"call_invite\":", text)
 
 
+    def load_unregister(self, env, terminal, cancelled):
+        from collections import defaultdict
+        tree = ast.parse(SRC.read_text(encoding="utf8"))
+        fn = [n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == "_unregister"]
+        assert len(fn) == 1
+        mod = ast.Module(
+            body=[ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0)] + fn,
+            type_ignores=[],
+        )
+        ast.fix_missing_locations(mod)
+        env["_connections"] = defaultdict(set)
+        env["_connection_meta"] = {}
+        env["_cancel_call_expiry"] = lambda call_id: cancelled.append(call_id)
+        env["_record_call_terminal"] = lambda call_id, status, reason: terminal.append((call_id, status, reason))
+        exec(compile(mod, str(SRC), "exec"), env)
+        return env["_unregister"]
+
+    async def test_pilot_callee_socket_loss_keeps_pending_ringing_invitation(self):
+        env, sent = harness()
+        terminal, cancelled = [], []
+        unregister = self.load_unregister(env, terminal, cancelled)
+        ws = object()
+        env["_connections"]["callee-b"].add(ws)
+        env["_active_calls"]["tvcall_live"] = dict(
+            call_id="tvcall_live", caller_id="caller-a", callee_id="callee-b",
+            state="ringing", created_at=time.time(), pilot_incoming_push=True,
+        )
+        await unregister("callee-b", ws)
+        self.assertIn("tvcall_live", env["_active_calls"])
+        self.assertEqual(terminal, [])
+        self.assertEqual(cancelled, [])
+        self.assertEqual(sent, [])
+
+    async def test_legacy_callee_disconnect_still_marks_missed_immediately(self):
+        env, sent = harness()
+        terminal, cancelled = [], []
+        unregister = self.load_unregister(env, terminal, cancelled)
+        ws = object()
+        env["_connections"]["callee-b"].add(ws)
+        env["_active_calls"]["tvcall_legacy"] = dict(
+            call_id="tvcall_legacy", caller_id="caller-a", callee_id="callee-b",
+            state="ringing", created_at=time.time(), pilot_incoming_push=False,
+        )
+        await unregister("callee-b", ws)
+        self.assertNotIn("tvcall_legacy", env["_active_calls"])
+        self.assertEqual(terminal, [("tvcall_legacy", "missed", "callee_disconnected")])
+        self.assertEqual(cancelled, ["tvcall_legacy"])
+        self.assertEqual(len(sent), 2)
+
+    async def test_pilot_caller_disconnect_cancels_invitation_immediately(self):
+        env, sent = harness()
+        terminal, cancelled = [], []
+        unregister = self.load_unregister(env, terminal, cancelled)
+        ws = object()
+        env["_connections"]["caller-a"].add(ws)
+        env["_active_calls"]["tvcall_pilot"] = dict(
+            call_id="tvcall_pilot", caller_id="caller-a", callee_id="callee-b",
+            state="ringing", created_at=time.time(), pilot_incoming_push=True,
+        )
+        await unregister("caller-a", ws)
+        self.assertNotIn("tvcall_pilot", env["_active_calls"])
+        self.assertEqual(terminal, [("tvcall_pilot", "canceled", "caller_disconnected")])
+        self.assertEqual(cancelled, ["tvcall_pilot"])
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0][1]["type"], "call_ended")
+
+
+
 if __name__ == "__main__":
     unittest.main()
