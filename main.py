@@ -62,6 +62,7 @@ from trust_voice_push import router as trust_voice_push_router, start_push_sched
 from trust_voice_preferences import router as trust_voice_preferences_router
 from trust_voice_blocking import router as trust_voice_blocking_router
 from trust_voice_devices import router as trust_voice_devices_router
+from trust_voice_native_calls import router as trust_voice_native_calls_router
 from trust_voice_calendar import router as trust_voice_calendar_router
 from trust_voice_attachments import router as trust_voice_attachments_router
 from trust_voice_attachment_analysis import router as trust_voice_attachment_analysis_router
@@ -291,6 +292,7 @@ app.include_router(trust_voice_push_router)
 app.include_router(trust_voice_preferences_router)
 app.include_router(trust_voice_blocking_router)
 app.include_router(trust_voice_devices_router)
+app.include_router(trust_voice_native_calls_router)
 
 # VERIFYD_TRUST_VOICE_CALENDAR_V1
 app.include_router(trust_voice_calendar_router)

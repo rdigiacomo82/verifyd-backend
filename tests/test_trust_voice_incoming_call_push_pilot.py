@@ -155,11 +155,11 @@ class IncomingPushPilotTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_legacy_foreground_and_timeout_flow_remains(self):
         text = SRC.read_text(encoding="utf8")
-        self.assertIn("if not recipient_online and not pilot_push_reachable:", text)
+        self.assertIn("if not recipient_online and not pilot_push_reachable and not native_push_reachable:", text)
         self.assertIn("if delivered == 0 and not push_sent", text)
         self.assertIn("_create_call_history(", text)
         self.assertIn("_schedule_call_expiry(call_id)", text)
-        self.assertIn('if _incoming_call_push_pilot_enabled(identity):', text)
+        self.assertIn('if _incoming_call_push_pilot_enabled(identity) or native_pilot_allowed(identity):', text)
         self.assertIn("if msg_type == \"call_invite\":", text)
 
 
