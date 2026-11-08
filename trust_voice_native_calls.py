@@ -14,6 +14,7 @@ import os
 import re
 import threading
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal, Optional
 from uuid import UUID
@@ -29,7 +30,15 @@ from pydantic import BaseModel, Field
 from database import get_db
 from native_call_contract import apns_voip_payload, build_invite
 
-router = APIRouter(prefix="/trust-voice", tags=["Native Calls"])
+@asynccontextmanager
+async def _readiness_lifespan(_app):
+    # Local checks only: no APNs request, database write, or delivery activation.
+    logging.getLogger("uvicorn.error").info(
+        "VERIFYD_NATIVE_CALL_READINESS %s", json.dumps(readiness_report(), sort_keys=True))
+    yield
+
+
+router = APIRouter(prefix="/trust-voice", tags=["Native Calls"], lifespan=_readiness_lifespan)
 log = logging.getLogger("verifyd.native_calls")
 BUNDLE_ID = "com.verifyd.videoauth"
 _schema_ready = False
@@ -190,6 +199,23 @@ def configured() -> bool:
                 and re.fullmatch(r"[A-Z0-9]{10}", os.getenv("VERIFYD_APNS_KEY_ID", ""))
                 and os.getenv("VERIFYD_APNS_PRIVATE_KEY_FILE")
                 and os.getenv("VERIFYD_NATIVE_CALL_TOKEN_ENCRYPTION_KEY"))
+
+
+def readiness_report() -> dict[str, bool]:
+    """Safe startup summary. Never serialize credentials or exception details."""
+    def passes(check) -> bool:
+        try:
+            return bool(check())
+        except Exception:
+            return False
+
+    return {
+        "required_settings": passes(configured),
+        "apns_key_readable_and_signable": passes(_provider_token),
+        "device_token_encryption": passes(_token_cipher),
+        "pilot_accounts_configured": bool(os.getenv("VERIFYD_NATIVE_CALLS_PILOT_HANDLES", "").strip()),
+        "native_delivery_enabled": enabled(),
+    }
 
 
 def reachable(identity: dict) -> bool:

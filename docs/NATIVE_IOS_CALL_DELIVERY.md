@@ -157,3 +157,16 @@ live APNs, native compilation and real-device media tests remain outstanding.
 
 Rollback delivery by setting `VERIFYD_NATIVE_CALLS_ENABLED=0`. Leave encrypted
 device data in place until a retention/migration plan; never drop existing tables.
+
+## Automatic readiness check
+
+On startup, the native-call router emits one `VERIFYD_NATIVE_CALL_READINESS`
+JSON log through the server logger. It reports only five booleans: required
+settings, local APNs key readability/signing, device-token encryption, pilot
+allowlist presence and the delivery gate. It never logs environment values,
+file paths, JWTs, private keys or exception details. Missing/invalid settings
+produce false and do not prevent startup. This check sends no APNs request,
+performs no database access, and does not change delivery flags. Local signing
+success does not prove that Apple accepts the key for the app's VoIP topic or
+that any device receives a call. It is intended for log-based diagnosis when
+connected tooling cannot execute a Render Shell command.
