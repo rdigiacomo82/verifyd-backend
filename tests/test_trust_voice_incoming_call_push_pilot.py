@@ -177,6 +177,7 @@ class IncomingPushPilotTests(unittest.IsolatedAsyncioTestCase):
         env["_connection_meta"] = {}
         env["_cancel_call_expiry"] = lambda call_id: cancelled.append(call_id)
         env["_record_call_terminal"] = lambda call_id, status, reason: terminal.append((call_id, status, reason))
+        env["_send_to_identity"] = env["_send"]
         exec(compile(mod, str(SRC), "exec"), env)
         return env["_unregister"]
 
