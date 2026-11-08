@@ -1,0 +1,27 @@
+name: Trust Voice Android call reconnect grace — staging only
+
+on:
+  pull_request:
+    paths:
+      - "trust_voice_signaling.py"
+      - "tests/test_trust_voice_call_disconnect_grace.py"
+      - ".github/workflows/trust-voice-call-reconnect-grace.yml"
+      - "docs/ANDROID_CALL_RECOVERY_STAGING.md"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Syntax and policy tests
+        run: |
+          python -m py_compile trust_voice_signaling.py
+          python -m unittest discover -s tests -p 'test_trust_voice_call_disconnect_grace.py' -v
+          python -m unittest discover -s tests -p 'test_trust_voice_session_db_resilience.py' -v

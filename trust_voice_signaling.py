@@ -76,6 +76,9 @@ _state_lock = asyncio.Lock()
 _persistent_session_schema_ready = False
 _call_history_schema_ready = False
 _call_expiry_tasks: Dict[str, asyncio.Task] = {}
+# Pilot only. A WebSocket interruption is not proof the underlying WebRTC media stopped.
+# Never enabled in production without coordinated client reconnect and native tests.
+_call_disconnect_grace_tasks: Dict[tuple[str, str], asyncio.Task] = {}
 
 
 class SessionCodeRequest(BaseModel):
@@ -1072,6 +1075,71 @@ async def _presence(
         )
 
 
+
+def _call_reconnect_grace_seconds() -> int:
+    """Bound the staging-only server grace; cannot be made indefinite by env."""
+    try:
+        value = int(os.environ.get("VERIFYD_CALL_RECONNECT_GRACE_SECONDS", "20"))
+    except (TypeError, ValueError):
+        value = 20
+    return max(5, min(value, 30))
+
+
+def _call_reconnect_grace_allowed(identity_id: str) -> bool:
+    """Fail closed unless flag AND explicit staging identity allowlist are set."""
+    if os.environ.get("VERIFYD_CALL_RECONNECT_GRACE_ENABLED", "0").strip().lower() not in {"1", "true", "yes", "on"}:
+        return False
+    allowed = {value.strip() for value in os.environ.get("VERIFYD_CALL_RECONNECT_GRACE_PILOT_IDS", "").split(",") if value.strip()}
+    return bool(identity_id and identity_id in allowed)
+
+
+def _cancel_call_disconnect_grace(call_id: str | None = None, identity_id: str | None = None) -> None:
+    """Cancel only matching pending tasks; called from the event loop."""
+    for key, task in list(_call_disconnect_grace_tasks.items()):
+        if (call_id is None or key[0] == call_id) and (identity_id is None or key[1] == identity_id):
+            _call_disconnect_grace_tasks.pop(key, None)
+            if not task.done():
+                task.cancel()
+
+
+async def _expire_call_after_disconnect_grace(call_id: str, identity_id: str) -> None:
+    """Terminate an answered call only if this participant never reconnected."""
+    key = (call_id, identity_id)
+    try:
+        await asyncio.sleep(_call_reconnect_grace_seconds())
+        async with _state_lock:
+            call = dict(_active_calls.get(call_id) or {})
+            if (
+                _connections.get(identity_id)
+                or call.get("state") != "answered"
+                or identity_id not in {call.get("caller_id"), call.get("callee_id")}
+            ):
+                return
+            _active_calls.pop(call_id, None)
+
+        _cancel_call_expiry(call_id)
+        other_id = call["callee_id"] if identity_id == call["caller_id"] else call["caller_id"]
+        _record_call_terminal(call_id, "ended", "peer_disconnected")
+        await _send_to_identity(other_id, {
+            "type": "call_ended", "call_id": call_id, "reason": "peer_disconnected"
+        })
+    except asyncio.CancelledError:
+        return
+    finally:
+        if _call_disconnect_grace_tasks.get(key) is asyncio.current_task():
+            _call_disconnect_grace_tasks.pop(key, None)
+
+
+def _schedule_call_disconnect_grace(call_id: str, identity_id: str) -> None:
+    """The caller must hold _state_lock to keep disconnect/reconnect atomic."""
+    key = (call_id, identity_id)
+    task = _call_disconnect_grace_tasks.get(key)
+    if task is None or task.done():
+        _call_disconnect_grace_tasks[key] = asyncio.create_task(
+            _expire_call_after_disconnect_grace(call_id, identity_id)
+        )
+
+
 async def _register(
     identity_id: str,
     ws: WebSocket,
@@ -1113,6 +1181,11 @@ async def _register(
             ),
         }
 
+        # A verified reconnect can cancel the staged pending server timeout.
+        # The current browser frontend still tears down WebRTC on socket close;
+        # this server change alone does NOT recover microphone media.
+        _cancel_call_disconnect_grace(identity_id=identity_id)
+
 
 async def _unregister(identity_id: str, ws: WebSocket) -> None:
     async with _state_lock:
@@ -1134,6 +1207,9 @@ async def _unregister(identity_id: str, ws: WebSocket) -> None:
                     call.get("caller_id"),
                     call.get("callee_id"),
                 }:
+                    if call.get("state") == "answered" and _call_reconnect_grace_allowed(identity_id):
+                        _schedule_call_disconnect_grace(call_id, identity_id)
+                        continue
                     affected.append((call_id, dict(call)))
                     _active_calls.pop(call_id, None)
 
