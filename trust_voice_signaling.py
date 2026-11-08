@@ -1225,6 +1225,17 @@ async def _unregister(identity_id: str, ws: WebSocket) -> None:
                     call.get("caller_id"),
                     call.get("callee_id"),
                 }:
+                    # A locked pilot recipient may briefly reconnect, then
+                    # lose its suspended browser socket before answering.
+                    # Preserve the invitation until its EXISTING 30-second
+                    # timeout, rather than turning it into an immediate miss.
+                    # A caller disconnect still cancels the invite normally.
+                    if (
+                        identity_id == call.get("callee_id")
+                        and call.get("state") == "ringing"
+                        and call.get("pilot_incoming_push")
+                    ):
+                        continue
                     affected.append((call_id, dict(call)))
                     _active_calls.pop(call_id, None)
 
