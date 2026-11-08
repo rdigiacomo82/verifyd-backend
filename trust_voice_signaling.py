@@ -1061,6 +1061,97 @@ async def notify_message_created(
     return sent
 
 
+
+def _incoming_call_push_pilot_enabled(target: dict) -> bool:
+    """Do not change call behavior unless BOTH gates explicitly allow this target."""
+    flag = os.environ.get("VERIFYD_INCOMING_CALL_PUSH_PILOT_ENABLED", "0").strip().lower()
+    if flag not in {"1", "true", "yes", "on"}:
+        return False
+    allowed_handles = {
+        v.strip().lower().lstrip("@")
+        for v in os.environ.get("VERIFYD_INCOMING_CALL_PUSH_PILOT_HANDLES", "").split(",")
+        if v.strip()
+    }
+    handle = str(target.get("handle_lower") or target.get("handle") or "").strip().lower().lstrip("@")
+    return bool(handle and handle in allowed_handles)
+
+
+def _incoming_call_push_subscription_ready(identity_id: str) -> bool:
+    """Read only current session-bound, nonrevoked subscriptions; fail closed."""
+    try:
+        from trust_voice_push import (
+            _active_subscriptions,
+            _enabled as push_enabled,
+            _configured as push_configured,
+        )
+        return bool(
+            identity_id and push_enabled() and push_configured()
+            and _active_subscriptions(identity_id)
+        )
+    except Exception:
+        log.warning("Incoming-call pilot push subscription lookup failed", exc_info=True)
+        return False
+
+
+async def _send_incoming_call_pilot_push(
+    callee_id: str, call_id: str, call_type: str
+) -> bool:
+    """Best-effort Web Push, NOT a native phone-call or a delivery acknowledgment."""
+    try:
+        from trust_voice_push import notify_identity_push
+        result = await asyncio.to_thread(
+            notify_identity_push,
+            callee_id,
+            notification_type="call_incoming",
+            title="Incoming VeriFYD Circle call",
+            body="Tap to open VeriFYD Circle and answer.",
+            url=f"/voice?incoming={call_id}",
+            tag=f"verifyd-incoming-{call_id}",
+            data={"call_id": call_id, "call_type": call_type},
+            ttl=INVITE_TTL_SECONDS,
+        )
+        return bool(int((result or {}).get("sent") or 0) > 0)
+    except Exception:
+        log.warning("Incoming-call pilot Web Push failed", exc_info=True)
+        return False
+
+
+async def _replay_pilot_ringing_calls(identity_id: str, websocket: WebSocket) -> None:
+    """Deliver live pending invitations when a previously sleeping client reconnects."""
+    async with _state_lock:
+        pending = [
+            dict(call)
+            for call in _active_calls.values()
+            if call.get("state") == "ringing"
+            and call.get("pilot_incoming_push")
+            and str(call.get("callee_id") or "") == identity_id
+        ]
+    for call in pending:
+        call_age = time.time() - float(call.get("created_at") or 0)
+        if not (0 <= call_age < INVITE_TTL_SECONDS):
+            continue
+        try:
+            caller = _identity_by_id(str(call.get("caller_id") or ""))
+            callee = _identity_by_id(identity_id)
+            if not caller or not callee:
+                continue
+            allowed, _reason = call_permission_decision(caller=caller, callee=callee)
+            if not allowed:
+                continue
+            from trust_voice_blocking import identities_blocked
+            if identities_blocked(str(caller["id"]), identity_id):
+                continue
+            await _send(websocket, {
+                "type": "incoming_call",
+                "call_id": str(call["call_id"]),
+                "caller": _public_identity(caller),
+                "expires_in_seconds": max(1, int(INVITE_TTL_SECONDS - call_age)),
+                "call_type": str(call.get("call_type") or "audio"),
+            })
+        except Exception:
+            log.warning("Could not replay staged incoming-call invitation", exc_info=True)
+
+
 async def _presence(
     identity_id: str,
 ) -> bool:
@@ -1134,6 +1225,17 @@ async def _unregister(identity_id: str, ws: WebSocket) -> None:
                     call.get("caller_id"),
                     call.get("callee_id"),
                 }:
+                    # A locked pilot recipient may briefly reconnect, then
+                    # lose its suspended browser socket before answering.
+                    # Preserve the invitation until its EXISTING 30-second
+                    # timeout, rather than turning it into an immediate miss.
+                    # A caller disconnect still cancels the invite normally.
+                    if (
+                        identity_id == call.get("callee_id")
+                        and call.get("state") == "ringing"
+                        and call.get("pilot_incoming_push")
+                    ):
+                        continue
                     affected.append((call_id, dict(call)))
                     _active_calls.pop(call_id, None)
 
@@ -2055,6 +2157,12 @@ async def signaling_ws(
         },
     )
 
+    # If the recipient opened a locked-screen push during an active pilot
+    # ringing window, replay the invitation to the authenticated socket.
+    # Never replay terminal or expired calls.
+    if _incoming_call_push_pilot_enabled(identity):
+        await _replay_pilot_ringing_calls(str(identity_id), websocket)
+
     try:
         while True:
             message = (
@@ -2293,9 +2401,14 @@ async def signaling_ws(
 
                     continue
 
-                if not await _presence(
-                    target["id"]
-                ):
+                recipient_online = await _presence(target["id"])
+                pilot_push_reachable = False
+                if _incoming_call_push_pilot_enabled(target):
+                    pilot_push_reachable = await asyncio.to_thread(
+                        _incoming_call_push_subscription_ready, str(target["id"])
+                    )
+
+                if not recipient_online and not pilot_push_reachable:
                     await _send(
                         websocket,
                         {
@@ -2337,6 +2450,7 @@ async def signaling_ws(
                     "created_at": (
                         time.time()
                     ),
+                    "pilot_incoming_push": pilot_push_reachable,
                 }
 
                 async with _state_lock:
@@ -2369,7 +2483,18 @@ async def signaling_ws(
                     )
                 )
 
-                if delivered == 0:
+                # Pilot push is sent in addition to live WebSocket signaling.
+                # An open socket can exist while a locked browser is suspended.
+                push_sent = False
+                if pilot_push_reachable:
+                    push_sent = await _send_incoming_call_pilot_push(
+                        str(target["id"]), call_id, call_type
+                    )
+
+                # Preserve the original offline failure unless a subscriber's
+                # push service accepted the pilot invitation, or the device
+                # authenticated again during the best-effort push attempt.
+                if delivered == 0 and not push_sent and not await _presence(str(target["id"])):
                     async with _state_lock:
                         _active_calls.pop(
                             call_id,
