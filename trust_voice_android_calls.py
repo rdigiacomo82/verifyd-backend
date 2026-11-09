@@ -215,15 +215,19 @@ def redeem_pairing(body: AndroidDeviceRegistration, response: Response,
     return {'device_token': device_token}
 
 
-def _paired_device(cur, authorization: Optional[str]) -> dict:
+def _control_token_hash(authorization: Optional[str]) -> str:
     from trust_voice_signaling import _token_from_authorization
     token = _token_from_authorization(authorization)
     if not DEVICE_TOKEN_PATTERN.fullmatch(token):
         raise HTTPException(401, detail={'error': 'invalid_android_device'})
+    return _digest(token)
+
+
+def _paired_device(cur, control_token_hash: str) -> dict:
     cur.execute('''SELECT d.identity_id, d.package_name, d.control_token_hash
       FROM verifyd_android_call_devices d JOIN verifyd_voice_sessions s
         ON s.session_id=d.session_id AND s.identity_id=d.identity_id AND s.revoked_at IS NULL
-      WHERE d.control_token_hash=%s AND d.disabled_at IS NULL''', (_digest(token),))
+      WHERE d.control_token_hash=%s AND d.disabled_at IS NULL''', (control_token_hash,))
     device = cur.fetchone()
     if not device:
         raise HTTPException(401, detail={'error': 'invalid_android_device'})
@@ -232,9 +236,10 @@ def _paired_device(cur, authorization: Optional[str]) -> dict:
 
 def _paired_identity(authorization: Optional[str]) -> str:
     from trust_voice_signaling import _identity_by_id
+    control_token_hash = _control_token_hash(authorization)
     ensure_schema()
     with get_db() as conn:
-        device = _paired_device(conn.cursor(), authorization)
+        device = _paired_device(conn.cursor(), control_token_hash)
     identity = _identity_by_id(device['identity_id'])
     if not identity or not pilot_allowed(identity) or device['package_name'] not in allowed_packages():
         raise HTTPException(403, detail={'error': 'android_call_pilot_required'})
@@ -250,7 +255,7 @@ def refresh_device_token(body: AndroidDeviceTokenUpdate,
     try:
         with get_db() as conn:
             cur = conn.cursor()
-            device = _paired_device(cur, authorization)
+            device = _paired_device(cur, _control_token_hash(authorization))
             cur.execute('''UPDATE verifyd_android_call_devices d
               SET token_hash=%s, token_ciphertext=%s, updated_at=%s
               FROM verifyd_voice_sessions s WHERE d.control_token_hash=%s
@@ -267,10 +272,13 @@ def refresh_device_token(body: AndroidDeviceTokenUpdate,
 
 @router.delete('/android-call-devices/current')
 def unlink_paired_device(authorization: Optional[str] = Header(default=None)):
-    ensure_schema()
+    control_token_hash = _control_token_hash(authorization)
     with get_db() as conn:
         cur = conn.cursor()
-        device = _paired_device(cur, authorization)
+        cur.execute("SELECT to_regclass('verifyd_android_call_devices') AS registry")
+        if cur.fetchone()['registry'] is None:
+            raise HTTPException(401, detail={'error': 'invalid_android_device'})
+        device = _paired_device(cur, control_token_hash)
         cur.execute('DELETE FROM verifyd_android_call_devices WHERE control_token_hash=%s',
                     (device['control_token_hash'],))
     return {'ok': True}

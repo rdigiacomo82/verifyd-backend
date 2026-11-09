@@ -165,6 +165,18 @@ class AndroidPilotTests(unittest.TestCase):
             signaling._verify_token(token)
         self.assertEqual(error.exception.status_code, 401)
 
+    def test_unlink_does_not_initialize_pilot_schema(self):
+        url = '/trust-voice/android-call-devices/current'
+        with patch.dict(os.environ, {}, clear=True), \
+             patch.object(android, 'ensure_schema') as schema, \
+             patch.object(android, 'get_db') as db:
+            self.assertEqual(self.client.delete(url).status_code, 401)
+            db.assert_not_called()
+            db.return_value.__enter__.return_value.cursor.return_value.fetchone.return_value = {'registry': None}
+            response = self.client.delete(url, headers={'Authorization': 'Bearer ac_' + 'a' * 43})
+            self.assertEqual(response.status_code, 401)
+        schema.assert_not_called()
+
     def dispatch(self, *, ringing, age):
         post = AsyncMock(return_value=MagicMock(status_code=200))
         client = MagicMock()
