@@ -1,0 +1,24 @@
+name: VeriFYD private gateway staging safety
+on:
+  pull_request:
+    paths:
+      - 'trust_voice_private_gateway_staging.py'
+      - 'main.py'
+      - 'tests/test_private_gateway_*.py'
+      - '.github/workflows/private-gateway-staging-check.yml'
+  workflow_dispatch:
+jobs:
+  isolated-staging-guard-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install HTTP test dependencies only
+        run: python -m pip install 'fastapi>=0.110,<1' 'pydantic>=2,<3' 'httpx>=0.25,<1'
+      - name: Compile and test private gateway (no databases, external services or SIP)
+        run: |
+          python -m py_compile main.py trust_voice_private_gateway_staging.py
+          python -m unittest discover -s tests -p 'test_private_gateway_*.py' -v
