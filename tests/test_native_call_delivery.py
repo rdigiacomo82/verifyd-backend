@@ -51,6 +51,27 @@ def authentication(row=None):
 
 
 class NativeAPI(unittest.TestCase):
+    def test_circle_registration_is_off_by_default(self):
+        body = dict(installation_id=DEVICE['installation_id'], token=DEVICE['token'],
+                    environment='production', bundle_id='com.verifyd.circle', opted_in=True)
+        with authentication() as auth, patch.dict(os.environ, {'VERIFYD_NATIVE_CALLS_ALLOWED_BUNDLE_IDS': native.BUNDLE_ID}):
+            self.assertEqual(422, self.client.post('/trust-voice/native-call-devices', headers=auth, json=body).status_code)
+
+    def test_circle_registration_uses_explicit_bundle_allowlist(self):
+        conn = MagicMock()
+        conn.cursor.return_value.fetchone.return_value = {'n': 0}
+        body = dict(installation_id=DEVICE['installation_id'], token=DEVICE['token'],
+                    environment='production', bundle_id='com.verifyd.circle', opted_in=True)
+        with authentication() as auth, patch.dict(os.environ, {
+            'VERIFYD_NATIVE_CALLS_ALLOWED_BUNDLE_IDS': native.BUNDLE_ID + ',com.verifyd.circle'
+        }), patch.object(native, 'ensure_schema'), patch.object(native, 'get_db') as db:
+            db.return_value.__enter__.return_value = conn
+            response = self.client.post('/trust-voice/native-call-devices', headers=auth, json=body)
+        self.assertEqual(200, response.status_code)
+        insert = next(c.args for c in conn.cursor.return_value.execute.call_args_list if 'INSERT INTO' in c.args[0])
+        self.assertEqual('com.verifyd.circle', insert[1][2])
+        self.assertEqual('production', insert[1][1])
+
     def setUp(self):
         app = FastAPI()
         app.include_router(native.router)
@@ -211,6 +232,21 @@ class CallState(unittest.IsolatedAsyncioTestCase):
 
 
 class APNs(unittest.IsolatedAsyncioTestCase):
+    async def test_each_app_uses_its_own_registered_voip_topic(self):
+        self.devices.return_value = [dict(DEVICE), dict(DEVICE, bundle_id='com.verifyd.circle', token='cd'*32,
+                                                      environment='production')]
+        with patch.dict(os.environ, {'VERIFYD_NATIVE_CALLS_ALLOWED_BUNDLE_IDS': native.BUNDLE_ID + ',com.verifyd.circle'}):
+            self.assertTrue(await self.dispatch())
+        self.assertEqual(2, len(self.requests))
+        by_host = {r.url.host: r.headers['apns-topic'] for r in self.requests}
+        self.assertEqual('com.verifyd.videoauth.voip', by_host['api.sandbox.push.apple.com'])
+        self.assertEqual('com.verifyd.circle.voip', by_host['api.push.apple.com'])
+
+    async def test_unknown_stored_app_cannot_select_an_apns_topic(self):
+        self.devices.return_value = [dict(DEVICE, bundle_id='evil.app')]
+        self.assertFalse(await self.dispatch())
+        self.assertFalse(self.requests)
+
     async def asyncSetUp(self):
         self.stack=ExitStack()
         self.addCleanup(self.stack.close)

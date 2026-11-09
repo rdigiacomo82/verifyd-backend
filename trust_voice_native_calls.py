@@ -42,12 +42,21 @@ class DeviceRegistration(BaseModel):
     installation_id: UUID
     token: str = Field(min_length=64, max_length=512, pattern=r"^[0-9a-f]+$")
     environment: Literal["sandbox", "production"]
-    bundle_id: Literal["com.verifyd.videoauth"]
+    bundle_id: str = Field(min_length=3, max_length=255,
+                           pattern=r"^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$")
     opted_in: Literal[True]
 
 
 def enabled() -> bool:
     return os.getenv("VERIFYD_NATIVE_CALLS_ENABLED", "0").lower().strip() in {"1", "true", "on", "yes"}
+
+
+def allowed_bundle_ids() -> set[str]:
+    # Keep the existing app as the default. Additional store apps require an
+    # explicit server setting; never accept a client-supplied APNs topic.
+    return {value.strip() for value in
+            os.getenv("VERIFYD_NATIVE_CALLS_ALLOWED_BUNDLE_IDS", BUNDLE_ID).split(",")
+            if re.fullmatch(r"[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+", value.strip())}
 
 
 def pilot_allowed(identity: dict) -> bool:
@@ -110,6 +119,8 @@ def ensure_schema() -> None:
 def register_device(body: DeviceRegistration, authorization: Optional[str] = Header(default=None)):
     _require_enabled()
     identity, session = _auth(authorization)
+    if body.bundle_id not in allowed_bundle_ids():
+        raise HTTPException(422, detail={"error": "unsupported_bundle_id"})
     if len(body.token) % 2:
         raise HTTPException(422, detail={"error": "invalid_token"})
     cipher = _token_cipher()
@@ -170,6 +181,8 @@ def active_devices(identity_id: str) -> list[dict]:
     cipher = _token_cipher()
     devices = []
     for row in rows:
+        if row["bundle_id"] not in allowed_bundle_ids():
+            continue
         try:
             row["token"] = cipher.decrypt(row["token_ciphertext"].encode()).decode()
             devices.append(row)
@@ -250,6 +263,8 @@ async def dispatch_invite(identity: dict, call: dict, is_current) -> bool:
         jwt = await asyncio.to_thread(_provider_token)
         async with httpx.AsyncClient(http2=True, timeout=2.0, follow_redirects=False) as client:
             async def send(device):
+                if device["bundle_id"] not in allowed_bundle_ids():
+                    return False
                 # Reconcile revoked/rotated devices immediately before dispatch.
                 current = await asyncio.to_thread(active_devices, str(identity["id"]))
                 if device not in current or not await is_current() or time.time() >= invite.expires_at:
@@ -259,7 +274,7 @@ async def dispatch_invite(identity: dict, call: dict, is_current) -> bool:
                 try:
                     response = await client.post(f"https://{host}/3/device/{device['token']}",
                         headers={"authorization": f"bearer {jwt}",
-                                 "apns-topic": BUNDLE_ID + ".voip", "apns-push-type": "voip",
+                                 "apns-topic": device["bundle_id"] + ".voip", "apns-push-type": "voip",
                                  "apns-priority": "10", "apns-expiration": str(invite.expires_at)},
                         json=apns_voip_payload(invite))
                     if response.status_code == 200:
