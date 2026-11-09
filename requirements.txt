@@ -93,3 +93,5 @@ pywebpush==2.5.0
 # iOS VoIP APNs HTTP/2 and ES256 provider authentication
 httpx[http2]>=0.27.0,<1
 cryptography>=43.0.0
+# Android FCM pilot OAuth (service account, never client-side)
+google-auth>=2.30.0,<3
