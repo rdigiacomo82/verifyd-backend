@@ -28,7 +28,7 @@ BODY = {
     'opted_in': True,
 }
 CALL_ID = 'tvcall_' + 'a' * 32
-DEVICES_URL = '/trust-voice/android-call-devices'
+PAIRINGS_URL = '/trust-voice/android-call-pairings'
 
 
 class AndroidPilotTests(unittest.TestCase):
@@ -41,14 +41,14 @@ class AndroidPilotTests(unittest.TestCase):
         with patch.dict(os.environ, {
             'VERIFYD_TRUST_VOICE_SIGNALING_ENABLED': '1',
         }, clear=True), patch.object(android, '_auth') as auth:
-            self.assertEqual(self.client.post(DEVICES_URL, json=BODY).status_code, 404)
+            self.assertEqual(self.client.post(PAIRINGS_URL).status_code, 404)
             self.assertEqual(self.client.get(f'/trust-voice/android-calls/{CALL_ID}').status_code, 404)
             self.assertEqual(self.client.post(f'/trust-voice/android-calls/{CALL_ID}/answer').status_code, 404)
         auth.assert_not_called()
 
     def test_requires_persistent_unrevoked_pilot_session(self):
         with patch.dict(os.environ, ENV, clear=True):
-            self.assertEqual(self.client.post(DEVICES_URL, json=BODY).status_code, 401)
+            self.assertEqual(self.client.post(PAIRINGS_URL).status_code, 401)
             with patch.object(signaling, '_secret', return_value=b'test-secret'), \
                  patch.object(signaling, '_identity_by_id', return_value=IDENTITY), \
                  patch.object(signaling, '_persistent_session_row', return_value={
@@ -58,7 +58,7 @@ class AndroidPilotTests(unittest.TestCase):
                     'identity_id': IDENTITY['id'], 'session_id': 'revoked',
                     'purpose': 'trust_voice_session',
                 })
-                result = self.client.post(DEVICES_URL, json=BODY, headers={
+                result = self.client.post(PAIRINGS_URL, headers={
                     'Authorization': f'Bearer {token}',
                 })
             self.assertEqual(result.status_code, 401)
@@ -72,11 +72,14 @@ class AndroidPilotTests(unittest.TestCase):
     def register_with_rows(self, rows):
         db = MagicMock()
         cursor = db.return_value.__enter__.return_value.cursor.return_value
-        cursor.fetchone.side_effect = rows
+        cursor.fetchone.side_effect = [
+            {'identity_id': IDENTITY['id'], 'session_id': 'session'}, {'handle_lower': 'pilot'}, *rows,
+        ]
         with patch.dict(os.environ, ENV, clear=True), \
-             patch.object(android, '_auth', return_value=(IDENTITY, {'session_id': 'session'})), \
              patch.object(android, 'ensure_schema'), patch.object(android, 'get_db', db):
-            result = self.client.post(DEVICES_URL, json=BODY)
+            result = self.client.post(PAIRINGS_URL + '/redeem', json=BODY, headers={
+                'Authorization': 'Bearer ap_' + 'a' * 43,
+            })
         return result, cursor.execute.call_args_list
 
     def test_registration_encrypts_and_binds_to_authenticated_session(self):
@@ -99,6 +102,68 @@ class AndroidPilotTests(unittest.TestCase):
     def test_registration_refuses_installation_owned_by_another_account(self):
         result, _ = self.register_with_rows([{'n': 0}, None, None])
         self.assertEqual(result.status_code, 409)
+
+    def test_issued_code_is_short_lived_and_only_digest_is_stored(self):
+        with patch.dict(os.environ, ENV, clear=True), \
+             patch.object(android, '_auth', return_value=(IDENTITY, {'session_id': 'session'})), \
+             patch.object(android, 'ensure_schema'), patch.object(android, 'get_db') as db:
+            result = self.client.post('/trust-voice/android-call-pairings')
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(result.headers['cache-control'], 'no-store')
+        code = result.json()['code']
+        self.assertIsNotNone(android.PAIR_CODE_PATTERN.fullmatch(code))
+        self.assertEqual(result.json()['expires_in_seconds'], 120)
+        sql, args = db.return_value.__enter__.return_value.cursor.return_value.execute.call_args.args
+        self.assertIn('ON CONFLICT (session_id)', sql)
+        self.assertEqual(args[:3], ('session', IDENTITY['id'], android._digest(code)))
+
+    def test_redeem_claims_code_and_writes_device_in_one_transaction(self):
+        code = 'ap_' + 'a' * 43
+        db = MagicMock()
+        cursor = db.return_value.__enter__.return_value.cursor.return_value
+        cursor.fetchone.side_effect = [
+            {'identity_id': IDENTITY['id'], 'session_id': 'session'},
+            {'handle_lower': 'pilot'},
+            None,
+        ]
+        url = '/trust-voice/android-call-pairings/redeem'
+        with patch.dict(os.environ, ENV, clear=True), patch.object(android, 'ensure_schema'), \
+             patch.object(android, 'get_db', db), patch.object(android, '_write_device') as write:
+            result = self.client.post(url, json=BODY, headers={'Authorization': f'Bearer {code}'})
+            replay = self.client.post(url, json=BODY, headers={'Authorization': f'Bearer {code}'})
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(result.headers['cache-control'], 'no-store')
+        self.assertEqual(replay.status_code, 401)
+        write.assert_called_once()
+        self.assertEqual(write.call_args.args[2:], (
+            IDENTITY['id'], 'session', android._digest(result.json()['device_token']),
+        ))
+        sql, args = cursor.execute.call_args_list[0].args
+        self.assertIn('DELETE FROM verifyd_android_call_pairings', sql)
+        self.assertIn('p.expires_at > EXTRACT(EPOCH FROM clock_timestamp())', sql)
+        self.assertIn('s.revoked_at IS NULL', sql)
+        self.assertEqual(args[0], android._digest(code))
+
+    def test_scoped_device_can_decline_but_cannot_answer_without_media(self):
+        with patch.dict(os.environ, ENV, clear=True), \
+             patch.object(android, '_paired_identity', return_value=IDENTITY['id']), \
+             patch.object(signaling, 'native_call_snapshot', new_callable=AsyncMock,
+                          return_value={'is_callee': True}), \
+             patch.object(signaling, 'apply_call_action', new_callable=AsyncMock,
+                          return_value={'type': 'call_declined'}) as action:
+            url = f'/trust-voice/android-calls/{CALL_ID}'
+            answer = self.client.post(url + '/answer')
+            decline = self.client.post(url + '/decline')
+        self.assertEqual(answer.status_code, 409)
+        self.assertEqual(answer.json()['detail']['error'], 'native_media_not_ready')
+        self.assertEqual(decline.status_code, 200)
+        action.assert_awaited_once_with(CALL_ID, IDENTITY['id'], 'call_decline')
+
+    def test_scoped_token_is_not_a_trust_voice_session_token(self):
+        token = 'ac_' + 'a' * 43
+        with self.assertRaises(signaling.HTTPException) as error:
+            signaling._verify_token(token)
+        self.assertEqual(error.exception.status_code, 401)
 
     def dispatch(self, *, ringing, age):
         post = AsyncMock(return_value=MagicMock(status_code=200))
