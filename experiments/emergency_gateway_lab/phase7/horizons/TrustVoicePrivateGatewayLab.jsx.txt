@@ -1,0 +1,261 @@
+/**
+ * VeriFYD PRIVATE gateway test page, NOT an emergency service.
+ * Safe for staging only: App.jsx gates this route behind Vite DEV + explicit
+ * VITE_VERIFYD_PRIVATE_GATEWAY_LAB_ENABLED=true. This page additionally
+ * refuses any origin other than localhost/127.0.0.1.
+ *
+ * No PSTN/SIP dialer, no 911/933 UI, no admin credentials, no account token,
+ * no tracking, no recording. Browser joins ONLY a local LiveKit echo room.
+ * The operator alone starts Asterisk extension 6000 from a separate terminal.
+ */
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { Room, RoomEvent } from 'livekit-client';
+
+const ROOM_URL = 'ws://127.0.0.1:7880';
+// This stage-broker integration is explicitly OFF unless the operator enables
+// it in a LOCAL Vite development session. Never enable on hosted vfvid.com.
+// Only the existing VeriFYD backend may receive an existing Circle session.
+const STAGE_API_BASE = (import.meta.env.VITE_VERIFYD_PRIVATE_GATEWAY_STAGE_API_BASE || '').replace(/\/+$/, '');
+const STAGE_BROKER_ENABLED = import.meta.env.DEV
+  && import.meta.env.VITE_VERIFYD_PRIVATE_GATEWAY_STAGE_BROKER_ENABLED === 'true'
+  && STAGE_API_BASE === 'https://verifyd-backend.onrender.com';
+const STAGE_STATUS_PATH = '/trust-voice/private-gateway/staging-status';
+const STAGE_ROOM_PATH = '/trust-voice/private-gateway/staging-room-token';
+function readCircleSession() {
+  // Never ask a user to paste their real Circle session into this page.
+  // On a local dev origin, a sign-in may not be present; fail closed.
+  try {
+    return sessionStorage.getItem('verifyd_trust_voice_session_token')
+      || localStorage.getItem('verifyd_trust_voice_session_token_persist')
+      || '';
+  } catch { return ''; }
+}
+
+const LOCAL_HOSTS = new Set(['127.0.0.1', 'localhost']);
+const isLocalBrowser = () => typeof window !== 'undefined' && LOCAL_HOSTS.has(window.location.hostname);
+const supportedOrigin = () => isLocalBrowser() && window.isSecureContext;
+
+const shell = 'min-h-screen bg-slate-950 text-white px-4 py-8 md:py-12';
+const panel = 'rounded-2xl border border-white/15 bg-slate-900 p-5 md:p-7 shadow-xl';
+const button = 'min-h-[48px] rounded-xl px-5 py-3 font-semibold focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-sky-400 disabled:opacity-40 disabled:cursor-not-allowed';
+
+export default function TrustVoicePrivateGatewayLab() {
+  const [token, setToken] = useState('');
+  const [state, setState] = useState('disconnected');
+  const [message, setMessage] = useState('Not connected.');
+  const [trackCount, setTrackCount] = useState(0);
+  const [microphoneReady, setMicrophoneReady] = useState(false);
+  const [needsPlay, setNeedsPlay] = useState(false);
+  const [stagePending, setStagePending] = useState(false);
+  const remoteNode = useRef(null);
+  const roomRef = useRef(null);
+  const remoteAudio = useRef(new Map());
+  const mountedRef = useRef(true);
+
+  const clearRemote = useCallback(() => {
+    for (const element of remoteAudio.current.values()) {
+      try { element.pause(); } catch { /* best effort */ }
+      element.remove();
+    }
+    remoteAudio.current.clear();
+    if (mountedRef.current) {
+      setTrackCount(0);
+      setNeedsPlay(false);
+    }
+  }, []);
+
+  const leave = useCallback(() => {
+    const room = roomRef.current;
+    roomRef.current = null;
+    if (room) {
+      try { room.localParticipant.setMicrophoneEnabled(false).catch(() => {}); } catch { /* already closed */ }
+      room.disconnect();
+    }
+    clearRemote();
+    if (mountedRef.current) {
+      setMicrophoneReady(false);
+      setToken('');
+      setState('disconnected');
+      setMessage('Disconnected. Microphone stopped.');
+    }
+  }, [clearRemote]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      leave();
+    };
+  }, [leave]);
+
+  const join = async (tokenOverride = null, roomUrlOverride = ROOM_URL) => {
+    if (!supportedOrigin() || roomRef.current || state !== 'disconnected') return;
+    const shortLivedToken = typeof tokenOverride === 'string' ? tokenOverride.trim() : token.trim();
+    if (!shortLivedToken) {
+      setMessage('Generate a short-lived lab token in the Mac terminal and paste it above.');
+      return;
+    }
+    setState('connecting');
+    setMessage('Connecting to the local LiveKit server...');
+    const room = new Room({ adaptiveStream: true, dynacast: true });
+    roomRef.current = room;
+    room.on(RoomEvent.TrackSubscribed, (track, publication) => {
+      if (track.kind !== 'audio' || !remoteNode.current) return;
+      const audio = track.attach();
+      audio.setAttribute('aria-label', 'Private Asterisk echo audio');
+      audio.setAttribute('data-lab-track', 'sip-echo');
+      audio.autoplay = true;
+      audio.controls = true;
+      audio.playsInline = true;
+      audio.muted = false;
+      remoteNode.current.appendChild(audio);
+      remoteAudio.current.set(publication.trackSid, audio);
+      if (mountedRef.current) {
+        setTrackCount(remoteAudio.current.size);
+        setMessage('Remote audio track connected. Speak into the microphone; headphones reduce feedback.');
+      }
+      const result = audio.play();
+      if (result?.catch) result.catch(() => { if (mountedRef.current) setNeedsPlay(true); });
+    });
+    room.on(RoomEvent.TrackUnsubscribed, (track, publication) => {
+      track.detach().forEach(element => element.remove());
+      remoteAudio.current.delete(publication.trackSid);
+      if (mountedRef.current) setTrackCount(remoteAudio.current.size);
+    });
+    room.on(RoomEvent.Disconnected, () => {
+      if (roomRef.current === room) roomRef.current = null;
+      clearRemote();
+      if (mountedRef.current) {
+        setMicrophoneReady(false);
+        setState('disconnected');
+        setMessage('LiveKit room disconnected.');
+      }
+    });
+    try {
+      // A broker-issued token is usable only for this same local echo endpoint.
+      if (roomUrlOverride !== ROOM_URL) throw new Error('Non-local gateway refused.');
+      await room.connect(ROOM_URL, shortLivedToken, { autoSubscribe: true });
+      if (!mountedRef.current) { room.disconnect(); return; }
+      setToken(''); // token stays out of DOM as soon as it is used
+      await room.localParticipant.setMicrophoneEnabled(true);
+      if (!mountedRef.current) { room.disconnect(); return; }
+      setMicrophoneReady(true);
+      setState('connected');
+      setMessage('Microphone connected. In Mac Terminal, run the private echo command shown below.');
+    } catch (error) {
+      room.disconnect();
+      if (roomRef.current === room) roomRef.current = null;
+      clearRemote();
+      if (mountedRef.current) {
+        setToken('');
+        setMicrophoneReady(false);
+        setState('disconnected');
+        setMessage(`Could not connect to local lab: ${String(error?.message || error)}. Check Docker services, Mac networking, and the token expiry.`);
+      }
+    }
+  };
+
+  const joinAsStagingCircleUser = async () => {
+    if (!STAGE_BROKER_ENABLED || !supportedOrigin() || state !== 'disconnected' || stagePending) return;
+    setStagePending(true);
+    try {
+      const circleToken = readCircleSession();
+      if (!circleToken) throw new Error('No Circle session on this local development origin. Use the existing manual lab token instead.');
+      const headers = { Authorization: `Bearer ${circleToken}` };
+      // The existing Circle backend validates session revocation + exact
+      // identity ID allowlist. No Circle bearer is sent to the SIP gateway.
+      const statusRes = await fetch(`${STAGE_API_BASE}${STAGE_STATUS_PATH}`, {
+        method: 'GET', headers, cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer',
+      });
+      if (!statusRes.ok) throw new Error(`Staging status unavailable (HTTP ${statusRes.status}); no change to normal calling.`);
+      const status = await statusRes.json();
+      if (!status.configured || status.emergency_service_available !== false || status.outbound_calls_enabled !== false) {
+        throw new Error('Dedicated private staging gateway is not configured safely.');
+      }
+      const tokenRes = await fetch(`${STAGE_API_BASE}${STAGE_ROOM_PATH}`, {
+        method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' },
+        body: '{}', cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer',
+      });
+      if (!tokenRes.ok) throw new Error(`Private test token denied (HTTP ${tokenRes.status}).`);
+      const grant = await tokenRes.json();
+      if (grant.test_only !== true || grant.outbound_calls_enabled !== false
+        || grant.emergency_service_available !== false || grant.room !== 'verifyd-private-echo'
+        || grant.url !== ROOM_URL || !grant.token || grant.expires_in_seconds > 180) {
+        throw new Error('Unexpected staging token response was refused.');
+      }
+      // The token stays in memory and is never displayed or stored.
+      await join(grant.token, grant.url);
+    } catch (error) {
+      if (mountedRef.current) setMessage(`Staging access unavailable: ${String(error?.message || error)}. Existing calls are unaffected.`);
+    } finally {
+      if (mountedRef.current) setStagePending(false);
+    }
+  };
+
+  const playRemote = async () => {
+    let failed = false;
+    for (const audio of remoteAudio.current.values()) {
+      try { await audio.play(); } catch { failed = true; }
+    }
+    setNeedsPlay(failed);
+    if (!failed) setMessage('Remote audio playback enabled.');
+  };
+
+  if (!supportedOrigin()) {
+    return (
+      <main className={shell}>
+        <section className={`${panel} mx-auto max-w-2xl`}>
+          <h1 className="text-2xl font-bold">Private Gateway Lab — disabled</h1>
+          <p className="mt-4">This development-only page runs only on localhost or 127.0.0.1, in a secure browser context. It cannot connect to your Mac from a hosted Horizons preview or production website.</p>
+          <p className="mt-3 font-semibold text-amber-200">NOT AN EMERGENCY SERVICE. Use your normal device phone service to contact emergency services.</p>
+        </section>
+      </main>
+    );
+  }
+
+  return (
+    <main className={shell}>
+      <section className={`${panel} mx-auto max-w-3xl`}>
+        <div className="mb-5 inline-flex rounded-full border border-amber-400/50 px-3 py-1 text-sm font-bold text-amber-200">PRIVATE TEST ONLY — NOT 911 / NOT 933</div>
+        <h1 className="text-2xl md:text-3xl font-bold">VeriFYD Private Gateway Lab</h1>
+        <p className="mt-3 text-slate-200">Connect your microphone to our isolated LiveKit room. A separate Mac Terminal command can call ONLY private Asterisk echo extension 6000. This page cannot dial any phone number.</p>
+
+        <div className="mt-6 grid gap-3 sm:grid-cols-3" aria-live="polite">
+          <div className="rounded-xl border border-white/10 bg-slate-800 p-4"><p className="text-xs uppercase text-slate-400">Room</p><strong>{state}</strong></div>
+          <div className="rounded-xl border border-white/10 bg-slate-800 p-4"><p className="text-xs uppercase text-slate-400">Microphone</p><strong>{microphoneReady ? 'Publishing' : 'Off'}</strong></div>
+          <div className="rounded-xl border border-white/10 bg-slate-800 p-4"><p className="text-xs uppercase text-slate-400">Remote audio tracks</p><strong>{trackCount}</strong></div>
+        </div>
+
+        <label htmlFor="verifyd-lab-token" className="mt-6 block font-semibold">5-minute, test-only LiveKit room token</label>
+        <textarea id="verifyd-lab-token" value={token} onChange={event => setToken(event.target.value)} rows={3} autoComplete="off" spellCheck={false}
+          placeholder="Paste token generated in local Mac Terminal; never use your VeriFYD account password" className="mt-2 w-full resize-y rounded-xl border border-white/20 bg-slate-800 p-4 text-sm text-white focus-visible:ring-4 focus-visible:ring-sky-400" />
+        <div className="mt-4 flex flex-wrap gap-3">
+          <button type="button" onClick={join} disabled={state !== 'disconnected'} className={`${button} bg-sky-500 text-slate-950`}>Join room and enable microphone</button>
+          <button type="button" onClick={leave} disabled={state === 'disconnected'} className={`${button} border border-white/30 bg-slate-700`}>Leave and stop microphone</button>
+          {needsPlay && <button type="button" onClick={playRemote} className={`${button} bg-amber-300 text-slate-950`}>Enable audio playback</button>}
+        </div>
+        {STAGE_BROKER_ENABLED && (
+          <div className="mt-5 rounded-xl border border-amber-300/40 bg-slate-800 p-4">
+            <p className="font-semibold text-amber-100">Circle authentication — separate staging test</p>
+            <p className="mt-2 text-sm text-slate-200">Uses your existing signed-in Circle session, if available on this LOCAL development origin, to request a 3-minute microphone-only token. No account password, emergency calling, or public dialer is involved.</p>
+            <button type="button" onClick={joinAsStagingCircleUser}
+              disabled={state !== 'disconnected' || stagePending}
+              className={`${button} mt-3 bg-sky-300 text-slate-950`}>
+              {stagePending ? 'Checking staging access…' : 'Join private test as Circle user'}
+            </button>
+          </div>
+        )}
+        <p role="status" aria-live="polite" className="mt-5 min-h-[54px] rounded-xl bg-slate-800 p-4 text-sm text-slate-100">{message}</p>
+        <div ref={remoteNode} className="mt-4" aria-label="Remote private echo audio players" />
+
+        <div className="mt-6 space-y-3 rounded-xl border border-sky-400/30 bg-slate-800/80 p-4 text-sm">
+          <p className="font-bold">Run these from the local Mac gateway directory, in separate Terminal commands:</p>
+          <code className="block whitespace-pre-wrap break-all">python3 bridge/phase4_bridge.py token</code>
+          <code className="block whitespace-pre-wrap break-all">python3 bridge/phase4_bridge.py call-echo --confirm-private-echo</code>
+          <p className="text-slate-300">Start Docker Compose before connecting. Generate the token first; join the room, then initiate the private echo. No admin token or SIP destination may be entered on this page.</p>
+        </div>
+        <p className="mt-5 text-sm font-semibold text-amber-200">This is not a reliable or authorized emergency-calling capability. Do not use it for emergencies.</p>
+      </section>
+    </main>
+  );
+}
