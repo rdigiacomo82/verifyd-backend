@@ -1,0 +1,38 @@
+name: VeriFYD silent distress STAGING safety
+on:
+  push:
+    branches: [experiment/verifyd-silent-distress-text-location-20261107]
+  pull_request:
+    paths:
+      - trust_voice_circle_safety.py
+      - tests/test_silent_distress_staging_static.py
+      - experiments/silent_distress_text/**
+      - .github/workflows/silent-distress-staging-safety.yml
+jobs:
+  static-checks:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: python -m unittest discover -s tests -p 'test_silent_distress_staging_static.py' -v
+      - run: python -m py_compile trust_voice_circle_safety.py
+      - name: Parse experimental JSX without running the app
+        run: |
+          mkdir -p "$RUNNER_TEMP/verifyd-silent-distress-ts"
+          cd "$RUNNER_TEMP/verifyd-silent-distress-ts"
+          npm install --ignore-scripts --no-audit --no-fund typescript@5.9.3
+          node - "$GITHUB_WORKSPACE" "$RUNNER_TEMP/verifyd-silent-distress-ts/node_modules/typescript" <<'JS'
+          const fs=require('fs');const root=process.argv[2];const ts=require(process.argv[3]);
+          const path=root+'/experiments/silent_distress_text/TrustVoiceCircleSafety.jsx.txt';
+          const code=fs.readFileSync(path,'utf8');
+          const ast=ts.createSourceFile(path,code,ts.ScriptTarget.Latest,true,ts.ScriptKind.JSX);
+          if(ast.parseDiagnostics.length){for(const d of ast.parseDiagnostics)console.error(ts.flattenDiagnosticMessageText(d.messageText,' '));process.exit(1)}
+          console.log('JSX parsed successfully');
+          JS

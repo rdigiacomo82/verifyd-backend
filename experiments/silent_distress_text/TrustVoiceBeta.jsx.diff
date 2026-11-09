@@ -1,0 +1,47 @@
+--- a/TrustVoiceBeta.jsx
++++ b/TrustVoiceBeta.jsx
+@@ -3300,6 +3300,9 @@
+   // Trust Voice session state (profile media auth)
+   const [safetyRequestNonce, setSafetyRequestNonce] = useState(0);
+   const requestCircleDistress = useCallback(() => setSafetyRequestNonce(n => n + 1), []);
++  // Explicit silent distress is independent of the normal long-press distress flow.
++  const [safetySilentRequestNonce, setSafetySilentRequestNonce] = useState(0);
++  const requestCircleSilentDistress = useCallback(() => setSafetySilentRequestNonce(n => n + 1), []);
+   const [sessionToken, setSessionToken] = useState(readStoredSessionToken);
+   const [sessionIdentity, setSessionIdentity] = useState(readStoredSessionIdentity);
+   const [socialLinksRefreshKey, setSocialLinksRefreshKey] = useState(0);
+@@ -10989,7 +10992,7 @@
+ 
+   return (
+     <>
+-      <TrustVoiceCircleSafetyOverlay sessionToken={sessionIdentity ? sessionToken : null} requestNonce={safetyRequestNonce} onRequestEmergency911={requestEmergency911} />
++      <TrustVoiceCircleSafetyOverlay sessionToken={sessionIdentity ? sessionToken : null} requestNonce={safetyRequestNonce} silentRequestNonce={safetySilentRequestNonce} onRequestEmergency911={requestEmergency911} />
+       {emergencyWorkflowLabEnabled && sessionIdentity && (
+         <TrustVoiceEmergencyWorkflowLab open={emergencyWorkflowLabOpen} onClose={() => setEmergencyWorkflowLabOpen(false)} sessionToken={sessionToken} />
+       )}
+@@ -11974,6 +11977,17 @@
+                         onActivities={() => setActivityPanel((panel) => panel === 'circle_activities' ? null : 'circle_activities')}
+                         onProgress={() => setActivityPanel((panel) => panel === 'circle_progress' ? null : 'circle_progress')}
+                       />
++                      {import.meta.env.DEV && import.meta.env.VITE_VERIFYD_SILENT_DISTRESS_ENABLED === 'true' && (
++                        <button
++                          type="button"
++                          onClick={requestCircleSilentDistress}
++                          className="mb-2 mt-2 w-full min-h-[48px] rounded-xl border border-zinc-600 bg-zinc-800/80 px-4 py-3 text-sm font-semibold text-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
++                          aria-label="Activate silent Circle Distress for your selected trusted contacts"
++                          title="Requires a configured Circle Safety PIN and eligible Trust Circle members. Not 911."
++                        >
++                          Silent Distress
++                        </button>
++                      )}
+                       <div className="hidden grid-cols-2 gap-2 sm:grid sm:gap-3">
+                         <button
+                           type="button"
+@@ -12991,6 +13005,7 @@
+                             languageSaveError={languageSaveError}
+                             sessionToken={sessionToken}
+                             onRequestDistress={requestCircleDistress}
++                            onRequestSilentDistress={requestCircleSilentDistress}
+                             onRequestEmergency911={requestEmergency911}
+                             onSocialSaved={() => setSocialLinksRefreshKey((n) => n + 1)}
+                             accessibilitySettings={accessibilitySettings}
