@@ -18,6 +18,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 import trust_voice_native_calls as native
+import trust_voice_android_calls as android
 import trust_voice_signaling as signal
 
 CALL_ID = 'tvcall_' + 'a' * 32
@@ -342,7 +343,7 @@ class ProviderSigning(unittest.TestCase):
 
 
 class SignalingDispatch(unittest.IsolatedAsyncioTestCase):
-    async def run_invite(self, reachable=False, sent=False, during_dispatch=None):
+    async def run_invite(self, reachable=False, sent=False, during_dispatch=None, provider=native):
         from fastapi import WebSocketDisconnect
         signal._state_lock=asyncio.Lock()
         signal._active_calls.clear()
@@ -374,9 +375,11 @@ class SignalingDispatch(unittest.IsolatedAsyncioTestCase):
             stack.enter_context(patch.object(signal,'_send_to_identity',new_callable=AsyncMock,return_value=0))
             stack.enter_context(patch.object(signal,'_incoming_call_push_pilot_enabled',return_value=False))
             stack.enter_context(patch.object(signal,'call_permission_decision',return_value=(True,'ok')))
-            stack.enter_context(patch.object(native,'reachable',return_value=reachable))
+            for candidate in (native, android):
+                stack.enter_context(patch.object(candidate, 'reachable',
+                                                return_value=reachable and candidate is provider))
             stack.enter_context(patch.object(native,'pilot_allowed',return_value=False))
-            push=stack.enter_context(patch.object(native,'dispatch_invite',side_effect=dispatch))
+            push=stack.enter_context(patch.object(provider,'dispatch_invite',side_effect=dispatch))
             history=stack.enter_context(patch.object(signal,'_create_call_history'))
             stack.enter_context(patch.object(signal,'_schedule_call_expiry'))
             stack.enter_context(patch.object(signal,'_cancel_call_expiry'))
@@ -400,6 +403,18 @@ class SignalingDispatch(unittest.IsolatedAsyncioTestCase):
         self.assertEqual('offline',events[-1]['reason'])
         self.assertFalse(signal._active_calls)
         self.assertEqual(('failed','offline'),terminal.call_args.args[1:])
+
+    async def test_offline_android_device_can_ring(self):
+        events, push, _ = await self.run_invite(reachable=True, sent=True, provider=android)
+        self.assertEqual('call_ringing', events[-1]['type'])
+        self.assertTrue(next(iter(signal._active_calls.values()))['android_incoming_push'])
+        push.assert_awaited_once()
+
+    async def test_android_push_failure_falls_back_to_offline(self):
+        events, _, terminal = await self.run_invite(reachable=True, provider=android)
+        self.assertEqual('offline', events[-1]['reason'])
+        self.assertFalse(signal._active_calls)
+        self.assertEqual(('failed', 'offline'), terminal.call_args.args[1:])
 
     async def test_no_stale_ringing_after_cancellation_during_push(self):
         async def cancel(item): signal._active_calls.pop(item['call_id'])

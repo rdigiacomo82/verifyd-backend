@@ -1126,7 +1126,7 @@ async def _replay_pilot_ringing_calls(identity_id: str, websocket: WebSocket) ->
             dict(call)
             for call in _active_calls.values()
             if call.get("state") == "ringing"
-            and (call.get("pilot_incoming_push") or call.get("native_incoming_push"))
+            and (call.get("pilot_incoming_push") or call.get("native_incoming_push") or call.get("android_incoming_push"))
             and str(call.get("callee_id") or "") == identity_id
         ]
     for call in pending:
@@ -1236,7 +1236,7 @@ async def _unregister(identity_id: str, ws: WebSocket) -> None:
                     if (
                         identity_id == call.get("callee_id")
                         and call.get("state") == "ringing"
-                        and (call.get("pilot_incoming_push") or call.get("native_incoming_push"))
+                        and (call.get("pilot_incoming_push") or call.get("native_incoming_push") or call.get("android_incoming_push"))
                     ):
                         continue
                     affected.append((call_id, dict(call)))
@@ -2232,8 +2232,13 @@ async def signaling_ws(
     # If the recipient opened a locked-screen push during an active pilot
     # ringing window, replay the invitation to the authenticated socket.
     # Never replay terminal or expired calls.
+    from trust_voice_android_calls import pilot_allowed as android_pilot_allowed
     from trust_voice_native_calls import pilot_allowed as native_pilot_allowed
-    if _incoming_call_push_pilot_enabled(identity) or native_pilot_allowed(identity):
+    if (
+        _incoming_call_push_pilot_enabled(identity)
+        or native_pilot_allowed(identity)
+        or android_pilot_allowed(identity)
+    ):
         await _replay_pilot_ringing_calls(str(identity_id), websocket)
 
     try:
@@ -2483,7 +2488,12 @@ async def signaling_ws(
 
                 from trust_voice_native_calls import reachable as native_reachable
                 native_push_reachable = await asyncio.to_thread(native_reachable, target)
-                if not recipient_online and not pilot_push_reachable and not native_push_reachable:
+                from trust_voice_android_calls import reachable as android_reachable
+                android_push_reachable = await asyncio.to_thread(android_reachable, target)
+                if not any((
+                    recipient_online, pilot_push_reachable,
+                    native_push_reachable, android_push_reachable,
+                )):
                     await _send(
                         websocket,
                         {
@@ -2527,6 +2537,7 @@ async def signaling_ws(
                     ),
                     "pilot_incoming_push": pilot_push_reachable,
                     "native_incoming_push": native_push_reachable,
+                    "android_incoming_push": android_push_reachable,
                 }
 
                 # Persist history before exposing the call to a fast answer.
@@ -2575,17 +2586,22 @@ async def signaling_ws(
                         str(target["id"]), call_id, call_type
                     )
 
-                if native_push_reachable:
-                    from trust_voice_native_calls import dispatch_invite
-
+                if native_push_reachable or android_push_reachable:
                     async def still_ringing():
                         async with _state_lock:
                             current = _active_calls.get(call_id)
                             return bool(current and current.get("state") == "ringing"
                                 and time.time() < current["created_at"] + INVITE_TTL_SECONDS)
 
+                if native_push_reachable:
+                    from trust_voice_native_calls import dispatch_invite
                     native_sent = await dispatch_invite(target, call, still_ringing)
                     push_sent = push_sent or native_sent
+
+                if android_push_reachable:
+                    from trust_voice_android_calls import dispatch_invite as dispatch_android_invite
+                    android_sent = await dispatch_android_invite(target, call, still_ringing)
+                    push_sent = push_sent or android_sent
 
                 # Reconcile answers/cancellation/expiry received during delivery.
                 # A stale ringing event must not follow its terminal event.
