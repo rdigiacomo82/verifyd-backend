@@ -1239,6 +1239,8 @@ async def _unregister(identity_id: str, ws: WebSocket) -> None:
                         and (call.get("pilot_incoming_push") or call.get("native_incoming_push") or call.get("android_incoming_push"))
                     ):
                         continue
+                    if identity_id == call.get("callee_id") and call.get("android_media_socket") is not None:
+                        continue
                     affected.append((call_id, dict(call)))
                     _active_calls.pop(call_id, None)
 
@@ -1313,14 +1315,10 @@ async def _unregister(identity_id: str, ws: WebSocket) -> None:
             "peer_disconnected",
         )
 
-        await _send_to_identity(
-            peer_id,
-            {
-                "type": "call_ended",
-                "call_id": call_id,
-                "reason": "peer_disconnected",
-            },
-        )
+        event = {"type": "call_ended", "call_id": call_id, "reason": "peer_disconnected"}
+        await _send_to_identity(peer_id, event)
+        if call.get("android_media_socket") is not None:
+            await _send(call["android_media_socket"], event)
 
 
 def _recent_otp_request(
@@ -2074,7 +2072,64 @@ async def native_call_snapshot(call_id: str, identity_id: str) -> dict:
             "is_callee": identity_id == call["callee_id"]}
 
 
-async def apply_call_action(call_id: str, identity_id: str, action: str) -> dict:
+async def relay_call_media(call_id: str, identity_id: str, message: dict, *,
+                           android_socket: Optional[WebSocket] = None) -> None:
+    """Relay only SDP/ICE for an accepted call; a native socket owns one callee leg."""
+    if not _webrtc_enabled():
+        raise HTTPException(409, detail={"error": "webrtc_not_enabled"})
+    if not call_id:
+        raise HTTPException(400, detail={"error": "call_id_required"})
+
+    async with _state_lock:
+        call = dict(_active_calls.get(call_id) or {})
+    if not call:
+        raise HTTPException(404, detail={"error": "call_not_found"})
+    caller_id, callee_id = call["caller_id"], call["callee_id"]
+    if identity_id not in {caller_id, callee_id}:
+        raise HTTPException(403, detail={"error": "not_call_participant"})
+    if call["state"] != "answered":
+        raise HTTPException(409, detail={"error": "invalid_call_state"})
+
+    native = call.get("android_media_socket")
+    if (identity_id == callee_id and native is not android_socket
+            or android_socket is not None and identity_id != callee_id):
+        raise HTTPException(403, detail={"error": "call_media_owned_by_another_device"})
+
+    kind = message.get("type")
+    if kind in {"webrtc_offer", "webrtc_answer"}:
+        offer = kind == "webrtc_offer"
+        role = "caller" if offer else "callee"
+        sdp_type = "offer" if offer else "answer"
+        if identity_id != (caller_id if offer else callee_id):
+            raise HTTPException(403, detail={"error": f"{sdp_type}_must_come_from_{role}"})
+        field, content = "sdp", message.get("sdp")
+        if (not isinstance(content, dict)
+                or str(content.get("type", "")).strip().lower() != sdp_type
+                or not isinstance(content.get("sdp"), str) or not content["sdp"].strip()):
+            raise HTTPException(400, detail={"error": "invalid_webrtc_sdp"})
+        if _json_size_bytes(content) > MAX_WEBRTC_SDP_BYTES:
+            raise HTTPException(413, detail={"error": "webrtc_sdp_too_large"})
+    elif kind == "webrtc_ice":
+        field, content = "candidate", message.get("candidate")
+        if not isinstance(content, dict) or not isinstance(content.get("candidate"), str):
+            raise HTTPException(400, detail={"error": "invalid_webrtc_candidate"})
+        if _json_size_bytes(content) > MAX_WEBRTC_ICE_BYTES:
+            raise HTTPException(413, detail={"error": "webrtc_candidate_too_large"})
+    else:
+        raise HTTPException(400, detail={"error": "unsupported_message_type"})
+
+    event = {"type": kind, "call_id": call_id, field: content}
+    if identity_id == caller_id and native is not None:
+        try:
+            await native.send_json(event)
+        except Exception:
+            raise HTTPException(409, detail={"error": "webrtc_peer_unavailable"}) from None
+    elif not await _send_to_identity(callee_id if identity_id == caller_id else caller_id, event):
+        raise HTTPException(409, detail={"error": "webrtc_peer_unavailable"})
+
+
+async def apply_call_action(call_id: str, identity_id: str, action: str, *,
+                            android_socket: Optional[WebSocket] = None) -> dict:
     """One atomic transition for native HTTP and existing WebSocket clients."""
     if action not in {"call_answer", "call_decline", "call_end"}:
         raise HTTPException(400, detail={"error": "invalid_action"})
@@ -2105,6 +2160,18 @@ async def apply_call_action(call_id: str, identity_id: str, action: str) -> dict
                 raise HTTPException(409, detail={"error": "invalid_call_state"})
             if time.time() >= call["created_at"] + INVITE_TTL_SECONDS:
                 raise HTTPException(410, detail={"error": "call_expired"})
+        native = call.get("android_media_socket")
+        if action == "call_end" and (
+            (android_socket is not None and native is not android_socket)
+            or (native is not None and identity_id == call["callee_id"] and android_socket is None)
+        ):
+            raise HTTPException(409, detail={"error": "call_media_owned_by_another_device"})
+        if android_socket is not None and action == "call_answer":
+            if call["call_type"] != "audio" or not _webrtc_enabled():
+                raise HTTPException(409, detail={"error": "native_audio_unavailable"})
+            if not _connections.get(call["caller_id"]):
+                raise HTTPException(409, detail={"error": "webrtc_peer_unavailable"})
+            call["android_media_socket"] = android_socket
         call = dict(call)
         if action == "call_answer":
             _active_calls[call_id]["state"] = "answered"
@@ -2122,8 +2189,23 @@ async def apply_call_action(call_id: str, identity_id: str, action: str) -> dict
         _record_call_terminal(call_id, "canceled" if ringing else "ended",
                               "ended_before_answer" if ringing else "ended")
         event = {"type": "call_ended", "call_id": call_id, "reason": "ended"}
-    await _send_to_identity(call["caller_id"], event)
-    await _send_to_identity(call["callee_id"], event)
+    native = call.get("android_media_socket")
+    if native is not None and action == "call_answer":
+        # Release any duplicate ring on the web callee. The caller's existing
+        # browser starts its offer as soon as it sees call_answered.
+        await native.send_json(event)
+        await _send_to_identity(call["callee_id"], {
+            "type": "call_ended", "call_id": call_id, "reason": "answered_on_another_device",
+        })
+        async with _state_lock:
+            if _active_calls.get(call_id, {}).get("android_media_socket") is not native:
+                return {"ok": False, "error": "call_not_found"}
+        await _send_to_identity(call["caller_id"], event)
+    else:
+        await _send_to_identity(call["caller_id"], event)
+        await _send_to_identity(call["callee_id"], event)
+        if native is not None:
+            await _send(native, event)
     return {"ok": True, **event}
 
 
@@ -2489,7 +2571,7 @@ async def signaling_ws(
                 from trust_voice_native_calls import reachable as native_reachable
                 native_push_reachable = await asyncio.to_thread(native_reachable, target)
                 from trust_voice_android_calls import reachable as android_reachable
-                android_push_reachable = await asyncio.to_thread(android_reachable, target)
+                android_push_reachable = await asyncio.to_thread(android_reachable, target, call_type)
                 if not any((
                     recipient_online, pilot_push_reachable,
                     native_push_reachable, android_push_reachable,
@@ -2661,404 +2743,12 @@ async def signaling_ws(
 
                 continue
 
-            if msg_type in {
-                "webrtc_offer",
-                "webrtc_answer",
-                "webrtc_ice",
-            }:
-                if not _webrtc_enabled():
-                    await _send(
-                        websocket,
-                        {
-                            "type": (
-                                "error"
-                            ),
-                            "error": (
-                                "webrtc_not_enabled"
-                            ),
-                        },
-                    )
-
-                    continue
-
-                call_id = str(
-                    message.get(
-                        "call_id",
-                        "",
-                    )
-                ).strip()
-
-                if not call_id:
-                    await _send(
-                        websocket,
-                        {
-                            "type": (
-                                "error"
-                            ),
-                            "error": (
-                                "call_id_required"
-                            ),
-                        },
-                    )
-
-                    continue
-
-                async with _state_lock:
-                    call = dict(
-                        _active_calls.get(
-                            call_id,
-                            {},
-                        )
-                    )
-
-                if not call:
-                    await _send(
-                        websocket,
-                        {
-                            "type": (
-                                "error"
-                            ),
-                            "error": (
-                                "call_not_found"
-                            ),
-                        },
-                    )
-
-                    continue
-
-                caller_id = (
-                    call.get(
-                        "caller_id"
-                    )
-                )
-
-                callee_id = (
-                    call.get(
-                        "callee_id"
-                    )
-                )
-
-                if (
-                    identity_id
-                    not in {
-                        caller_id,
-                        callee_id,
-                    }
-                ):
-                    await _send(
-                        websocket,
-                        {
-                            "type": (
-                                "error"
-                            ),
-                            "error": (
-                                "not_call_participant"
-                            ),
-                        },
-                    )
-
-                    continue
-
-                if (
-                    call.get(
-                        "state"
-                    )
-                    != "answered"
-                ):
-                    await _send(
-                        websocket,
-                        {
-                            "type": (
-                                "error"
-                            ),
-                            "error": (
-                                "invalid_call_state"
-                            ),
-                        },
-                    )
-
-                    continue
-
-                if (
-                    msg_type
-                    == "webrtc_offer"
-                    and identity_id
-                    != caller_id
-                ):
-                    await _send(
-                        websocket,
-                        {
-                            "type": (
-                                "error"
-                            ),
-                            "error": (
-                                "offer_must_come_from_caller"
-                            ),
-                        },
-                    )
-
-                    continue
-
-                if (
-                    msg_type
-                    == "webrtc_answer"
-                    and identity_id
-                    != callee_id
-                ):
-                    await _send(
-                        websocket,
-                        {
-                            "type": (
-                                "error"
-                            ),
-                            "error": (
-                                "answer_must_come_from_callee"
-                            ),
-                        },
-                    )
-
-                    continue
-
-                peer_id = (
-                    callee_id
-                    if (
-                        identity_id
-                        == caller_id
-                    )
-                    else caller_id
-                )
-
-                # --------------------------------------------
-                # SDP OFFER / ANSWER
-                # --------------------------------------------
-
-                if msg_type in {
-                    "webrtc_offer",
-                    "webrtc_answer",
-                }:
-                    sdp = (
-                        message.get(
-                            "sdp"
-                        )
-                    )
-
-                    expected_type = (
-                        "offer"
-                        if (
-                            msg_type
-                            == "webrtc_offer"
-                        )
-                        else "answer"
-                    )
-
-                    if not isinstance(
-                        sdp,
-                        dict,
-                    ):
-                        await _send(
-                            websocket,
-                            {
-                                "type": (
-                                    "error"
-                                ),
-                                "error": (
-                                    "invalid_webrtc_sdp"
-                                ),
-                            },
-                        )
-
-                        continue
-
-                    sdp_type = str(
-                        sdp.get(
-                            "type",
-                            "",
-                        )
-                    ).strip().lower()
-
-                    sdp_body = (
-                        sdp.get(
-                            "sdp"
-                        )
-                    )
-
-                    if (
-                        sdp_type
-                        != expected_type
-                        or not isinstance(
-                            sdp_body,
-                            str,
-                        )
-                        or not sdp_body.strip()
-                    ):
-                        await _send(
-                            websocket,
-                            {
-                                "type": (
-                                    "error"
-                                ),
-                                "error": (
-                                    "invalid_webrtc_sdp"
-                                ),
-                            },
-                        )
-
-                        continue
-
-                    if (
-                        _json_size_bytes(
-                            sdp
-                        )
-                        > MAX_WEBRTC_SDP_BYTES
-                    ):
-                        await _send(
-                            websocket,
-                            {
-                                "type": (
-                                    "error"
-                                ),
-                                "error": (
-                                    "webrtc_sdp_too_large"
-                                ),
-                            },
-                        )
-
-                        continue
-
-                    delivered = (
-                        await _send_to_identity(
-                            peer_id,
-                            {
-                                "type": (
-                                    msg_type
-                                ),
-                                "call_id": (
-                                    call_id
-                                ),
-                                "sdp": (
-                                    sdp
-                                ),
-                            },
-                        )
-                    )
-
-                    if delivered == 0:
-                        await _send(
-                            websocket,
-                            {
-                                "type": (
-                                    "error"
-                                ),
-                                "error": (
-                                    "webrtc_peer_unavailable"
-                                ),
-                            },
-                        )
-
-                    continue
-
-                # --------------------------------------------
-                # ICE CANDIDATE
-                # --------------------------------------------
-
-                candidate = (
-                    message.get(
-                        "candidate"
-                    )
-                )
-
-                if not isinstance(
-                    candidate,
-                    dict,
-                ):
-                    await _send(
-                        websocket,
-                        {
-                            "type": (
-                                "error"
-                            ),
-                            "error": (
-                                "invalid_webrtc_candidate"
-                            ),
-                        },
-                    )
-
-                    continue
-
-                candidate_line = (
-                    candidate.get(
-                        "candidate"
-                    )
-                )
-
-                if not isinstance(
-                    candidate_line,
-                    str,
-                ):
-                    await _send(
-                        websocket,
-                        {
-                            "type": (
-                                "error"
-                            ),
-                            "error": (
-                                "invalid_webrtc_candidate"
-                            ),
-                        },
-                    )
-
-                    continue
-
-                if (
-                    _json_size_bytes(
-                        candidate
-                    )
-                    > MAX_WEBRTC_ICE_BYTES
-                ):
-                    await _send(
-                        websocket,
-                        {
-                            "type": (
-                                "error"
-                            ),
-                            "error": (
-                                "webrtc_candidate_too_large"
-                            ),
-                        },
-                    )
-
-                    continue
-
-                delivered = (
-                    await _send_to_identity(
-                        peer_id,
-                        {
-                            "type": (
-                                "webrtc_ice"
-                            ),
-                            "call_id": (
-                                call_id
-                            ),
-                            "candidate": (
-                                candidate
-                            ),
-                        },
-                    )
-                )
-
-                if delivered == 0:
-                    await _send(
-                        websocket,
-                        {
-                            "type": (
-                                "error"
-                            ),
-                            "error": (
-                                "webrtc_peer_unavailable"
-                            ),
-                        },
-                    )
-
+            if msg_type in {"webrtc_offer", "webrtc_answer", "webrtc_ice"}:
+                call_id = str(message.get("call_id") or "").strip()
+                try:
+                    await relay_call_media(call_id, identity_id, message)
+                except HTTPException as exc:
+                    await _send(websocket, {"type": "error", **exc.detail})
                 continue
 
             if msg_type in {
