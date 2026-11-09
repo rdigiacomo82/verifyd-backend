@@ -1,0 +1,4 @@
+<resources>
+    <!-- Set to the isolated pilot HTTPS origin before building nativepilotDebug. -->
+    <string name="detector_pilot_api_origin" translatable="false"></string>
+</resources>

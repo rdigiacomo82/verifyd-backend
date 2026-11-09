@@ -1,0 +1,54 @@
+plugins { id 'com.android.application' }
+android {
+    namespace 'com.verifyd.app'
+    compileSdk 36
+    defaultConfig {
+        applicationId 'com.verifyd.app'
+        minSdk 21
+        targetSdk 36
+        versionCode (providers.gradleProperty('verifydVersionCode').orElse('4').get() as Integer)
+        versionName '4-preview'
+        buildConfigField 'boolean', 'NATIVE_CALL_PREVIEW_ENABLED',
+            providers.gradleProperty('verifydCallPreview').orElse('false').get() == 'true' ? 'true' : 'false'
+    }
+    flavorDimensions 'integration'
+    productFlavors {
+        // Play-compliance-focused baseline, preserves original v3 minimum supported API 21.
+        baseline { dimension 'integration' }
+        // Developer-only FCM pilot; intentionally uses DIFFERENT package suffix.
+        // Recent Firebase Messaging SDKs require higher minSDK (26.0.0 -> 24).
+        callpilot { dimension 'integration'; minSdk 26; applicationIdSuffix '.pilot' }
+    }
+    buildTypes {
+        release { minifyEnabled false }
+        debug { applicationIdSuffix '.dev' }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    buildFeatures { buildConfig true }
+}
+dependencies {
+    // ABH 2.6.2 has minSdk21 (matches v3); ABH 2.7.4 requires minSdk24.
+    baselineImplementation 'com.google.androidbrowserhelper:androidbrowserhelper:2.6.2'
+    callpilotImplementation 'com.google.androidbrowserhelper:androidbrowserhelper:2.7.4'
+    // Only the isolated developer-only callpilot uses Firebase. This keeps the
+    // production-safe baseline independent of newer Firebase minSdk rules.
+    callpilotImplementation platform('com.google.firebase:firebase-bom:35.1.0')
+    callpilotImplementation 'com.google.firebase:firebase-messaging'
+    callpilotImplementation 'io.github.webrtc-sdk:android:150.7871.01'
+    callpilotImplementation 'com.squareup.okhttp3:okhttp:4.12.0'
+}
+// Opt-in, never enabled for baseline by default. A Firebase project must
+// explicitly register the variant's actual package name before configuring.
+if (providers.gradleProperty('enableGoogleServices').orElse('false').get() == 'true') {
+    apply plugin: 'com.google.gms.google-services'
+}
+
+// The native calling candidate is a developer-only variant.
+androidComponents {
+    beforeVariants(selector().withBuildType('release')) { variant ->
+        if (variant.productFlavors.any { it.second == 'callpilot' }) variant.enable = false
+    }
+}

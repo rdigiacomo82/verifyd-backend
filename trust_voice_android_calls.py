@@ -19,11 +19,11 @@ from uuid import UUID
 
 import httpx
 from cryptography.fernet import Fernet, InvalidToken
-from fastapi import APIRouter, Header, HTTPException, Response
+from fastapi import APIRouter, Header, HTTPException, Response, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
 from database import get_db
-from native_call_contract import build_invite, fcm_data
+from native_call_contract import CALL_ID_PATTERN, build_invite, fcm_data
 
 log = logging.getLogger('verifyd.android_calls')
 router = APIRouter(prefix='/trust-voice', tags=['Android Native Calls'])
@@ -34,6 +34,7 @@ PAIR_CODE_PATTERN = re.compile(r'ap_[A-Za-z0-9_-]{43}')
 DEVICE_TOKEN_PATTERN = re.compile(r'ac_[A-Za-z0-9_-]{43}')
 PACKAGE = 'com.verifyd.circle'
 CIRCLE_PACKAGES = {PACKAGE, f'{PACKAGE}.dev', f'{PACKAGE}.pilot', f'{PACKAGE}.pilot.dev'}
+DETECTOR_PILOT_PACKAGE = 'com.verifyd.app.pilot.dev'
 TOKEN_PATTERN = r'^[a-zA-Z0-9_:\-]{80,4096}$'
 
 
@@ -61,7 +62,11 @@ def pilot_allowed(identity: dict) -> bool:
 
 def allowed_packages() -> set[str]:
     raw = os.getenv('VERIFYD_ANDROID_CALLS_ALLOWED_PACKAGES', PACKAGE)
-    return CIRCLE_PACKAGES.intersection(p.strip() for p in raw.split(','))
+    supported = CIRCLE_PACKAGES
+    if (os.getenv('VERIFYD_ANDROID_DETECTOR_CALLS_ENABLED') == '1'
+            and os.getenv('VERIFYD_ANDROID_NATIVE_AUDIO_ENABLED') == '1'):
+        supported = supported | {DETECTOR_PILOT_PACKAGE}
+    return supported.intersection(p.strip() for p in raw.split(','))
 
 
 def _require_enabled() -> None:
@@ -324,9 +329,14 @@ def configured() -> bool:
                 and os.getenv('VERIFYD_NATIVE_CALL_TOKEN_ENCRYPTION_KEY'))
 
 
-def reachable(identity:dict) -> bool:
+def _devices_for_call(identity_id: str, call_type: str) -> list[dict]:
+    return [device for device in active_devices(identity_id)
+            if call_type == 'audio' or device['package_name'] != DETECTOR_PILOT_PACKAGE]
+
+
+def reachable(identity:dict, call_type: str = 'audio') -> bool:
     if not pilot_allowed(identity) or not configured():return False
-    try:return bool(active_devices(str(identity['id'])))
+    try:return bool(_devices_for_call(str(identity['id']), call_type))
     except Exception:
         log.warning('Android push registry unavailable')
         return False
@@ -348,7 +358,7 @@ async def dispatch_invite(identity:dict,call:dict,is_current) -> bool:
     if not pilot_allowed(identity) or not configured():return False
     try:
         invite=build_invite(call['call_id'],call['call_type'],call['created_at'])
-        devices=await asyncio.to_thread(active_devices,str(identity['id']))
+        devices=await asyncio.to_thread(_devices_for_call, str(identity['id']), invite.call_type)
         if not devices or not await is_current():return False
         bearer=await asyncio.to_thread(_access_token)
         project=os.environ['VERIFYD_ANDROID_FIREBASE_PROJECT_ID']
@@ -401,3 +411,81 @@ async def call_action(call_id:str,action:Literal['answer','decline','end'],
     if action != 'decline':
         raise HTTPException(409, detail={'error': 'native_media_not_ready'})
     return await apply_call_action(call_id, identity_id, 'call_decline')
+
+
+@router.websocket('/android-calls/{call_id}/media')
+async def android_call_media(websocket: WebSocket, call_id: str):
+    """A paired device can answer one audio call and exchange only its media signals."""
+    from trust_voice_signaling import apply_call_action, native_call_snapshot, relay_call_media
+
+    if not enabled() or os.getenv('VERIFYD_ANDROID_NATIVE_AUDIO_ENABLED') != '1':
+        await websocket.close(code=4404)
+        return
+    if not CALL_ID_PATTERN.fullmatch(call_id):
+        await websocket.close(code=4404)
+        return
+
+    authorization = websocket.headers.get('authorization')
+    identity_id = None
+    attempted_claim = False
+    try:
+        _require_enabled()
+        identity_id = await asyncio.to_thread(_paired_identity, authorization)
+        snapshot = await native_call_snapshot(call_id, identity_id)
+        if not snapshot['is_callee'] or snapshot['state'] != 'ringing' or snapshot['call_type'] != 'audio':
+            await websocket.close(code=4404)
+            return
+
+        await websocket.accept()
+        # The client prepares its native peer connection before explicitly
+        # sending call_answer. A connected socket alone cannot accept a call.
+        ready = await asyncio.wait_for(websocket.receive_json(), timeout=5)
+        if not isinstance(ready, dict) or ready != {'type': 'call_answer'}:
+            await websocket.close(code=4400)
+            return
+        if await asyncio.to_thread(_paired_identity, authorization) != identity_id:
+            await websocket.close(code=4403)
+            return
+        attempted_claim = True
+        await apply_call_action(call_id, identity_id, 'call_answer', android_socket=websocket)
+
+        # Recheck revocation on a monotonic schedule even on a busy connection.
+        next_auth = time.monotonic() + 20
+        while True:
+            if time.monotonic() >= next_auth:
+                if await asyncio.to_thread(_paired_identity, authorization) != identity_id:
+                    await websocket.close(code=4403)
+                    return
+                next_auth = time.monotonic() + 20
+                await native_call_snapshot(call_id, identity_id)
+            try:
+                message = await asyncio.wait_for(websocket.receive_json(),
+                                                 timeout=max(0.01, next_auth - time.monotonic()))
+            except asyncio.TimeoutError:
+                continue
+            if not isinstance(message, dict) or 'call_id' in message:
+                await websocket.close(code=4400)
+                return
+            kind = message.get('type')
+            if kind == 'call_end':
+                return
+            if kind == 'ping':
+                await websocket.send_json({'type': 'pong'})
+            elif kind in ('webrtc_answer', 'webrtc_ice'):
+                await relay_call_media(call_id, identity_id, message, android_socket=websocket)
+            else:
+                await websocket.close(code=4400)
+                return
+    except HTTPException as exc:
+        code = 4401 if exc.status_code == 401 else 4403 if exc.status_code == 403 else 4409
+        await websocket.close(code=code)
+    except asyncio.TimeoutError:
+        await websocket.close(code=4408)
+    except (WebSocketDisconnect, ValueError, RuntimeError):
+        pass
+    finally:
+        if attempted_claim:
+            try:
+                await apply_call_action(call_id, identity_id, 'call_end', android_socket=websocket)
+            except HTTPException:
+                pass

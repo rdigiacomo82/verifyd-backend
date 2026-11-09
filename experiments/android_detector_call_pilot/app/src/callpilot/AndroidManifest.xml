@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+  <uses-permission android:name="android.permission.INTERNET" />
+  <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+  <uses-permission android:name="android.permission.RECORD_AUDIO" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+  <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+  <application>
+    <activity android:name=".calls.PilotAnswerActivity" android:exported="false"
+        android:showWhenLocked="true" android:turnScreenOn="true"
+        android:theme="@android:style/Theme.Material.Light.NoActionBar" />
+    <service android:name=".calls.PilotAudioService" android:exported="false"
+        android:foregroundServiceType="microphone" />
+    <receiver android:name=".calls.PilotDeclineReceiver" android:exported="false" />
+    <service android:name=".calls.IncomingCallMessagingService" android:exported="false">
+      <intent-filter><action android:name="com.google.firebase.MESSAGING_EVENT" /></intent-filter>
+    </service>
+    <activity android:name=".calls.CallOpenActivity" android:exported="false" android:excludeFromRecents="true" />
+    <receiver android:name=".calls.CallDismissReceiver" android:exported="false" />
+  </application>
+</manifest>
