@@ -157,3 +157,16 @@ live APNs, native compilation and real-device media tests remain outstanding.
 
 Rollback delivery by setting `VERIFYD_NATIVE_CALLS_ENABLED=0`. Leave encrypted
 device data in place until a retention/migration plan; never drop existing tables.
+
+## Additional store app: VeriFYD Circle
+
+The companion Circle integration preserves `com.verifyd.circle` and Apple team
+`3623QELM75`. Configure `VERIFYD_NATIVE_CALLS_ALLOWED_BUNDLE_IDS` explicitly as
+`com.verifyd.videoauth,com.verifyd.circle` only when the Circle client is ready.
+The default remains `com.verifyd.videoauth`. Unknown or removed app IDs cannot
+register or receive native calls. Each registered device uses its own validated
+bundle ID for the APNs topic (`<bundle_id>.voip`); Circle tokens must never be
+sent with the Video Authenticator topic. Existing per-account pilot gates,
+session revocation, device encryption and 30-second deadline remain in force.
+No Apple key or live configuration is changed by this code change. Verify that
+the existing APNs key authorizes Circle's topic and production environment.
