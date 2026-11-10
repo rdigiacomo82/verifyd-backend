@@ -2,6 +2,8 @@
 import asyncio
 import os
 import unittest
+
+import httpx
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from cryptography.fernet import Fernet
@@ -177,15 +179,18 @@ class AndroidPilotTests(unittest.TestCase):
             self.assertEqual(response.status_code, 401)
         schema.assert_not_called()
 
-    def dispatch(self, *, ringing, age):
-        post = AsyncMock(return_value=MagicMock(status_code=200))
+    def dispatch(self, *, ringing, age, response=None):
+        if response is None:
+            response = httpx.Response(200)
+        post = AsyncMock(return_value=response)
         client = MagicMock()
         client.return_value.__aenter__.return_value.post = post
         call = {'call_id': CALL_ID, 'call_type': 'audio', 'created_at': 2000 - age}
         with patch.dict(os.environ, ENV, clear=True), \
              patch.object(android.time, 'time', return_value=2000), \
              patch.object(android, 'active_devices', return_value=[{
-                 'package_name': android.PACKAGE, 'fcm_token': BODY['fcm_token'],
+                 'installation_id': INSTALLATION, 'package_name': android.PACKAGE,
+                 'token_hash': 'test-token-hash', 'fcm_token': BODY['fcm_token'],
              }]), patch.object(android, '_access_token', return_value='test-only'), \
              patch.object(android.httpx, 'AsyncClient', client):
             sent = asyncio.run(android.dispatch_invite(IDENTITY, call, AsyncMock(return_value=ringing)))
@@ -202,6 +207,36 @@ class AndroidPilotTests(unittest.TestCase):
         self.assertEqual(payload['data']['call_id'], CALL_ID)
         self.assertNotIn('identity_id', payload['data'])
         self.assertNotIn('notification', payload)
+
+    def test_fcm_only_invalidates_explicit_unregistered_token(self):
+        for response, expected in [
+            (httpx.Response(404, json={'error': {'details': [{
+                '@type': 'type.googleapis.com/google.firebase.fcm.v1.FcmError',
+                'errorCode': 'UNREGISTERED',
+            }]}}), True),
+            (httpx.Response(404, json={'error': {'status': 'NOT_FOUND'}}), False),
+            (httpx.Response(404, text='not JSON'), False),
+            (httpx.Response(403, json={'error': {'details': [{
+                '@type': 'type.googleapis.com/google.firebase.fcm.v1.FcmError',
+                'errorCode': 'SENDER_ID_MISMATCH',
+            }]}}), False),
+        ]:
+            with self.subTest(status=response.status_code, expected=expected):
+                with patch.object(android, '_invalidate_fcm_token') as invalidate:
+                    sent, _ = self.dispatch(ringing=True, age=10, response=response)
+                    self.assertFalse(sent)
+                    self.assertEqual(invalidate.called, expected)
+
+    def test_fcm_invalidation_targets_the_rejected_token(self):
+        with patch.object(android, 'get_db') as db:
+            android._invalidate_fcm_token({
+                'installation_id': INSTALLATION, 'package_name': android.PACKAGE,
+                'token_hash': 'rejected-hash',
+            })
+        sql, parameters = db.return_value.__enter__.return_value.cursor.return_value.execute.call_args.args
+        self.assertIn('AND token_hash=%s', sql)
+        self.assertEqual(parameters[1:], (INSTALLATION, android.PACKAGE, 'rejected-hash'))
+        self.assertNotIn('SET disabled_at', sql)
 
     def test_fcm_does_not_send_cancelled_or_expired_invites(self):
         for ringing, age in [(False, 10), (True, 31)]:
