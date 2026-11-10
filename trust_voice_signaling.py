@@ -1064,18 +1064,10 @@ async def notify_message_created(
 
 
 
-def _incoming_call_push_pilot_enabled(target: dict) -> bool:
-    """Do not change call behavior unless BOTH gates explicitly allow this target."""
+def _incoming_call_push_pilot_enabled() -> bool:
+    """Global Web Push switch; browser opt-in is checked separately."""
     flag = os.environ.get("VERIFYD_INCOMING_CALL_PUSH_PILOT_ENABLED", "0").strip().lower()
-    if flag not in {"1", "true", "yes", "on"}:
-        return False
-    allowed_handles = {
-        v.strip().lower().lstrip("@")
-        for v in os.environ.get("VERIFYD_INCOMING_CALL_PUSH_PILOT_HANDLES", "").split(",")
-        if v.strip()
-    }
-    handle = str(target.get("handle_lower") or target.get("handle") or "").strip().lower().lstrip("@")
-    return bool(handle and handle in allowed_handles)
+    return flag in {"1", "true", "yes", "on"}
 
 
 def _incoming_call_push_subscription_ready(identity_id: str) -> bool:
@@ -2328,7 +2320,7 @@ async def signaling_ws(
     from trust_voice_native_calls import pilot_allowed as native_pilot_allowed
     replayed_call_ids = set()
     if (
-        _incoming_call_push_pilot_enabled(identity)
+        _incoming_call_push_pilot_enabled()
         or native_pilot_allowed(identity)
         or android_pilot_allowed(identity)
     ):
@@ -2574,7 +2566,7 @@ async def signaling_ws(
 
                 recipient_online = await _presence(target["id"])
                 pilot_push_reachable = False
-                if _incoming_call_push_pilot_enabled(target):
+                if _incoming_call_push_pilot_enabled():
                     pilot_push_reachable = await asyncio.to_thread(
                         _incoming_call_push_subscription_ready, str(target["id"])
                     )
