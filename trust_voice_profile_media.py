@@ -22,6 +22,7 @@ import io
 import logging
 import os
 from datetime import datetime, timezone
+from threading import Lock
 from typing import Literal, Optional
 
 from fastapi import (
@@ -52,6 +53,8 @@ ALLOWED_INPUT_MIME = {
     "image/webp",
 }
 ALLOWED_MEDIA_KIND = {"personal_photo", "business_logo"}
+_schema_lock = Lock()
+_schema_ready = False
 
 
 def _enabled() -> bool:
@@ -71,30 +74,41 @@ def _now_iso() -> str:
 
 
 def _ensure_schema() -> None:
-    """Create only the isolated Trust Voice profile media table."""
-    with get_db() as conn:
-        cur = conn.cursor()
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS verifyd_identity_media (
-                identity_id      TEXT PRIMARY KEY,
-                media_kind       TEXT NOT NULL,
-                mime_type        TEXT NOT NULL,
-                image_bytes      BYTEA NOT NULL,
-                width            INTEGER NOT NULL,
-                height           INTEGER NOT NULL,
-                byte_size        INTEGER NOT NULL,
-                created_at       TEXT NOT NULL,
-                updated_at       TEXT NOT NULL
+    """Initialize profile media once per process, after a successful commit."""
+    global _schema_ready
+
+    if _schema_ready:
+        return
+
+    with _schema_lock:
+        if _schema_ready:
+            return
+
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS verifyd_identity_media (
+                    identity_id      TEXT PRIMARY KEY,
+                    media_kind       TEXT NOT NULL,
+                    mime_type        TEXT NOT NULL,
+                    image_bytes      BYTEA NOT NULL,
+                    width            INTEGER NOT NULL,
+                    height           INTEGER NOT NULL,
+                    byte_size        INTEGER NOT NULL,
+                    created_at       TEXT NOT NULL,
+                    updated_at       TEXT NOT NULL
+                )
+                """
             )
-            """
-        )
-        cur.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_verifyd_identity_media_kind
-            ON verifyd_identity_media(media_kind)
-            """
-        )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_verifyd_identity_media_kind
+                ON verifyd_identity_media(media_kind)
+                """
+            )
+
+        _schema_ready = True
 
 
 def _identity_from_bearer(authorization: Optional[str]) -> dict:
