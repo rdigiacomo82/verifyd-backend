@@ -115,6 +115,8 @@ def ensure_schema() -> None:
               ON verifyd_android_call_devices(identity_id,disabled_at)''')
             conn.cursor().execute('''ALTER TABLE verifyd_android_call_devices
               ADD COLUMN IF NOT EXISTS control_token_hash TEXT''')
+            conn.cursor().execute('''ALTER TABLE verifyd_android_call_devices
+              ADD COLUMN IF NOT EXISTS fcm_token_invalidated_at DOUBLE PRECISION''')
             conn.cursor().execute('''CREATE UNIQUE INDEX IF NOT EXISTS idx_android_call_control_token
               ON verifyd_android_call_devices(control_token_hash) WHERE control_token_hash IS NOT NULL''')
             conn.cursor().execute('''CREATE TABLE IF NOT EXISTS verifyd_android_call_pairings (
@@ -157,6 +159,9 @@ def _write_device(cur, body: AndroidDeviceRegistration, identity_id: str, sessio
       session_id=EXCLUDED.session_id,
       token_hash=EXCLUDED.token_hash,token_ciphertext=EXCLUDED.token_ciphertext,
       updated_at=EXCLUDED.updated_at,disabled_at=NULL,
+      fcm_token_invalidated_at=CASE
+        WHEN verifyd_android_call_devices.token_hash<>EXCLUDED.token_hash THEN NULL
+        ELSE verifyd_android_call_devices.fcm_token_invalidated_at END,
       control_token_hash=EXCLUDED.control_token_hash
       WHERE verifyd_android_call_devices.identity_id=EXCLUDED.identity_id
       RETURNING installation_id''',
@@ -262,12 +267,14 @@ def refresh_device_token(body: AndroidDeviceTokenUpdate,
             cur = conn.cursor()
             device = _paired_device(cur, _control_token_hash(authorization))
             cur.execute('''UPDATE verifyd_android_call_devices d
-              SET token_hash=%s, token_ciphertext=%s, updated_at=%s
+              SET token_hash=%s, token_ciphertext=%s, updated_at=%s,
+                  fcm_token_invalidated_at=CASE WHEN d.token_hash<>%s THEN NULL
+                    ELSE d.fcm_token_invalidated_at END
               FROM verifyd_voice_sessions s WHERE d.control_token_hash=%s
                 AND s.session_id=d.session_id AND s.identity_id=d.identity_id AND s.revoked_at IS NULL
                 AND d.disabled_at IS NULL''', (_digest(body.fcm_token),
                     _cipher().encrypt(body.fcm_token.encode()).decode(), time.time(),
-                    device['control_token_hash']))
+                    _digest(body.fcm_token), device['control_token_hash']))
             if cur.rowcount != 1:
                 raise HTTPException(401, detail={'error': 'invalid_android_device'})
     except UniqueViolation:
@@ -312,6 +319,7 @@ def active_devices(identity_id:str) -> list[dict]:
           JOIN verifyd_voice_sessions s ON s.session_id=d.session_id
             AND s.identity_id=d.identity_id AND s.revoked_at IS NULL
           WHERE d.identity_id=%s AND d.disabled_at IS NULL AND d.control_token_hash IS NOT NULL
+            AND d.fcm_token_invalidated_at IS NULL
           ORDER BY d.updated_at DESC LIMIT 8''',(identity_id,))
         rows=[dict(r) for r in cur.fetchall()]
     result=[]
@@ -353,6 +361,39 @@ def _access_token() -> str:
     return str(credentials.token)
 
 
+def _fcm_error_code(response: httpx.Response) -> str:
+    """Extract only documented FCM detail codes. Never log the response body."""
+    try:
+        payload = response.json()
+    except ValueError:
+        return 'UNKNOWN'
+    error = payload.get('error') if isinstance(payload, dict) else None
+    details = error.get('details') if isinstance(error, dict) else None
+    if not isinstance(details, list):
+        return 'UNKNOWN'
+    for detail in details:
+        if not isinstance(detail, dict) or detail.get('@type') != 'type.googleapis.com/google.firebase.fcm.v1.FcmError':
+            continue
+        code = detail.get('errorCode')
+        if isinstance(code, str) and code in {
+            'UNREGISTERED', 'INVALID_ARGUMENT', 'SENDER_ID_MISMATCH', 'QUOTA_EXCEEDED',
+            'UNAVAILABLE', 'INTERNAL', 'THIRD_PARTY_AUTH_ERROR', 'UNSPECIFIED_ERROR',
+        }:
+            return code
+    return 'UNKNOWN'
+
+
+def _invalidate_fcm_token(device: dict) -> None:
+    with get_db() as conn:
+        cur = conn.cursor()
+        # FCM may respond after the handset has refreshed its token.
+        # Update only the exact token that was rejected.
+        cur.execute('''UPDATE verifyd_android_call_devices SET fcm_token_invalidated_at=%s
+          WHERE installation_id=%s AND package_name=%s AND token_hash=%s
+            AND fcm_token_invalidated_at IS NULL''',
+          (time.time(), device['installation_id'], device['package_name'], device['token_hash']))
+
+
 async def dispatch_invite(identity:dict,call:dict,is_current) -> bool:
     """Send only an existing live call with bounded original TTL (no retry)."""
     if not pilot_allowed(identity) or not configured():return False
@@ -378,10 +419,20 @@ async def dispatch_invite(identity:dict,call:dict,is_current) -> bool:
                                'restricted_package_name':d['package_name']}}}
                 try:
                     r=await client.post(url,json=request,headers={'Authorization':f'Bearer {bearer}'})
-                    if r.status_code==200:any_ok=True
-                    else:log.warning('Android FCM refused incoming invite, status=%d',r.status_code)
+                    if r.status_code == 200:
+                        any_ok = True
+                        continue
+                    error_code = _fcm_error_code(r)
+                    log.warning('Android FCM refused incoming invite, status=%d code=%s', r.status_code, error_code)
+                    if r.status_code == 404 and error_code == 'UNREGISTERED':
+                        try:
+                            await asyncio.to_thread(_invalidate_fcm_token, d)
+                        except Exception:
+                            log.warning('Android FCM token invalidation failed')
                 except httpx.HTTPError:
                     log.warning('Android FCM request failed')
+            if any_ok:
+                log.info('Android FCM accepted incoming invite, call_id=%s', invite.call_id)
             return any_ok
     except Exception:
         log.warning('Android native push dispatch unavailable',exc_info=False)
