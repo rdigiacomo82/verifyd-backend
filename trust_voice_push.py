@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import threading
 import time
 import uuid
@@ -391,6 +392,10 @@ def notify_identity_push(
     sent = 0
     failed = 0
 
+    # A 30-second incoming call can expire while the handset is idle.
+    # RFC 8030 defines high urgency for incoming calls.
+    is_incoming_call = notification_type == "call_incoming"
+
     for subscription in subscriptions:
         subscription_id = str(
             subscription.get("subscription_id") or ""
@@ -412,6 +417,7 @@ def notify_identity_push(
                 vapid_claims={"sub": _vapid_subject()},
                 ttl=max(0, min(int(ttl or 0), 86400)),
                 timeout=5,
+                headers={"Urgency": "high"} if is_incoming_call else None,
             )
             sent += 1
             _mark_subscription_success(subscription_id)
@@ -446,6 +452,17 @@ def notify_identity_push(
                 subscription_id,
                 exc_info=True,
             )
+
+    call_id = data.get("call_id") if isinstance(data, dict) else None
+    if (
+        notification_type in {"call_incoming", "call_missed"}
+        and isinstance(call_id, str)
+        and re.fullmatch(r"tvcall_[a-f0-9]{32}", call_id)
+    ):
+        log.info(
+            "call_trace event=web_push call_id=%s kind=%s urgency=%s accepted=%d failed=%d",
+            call_id, notification_type, "high" if is_incoming_call else "normal", sent, failed,
+        )
 
     return {
         "configured": True,
