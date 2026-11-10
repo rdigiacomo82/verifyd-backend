@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import logging
 import os
@@ -12,15 +14,17 @@ import re
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, Header, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from database import get_db
 from trust_voice_signaling import (
     _identity_by_id,
+    _secret,
     _token_from_authorization,
     _verify_token,
 )
@@ -335,6 +339,58 @@ def _mark_subscription_failure(
         )
 
 
+_CALL_RECEIPT_PATTERN = re.compile(
+    r"(call_incoming|call_missed):(tvcall_[a-f0-9]{32}):([0-9]{10}):([a-f0-9]{32}):([a-f0-9]{64})"
+)
+_CALL_RECEIPT_RESULTS = {"display_accepted", "fallback_accepted", "display_failed"}
+_call_receipt_lock = threading.Lock()
+_call_receipts: OrderedDict[str, None] = OrderedDict()
+
+
+def _call_receipt_signature(value: str) -> str:
+    return hmac.new(
+        _secret(), ("voice-web-push-receipt-v1:" + value).encode(), hashlib.sha256
+    ).hexdigest()
+
+
+def _issue_call_receipt(kind: str, call_id: str) -> str:
+    value = f"{kind}:{call_id}:{int(time.time()) + 900}:{uuid.uuid4().hex}"
+    return f"{value}:{_call_receipt_signature(value)}"
+
+
+def _record_call_receipt(token: str, result: str) -> None:
+    match = _CALL_RECEIPT_PATTERN.fullmatch(token)
+    if not match or result not in _CALL_RECEIPT_RESULTS:
+        return
+    kind, call_id, expiry, nonce, signature = match.groups()
+    if not 0 < int(expiry) - int(time.time()) <= 900:
+        return
+    if not hmac.compare_digest(signature, _call_receipt_signature(token.rsplit(":", 1)[0])):
+        return
+    with _call_receipt_lock:
+        if nonce in _call_receipts:
+            return
+        _call_receipts[nonce] = None
+        if len(_call_receipts) > 4096:
+            _call_receipts.popitem(last=False)
+    log.info("call_trace event=web_worker call_id=%s kind=%s result=%s", call_id, kind, result)
+
+
+@router.post("/push/call-receipt", include_in_schema=False)
+async def receive_call_receipt(request: Request):
+    body = bytearray()
+    async for chunk in request.stream():
+        if len(body) + len(chunk) > 256:
+            return Response(status_code=413)
+        body.extend(chunk)
+    try:
+        token, result = body.decode("ascii").split("\n", 1)
+        _record_call_receipt(token, result)
+    except (ValueError, HTTPException):
+        pass
+    return Response(status_code=204)
+
+
 def notify_identity_push(
     identity_id: str,
     *,
@@ -383,11 +439,13 @@ def notify_identity_push(
         "data": data if isinstance(data, dict) else {},
     }
 
-    serialized = json.dumps(
-        payload,
-        separators=(",", ":"),
-        ensure_ascii=False,
+    call_id = data.get("call_id") if isinstance(data, dict) else None
+    trace_call = (
+        notification_type in {"call_incoming", "call_missed"}
+        and isinstance(call_id, str)
+        and re.fullmatch(r"tvcall_[a-f0-9]{32}", call_id)
     )
+    serialized = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
 
     sent = 0
     failed = 0
@@ -409,10 +467,20 @@ def notify_identity_push(
             },
         }
 
+        outbound = serialized
+        if trace_call:
+            try:
+                outbound = json.dumps(
+                    {**payload, "call_receipt": _issue_call_receipt(notification_type, call_id)},
+                    separators=(",", ":"), ensure_ascii=False,
+                )
+            except HTTPException:
+                pass  # A missing diagnostics key must not prevent push delivery.
+
         try:
             webpush(
                 subscription_info=info,
-                data=serialized,
+                data=outbound,
                 vapid_private_key=_vapid_private_key(),
                 vapid_claims={"sub": _vapid_subject()},
                 ttl=max(0, min(int(ttl or 0), 86400)),
@@ -453,12 +521,7 @@ def notify_identity_push(
                 exc_info=True,
             )
 
-    call_id = data.get("call_id") if isinstance(data, dict) else None
-    if (
-        notification_type in {"call_incoming", "call_missed"}
-        and isinstance(call_id, str)
-        and re.fullmatch(r"tvcall_[a-f0-9]{32}", call_id)
-    ):
+    if trace_call:
         log.info(
             "call_trace event=web_push call_id=%s kind=%s urgency=%s accepted=%d failed=%d",
             call_id, notification_type, "high" if is_incoming_call else "normal", sent, failed,
