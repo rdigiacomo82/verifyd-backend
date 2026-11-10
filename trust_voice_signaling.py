@@ -975,13 +975,12 @@ def _public_identity(
 async def _send(
     ws: WebSocket,
     payload: dict,
-) -> None:
+) -> bool:
     try:
-        await ws.send_json(
-            payload
-        )
+        await ws.send_json(payload)
+        return True
     except Exception:
-        pass
+        return False
 
 
 async def _send_to_identity(
@@ -1119,8 +1118,9 @@ async def _send_incoming_call_pilot_push(
         return False
 
 
-async def _replay_pilot_ringing_calls(identity_id: str, websocket: WebSocket) -> None:
-    """Deliver live pending invitations when a previously sleeping client reconnects."""
+async def _replay_pilot_ringing_calls(identity_id: str, websocket: WebSocket) -> set[str]:
+    """Deliver live invitations and return the call IDs sent on this socket."""
+    replayed_call_ids = set()
     async with _state_lock:
         pending = [
             dict(call)
@@ -1144,15 +1144,21 @@ async def _replay_pilot_ringing_calls(identity_id: str, websocket: WebSocket) ->
             from trust_voice_blocking import identities_blocked
             if identities_blocked(str(caller["id"]), identity_id):
                 continue
-            await _send(websocket, {
+            sent = await _send(websocket, {
                 "type": "incoming_call",
                 "call_id": str(call["call_id"]),
                 "caller": _public_identity(caller),
                 "expires_in_seconds": max(1, int(INVITE_TTL_SECONDS - call_age)),
                 "call_type": str(call.get("call_type") or "audio"),
+                "replayed": True,
             })
+            log.info("call_trace event=replay call_id=%s result=%s",
+                     call["call_id"], "sent" if sent else "send_failed")
+            if sent:
+                replayed_call_ids.add(str(call["call_id"]))
         except Exception:
             log.warning("Could not replay staged incoming-call invitation", exc_info=True)
+    return replayed_call_ids
 
 
 async def _presence(
@@ -2129,7 +2135,8 @@ async def relay_call_media(call_id: str, identity_id: str, message: dict, *,
 
 
 async def apply_call_action(call_id: str, identity_id: str, action: str, *,
-                            android_socket: Optional[WebSocket] = None) -> dict:
+                            android_socket: Optional[WebSocket] = None,
+                            transport: str = "native_http") -> dict:
     """One atomic transition for native HTTP and existing WebSocket clients."""
     if action not in {"call_answer", "call_decline", "call_end"}:
         raise HTTPException(400, detail={"error": "invalid_action"})
@@ -2189,6 +2196,9 @@ async def apply_call_action(call_id: str, identity_id: str, action: str, *,
         _record_call_terminal(call_id, "canceled" if ringing else "ended",
                               "ended_before_answer" if ringing else "ended")
         event = {"type": "call_ended", "call_id": call_id, "reason": "ended"}
+        log.info("call_trace event=end call_id=%s actor=%s transport=%s state=%s",
+                 call_id, "caller" if identity_id == call["caller_id"] else "callee",
+                 "android_media" if android_socket is not None else transport, call["state"])
     native = call.get("android_media_socket")
     if native is not None and action == "call_answer":
         # Release any duplicate ring on the web callee. The caller's existing
@@ -2316,12 +2326,13 @@ async def signaling_ws(
     # Never replay terminal or expired calls.
     from trust_voice_android_calls import pilot_allowed as android_pilot_allowed
     from trust_voice_native_calls import pilot_allowed as native_pilot_allowed
+    replayed_call_ids = set()
     if (
         _incoming_call_push_pilot_enabled(identity)
         or native_pilot_allowed(identity)
         or android_pilot_allowed(identity)
     ):
-        await _replay_pilot_ringing_calls(str(identity_id), websocket)
+        replayed_call_ids = await _replay_pilot_ringing_calls(str(identity_id), websocket)
 
     try:
         while True:
@@ -3381,10 +3392,21 @@ async def signaling_ws(
 
                     continue
 
+            if msg_type == "call_replay_receipt":
+                call_id = message.get("call_id")
+                result = message.get("result")
+                if not isinstance(call_id, str) or not isinstance(result, str) or result not in {
+                    "presented", "already_active", "other_call_active", "native_owns_call", "expired"
+                } or call_id not in replayed_call_ids:
+                    continue
+                replayed_call_ids.remove(call_id)
+                log.info("call_trace event=browser_receipt call_id=%s result=%s", call_id, result)
+                continue
+
             if msg_type in {"call_answer", "call_decline", "call_end"}:
                 call_id = str(message.get("call_id") or "").strip()
                 try:
-                    await apply_call_action(call_id, str(identity_id), msg_type)
+                    await apply_call_action(call_id, str(identity_id), msg_type, transport="websocket")
                 except HTTPException as exc:
                     detail = exc.detail if isinstance(exc.detail, dict) else {"error": str(exc.detail)}
                     await _send(websocket, {"type": "error", "call_id": call_id, **detail})
