@@ -1,0 +1,26 @@
+name: Native call contract (isolated, no deploy)
+on:
+  push:
+    paths:
+      - 'native_call_contract.py'
+      - 'tests/test_native_call_contract.py'
+      - '.github/workflows/native-call-contract.yml'
+  pull_request:
+    paths:
+      - 'native_call_contract.py'
+      - 'tests/test_native_call_contract.py'
+      - '.github/workflows/native-call-contract.yml'
+permissions:
+  contents: read
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Validate contract and tests
+        run: |
+          python -m py_compile native_call_contract.py tests/test_native_call_contract.py
+          python -m unittest discover -s tests -p 'test_native_call_contract.py' -v
