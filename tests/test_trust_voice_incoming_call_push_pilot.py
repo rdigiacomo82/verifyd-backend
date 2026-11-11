@@ -57,30 +57,25 @@ def harness():
 
 
 class IncomingPushPilotTests(unittest.IsolatedAsyncioTestCase):
-    async def test_feature_off_by_default_even_if_allowlist_present(self):
+    async def test_feature_off_by_default_even_if_legacy_allowlist_present(self):
         env, _ = harness()
-        with patch.dict(os.environ, {
-            "VERIFYD_INCOMING_CALL_PUSH_PILOT_ENABLED": "0",
-            "VERIFYD_INCOMING_CALL_PUSH_PILOT_HANDLES": "pilot",
-        }):
-            self.assertFalse(env["_incoming_call_push_pilot_enabled"]({"handle": "pilot"}))
+        with patch.dict(os.environ, {"VERIFYD_INCOMING_CALL_PUSH_PILOT_HANDLES": "pilot"}, clear=True):
+            self.assertFalse(env["_incoming_call_push_pilot_enabled"]())
 
-    async def test_empty_allowlist_fails_closed(self):
+    async def test_feature_can_be_enabled_without_an_allowlist(self):
         env, _ = harness()
-        with patch.dict(os.environ, {
-            "VERIFYD_INCOMING_CALL_PUSH_PILOT_ENABLED": "1",
-            "VERIFYD_INCOMING_CALL_PUSH_PILOT_HANDLES": "",
-        }):
-            self.assertFalse(env["_incoming_call_push_pilot_enabled"]({"handle": "pilot"}))
+        with patch.dict(os.environ, {"VERIFYD_INCOMING_CALL_PUSH_PILOT_ENABLED": "1"}, clear=True):
+            self.assertTrue(env["_incoming_call_push_pilot_enabled"]())
 
-    async def test_only_exact_explicit_pilot_handle_works(self):
+    async def test_legacy_allowlist_does_not_limit_enabled_rollout(self):
         env, _ = harness()
         with patch.dict(os.environ, {
             "VERIFYD_INCOMING_CALL_PUSH_PILOT_ENABLED": "on",
-            "VERIFYD_INCOMING_CALL_PUSH_PILOT_HANDLES": " @Pilot , @other ",
-        }):
-            self.assertTrue(env["_incoming_call_push_pilot_enabled"]({"handle_lower": "pilot"}))
-            self.assertFalse(env["_incoming_call_push_pilot_enabled"]({"handle": "pilot_extra"}))
+            "VERIFYD_INCOMING_CALL_PUSH_PILOT_HANDLES": "pilot",
+        }, clear=True):
+            self.assertTrue(env["_incoming_call_push_pilot_enabled"]())
+            source = SRC.read_text(encoding="utf8")
+            self.assertNotIn("VERIFYD_INCOMING_CALL_PUSH_PILOT_HANDLES", source)
 
     async def test_subscription_readiness_requires_enabled_config_and_live_sub(self):
         env, _ = harness()
@@ -160,7 +155,7 @@ class IncomingPushPilotTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("if delivered == 0 and not push_sent", text)
         self.assertIn("_create_call_history(", text)
         self.assertIn("_schedule_call_expiry(call_id)", text)
-        self.assertIn('_incoming_call_push_pilot_enabled(identity)', text)
+        self.assertIn('_incoming_call_push_pilot_enabled()', text)
         self.assertIn('or native_pilot_allowed(identity)', text)
         self.assertIn('or android_pilot_allowed(identity)', text)
         self.assertIn("if msg_type == \"call_invite\":", text)
