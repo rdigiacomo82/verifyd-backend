@@ -1,0 +1,1149 @@
+{
+  "version": "2026.11.11",
+  "grade_bands": [
+    {
+      "id": "K-2",
+      "label": "Early Elementary (approx. ages 5–7)"
+    },
+    {
+      "id": "3-5",
+      "label": "Upper Elementary (approx. ages 8–10)"
+    },
+    {
+      "id": "6-8",
+      "label": "Middle School (approx. ages 11–13)"
+    },
+    {
+      "id": "9-12",
+      "label": "High School (approx. ages 14–18)"
+    }
+  ],
+  "subjects": [
+    "Mathematics",
+    "Reading & Writing",
+    "Science",
+    "Social Studies"
+  ],
+  "assignments": [
+    {
+      "id": "k2-math-add",
+      "band": "K-2",
+      "subject": "Mathematics",
+      "title": "Count, Combine & Compare",
+      "standards_note": "CCSS 2.OA.A.1 (addition and subtraction word problems)",
+      "source_url": "https://www.thecorestandards.org/Math/Content/",
+      "estimated_minutes": 12,
+      "points": 60,
+      "questions": [
+        {
+          "id": "q1",
+          "prompt": "You have 7 crayons and get 5 more. How many?",
+          "choices": [
+            {
+              "id": "a",
+              "text": "11"
+            },
+            {
+              "id": "b",
+              "text": "12"
+            },
+            {
+              "id": "c",
+              "text": "13"
+            }
+          ],
+          "answer": "b"
+        },
+        {
+          "id": "q2",
+          "prompt": "A class has 14 apples; 6 are eaten. How many remain?",
+          "choices": [
+            {
+              "id": "a",
+              "text": "8"
+            },
+            {
+              "id": "b",
+              "text": "7"
+            },
+            {
+              "id": "c",
+              "text": "9"
+            }
+          ],
+          "answer": "a"
+        },
+        {
+          "id": "q3",
+          "prompt": "Which number is larger?",
+          "choices": [
+            {
+              "id": "a",
+              "text": "29"
+            },
+            {
+              "id": "b",
+              "text": "32"
+            },
+            {
+              "id": "c",
+              "text": "23"
+            }
+          ],
+          "answer": "b"
+        }
+      ],
+      "reflection_prompt": "Write or explain how you solved one problem."
+    },
+    {
+      "id": "k2-ela-story",
+      "band": "K-2",
+      "subject": "Reading & Writing",
+      "title": "The Little Garden Story",
+      "standards_note": "NYS Next Generation ELA: story comprehension and sequencing",
+      "source_url": "https://www.nysed.gov/standards-instruction/english-language-arts",
+      "estimated_minutes": 12,
+      "points": 60,
+      "questions": [
+        {
+          "id": "q1",
+          "prompt": "Maya planted a seed, watered it, and saw a sprout. What happened first?",
+          "choices": [
+            {
+              "id": "a",
+              "text": "She watered it"
+            },
+            {
+              "id": "b",
+              "text": "She planted a seed"
+            },
+            {
+              "id": "c",
+              "text": "A sprout appeared"
+            }
+          ],
+          "answer": "b"
+        },
+        {
+          "id": "q2",
+          "prompt": "Why did Maya water the seed?",
+          "choices": [
+            {
+              "id": "a",
+              "text": "To help it grow"
+            },
+            {
+              "id": "b",
+              "text": "To paint it"
+            },
+            {
+              "id": "c",
+              "text": "To carry it"
+            }
+          ],
+          "answer": "a"
+        },
+        {
+          "id": "q3",
+          "prompt": "Which event happened last?",
+          "choices": [
+            {
+              "id": "a",
+              "text": "Planting a seed"
+            },
+            {
+              "id": "b",
+              "text": "Watering"
+            },
+            {
+              "id": "c",
+              "text": "Seeing a sprout"
+            }
+          ],
+          "answer": "c"
+        }
+      ],
+      "reflection_prompt": "Tell a short story with a beginning, middle and end."
+    },
+    {
+      "id": "k2-science-plants",
+      "band": "K-2",
+      "subject": "Science",
+      "title": "What Does a Plant Need?",
+      "standards_note": "NGSS K–2: organisms and their environment",
+      "source_url": "https://www.nextgenscience.org/overview-topics",
+      "estimated_minutes": 12,
+      "points": 60,
+      "questions": [
+        {
+          "id": "q1",
+          "prompt": "Which helps most plants grow?",
+          "choices": [
+            {
+              "id": "a",
+              "text": "Sunlight"
+            },
+            {
+              "id": "b",
+              "text": "A blanket"
+            },
+            {
+              "id": "c",
+              "text": "A television"
+            }
+          ],
+          "answer": "a"
+        },
+        {
+          "id": "q2",
+          "prompt": "Roots mainly help a plant...",
+          "choices": [
+            {
+              "id": "a",
+              "text": "Make noise"
+            },
+            {
+              "id": "b",
+              "text": "Take in water"
+            },
+            {
+              "id": "c",
+              "text": "Fly"
+            }
+          ],
+          "answer": "b"
+        },
+        {
+          "id": "q3",
+          "prompt": "Which is a living thing?",
+          "choices": [
+            {
+              "id": "a",
+              "text": "Rock"
+            },
+            {
+              "id": "b",
+              "text": "Pencil"
+            },
+            {
+              "id": "c",
+              "text": "Tree"
+            }
+          ],
+          "answer": "c"
+        }
+      ],
+      "reflection_prompt": "Describe one way you could care for a plant."
+    },
+    {
+      "id": "k2-social-community",
+      "band": "K-2",
+      "subject": "Social Studies",
+      "title": "Our Community Helpers",
+      "standards_note": "NYS Social Studies Framework: community, roles and responsibilities",
+      "source_url": "https://www.nysed.gov/standards-instruction/social-studies",
+      "estimated_minutes": 12,
+      "points": 60,
+      "questions": [
+        {
+          "id": "q1",
+          "prompt": "Who helps put out a building fire?",
+          "choices": [
+            {
+              "id": "a",
+              "text": "Firefighter"
+            },
+            {
+              "id": "b",
+              "text": "Librarian"
+            },
+            {
+              "id": "c",
+              "text": "Coach"
+            }
+          ],
+          "answer": "a"
+        },
+        {
+          "id": "q2",
+          "prompt": "What is a helpful rule at a public library?",
+          "choices": [
+            {
+              "id": "a",
+              "text": "Shout loudly"
+            },
+            {
+              "id": "b",
+              "text": "Respect others and books"
+            },
+            {
+              "id": "c",
+              "text": "Leave books outside"
+            }
+          ],
+          "answer": "b"
+        },
+        {
+          "id": "q3",
+          "prompt": "Which is a way to help your community?",
+          "choices": [
+            {
+              "id": "a",
+              "text": "Pick up litter safely with an adult"
+            },
+            {
+              "id": "b",
+              "text": "Block sidewalks"
+            },
+            {
+              "id": "c",
+              "text": "Break signs"
+            }
+          ],
+          "answer": "a"
+        }
+      ],
+      "reflection_prompt": "Describe one helpful role in your neighborhood."
+    },
+    {
+      "id": "g35-math-fractions",
+      "band": "3-5",
+      "subject": "Mathematics",
+      "title": "Fraction Detectives",
+      "standards_note": "CCSS 4.NF.A.1–2 (equivalence and comparisons)",
+      "source_url": "https://www.thecorestandards.org/Math/Content/",
+      "estimated_minutes": 12,
+      "points": 60,
+      "questions": [
+        {
+          "id": "q1",
+          "prompt": "Which fraction equals one-half?",
+          "choices": [
+            {
+              "id": "a",
+              "text": "2/4"
+            },
+            {
+              "id": "b",
+              "text": "1/3"
+            },
+            {
+              "id": "c",
+              "text": "3/4"
+            }
+          ],
+          "answer": "a"
+        },
+        {
+          "id": "q2",
+          "prompt": "Which is greater?",
+          "choices": [
+            {
+              "id": "a",
+              "text": "1/4"
+            },
+            {
+              "id": "b",
+              "text": "3/4"
+            },
+            {
+              "id": "c",
+              "text": "They are equal"
+            }
+          ],
+          "answer": "b"
+        },
+        {
+          "id": "q3",
+          "prompt": "What is 1/4 + 2/4?",
+          "choices": [
+            {
+              "id": "a",
+              "text": "3/8"
+            },
+            {
+              "id": "b",
+              "text": "2/4"
+            },
+            {
+              "id": "c",
+              "text": "3/4"
+            }
+          ],
+          "answer": "c"
+        }
+      ],
+      "reflection_prompt": "Draw or describe a fraction model."
+    },
+    {
+      "id": "g35-ela-main-idea",
+      "band": "3-5",
+      "subject": "Reading & Writing",
+      "title": "Main Idea and Evidence",
+      "standards_note": "NYS Next Generation ELA: main ideas, details and responses",
+      "source_url": "https://www.nysed.gov/standards-instruction/english-language-arts",
+      "estimated_minutes": 12,
+      "points": 60,
+      "questions": [
+        {
+          "id": "q1",
+          "prompt": "Bees visit flowers and carry pollen. This helps plants produce seeds. What is the main idea?",
+          "choices": [
+            {
+              "id": "a",
+              "text": "Bees help plants reproduce"
+            },
+            {
+              "id": "b",
+              "text": "Bees live underwater"
+            },
+            {
+              "id": "c",
+              "text": "Plants never need insects"
+            }
+          ],
+          "answer": "a"
+        },
+        {
+          "id": "q2",
+          "prompt": "Which detail supports the main idea?",
+          "choices": [
+            {
+              "id": "a",
+              "text": "The sky is blue"
+            },
+            {
+              "id": "b",
+              "text": "Bees carry pollen"
+            },
+            {
+              "id": "c",
+              "text": "Cars have tires"
+            }
+          ],
+          "answer": "b"
+        },
+        {
+          "id": "q3",
+          "prompt": "Which sentence is a fact rather than an opinion?",
+          "choices": [
+            {
+              "id": "a",
+              "text": "Bees are the best insects"
+            },
+            {
+              "id": "b",
+              "text": "All flowers are pretty"
+            },
+            {
+              "id": "c",
+              "text": "Bees carry pollen between flowers"
+            }
+          ],
+          "answer": "c"
+        }
+      ],
+      "reflection_prompt": "Write a two-sentence summary of the passage."
+    },
+    {
+      "id": "g35-science-erosion",
+      "band": "3-5",
+      "subject": "Science",
+      "title": "Weathering and Erosion",
+      "standards_note": "NGSS Grade 4: Earth systems and changes to land",
+      "source_url": "https://www.nextgenscience.org/overview-topics",
+      "estimated_minutes": 12,
+      "points": 60,
+      "questions": [
+        {
+          "id": "q1",
+          "prompt": "Which can move soil downhill?",
+          "choices": [
+            {
+              "id": "a",
+              "text": "Running water"
+            },
+            {
+              "id": "b",
+              "text": "A closed book"
+            },
+            {
+              "id": "c",
+              "text": "Sunset"
+            }
+          ],
+          "answer": "a"
+        },
+        {
+          "id": "q2",
+          "prompt": "Plant roots can help reduce erosion by...",
+          "choices": [
+            {
+              "id": "a",
+              "text": "Making wind"
+            },
+            {
+              "id": "b",
+              "text": "Holding soil in place"
+            },
+            {
+              "id": "c",
+              "text": "Turning soil into metal"
+            }
+          ],
+          "answer": "b"
+        },
+        {
+          "id": "q3",
+          "prompt": "What may happen to a riverbank after a major storm?",
+          "choices": [
+            {
+              "id": "a",
+              "text": "It always grows taller"
+            },
+            {
+              "id": "b",
+              "text": "Nothing can change"
+            },
+            {
+              "id": "c",
+              "text": "Some soil may wash away"
+            }
+          ],
+          "answer": "c"
+        }
+      ],
+      "reflection_prompt": "Suggest one way to protect soil near a stream."
+    },
+    {
+      "id": "g35-social-maps",
+      "band": "3-5",
+      "subject": "Social Studies",
+      "title": "Read a Neighborhood Map",
+      "standards_note": "NYS Social Studies Framework: geography and map evidence",
+      "source_url": "https://www.nysed.gov/standards-instruction/social-studies",
+      "estimated_minutes": 12,
+      "points": 60,
+      "questions": [
+        {
+          "id": "q1",
+          "prompt": "What does a map key explain?",
+          "choices": [
+            {
+              "id": "a",
+              "text": "Symbols"
+            },
+            {
+              "id": "b",
+              "text": "The weather tomorrow"
+            },
+            {
+              "id": "c",
+              "text": "Homework grades"
+            }
+          ],
+          "answer": "a"
+        },
+        {
+          "id": "q2",
+          "prompt": "If a library is north of the school, which direction is the school from the library?",
+          "choices": [
+            {
+              "id": "a",
+              "text": "North"
+            },
+            {
+              "id": "b",
+              "text": "South"
+            },
+            {
+              "id": "c",
+              "text": "East"
+            }
+          ],
+          "answer": "b"
+        },
+        {
+          "id": "q3",
+          "prompt": "Why is a map scale useful?",
+          "choices": [
+            {
+              "id": "a",
+              "text": "To choose colors"
+            },
+            {
+              "id": "b",
+              "text": "To name roads"
+            },
+            {
+              "id": "c",
+              "text": "To estimate distances"
+            }
+          ],
+          "answer": "c"
+        }
+      ],
+      "reflection_prompt": "Describe a simple route from home to a familiar public place without sharing your actual address."
+    },
+    {
+      "id": "g68-math-ratios",
+      "band": "6-8",
+      "subject": "Mathematics",
+      "title": "Ratios in a Recipe",
+      "standards_note": "CCSS 6.RP.A.1–3 (ratios and unit rates)",
+      "source_url": "https://www.thecorestandards.org/Math/Content/",
+      "estimated_minutes": 18,
+      "points": 60,
+      "questions": [
+        {
+          "id": "q1",
+          "prompt": "A drink uses 2 cups juice for every 3 cups water. What is juice:water?",
+          "choices": [
+            {
+              "id": "a",
+              "text": "2:3"
+            },
+            {
+              "id": "b",
+              "text": "3:2"
+            },
+            {
+              "id": "c",
+              "text": "5:3"
+            }
+          ],
+          "answer": "a"
+        },
+        {
+          "id": "q2",
+          "prompt": "Double the recipe. How many cups water?",
+          "choices": [
+            {
+              "id": "a",
+              "text": "5"
+            },
+            {
+              "id": "b",
+              "text": "6"
+            },
+            {
+              "id": "c",
+              "text": "8"
+            }
+          ],
+          "answer": "b"
+        },
+        {
+          "id": "q3",
+          "prompt": "5 tickets cost $25. What is the cost per ticket?",
+          "choices": [
+            {
+              "id": "a",
+              "text": "$4"
+            },
+            {
+              "id": "b",
+              "text": "$10"
+            },
+            {
+              "id": "c",
+              "text": "$5"
+            }
+          ],
+          "answer": "c"
+        }
+      ],
+      "reflection_prompt": "Explain how a ratio could help scale a recipe."
+    },
+    {
+      "id": "g68-ela-claims",
+      "band": "6-8",
+      "subject": "Reading & Writing",
+      "title": "Claim, Reason, Evidence",
+      "standards_note": "NYS Next Generation ELA Grades 6–8: arguments and supporting evidence",
+      "source_url": "https://www.nysed.gov/standards-instruction/english-language-arts",
+      "estimated_minutes": 18,
+      "points": 60,
+      "questions": [
+        {
+          "id": "q1",
+          "prompt": "Which is a claim?",
+          "choices": [
+            {
+              "id": "a",
+              "text": "Schools should provide more shade outside."
+            },
+            {
+              "id": "b",
+              "text": "The tree is 12 feet tall."
+            },
+            {
+              "id": "c",
+              "text": "Our class starts at 9."
+            }
+          ],
+          "answer": "a"
+        },
+        {
+          "id": "q2",
+          "prompt": "Which evidence best supports a shade proposal?",
+          "choices": [
+            {
+              "id": "a",
+              "text": "Green is a nice color"
+            },
+            {
+              "id": "b",
+              "text": "Temperature measurements of sunny and shady areas"
+            },
+            {
+              "id": "c",
+              "text": "A friend likes hats"
+            }
+          ],
+          "answer": "b"
+        },
+        {
+          "id": "q3",
+          "prompt": "Which word signals a reason?",
+          "choices": [
+            {
+              "id": "a",
+              "text": "Yesterday"
+            },
+            {
+              "id": "b",
+              "text": "Blue"
+            },
+            {
+              "id": "c",
+              "text": "Because"
+            }
+          ],
+          "answer": "c"
+        }
+      ],
+      "reflection_prompt": "Write a claim about your school or community and a piece of evidence supporting it."
+    },
+    {
+      "id": "g68-science-ecosystem",
+      "band": "6-8",
+      "subject": "Science",
+      "title": "Energy in Ecosystems",
+      "standards_note": "NGSS MS-LS2-3: flow of energy and cycling of matter",
+      "source_url": "https://www.nextgenscience.org/overview-topics",
+      "estimated_minutes": 18,
+      "points": 60,
+      "questions": [
+        {
+          "id": "q1",
+          "prompt": "What is the main energy source for many food webs?",
+          "choices": [
+            {
+              "id": "a",
+              "text": "The Sun"
+            },
+            {
+              "id": "b",
+              "text": "Rocks"
+            },
+            {
+              "id": "c",
+              "text": "The Moon"
+            }
+          ],
+          "answer": "a"
+        },
+        {
+          "id": "q2",
+          "prompt": "Which organism can make food using sunlight?",
+          "choices": [
+            {
+              "id": "a",
+              "text": "Rabbit"
+            },
+            {
+              "id": "b",
+              "text": "Grass"
+            },
+            {
+              "id": "c",
+              "text": "Wolf"
+            }
+          ],
+          "answer": "b"
+        },
+        {
+          "id": "q3",
+          "prompt": "What happens to matter when organisms decompose?",
+          "choices": [
+            {
+              "id": "a",
+              "text": "It disappears forever"
+            },
+            {
+              "id": "b",
+              "text": "It changes into light"
+            },
+            {
+              "id": "c",
+              "text": "It returns to the environment"
+            }
+          ],
+          "answer": "c"
+        }
+      ],
+      "reflection_prompt": "Explain a simple food chain using three organisms."
+    },
+    {
+      "id": "g68-social-sources",
+      "band": "6-8",
+      "subject": "Social Studies",
+      "title": "Primary Sources and Community Decisions",
+      "standards_note": "NYS Social Studies Framework Grades 6–8: inquiry and source evaluation",
+      "source_url": "https://www.nysed.gov/standards-instruction/social-studies",
+      "estimated_minutes": 18,
+      "points": 60,
+      "questions": [
+        {
+          "id": "q1",
+          "prompt": "Which is a primary source about a historical meeting?",
+          "choices": [
+            {
+              "id": "a",
+              "text": "A witness diary"
+            },
+            {
+              "id": "b",
+              "text": "A modern summary textbook"
+            },
+            {
+              "id": "c",
+              "text": "An encyclopedia entry"
+            }
+          ],
+          "answer": "a"
+        },
+        {
+          "id": "q2",
+          "prompt": "Why compare two sources describing the same event?",
+          "choices": [
+            {
+              "id": "a",
+              "text": "To make the paper longer"
+            },
+            {
+              "id": "b",
+              "text": "To check perspective and evidence"
+            },
+            {
+              "id": "c",
+              "text": "To avoid reading"
+            }
+          ],
+          "answer": "b"
+        },
+        {
+          "id": "q3",
+          "prompt": "What helps evaluate reliability of a source?",
+          "choices": [
+            {
+              "id": "a",
+              "text": "Only colorful pictures"
+            },
+            {
+              "id": "b",
+              "text": "The title font"
+            },
+            {
+              "id": "c",
+              "text": "Author, date and evidence"
+            }
+          ],
+          "answer": "c"
+        }
+      ],
+      "reflection_prompt": "Explain one question you would ask about the source of a historical claim."
+    },
+    {
+      "id": "g912-math-linear",
+      "band": "9-12",
+      "subject": "Mathematics",
+      "title": "Linear Equations in Context",
+      "standards_note": "High school algebra: linear equations and modeling",
+      "source_url": "https://www.thecorestandards.org/Math/Content/",
+      "estimated_minutes": 18,
+      "points": 60,
+      "questions": [
+        {
+          "id": "q1",
+          "prompt": "Solve: 2x + 5 = 17.",
+          "choices": [
+            {
+              "id": "a",
+              "text": "x = 6"
+            },
+            {
+              "id": "b",
+              "text": "x = 11"
+            },
+            {
+              "id": "c",
+              "text": "x = 8"
+            }
+          ],
+          "answer": "a"
+        },
+        {
+          "id": "q2",
+          "prompt": "In y = 3x + 2, what is the slope?",
+          "choices": [
+            {
+              "id": "a",
+              "text": "2"
+            },
+            {
+              "id": "b",
+              "text": "3"
+            },
+            {
+              "id": "c",
+              "text": "5"
+            }
+          ],
+          "answer": "b"
+        },
+        {
+          "id": "q3",
+          "prompt": "A $4 ticket fee plus $7 per event is modeled by...",
+          "choices": [
+            {
+              "id": "a",
+              "text": "y = 4x + 7"
+            },
+            {
+              "id": "b",
+              "text": "y = 11x"
+            },
+            {
+              "id": "c",
+              "text": "y = 7x + 4"
+            }
+          ],
+          "answer": "c"
+        }
+      ],
+      "reflection_prompt": "Create a real-world situation that could be modeled by a linear equation."
+    },
+    {
+      "id": "g912-ela-rhetoric",
+      "band": "9-12",
+      "subject": "Reading & Writing",
+      "title": "Evaluate a Persuasive Argument",
+      "standards_note": "NYS Next Generation ELA Grades 9–12: reasoning, evidence and rhetoric",
+      "source_url": "https://www.nysed.gov/standards-instruction/english-language-arts",
+      "estimated_minutes": 18,
+      "points": 60,
+      "questions": [
+        {
+          "id": "q1",
+          "prompt": "Which statement offers evidence for installing bike racks?",
+          "choices": [
+            {
+              "id": "a",
+              "text": "A survey found 60 students commute by bike."
+            },
+            {
+              "id": "b",
+              "text": "Bike racks look cool."
+            },
+            {
+              "id": "c",
+              "text": "I like green paint."
+            }
+          ],
+          "answer": "a"
+        },
+        {
+          "id": "q2",
+          "prompt": "What is a counterclaim?",
+          "choices": [
+            {
+              "id": "a",
+              "text": "A repeat of the main claim"
+            },
+            {
+              "id": "b",
+              "text": "A reasonable opposing position"
+            },
+            {
+              "id": "c",
+              "text": "A title"
+            }
+          ],
+          "answer": "b"
+        },
+        {
+          "id": "q3",
+          "prompt": "Why identify the source of a statistic?",
+          "choices": [
+            {
+              "id": "a",
+              "text": "To fill space"
+            },
+            {
+              "id": "b",
+              "text": "To make it harder to read"
+            },
+            {
+              "id": "c",
+              "text": "To evaluate credibility"
+            }
+          ],
+          "answer": "c"
+        }
+      ],
+      "reflection_prompt": "Write a claim, counterclaim and evidence in 3–5 sentences."
+    },
+    {
+      "id": "g912-science-carbon",
+      "band": "9-12",
+      "subject": "Science",
+      "title": "Carbon Cycling and Photosynthesis",
+      "standards_note": "NGSS HS-LS2-5: carbon cycling among Earth systems",
+      "source_url": "https://www.nextgenscience.org/overview-topics",
+      "estimated_minutes": 18,
+      "points": 60,
+      "questions": [
+        {
+          "id": "q1",
+          "prompt": "During photosynthesis, plants take in...",
+          "choices": [
+            {
+              "id": "a",
+              "text": "Carbon dioxide"
+            },
+            {
+              "id": "b",
+              "text": "Helium"
+            },
+            {
+              "id": "c",
+              "text": "Nitrogen gas only"
+            }
+          ],
+          "answer": "a"
+        },
+        {
+          "id": "q2",
+          "prompt": "Which process releases CO₂ from many organisms?",
+          "choices": [
+            {
+              "id": "a",
+              "text": "Freezing"
+            },
+            {
+              "id": "b",
+              "text": "Cellular respiration"
+            },
+            {
+              "id": "c",
+              "text": "Condensation"
+            }
+          ],
+          "answer": "b"
+        },
+        {
+          "id": "q3",
+          "prompt": "A change in forests can affect atmospheric carbon because...",
+          "choices": [
+            {
+              "id": "a",
+              "text": "Trees are made of metal"
+            },
+            {
+              "id": "b",
+              "text": "Trees do not use carbon"
+            },
+            {
+              "id": "c",
+              "text": "Trees store carbon in biomass"
+            }
+          ],
+          "answer": "c"
+        }
+      ],
+      "reflection_prompt": "Describe one human activity that affects the carbon cycle and support your idea."
+    },
+    {
+      "id": "g912-social-civics",
+      "band": "9-12",
+      "subject": "Social Studies",
+      "title": "Evaluate a Civic Proposal",
+      "standards_note": "NYS Social Studies Framework Grades 9–12: government, civic participation and evidence",
+      "source_url": "https://www.nysed.gov/standards-instruction/social-studies",
+      "estimated_minutes": 18,
+      "points": 60,
+      "questions": [
+        {
+          "id": "q1",
+          "prompt": "Which body makes federal laws in the U.S.?",
+          "choices": [
+            {
+              "id": "a",
+              "text": "Congress"
+            },
+            {
+              "id": "b",
+              "text": "Supreme Court"
+            },
+            {
+              "id": "c",
+              "text": "Federal Reserve"
+            }
+          ],
+          "answer": "a"
+        },
+        {
+          "id": "q2",
+          "prompt": "What is an evidence-based way to evaluate a proposed local law?",
+          "choices": [
+            {
+              "id": "a",
+              "text": "Guess the outcome"
+            },
+            {
+              "id": "b",
+              "text": "Review data, impacts and community perspectives"
+            },
+            {
+              "id": "c",
+              "text": "Ignore affected residents"
+            }
+          ],
+          "answer": "b"
+        },
+        {
+          "id": "q3",
+          "prompt": "Which protects a democratic process?",
+          "choices": [
+            {
+              "id": "a",
+              "text": "Silencing all disagreement"
+            },
+            {
+              "id": "b",
+              "text": "Rejecting all evidence"
+            },
+            {
+              "id": "c",
+              "text": "Peaceful participation and informed discussion"
+            }
+          ],
+          "answer": "c"
+        }
+      ],
+      "reflection_prompt": "Draft a short, respectful note about a local issue without sharing private identifying information."
+    }
+  ]
+}
