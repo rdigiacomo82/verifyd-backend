@@ -1,0 +1,29 @@
+name: Trust Voice WebSocket auth regression
+
+on:
+  push:
+    branches:
+      - fix/ws-auth-nonblocking-session-check-20261112
+  pull_request:
+    paths:
+      - trust_voice_signaling.py
+      - tests/test_trust_voice_websocket_auth.py
+      - .github/workflows/trust-voice-websocket-auth.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  websocket-auth:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Validate signaling syntax
+        run: python -m py_compile trust_voice_signaling.py
+      - name: Exercise secure and legacy WebSocket authentication
+        run: python -m unittest discover -s tests -p "test_trust_voice_websocket_auth.py" -v
