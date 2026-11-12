@@ -1,0 +1,55 @@
+name: Circle verified games and Homework integration
+
+on:
+  push:
+    branches:
+      - feature/circle-server-verified-games-20261112
+  pull_request:
+    paths:
+      - trust_voice_verified_games.py
+      - trust_voice_homework.py
+      - trust_voice_ranks.py
+      - main.py
+      - tests/test_circle_verified_games*.py
+      - tests/test_circle_homework*.py
+      - .github/workflows/circle-verified-games-ci.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  games-homework:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: circletest
+          POSTGRES_USER: circle
+          POSTGRES_PASSWORD: circle
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U circle -d circletest"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      TEST_PG_DSN: postgresql://circle:circle@127.0.0.1:5432/circletest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install isolated test dependencies
+        run: python -m pip install "fastapi>=0.110,<1" "pydantic>=2,<3" "psycopg2-binary>=2.9,<3"
+      - name: Compile optional routers
+        run: python -m py_compile trust_voice_verified_games.py trust_voice_homework.py trust_voice_ranks.py main.py
+      - name: Test server-controlled game rules
+        run: python -m unittest discover -s tests -p "test_circle_verified_games.py" -v
+      - name: Test game owner isolation and awards in PostgreSQL
+        run: python -m unittest discover -s tests -p "test_circle_verified_games_postgres.py" -v
+      - name: Test Homework grading, persistence and ranking awards
+        run: python -m unittest discover -s tests -p "test_circle_homework*.py" -v
