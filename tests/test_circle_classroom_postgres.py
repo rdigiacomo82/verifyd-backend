@@ -36,7 +36,7 @@ def auth(header):
     from fastapi import HTTPException
     if not header or not header.startswith("Bearer edu-"):
         raise HTTPException(401, detail={"error":"session_required"})
-    return {"id":header[11:],"status":"active"}
+    return {"id":header.split(" ",1)[1],"status":"active"}
 
 def load(name,file):
     spec=importlib.util.spec_from_file_location(name,ROOT/file)
