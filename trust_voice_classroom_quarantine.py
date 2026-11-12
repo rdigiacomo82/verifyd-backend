@@ -12,6 +12,7 @@ import hashlib
 import os
 import re
 import secrets
+import threading
 from pathlib import PurePosixPath
 from typing import Literal, Optional
 
@@ -24,6 +25,8 @@ from database import get_db
 from trust_voice_classrooms import _identity, _schema as class_schema, _teacher, _member, _assignment
 
 router = APIRouter(prefix="/trust-voice/classroom", tags=["Circle Classroom Quarantine"])
+_READY = False
+_LOCK = threading.Lock()
 
 MAX_FILE_SIZE = 8 * 1024 * 1024
 MAX_FILES_PER_ASSIGNMENT = 12
@@ -87,25 +90,31 @@ def check_signature(name, body):
 
 
 def ensure_upload_schema():
-    class_schema()
-    with get_db() as conn:
-        cur = conn.cursor()
-        cur.execute("""CREATE TABLE IF NOT EXISTS verifyd_circle_class_uploads(
-            upload_id TEXT PRIMARY KEY,
-            assignment_id TEXT NOT NULL REFERENCES verifyd_circle_class_assignments(assignment_id) ON DELETE CASCADE,
-            owner_id TEXT NOT NULL REFERENCES verifyd_identities(id) ON DELETE CASCADE,
-            purpose TEXT NOT NULL CHECK (purpose IN ('teacher_material','student_work')),
-            storage_key TEXT NOT NULL UNIQUE,
-            original_name TEXT NOT NULL,
-            content_type TEXT NOT NULL,
-            sha256 TEXT NOT NULL,
-            byte_size INTEGER NOT NULL CHECK (byte_size BETWEEN 1 AND 8388608),
-            scan_status TEXT NOT NULL DEFAULT 'quarantined' CHECK(scan_status IN ('quarantined','rejected')),
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        )""")
-        cur.execute("""CREATE INDEX IF NOT EXISTS idx_circle_class_uploads_assignment_owner
-            ON verifyd_circle_class_uploads(assignment_id,owner_id)""")
-
+    global _READY
+    if _READY:
+        return
+    with _LOCK:
+        if _READY:
+            return
+        class_schema()
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("""CREATE TABLE IF NOT EXISTS verifyd_circle_class_uploads(
+                upload_id TEXT PRIMARY KEY,
+                assignment_id TEXT NOT NULL REFERENCES verifyd_circle_class_assignments(assignment_id) ON DELETE CASCADE,
+                owner_id TEXT NOT NULL REFERENCES verifyd_identities(id) ON DELETE CASCADE,
+                purpose TEXT NOT NULL CHECK (purpose IN ('teacher_material','student_work')),
+                storage_key TEXT NOT NULL UNIQUE,
+                original_name TEXT NOT NULL,
+                content_type TEXT NOT NULL,
+                sha256 TEXT NOT NULL,
+                byte_size INTEGER NOT NULL CHECK (byte_size BETWEEN 1 AND 8388608),
+                scan_status TEXT NOT NULL DEFAULT 'quarantined' CHECK(scan_status IN ('quarantined','rejected')),
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )""")
+            cur.execute("""CREATE INDEX IF NOT EXISTS idx_circle_class_uploads_assignment_owner
+                ON verifyd_circle_class_uploads(assignment_id,owner_id)""")
+        _READY = True
 
 @router.get("/uploads/health")
 def health():
