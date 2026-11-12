@@ -4,9 +4,9 @@ Disabled by default (VERIFYD_CIRCLE_RANKING_ENABLED=1). Dedicated tables;
 no mutation of identity or clinical session records. This is an ACHIEVEMENT
 rank, not proof of identity/organization verification or safety.
 
-Trusted game services may call award_verified_challenge() ONLY after server
-validation. There is deliberately no public endpoint accepting a points total,
-raw activity result, or client-supplied completion as proof.
+Games remain recreational: they DO NOT contribute to Trust Rank. Only
+eligible server-validated learning or other reviewed non-game achievements
+may affect achievement ranking. There is no public points-award endpoint.
 """
 from __future__ import annotations
 
@@ -28,18 +28,16 @@ _schema_ready = False
 # Printed card numbering follows the user-provided 01/05 ... 05/05 artwork.
 TIERS = [
     {"level": 0, "name": "Newcomer", "color": "#94A3B8", "card": None, "min_points": 0, "min_unique": 0, "min_games": 0},
-    {"level": 1, "name": "Nova", "color": "#38BDF8", "card": "NOVA", "min_points": 150, "min_unique": 3, "min_games": 2},
-    {"level": 2, "name": "Pixel", "color": "#FB923C", "card": "PIXEL", "min_points": 500, "min_unique": 8, "min_games": 5},
-    {"level": 3, "name": "Echo", "color": "#C084FC", "card": "ECHO", "min_points": 1100, "min_unique": 16, "min_games": 10},
-    {"level": 4, "name": "Spark", "color": "#A3E635", "card": "SPARK", "min_points": 2500, "min_unique": 30, "min_games": 18},
-    {"level": 5, "name": "Luna", "color": "#F0ABFC", "card": "LUNA", "min_points": 4500, "min_unique": 50, "min_games": 30},
+    {"level": 1, "name": "Nova", "color": "#38BDF8", "card": "NOVA", "min_points": 150, "min_unique": 3, "min_games": 0},
+    {"level": 2, "name": "Pixel", "color": "#FB923C", "card": "PIXEL", "min_points": 500, "min_unique": 8, "min_games": 0},
+    {"level": 3, "name": "Echo", "color": "#C084FC", "card": "ECHO", "min_points": 1100, "min_unique": 16, "min_games": 0},
+    {"level": 4, "name": "Spark", "color": "#A3E635", "card": "SPARK", "min_points": 2500, "min_unique": 30, "min_games": 0},
+    {"level": 5, "name": "Luna", "color": "#F0ABFC", "card": "LUNA", "min_points": 4500, "min_unique": 50, "min_games": 0},
 ]
 
 # Controlled, server-only challenge IDs. No public client-award endpoint.
 # Every additional challenge must be explicitly reviewed before release.
-CHALLENGES = {
-    "circle-match": {"label": "Circle Match (any difficulty)", "kind": "game", "points": 100},
-}
+CHALLENGES = {}  # Game points disabled; games unlock separately.
 AVATAR_UNLOCKS = {
     level: ["default", *["nova", "pixel", "echo", "spark", "luna"][:level]]
     for level in range(6)
@@ -115,7 +113,7 @@ def _schema():
 def tier_for(points, unique, games):
     winner = TIERS[0]
     for tier in TIERS[1:]:
-        if points >= tier["min_points"] and unique >= tier["min_unique"] and games >= tier["min_games"]:
+        if points >= tier["min_points"] and unique >= tier["min_unique"]:
             winner = tier
     return winner
 
@@ -127,8 +125,8 @@ def _snapshot(identity_id: str, owner: bool = False):
         cur.execute("""SELECT show_public_number, selected_avatar
                        FROM verifyd_circle_rank_profiles WHERE identity_id=%s""", (identity_id,))
         profile = cur.fetchone() or {}
-        cur.execute("""SELECT COALESCE(SUM(points),0) AS points,
-                           COUNT(*) AS unique_count,
+        cur.execute("""SELECT COALESCE(SUM(points) FILTER (WHERE kind='challenge'),0) AS points,
+                           COUNT(*) FILTER (WHERE kind='challenge') AS unique_count,
                            COUNT(*) FILTER (WHERE kind='game') AS game_count
                        FROM verifyd_circle_rank_awards WHERE identity_id=%s""", (identity_id,))
         totals = cur.fetchone() or {}
@@ -183,7 +181,7 @@ def catalog():
         "version": "0.1.0", "tiers": TIERS,
         "challenges": [{**c, "id": key, "status": "verification_integration_pending"}
                        for key, c in CHALLENGES.items()],
-        "warning": "Achievements are not a substitute for VeriFYD identity verification.",
+        "warning": "Learning achievements, not gameplay or identity verification, drive Trust Rank.",
     }
 
 
