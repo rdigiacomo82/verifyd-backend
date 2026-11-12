@@ -5,6 +5,7 @@ This is intentionally separate from shared classes and existing Homework.
 Private notes are never exposed to teachers, classmates, or public profiles.
 """
 import uuid
+import threading
 from datetime import datetime
 from typing import Literal, Optional
 
@@ -15,25 +16,34 @@ from database import get_db
 from trust_voice_classrooms import _identity, _schema as class_schema
 
 router = APIRouter(prefix="/trust-voice/classroom", tags=["Circle Personal Learning"])
+_READY = False
+_LOCK = threading.Lock()
 
 
 def schema():
-    class_schema()
-    with get_db() as conn:
-        conn.cursor().execute("""CREATE TABLE IF NOT EXISTS verifyd_circle_personal_coursework(
-            coursework_id TEXT PRIMARY KEY,
-            identity_id TEXT NOT NULL REFERENCES verifyd_identities(id) ON DELETE CASCADE,
-            title TEXT NOT NULL,
-            assignment TEXT NOT NULL DEFAULT '',
-            response TEXT NOT NULL DEFAULT '',
-            status TEXT NOT NULL DEFAULT 'in_progress'
-                CHECK (status IN ('in_progress','completed')),
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        )""")
-        conn.cursor().execute("""CREATE INDEX IF NOT EXISTS idx_circle_personal_coursework_owner
-            ON verifyd_circle_personal_coursework(identity_id,updated_at DESC)""")
-
+    global _READY
+    if _READY:
+        return
+    with _LOCK:
+        if _READY:
+            return
+        class_schema()
+        with get_db() as conn:
+            cur=conn.cursor()
+            cur.execute("""CREATE TABLE IF NOT EXISTS verifyd_circle_personal_coursework(
+                coursework_id TEXT PRIMARY KEY,
+                identity_id TEXT NOT NULL REFERENCES verifyd_identities(id) ON DELETE CASCADE,
+                title TEXT NOT NULL,
+                assignment TEXT NOT NULL DEFAULT '',
+                response TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'in_progress'
+                    CHECK (status IN ('in_progress','completed')),
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )""")
+            cur.execute("""CREATE INDEX IF NOT EXISTS idx_circle_personal_coursework_owner
+                ON verifyd_circle_personal_coursework(identity_id,updated_at DESC)""")
+        _READY = True
 
 class PersonalCreate(BaseModel):
     title: str = Field(min_length=3,max_length=160)
