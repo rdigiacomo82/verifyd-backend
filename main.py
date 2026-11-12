@@ -72,6 +72,7 @@ from trust_voice_voicemail_intelligence import router as trust_voice_voicemail_i
 from trust_voice_circle_safety import router as trust_voice_circle_safety_router
 from trust_voice_homework import router as trust_voice_homework_router
 from trust_voice_ranks import router as trust_voice_ranks_router
+from trust_voice_verified_games import router as trust_voice_verified_games_router
 
 log = logging.getLogger("verifyd.main")
 
@@ -316,6 +317,8 @@ app.include_router(trust_voice_circle_safety_router)
 app.include_router(trust_voice_homework_router)
 # VERIFYD_CIRCLE_RANKING_PHASE1 — disabled by default
 app.include_router(trust_voice_ranks_router)
+# VERIFYD_CIRCLE_VERIFIED_GAMES_V1 — separate feature flag, off by default
+app.include_router(trust_voice_verified_games_router)
 
 # VERIFYD_MAIL_SHIELD_STATIC_ICONS_V1
 # Public static assets for Microsoft Outlook add-in validation icons.
