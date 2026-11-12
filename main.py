@@ -74,6 +74,7 @@ from trust_voice_homework import router as trust_voice_homework_router
 from trust_voice_classrooms import router as trust_voice_classrooms_router
 from trust_voice_classroom_quarantine import router as trust_voice_classroom_quarantine_router
 from trust_voice_personal_coursework import router as trust_voice_personal_coursework_router
+from trust_voice_classroom_tools import router as trust_voice_classroom_tools_router
 from trust_voice_ranks import router as trust_voice_ranks_router
 
 log = logging.getLogger("verifyd.main")
@@ -321,6 +322,7 @@ app.include_router(trust_voice_homework_router)
 app.include_router(trust_voice_classrooms_router)
 app.include_router(trust_voice_classroom_quarantine_router)
 app.include_router(trust_voice_personal_coursework_router)
+app.include_router(trust_voice_classroom_tools_router)
 # VERIFYD_CIRCLE_RANKING_PHASE1 — disabled by default
 app.include_router(trust_voice_ranks_router)
 
