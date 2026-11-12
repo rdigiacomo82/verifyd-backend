@@ -49,6 +49,7 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from pydantic import BaseModel, Field
+from fastapi.concurrency import run_in_threadpool
 
 from database import create_otp, get_db, is_valid_email, verify_otp
 from emailer import send_otp_email
@@ -2219,6 +2220,25 @@ async def apply_call_action(call_id: str, identity_id: str, action: str, *,
     return {"ok": True, **event}
 
 
+# VERIFYD_WS_AUTH_HEADER_V1
+# Subprotocol authentication keeps credentials out of URLs logged by proxies.
+# Legacy query-token clients remain supported throughout the migration.
+_WS_AUTH_PROTOCOL = "verifyd-auth-v1"
+_WS_TOKEN_PREFIX = "verifyd-session."
+
+
+def _websocket_auth_from_scope(websocket: WebSocket, legacy_query_token: str) -> tuple[str, Optional[str]]:
+    offered = websocket.scope.get("subprotocols") or []
+    tokens = [str(p)[len(_WS_TOKEN_PREFIX):] for p in offered
+              if isinstance(p, str) and p.startswith(_WS_TOKEN_PREFIX)]
+    if tokens or _WS_AUTH_PROTOCOL in offered:
+        # Never silently downgrade a malformed protocol-auth request to a URL token.
+        if len(tokens) != 1 or not tokens[0] or _WS_AUTH_PROTOCOL not in offered:
+            return "", None
+        return tokens[0], _WS_AUTH_PROTOCOL
+    return legacy_query_token, None
+
+
 @router.websocket(
     "/ws"
 )
@@ -2234,19 +2254,15 @@ async def signaling_ws(
         )
         return
 
-    try:
-        token_payload = (
-            _verify_token(
-                token
-            )
-        )
+    # Browser clients can authenticate by WebSocket subprotocol without
+    # transmitting session credentials in URL query strings.
+    token, negotiated_protocol = _websocket_auth_from_scope(websocket, token)
 
-        identity = (
-            _identity_by_id(
-                token_payload[
-                    "identity_id"
-                ]
-            )
+    try:
+        # Do not run blocking PostgreSQL session queries on the event loop.
+        token_payload = await run_in_threadpool(_verify_token, token)
+        identity = await run_in_threadpool(
+            _identity_by_id, token_payload["identity_id"]
         )
 
         if not identity:
@@ -2277,7 +2293,8 @@ async def signaling_ws(
         identity["id"]
     )
 
-    await websocket.accept()
+    # Only echo the fixed protocol identifier; never echo the token subprotocol.
+    await websocket.accept(subprotocol=negotiated_protocol)
 
     await _register(
         identity_id,
@@ -2360,7 +2377,7 @@ async def signaling_ws(
             # A revoked device must not keep an established websocket alive.
             # Transient database failures should not be mistaken for revocation.
             try:
-                _verify_token(token)
+                await run_in_threadpool(_verify_token, token)
             except HTTPException as exc:
                 if exc.status_code == 401:
                     await websocket.close(code=4401)
