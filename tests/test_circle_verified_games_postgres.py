@@ -42,6 +42,7 @@ def owner(header):
 def load(name,path):
     spec=importlib.util.spec_from_file_location(name,ROOT/path)
     obj=importlib.util.module_from_spec(spec)
+    sys.modules[name]=obj
     spec.loader.exec_module(obj)
     return obj
 
@@ -78,6 +79,7 @@ class VerifiedGamePostgresTests(unittest.TestCase):
             cls.flags.stop()
             cls.patchmods.stop()
             sys.modules.pop("trust_voice_ranks",None)
+            sys.modules.pop("circle_verified_games_test",None)
 
     def token(self,person):
         return "Bearer game-itest-"+person
