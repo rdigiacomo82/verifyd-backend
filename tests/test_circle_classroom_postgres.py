@@ -72,8 +72,10 @@ class ClassroomPostgresTests(unittest.TestCase):
         cls.flags.start()
         cls.c=load("trust_voice_classrooms","trust_voice_classrooms.py")
         cls.personal=load("trust_voice_personal_coursework","trust_voice_personal_coursework.py")
+        cls.tools=load("trust_voice_classroom_tools","trust_voice_classroom_tools.py")
         cls.c._schema()
         cls.personal.schema()
+        cls.tools.schema()
 
     @classmethod
     def tearDownClass(cls):
@@ -86,6 +88,7 @@ class ClassroomPostgresTests(unittest.TestCase):
             cls.modules.stop()
             sys.modules.pop("trust_voice_classrooms",None)
             sys.modules.pop("trust_voice_personal_coursework",None)
+            sys.modules.pop("trust_voice_classroom_tools",None)
 
     def bearer(self,identity):
         return "Bearer "+identity
@@ -165,6 +168,52 @@ class ClassroomPostgresTests(unittest.TestCase):
         with self.assertRaises(HTTPException):
             self.personal.delete_private(key,authorization=self.bearer(self.teacher))
         self.assertTrue(self.personal.delete_private(key,authorization=self.bearer(self.other))["deleted"])
+
+
+    def test_04_classroom_tools_privacy_and_rubrics(self):
+        from fastapi import HTTPException
+        made=self.c.create_assignment(self.class_id,self.c.AssignmentCreate(
+            title="Planetary comparison",instructions="Compare two planets",points_possible=10),
+            authorization=self.bearer(self.teacher))
+        ident=made["assignment_id"]
+        criteria=self.tools.Rubric(criteria=[
+            self.tools.RubricCriterion(label="Scientific facts",max_points=6),
+            self.tools.RubricCriterion(label="Clarity",max_points=4)])
+        with self.assertRaises(HTTPException):
+            self.tools.create_rubric(self.class_id,ident,criteria,
+                authorization=self.bearer(self.student))
+        self.assertEqual(self.tools.create_rubric(self.class_id,ident,criteria,
+            authorization=self.bearer(self.teacher))["total_points"],10)
+        with self.assertRaises(HTTPException):
+            self.tools.get_rubric(self.class_id,ident,authorization=self.bearer(self.student))
+        self.c.publish_assignment(self.class_id,ident,authorization=self.bearer(self.teacher))
+        self.assertEqual(len(self.tools.get_rubric(self.class_id,ident,
+            authorization=self.bearer(self.student))["rubric"]),2)
+        with self.assertRaises(HTTPException):
+            self.tools.create_rubric(self.class_id,ident,criteria,
+                authorization=self.bearer(self.teacher))
+
+        announcement=self.tools.post_announcement(self.class_id,self.tools.Announcement(body="Welcome"),
+            authorization=self.bearer(self.teacher))
+        self.assertTrue(announcement["posted"])
+        self.assertEqual(len(self.tools.list_announcements(self.class_id,
+            authorization=self.bearer(self.student))["announcements"]),1)
+        with self.assertRaises(HTTPException):
+            self.tools.list_announcements(self.class_id,authorization=self.bearer(self.stranger))
+        self.assertGreaterEqual(len(self.tools.student_todo(self.class_id,
+            authorization=self.bearer(self.student))["assignments"]),1)
+        gradebook=self.tools.teacher_gradebook(self.class_id,authorization=self.bearer(self.teacher))
+        self.assertGreaterEqual(len(gradebook["gradebook"]),2)
+        self.assertIn(self.student,[x["student_id"] for x in gradebook["gradebook"]])
+        with self.assertRaises(HTTPException):
+            self.tools.teacher_gradebook(self.class_id,authorization=self.bearer(self.student))
+
+        rotated=self.tools.rotate_join_code(self.class_id,authorization=self.bearer(self.teacher))
+        self.assertTrue(rotated["previous_code_invalidated"])
+        self.assertTrue(self.tools.remove_member(self.class_id,self.student,
+            authorization=self.bearer(self.teacher))["removed"])
+        with self.assertRaises(HTTPException):
+            self.c.list_assignments(self.class_id,authorization=self.bearer(self.student))
 
 if __name__=="__main__":
     unittest.main()
