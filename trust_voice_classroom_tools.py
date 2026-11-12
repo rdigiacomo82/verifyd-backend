@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import secrets
 from datetime import datetime
+import threading
 from typing import Optional
 
 from fastapi import APIRouter, Header, HTTPException
@@ -15,26 +16,35 @@ from trust_voice_classrooms import (
 )
 
 router = APIRouter(prefix="/trust-voice/classroom", tags=["Circle Classroom Tools"])
+_READY = False
+_LOCK = threading.Lock()
 
 
 def schema():
-    class_schema()
-    with get_db() as conn:
-        conn.cursor().execute("""CREATE TABLE IF NOT EXISTS verifyd_circle_class_announcements(
-            announcement_id TEXT PRIMARY KEY,
-            class_id TEXT NOT NULL REFERENCES verifyd_circle_classes(class_id) ON DELETE CASCADE,
-            author_id TEXT NOT NULL REFERENCES verifyd_identities(id) ON DELETE CASCADE,
-            body TEXT NOT NULL,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        )""")
-        conn.cursor().execute("""CREATE INDEX IF NOT EXISTS idx_class_announcement_created
-            ON verifyd_circle_class_announcements(class_id,created_at DESC)""")
-        conn.cursor().execute("""CREATE TABLE IF NOT EXISTS verifyd_circle_assignment_rubrics(
-            assignment_id TEXT PRIMARY KEY REFERENCES verifyd_circle_class_assignments(assignment_id) ON DELETE CASCADE,
-            criteria JSONB NOT NULL,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        )""")
-
+    global _READY
+    if _READY:
+        return
+    with _LOCK:
+        if _READY:
+            return
+        class_schema()
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("""CREATE TABLE IF NOT EXISTS verifyd_circle_class_announcements(
+                announcement_id TEXT PRIMARY KEY,
+                class_id TEXT NOT NULL REFERENCES verifyd_circle_classes(class_id) ON DELETE CASCADE,
+                author_id TEXT NOT NULL REFERENCES verifyd_identities(id) ON DELETE CASCADE,
+                body TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )""")
+            cur.execute("""CREATE INDEX IF NOT EXISTS idx_class_announcement_created
+                ON verifyd_circle_class_announcements(class_id,created_at DESC)""")
+            cur.execute("""CREATE TABLE IF NOT EXISTS verifyd_circle_assignment_rubrics(
+                assignment_id TEXT PRIMARY KEY REFERENCES verifyd_circle_class_assignments(assignment_id) ON DELETE CASCADE,
+                criteria JSONB NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )""")
+        _READY = True
 
 class Announcement(BaseModel):
     body: str = Field(min_length=1, max_length=4000)
@@ -149,7 +159,8 @@ def teacher_gradebook(class_id: str, authorization: Optional[str] = Header(defau
         cur=conn.cursor()
         _teacher(cur,class_id,user)
         cur.execute("""SELECT a.assignment_id,a.title,a.points_possible,
-            s.student_id,s.status,s.points_awarded,s.submitted_at,s.returned_at
+            m.student_id,COALESCE(s.status,'not_started') AS status,
+            s.points_awarded,s.submitted_at,s.returned_at
             FROM verifyd_circle_class_assignments a
             JOIN verifyd_circle_class_members m
                 ON m.class_id=a.class_id AND m.status='approved'
