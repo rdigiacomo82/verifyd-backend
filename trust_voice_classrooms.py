@@ -121,6 +121,8 @@ def _member(cur, class_id, identity_id):
     record = cur.fetchone()
     if not record or (record["teacher_id"] != identity_id and record["status"] != "approved"):
         raise HTTPException(404, detail={"error": "class_not_found"})
+    if record["teacher_id"] == identity_id:
+        _approved_teacher(identity_id)  # Admin revocation removes teacher data access.
     return record
 
 
@@ -229,14 +231,15 @@ def request_to_join(payload: JoinRequest, authorization: Optional[str] = Header(
 def my_classes(authorization: Optional[str] = Header(default=None)):
     user=_identity(authorization)
     _schema()
+    teacher_allowed = user in {v.strip() for v in os.getenv("VERIFYD_CIRCLE_CLASSROOM_TEACHER_IDS", "").split(",") if v.strip()}
     with get_db() as conn:
         cur=conn.cursor()
         cur.execute("""SELECT c.class_id,c.title,c.subject,c.grade_band,c.created_at,
             CASE WHEN c.teacher_id=%s THEN 'teacher' ELSE 'student' END AS my_role
             FROM verifyd_circle_classes c LEFT JOIN verifyd_circle_class_members m
             ON m.class_id=c.class_id AND m.student_id=%s
-            WHERE c.teacher_id=%s OR m.status='approved'
-            ORDER BY c.created_at DESC LIMIT 100""",(user,user,user))
+            WHERE (c.teacher_id=%s AND %s) OR m.status='approved'
+            ORDER BY c.created_at DESC LIMIT 100""",(user,user,user,teacher_allowed))
         rows=[_display(x) for x in cur.fetchall()]
     return {"classes":rows}
 
