@@ -2228,7 +2228,7 @@ _WS_TOKEN_PREFIX = "verifyd-session."
 
 
 def _websocket_auth_from_scope(websocket: WebSocket, legacy_query_token: str) -> tuple[str, Optional[str]]:
-    offered = websocket.scope.get("subprotocols") or []
+    offered = (getattr(websocket, "scope", None) or {}).get("subprotocols") or []
     tokens = [str(p)[len(_WS_TOKEN_PREFIX):] for p in offered
               if isinstance(p, str) and p.startswith(_WS_TOKEN_PREFIX)]
     if tokens or _WS_AUTH_PROTOCOL in offered:
@@ -2294,7 +2294,10 @@ async def signaling_ws(
     )
 
     # Only echo the fixed protocol identifier; never echo the token subprotocol.
-    await websocket.accept(subprotocol=negotiated_protocol)
+    if negotiated_protocol is None:
+        await websocket.accept()  # Unchanged handshake for legacy/native clients
+    else:
+        await websocket.accept(subprotocol=negotiated_protocol)
 
     await _register(
         identity_id,
