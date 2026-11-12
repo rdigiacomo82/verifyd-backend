@@ -121,7 +121,7 @@ def remove_member(class_id: str, student_id: str,
         if not cur.fetchone():
             raise HTTPException(404,detail={"error":"member_not_found"})
     return {"removed":True,
-            "note":"Access revoked. Student-work deletion follows the configured retention policy."}
+            "note":"Access revoked. Existing submissions remain stored until an explicit deletion and retention workflow is implemented."}
 
 
 @router.get("/classes/{class_id}/my-todo")
