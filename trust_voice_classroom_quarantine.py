@@ -23,7 +23,26 @@ from fastapi import APIRouter, File, Form, Header, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 
 from database import get_db
-from trust_voice_classrooms import _identity, _schema as class_schema, _teacher, _member, _assignment, _prepare_classroom_audience, _classroom_assignment_visible
+from trust_voice_classrooms import _identity, _schema as class_schema, _teacher, _member, _assignment
+
+def _audience_active():
+    return (os.getenv("VERIFYD_CIRCLE_CLASSROOM_AUDIENCE_ENABLED", "0").lower() in ("1","true","yes","on")
+            and os.getenv("VERIFYD_CIRCLE_CLASSROOM_INVITES_ENABLED", "0").lower() in ("1","true","yes","on"))
+
+
+def _prepare_classroom_audience():
+    # Older quarantine test fixtures deliberately do not import optional invite code.
+    if _audience_active():
+        from trust_voice_classroom_invitations import prepare_audience
+        prepare_audience()
+
+
+def _classroom_assignment_visible(cur, assignment_id, identity_id):
+    if not _audience_active():
+        return True
+    from trust_voice_classroom_invitations import audience_allows
+    return audience_allows(cur, assignment_id, identity_id)
+
 
 router = APIRouter(prefix="/trust-voice/classroom", tags=["Circle Classroom Quarantine"])
 _READY = False
