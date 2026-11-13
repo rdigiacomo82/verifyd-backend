@@ -258,11 +258,11 @@ class AssignmentCreate(BaseModel):
 
 
 class AssignmentEdit(BaseModel):
-    """Only unpublished assignments may be edited; grades and points are unchanged."""
+    """Only unpublished assignments may be edited; grades and point rewards are locked after publish."""
     title: str = Field(min_length=3, max_length=160)
     instructions: str = Field(min_length=1, max_length=16000)
     due_at: Optional[datetime] = None
-    rank_points: int = Field(default=0, ge=0, le=5)
+    rank_points: Optional[int] = Field(default=None, ge=0, le=5)
 
 
 class ScheduleAssignment(BaseModel):
@@ -450,7 +450,7 @@ def edit_assignment(class_id: str, assignment_id: str, payload: AssignmentEdit,
         cur = conn.cursor()
         _teacher(cur, class_id, user)
         cur.execute("""UPDATE verifyd_circle_class_assignments
-            SET title=%s, instructions=%s, due_at=%s, rank_points=%s
+            SET title=%s, instructions=%s, due_at=%s, rank_points=COALESCE(%s,rank_points)
             WHERE assignment_id=%s AND class_id=%s AND status='draft'
             RETURNING assignment_id,class_id,title,instructions,due_at,publish_at,points_possible,rank_points,status""",
             (payload.title.strip(), payload.instructions.strip(), payload.due_at, payload.rank_points, assignment_id, class_id))
