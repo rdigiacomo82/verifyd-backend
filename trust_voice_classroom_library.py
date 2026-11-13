@@ -10,6 +10,7 @@ import os
 import re
 import threading
 import uuid
+from collections import Counter
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Header, HTTPException
@@ -153,8 +154,18 @@ def suggestions(subject: str = "", grade_band: str = "",
             GROUP BY category ORDER BY uses DESC, category ASC LIMIT 8""",
             (subject, subject, grade_band, grade_band))
         categories = [{"name": row["category"], "uses": int(row["uses"])} for row in cur.fetchall()]
-    return {"suggestions": categories, "categories": list(_CATEGORIES),
-            "method": "Counts of educator-selected categories on moderator-approved shared lessons; suggestions require teacher confirmation. No private lesson plans used."}
+        cur.execute("""SELECT skills FROM verifyd_circle_shared_lessons
+            WHERE status='approved'
+              AND (%s='' OR LOWER(subject)=LOWER(%s))
+              AND (%s='' OR grade_band=%s)
+            ORDER BY reviewed_at DESC LIMIT 300""",
+            (subject, subject, grade_band, grade_band))
+        skills_count = Counter(tag for record in cur.fetchall()
+            for tag in (record["skills"] or "").split("|") if tag)
+        skills = [{"name": name, "uses": count} for name, count in
+            sorted(skills_count.items(), key=lambda item: (-item[1], item[0]))[:12]]
+    return {"suggestions": categories, "skills": skills, "categories": list(_CATEGORIES),
+            "method": "Aggregated educator-selected categories and skill tags on moderator-approved lessons. Teachers confirm suggestions; private learner work is excluded."}
 
 
 @router.get("/mine")
