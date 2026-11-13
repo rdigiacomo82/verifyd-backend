@@ -8,6 +8,7 @@ import pathlib
 import sys
 import types
 import uuid
+from datetime import datetime, timedelta, timezone
 import unittest
 from contextlib import contextmanager
 from unittest.mock import patch
@@ -169,6 +170,39 @@ class ClassroomPostgresTests(unittest.TestCase):
             self.personal.delete_private(key,authorization=self.bearer(self.teacher))
         self.assertTrue(self.personal.delete_private(key,authorization=self.bearer(self.other))["deleted"])
 
+
+
+    def test_03a_scheduled_classwork_remains_hidden(self):
+        from fastapi import HTTPException
+        when=datetime.now(timezone.utc)+timedelta(minutes=5)
+        due=when+timedelta(days=1)
+        made=self.c.create_assignment(self.class_id,self.c.AssignmentCreate(
+            title="Scheduled science quiz",instructions="Five simple questions",due_at=due),
+            authorization=self.bearer(self.teacher))
+        key=made["assignment_id"]
+        result=self.c.schedule_assignment(self.class_id,key,self.c.ScheduleAssignment(
+            publish_at=when),authorization=self.bearer(self.teacher))
+        self.assertEqual(result["status"],"scheduled")
+        teacher=self.c.list_assignments(self.class_id,authorization=self.bearer(self.teacher))
+        self.assertIn(key,[x["assignment_id"] for x in teacher["assignments"]])
+        student=self.c.list_assignments(self.class_id,authorization=self.bearer(self.student))
+        self.assertNotIn(key,[x["assignment_id"] for x in student["assignments"]])
+        todo=self.tools.student_todo(self.class_id,authorization=self.bearer(self.student))
+        self.assertNotIn(key,[x["assignment_id"] for x in todo["assignments"]])
+        with self.assertRaises(HTTPException) as err:
+            self.c.save_or_turn_in(self.class_id,key,self.c.Work(response="Not yet"),
+                authorization=self.bearer(self.student))
+        self.assertEqual(err.exception.status_code,409)
+        with db() as conn:
+            conn.cursor().execute("""UPDATE verifyd_circle_class_assignments
+                SET publish_at=NOW()-INTERVAL '5 seconds' WHERE assignment_id=%s""",(key,))
+        student=self.c.list_assignments(self.class_id,authorization=self.bearer(self.student))
+        self.assertIn(key,[x["assignment_id"] for x in student["assignments"]])
+        todo=self.tools.student_todo(self.class_id,authorization=self.bearer(self.student))
+        self.assertIn(key,[x["assignment_id"] for x in todo["assignments"]])
+        worked=self.c.save_or_turn_in(self.class_id,key,self.c.Work(response="Ready",
+            action="save"),authorization=self.bearer(self.student))
+        self.assertEqual(worked["work"]["status"],"draft")
 
     def test_04_classroom_tools_privacy_and_rubrics(self):
         from fastapi import HTTPException
