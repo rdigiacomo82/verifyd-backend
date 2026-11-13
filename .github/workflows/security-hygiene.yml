@@ -1,0 +1,39 @@
+name: VeriFYD security hygiene
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '17 10 * * 1'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  tracked-secret-guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Verify scanning rules
+        run: python -m unittest discover -s scripts -p 'test_secret_hygiene.py' -v
+      - name: Block committed credentials
+        run: python scripts/check_secret_hygiene.py
+  python-advisories:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install audit tools
+        run: python -m pip install pip-audit bandit
+      - name: Dependency advisories (review nonzero results; existing versions may need phased upgrades)
+        continue-on-error: true
+        run: python -m pip_audit -r requirements.txt --progress-spinner off
+      - name: Bandit source review (advisory until triaged)
+        continue-on-error: true
+        run: bandit -q -r main.py database.py trust_voice_identity.py trust_voice_signaling.py trust_voice_attachments.py trust_voice_circle_email.py -ll
