@@ -249,5 +249,16 @@ class ClassroomPostgresTests(unittest.TestCase):
         with self.assertRaises(HTTPException):
             self.c.list_assignments(self.class_id,authorization=self.bearer(self.student))
 
+    def test_05_revoked_teacher_cannot_read_student_roster(self):
+        from fastapi import HTTPException
+        # The operator may revoke educator access after a class is created.
+        # Previously GET /members omitted this check and leaked student IDs.
+        rows = self.c.members(self.class_id, authorization=self.bearer(self.teacher))["members"]
+        self.assertTrue(any(row["student_id"] == self.student for row in rows))
+        with patch.dict(os.environ, {"VERIFYD_CIRCLE_CLASSROOM_TEACHER_IDS": ""}):
+            with self.assertRaises(HTTPException) as error:
+                self.c.members(self.class_id, authorization=self.bearer(self.teacher))
+            self.assertEqual(error.exception.status_code, 403)
+
 if __name__=="__main__":
     unittest.main()
