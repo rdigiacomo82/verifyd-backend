@@ -120,8 +120,19 @@ class ClassroomPostgresTests(unittest.TestCase):
             authorization=self.bearer(self.teacher))
         assignment=made["assignment_id"]
         self.__class__.assignment=assignment
+        updated=self.c.edit_assignment(self.class_id, assignment,
+            self.c.AssignmentEdit(title="Planet notes revised",
+                instructions="Write five accurate facts",due_at=None),
+            authorization=self.bearer(self.teacher))
+        self.assertEqual(updated["assignment"]["title"],"Planet notes revised")
+        self.assertEqual(updated["assignment"]["instructions"],"Write five accurate facts")
         self.assertEqual(self.c.list_assignments(self.class_id,authorization=self.bearer(self.student))["assignments"],[])
         self.c.publish_assignment(self.class_id,assignment,authorization=self.bearer(self.teacher))
+        with self.assertRaises(HTTPException) as locked:
+            self.c.edit_assignment(self.class_id,assignment,
+                self.c.AssignmentEdit(title="Tamper published",instructions="Not allowed"),
+                authorization=self.bearer(self.teacher))
+        self.assertEqual(locked.exception.status_code,409)
         self.assertEqual(len(self.c.list_assignments(self.class_id,authorization=self.bearer(self.student))["assignments"]),1)
         with self.assertRaises(HTTPException):
             self.c.save_or_turn_in(self.class_id,assignment,self.c.Work(response="secret",action="turn_in"),
@@ -259,6 +270,31 @@ class ClassroomPostgresTests(unittest.TestCase):
             with self.assertRaises(HTTPException) as error:
                 self.c.members(self.class_id, authorization=self.bearer(self.teacher))
             self.assertEqual(error.exception.status_code, 403)
+
+    def test_06_student_deletion_and_teacher_class_deletion(self):
+        # Rejoin after prior test removed membership: no data from a student
+        # may remain after an explicit deletion request.
+        with db() as conn:
+            cur=conn.cursor()
+            cur.execute("""UPDATE verifyd_circle_class_members SET status='approved'
+                WHERE class_id=%s AND student_id=%s""",(self.class_id,self.student))
+        result=self.c.leave_class_and_erase_my_work(self.class_id,
+            authorization=self.bearer(self.student))
+        self.assertTrue(result["my_classwork_deleted"])
+        with db() as conn:
+            cur=conn.cursor()
+            cur.execute("""SELECT COUNT(*) AS n FROM verifyd_circle_class_submissions s
+                JOIN verifyd_circle_class_assignments a USING (assignment_id)
+                WHERE a.class_id=%s AND s.student_id=%s""",(self.class_id,self.student))
+            self.assertEqual(cur.fetchone()["n"],0)
+        removed=self.c.delete_teacher_class(self.class_id,
+            authorization=self.bearer(self.teacher))
+        self.assertTrue(removed["deleted"])
+        with db() as conn:
+            cur=conn.cursor()
+            cur.execute("SELECT COUNT(*) AS n FROM verifyd_circle_classes WHERE class_id=%s",(self.class_id,))
+            self.assertEqual(cur.fetchone()["n"],0)
+
 
 if __name__=="__main__":
     unittest.main()
