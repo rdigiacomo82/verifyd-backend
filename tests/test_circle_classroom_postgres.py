@@ -52,7 +52,7 @@ class ClassroomPostgresTests(unittest.TestCase):
     def setUpClass(cls):
         with db() as conn:
             conn.cursor().execute("""CREATE TABLE IF NOT EXISTS verifyd_identities
-                (id TEXT PRIMARY KEY,status TEXT NOT NULL DEFAULT 'active')""")
+                (id TEXT PRIMARY KEY,handle TEXT,status TEXT NOT NULL DEFAULT 'active')""")
         cls.teacher="edu-"+uuid.uuid4().hex
         cls.student="edu-"+uuid.uuid4().hex
         cls.other="edu-"+uuid.uuid4().hex
@@ -395,7 +395,7 @@ class ClassroomPostgresTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             self.c.AssignmentCreate(title="Bad points",instructions="Try this",rank_points=9)
 
-    def test_08_rank_points_immutable_after_publish(self):
+    def test_02c_rank_points_immutable_after_publish(self):
         from fastapi import HTTPException
         made=self.c.create_assignment(self.class_id,self.c.AssignmentCreate(
             title="Draft with points", instructions="Write a short note",rank_points=2),
