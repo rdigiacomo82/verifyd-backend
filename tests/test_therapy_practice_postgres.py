@@ -150,5 +150,17 @@ class TherapyPostgresIntegration(unittest.TestCase):
         self.assertFalse(any(row['program_id']==program for row in m.programs(self.bearer(self.client))['programs']))
         with self.assertRaises(HTTPException):
             m.my_response(program,task,self.bearer(self.client))
+        # Re-inviting the same test client must not reactivate past assignments.
+        self.assertEqual(m.invite(program,m.InviteClients(client_ids=[self.client]),self.bearer(self.pro))['sent'],1)
+        again=next(row for row in m.inbox(self.bearer(self.client))['invitations'] if row['program_id']==program)
+        self.assertTrue(m.accept(again['invitation_id'],m.AcceptInvite(adult_attestation=True),self.bearer(self.client))['joined'])
+        self.assertNotIn(task,[row['task_id'] for row in
+            m.list_tasks(program,self.bearer(self.client))['tasks']])
+        with self.assertRaises(HTTPException) as hidden:
+            m.my_response(program,task,self.bearer(self.client))
+        self.assertEqual(hidden.exception.status_code,404)
+        with self.assertRaises(HTTPException) as unauthorized:
+            m.save_response(program,task,m.PracticeResponse(response='Legacy task',action='save'),self.bearer(self.client))
+        self.assertEqual(unauthorized.exception.status_code,404)
 
 if __name__=='__main__':unittest.main()
