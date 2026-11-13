@@ -253,6 +253,8 @@ def my_classes(authorization: Optional[str] = Header(default=None)):
 @router.get("/classes/{class_id}/members")
 def members(class_id: str, authorization: Optional[str] = Header(default=None)):
     user=_identity(authorization)
+    # A revoked teacher must not retain read access to enrolled student IDs.
+    _approved_teacher(user)
     _schema()
     with get_db() as conn:
         cur=conn.cursor()
