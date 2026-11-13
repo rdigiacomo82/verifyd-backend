@@ -66,55 +66,38 @@ def _footer_html() -> str:
 
 
 def send_otp_email(to_email: str, code: str) -> bool:
-    """Send OTP verification email via Resend."""
-    html = f"""
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-</head>
-<body style="margin:0;padding:0;background-color:#0a0a0a;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
-  <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#0a0a0a;padding:40px 20px;">
-    <tr>
-      <td align="center">
-        <table width="500" cellpadding="0" cellspacing="0" style="background-color:#111111;border-radius:12px;border:1px solid #222222;overflow:hidden;max-width:500px;width:100%;">
-          {_header_html()}
-          <tr>
-            <td style="padding:40px 32px;">
-              <h2 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#ffffff;">
-                Verify your email
-              </h2>
-              <p style="margin:0 0 32px;color:#888888;font-size:15px;line-height:1.6;">
-                Enter the code below to verify your email address and start using VeriFYD.
-                This code expires in <strong style="color:#f59e0b;">10 minutes</strong>.
-              </p>
-              <div style="background:#1a1a1a;border:2px solid #f59e0b;border-radius:12px;padding:28px;text-align:center;margin:0 0 32px;">
-                <p style="margin:0 0 8px;color:#888;font-size:12px;letter-spacing:2px;text-transform:uppercase;">
-                  Your verification code
-                </p>
-                <p style="margin:0;font-size:48px;font-weight:800;color:#f59e0b;letter-spacing:12px;font-family:'Courier New',monospace;">
-                  {code}
-                </p>
-              </div>
-              <p style="margin:0;color:#555555;font-size:13px;line-height:1.6;">
-                If you didn't request this code, you can safely ignore this email.
-              </p>
-            </td>
-          </tr>
-          {_footer_html()}
-        </table>
-      </td>
-    </tr>
-  </table>
-</body>
-</html>"""
+    """Send a simple, accessible transactional OTP in HTML AND plain text.
 
+    Shared by VeriFYD detector and Circle; OTP generation, expiry and rate
+    limits are unchanged. A monitored reply address is available for help.
+    """
+    from html import escape
+
+    safe_code = escape(str(code))
+    html = f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:24px;background:#f7f9fc;color:#152033;font-family:Arial,sans-serif">
+<main style="max-width:480px;margin:auto;padding:24px;background:#ffffff;border:1px solid #dce4ee;border-radius:12px">
+<h1 style="font-size:21px;margin:0 0 16px">Your VeriFYD verification code</h1>
+<p style="font-size:16px;line-height:1.5">Enter this code in the VeriFYD app to finish signing in or registering:</p>
+<p style="font-size:32px;font-weight:700;letter-spacing:6px;margin:24px 0">{safe_code}</p>
+<p style="font-size:14px;line-height:1.5">The code expires in 10 minutes. If you didn't request it, ignore this message.</p>
+<p style="font-size:13px;color:#475569">Need help? Reply to this email.</p>
+</main></body></html>"""
+    plain = (
+        "Your VeriFYD verification code\\n\\n"
+        f"{code}\\n\\n"
+        "Enter this code in VeriFYD to finish signing in or registering.\\n"
+        "The code expires in 10 minutes. If you didn't request it, ignore this message.\\n"
+        "Need help? Reply to this email.\\n"
+    )
     return _send({
-        "from":    f"{FROM_NAME} <{FROM_ADDRESS}>",
-        "to":      [to_email],
-        "subject": f"{code} is your VeriFYD verification code",
-        "html":    html,
+        "from": "VeriFYD Circle <support@vfvid.com>",
+        "reply_to": ["support@vfvid.com"],
+        "to": [to_email],
+        "subject": "Your VeriFYD verification code",
+        "text": plain,
+        "html": html,
     })
 
 
