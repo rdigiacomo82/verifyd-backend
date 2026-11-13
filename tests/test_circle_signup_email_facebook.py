@@ -87,6 +87,44 @@ class SignupSession(unittest.TestCase):
         self.assertEqual(called[-1]["session_id"],"session-for-vfyd_usr_test")
         self.assertIn("signer_verified",called)
 
+    def test_inactive_identity_cannot_claim_new_session(self):
+        class FakeCursor:
+            def execute(self, *args):
+                pass
+            def fetchone(self):
+                return {"id":"vfyd_usr_inactive","email_lower":"test@example.invalid",
+                        "handle_lower":"tester","status":"suspended"}
+        class FakeDB:
+            def __enter__(self):
+                return self
+            def __exit__(self, exc_type, exc, tb):
+                return False
+            def cursor(self):
+                return FakeCursor()
+        calls=[]
+        global_env={
+            "ClaimIdentityRequest":object,
+            "HTTPException":HTTPException,
+            "_require_enabled":lambda:None,
+            "_normalize_email":lambda x:x,
+            "is_valid_email":lambda x:True,
+            "_validate_handle":lambda x:(x,x),
+            "_validate_display_name":lambda x:x,
+            "_validate_display_emoji":lambda x:x,
+            "verify_otp":lambda e,c:(True,"ok"),
+            "_ensure_identity_schema":lambda:None,
+            "get_db":FakeDB,
+            "_public_identity":lambda row:row,
+            "_issue_verified_claim_session":lambda row:calls.append(row),
+        }
+        claim=extract_function("trust_voice_identity.py","claim_identity",global_env)
+        payload=types.SimpleNamespace(email="test@example.invalid",code="123456",
+             handle="tester",display_name="Tester",display_emoji="")
+        with self.assertRaises(HTTPException) as err:
+            claim(payload)
+        self.assertEqual(err.exception.status_code,403)
+        self.assertEqual(calls,[])
+
     def test_signup_proof_precedes_session_and_old_login_is_preserved(self):
         source=(ROOT/"trust_voice_identity.py").read_text()
         start=source.index("def claim_identity(")
