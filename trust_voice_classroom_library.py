@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import re
+import threading
 import uuid
 from typing import Literal, Optional
 
@@ -18,6 +19,8 @@ from database import get_db
 from trust_voice_classrooms import _identity, _approved_teacher, _schema as classroom_schema
 
 router = APIRouter(prefix="/trust-voice/classroom/library", tags=["Circle Educator Library"])
+_READY = False
+_LOCK = threading.Lock()
 
 _CATEGORIES = (
     "Mathematics", "Literacy & Reading", "Writing & Language", "Science",
@@ -51,26 +54,34 @@ def _moderator(user):
 
 
 def _schema():
-    classroom_schema()
-    with get_db() as conn:
-        conn.cursor().execute("""CREATE TABLE IF NOT EXISTS verifyd_circle_shared_lessons (
-            lesson_id TEXT PRIMARY KEY,
-            teacher_id TEXT NOT NULL REFERENCES verifyd_identities(id) ON DELETE CASCADE,
-            author_label TEXT NOT NULL,
-            title TEXT NOT NULL,
-            instructions TEXT NOT NULL,
-            grade_band TEXT NOT NULL,
-            subject TEXT NOT NULL,
-            category TEXT NOT NULL,
-            skills TEXT NOT NULL DEFAULT '',
-            status TEXT NOT NULL DEFAULT 'pending'
-                CHECK (status IN ('pending','approved','rejected','withdrawn')),
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            reviewed_at TIMESTAMPTZ,
-            reviewed_by TEXT REFERENCES verifyd_identities(id)
-        )""")
-        conn.cursor().execute("""CREATE INDEX IF NOT EXISTS idx_circle_shared_lessons_public
-            ON verifyd_circle_shared_lessons(status, created_at DESC)""")
+    global _READY
+    if _READY:
+        return
+    with _LOCK:
+        if _READY:
+            return
+        classroom_schema()
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("""CREATE TABLE IF NOT EXISTS verifyd_circle_shared_lessons (
+                lesson_id TEXT PRIMARY KEY,
+                teacher_id TEXT NOT NULL REFERENCES verifyd_identities(id) ON DELETE CASCADE,
+                author_label TEXT NOT NULL,
+                title TEXT NOT NULL,
+                instructions TEXT NOT NULL,
+                grade_band TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                category TEXT NOT NULL,
+                skills TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'pending'
+                    CHECK (status IN ('pending','approved','rejected','withdrawn')),
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                reviewed_at TIMESTAMPTZ,
+                reviewed_by TEXT REFERENCES verifyd_identities(id)
+            )""")
+            cur.execute("""CREATE INDEX IF NOT EXISTS idx_circle_shared_lessons_public
+                ON verifyd_circle_shared_lessons(status, created_at DESC)""")
+        _READY = True
 
 
 class ShareLesson(BaseModel):
@@ -213,8 +224,8 @@ def withdraw(lesson_id: str, authorization: Optional[str] = Header(default=None)
     _schema()
     with get_db() as conn:
         cur = conn.cursor()
-        cur.execute("""UPDATE verifyd_circle_shared_lessons SET status='withdrawn'
-            WHERE lesson_id=%s AND teacher_id=%s AND status IN ('pending','approved')
+        cur.execute("""DELETE FROM verifyd_circle_shared_lessons
+            WHERE lesson_id=%s AND teacher_id=%s
             RETURNING lesson_id""",(lesson_id,user))
         if not cur.fetchone():
             raise HTTPException(404,detail={"error": "shared_lesson_not_found"})
@@ -246,8 +257,8 @@ def decide(lesson_id: str, payload: ReviewDecision,
         cur = conn.cursor()
         cur.execute("""UPDATE verifyd_circle_shared_lessons
             SET status=%s,reviewed_at=NOW(),reviewed_by=%s
-            WHERE lesson_id=%s AND status='pending'
-            RETURNING lesson_id""",(payload.decision,user,lesson_id))
+            WHERE lesson_id=%s AND (status='pending' OR (status='approved' AND %s='rejected'))
+            RETURNING lesson_id""",(payload.decision,user,lesson_id,payload.decision))
         if not cur.fetchone():
             raise HTTPException(409,detail={"error": "lesson_not_pending"})
     return {"lesson_id": lesson_id, "status": payload.decision}
