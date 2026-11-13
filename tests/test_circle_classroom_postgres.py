@@ -498,5 +498,78 @@ class ClassroomPostgresTests(unittest.TestCase):
                 skills=["Speaking"],share_with_community=True,confirm_rights_and_privacy=True),
                 authorization=self.bearer(self.teacher))
 
+
+    def test_09_circle_invitation_and_selected_assignment_isolation(self):
+        """End-to-end DB: two invitees accept; only selected student sees and submits one assignment."""
+        from fastapi import HTTPException
+        from trust_voice_permissions import ensure_trust_circle_schema
+        with patch.dict(os.environ, {
+            "VERIFYD_CIRCLE_CLASSROOM_INVITES_ENABLED": "1",
+            "VERIFYD_CIRCLE_CLASSROOM_AUDIENCE_ENABLED": "1",
+        }):
+            ensure_trust_circle_schema()
+            own = self.c.create_class(self.c.ClassCreate(
+                title="Period-specific lesson", subject="Science", grade_band="Adult"),
+                authorization=self.bearer(self.teacher))
+            class_id = own["class_id"]
+            try:
+                with db() as conn:
+                    cur = conn.cursor()
+                    for student in (self.student, self.other):
+                        cur.execute("""INSERT INTO verifyd_trust_circle_members
+                            (owner_identity_id,member_identity_id,contact_type,created_at,updated_at)
+                            VALUES (%s,%s,'person',%s,%s)
+                            ON CONFLICT (owner_identity_id,member_identity_id) DO NOTHING""",
+                            (self.teacher,student,datetime.now(timezone.utc).isoformat(),
+                             datetime.now(timezone.utc).isoformat()))
+                invites = load("trust_voice_classroom_invitations","trust_voice_classroom_invitations.py")
+                sent = invites.send_class_invitations(class_id,
+                    invites.InviteSelection(student_ids=[self.student,self.other]),
+                    authorization=self.bearer(self.teacher))
+                self.assertEqual(sent["sent"],2)
+                for student in (self.student,self.other):
+                    inbox = invites.incoming_class_invitations(authorization=self.bearer(student))
+                    item = next(x for x in inbox["invitations"] if x["class_id"]==class_id)
+                    with self.assertRaises(HTTPException):
+                        invites.accept_class_invitation(item["invitation_id"],
+                            invites.AcceptInvitation(adult_attestation=False),
+                            authorization=self.bearer(student))
+                    result = invites.accept_class_invitation(item["invitation_id"],
+                        invites.AcceptInvitation(adult_attestation=True),
+                        authorization=self.bearer(student))
+                    self.assertTrue(result["joined"])
+                    self.assertFalse(result["requires_second_approval"])
+                created = self.c.create_assignment(class_id,self.c.AssignmentCreate(
+                    title="Only selected learners",instructions="Complete the period's worksheet"),
+                    authorization=self.bearer(self.teacher))
+                aid = created["assignment_id"]
+                self.assertEqual(invites.update_assignment_audience(class_id,aid,
+                    invites.AudienceSelection(mode="selected",student_ids=[self.student]),
+                    authorization=self.bearer(self.teacher))["selected_count"],1)
+                self.c.publish_assignment(class_id,aid,authorization=self.bearer(self.teacher))
+                self.assertIn(aid,[r["assignment_id"] for r in
+                    self.c.list_assignments(class_id,authorization=self.bearer(self.student))["assignments"]])
+                self.assertNotIn(aid,[r["assignment_id"] for r in
+                    self.c.list_assignments(class_id,authorization=self.bearer(self.other))["assignments"]])
+                self.assertNotIn(aid,[r["assignment_id"] for r in
+                    self.tools.student_todo(class_id,authorization=self.bearer(self.other))["assignments"]])
+                with self.assertRaises(HTTPException) as denied:
+                    self.c.save_or_turn_in(class_id,aid,
+                        self.c.Work(response="I should not see this",action="save"),
+                        authorization=self.bearer(self.other))
+                self.assertEqual(denied.exception.status_code,404)
+                self.assertEqual(self.c.save_or_turn_in(class_id,aid,
+                    self.c.Work(response="My permitted answer",action="save"),
+                    authorization=self.bearer(self.student))["work"]["status"],"draft")
+                with self.assertRaises(HTTPException) as locked:
+                    invites.update_assignment_audience(class_id,aid,
+                        invites.AudienceSelection(mode="all"),
+                        authorization=self.bearer(self.teacher))
+                self.assertEqual(locked.exception.status_code,409)
+            finally:
+                self.c.delete_teacher_class(class_id,authorization=self.bearer(self.teacher))
+                sys.modules.pop("trust_voice_classroom_invitations",None)
+
+
 if __name__=="__main__":
     unittest.main()

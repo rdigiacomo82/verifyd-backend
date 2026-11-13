@@ -12,7 +12,8 @@ from pydantic import BaseModel, Field
 
 from database import get_db
 from trust_voice_classrooms import (
-    _identity, _schema as class_schema, _teacher, _member, _assignment, _approved_teacher, _display
+    _identity, _schema as class_schema, _teacher, _member, _assignment, _approved_teacher, _display,
+    _prepare_classroom_audience, _classroom_assignment_visible
 )
 
 router = APIRouter(prefix="/trust-voice/classroom", tags=["Circle Classroom Tools"])
@@ -111,6 +112,9 @@ def remove_member(class_id: str, student_id: str,
                   authorization: Optional[str] = Header(default=None)):
     user=_identity(authorization)
     _approved_teacher(user)
+    from trust_voice_classroom_invitations import invites_enabled, prepare_invites
+    if invites_enabled():
+        prepare_invites()
     class_schema()
     with get_db() as conn:
         cur=conn.cursor()
@@ -120,6 +124,15 @@ def remove_member(class_id: str, student_id: str,
             RETURNING student_id""",(class_id,student_id))
         if not cur.fetchone():
             raise HTTPException(404,detail={"error":"member_not_found"})
+        if invites_enabled():
+            # A removed student must not be able to accept an old pending invitation.
+            cur.execute("""UPDATE verifyd_circle_class_invitations SET status='revoked',responded_at=NOW()
+                WHERE class_id=%s AND student_id=%s AND status='pending'""",(class_id,student_id))
+            # Rejoining later must not silently restore assignment-specific access.
+            cur.execute("""DELETE FROM verifyd_circle_assignment_audience_students
+                WHERE student_id=%s AND assignment_id IN
+                (SELECT assignment_id FROM verifyd_circle_class_assignments WHERE class_id=%s)""",
+                (student_id,class_id))
     return {"removed":True,
             "note":"Access revoked. Existing submissions remain stored until an explicit deletion and retention workflow is implemented."}
 
@@ -127,6 +140,7 @@ def remove_member(class_id: str, student_id: str,
 @router.get("/classes/{class_id}/my-todo")
 def student_todo(class_id: str, authorization: Optional[str] = Header(default=None)):
     user=_identity(authorization)
+    _prepare_classroom_audience()
     class_schema()
     with get_db() as conn:
         cur=conn.cursor()
@@ -144,6 +158,8 @@ def student_todo(class_id: str, authorization: Optional[str] = Header(default=No
         items=[]
         now=datetime.now().astimezone()
         for rec in cur.fetchall():
+            if not _classroom_assignment_visible(cur,rec["assignment_id"],user):
+                continue
             item=_display(rec)
             item["overdue"]=bool(rec["due_at"] and rec["due_at"]<now
                                 and rec["my_status"] in ("not_started","draft"))
@@ -155,6 +171,7 @@ def student_todo(class_id: str, authorization: Optional[str] = Header(default=No
 def teacher_gradebook(class_id: str, authorization: Optional[str] = Header(default=None)):
     user=_identity(authorization)
     _approved_teacher(user)
+    _prepare_classroom_audience()
     class_schema()
     with get_db() as conn:
         cur=conn.cursor()
@@ -172,6 +189,7 @@ def teacher_gradebook(class_id: str, authorization: Optional[str] = Header(defau
             WHERE a.class_id=%s AND a.status='published'
             ORDER BY a.created_at DESC,m.student_id LIMIT 5000""",(class_id,))
         rows=[_display(x) for x in cur.fetchall()]
+        rows=[item for item in rows if _classroom_assignment_visible(cur,item["assignment_id"],item["student_id"])]
     return {"gradebook":rows,"teacher_only":True}
 
 
@@ -202,11 +220,14 @@ def create_rubric(class_id: str,assignment_id: str,payload: Rubric,
 def get_rubric(class_id: str,assignment_id: str,
                authorization: Optional[str] = Header(default=None)):
     user=_identity(authorization)
+    _prepare_classroom_audience()
     schema()
     with get_db() as conn:
         cur=conn.cursor()
         rec=_member(cur,class_id,user)
         assignment=_assignment(cur,class_id,assignment_id)
+        if rec["teacher_id"] != user and not _classroom_assignment_visible(cur,assignment_id,user):
+            raise HTTPException(404,detail={"error":"rubric_not_found"})
         if rec["teacher_id"] != user and (assignment["status"] != "published" or (assignment["publish_at"] is not None and assignment["publish_at"] > datetime.now().astimezone())):
             raise HTTPException(404,detail={"error":"rubric_not_found"})
         cur.execute("SELECT criteria FROM verifyd_circle_assignment_rubrics WHERE assignment_id=%s",

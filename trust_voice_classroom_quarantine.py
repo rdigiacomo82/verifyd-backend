@@ -25,6 +25,25 @@ from fastapi.concurrency import run_in_threadpool
 from database import get_db
 from trust_voice_classrooms import _identity, _schema as class_schema, _teacher, _member, _assignment
 
+def _audience_active():
+    return (os.getenv("VERIFYD_CIRCLE_CLASSROOM_AUDIENCE_ENABLED", "0").lower() in ("1","true","yes","on")
+            and os.getenv("VERIFYD_CIRCLE_CLASSROOM_INVITES_ENABLED", "0").lower() in ("1","true","yes","on"))
+
+
+def _prepare_classroom_audience():
+    # Older quarantine test fixtures deliberately do not import optional invite code.
+    if _audience_active():
+        from trust_voice_classroom_invitations import prepare_audience
+        prepare_audience()
+
+
+def _classroom_assignment_visible(cur, assignment_id, identity_id):
+    if not _audience_active():
+        return True
+    from trust_voice_classroom_invitations import audience_allows
+    return audience_allows(cur, assignment_id, identity_id)
+
+
 router = APIRouter(prefix="/trust-voice/classroom", tags=["Circle Classroom Quarantine"])
 _READY = False
 _LOCK = threading.Lock()
@@ -135,6 +154,7 @@ async def upload(class_id: str, assignment_id: str,
     if not upload_enabled():
         raise HTTPException(404, detail={"error": "classroom_uploads_disabled"})
     user = _identity(authorization)
+    _prepare_classroom_audience()
     ensure_upload_schema()
     with get_db() as conn:
         cur = conn.cursor()
@@ -144,7 +164,7 @@ async def upload(class_id: str, assignment_id: str,
             if membership["teacher_id"] != user:
                 raise HTTPException(404, detail={"error": "assignment_not_found"})
         else:
-            if membership["teacher_id"] == user or assignment["status"] != "published" or (assignment["publish_at"] is not None and assignment["publish_at"] > datetime.now(timezone.utc)):
+            if membership["teacher_id"] == user or not _classroom_assignment_visible(cur, assignment_id, user) or assignment["status"] != "published" or (assignment["publish_at"] is not None and assignment["publish_at"] > datetime.now(timezone.utc)):
                 raise HTTPException(403, detail={"error": "student_submission_unavailable"})
             cur.execute("""SELECT status FROM verifyd_circle_class_submissions
                 WHERE assignment_id=%s AND student_id=%s""", (assignment_id, user))
@@ -184,7 +204,7 @@ async def upload(class_id: str, assignment_id: str,
             if purpose == "teacher_material":
                 if membership["teacher_id"] != user:
                     raise HTTPException(404, detail={"error": "assignment_not_found"})
-            elif membership["teacher_id"] == user or assignment["status"] != "published" or (assignment["publish_at"] is not None and assignment["publish_at"] > datetime.now(timezone.utc)):
+            elif membership["teacher_id"] == user or not _classroom_assignment_visible(cur, assignment_id, user) or assignment["status"] != "published" or (assignment["publish_at"] is not None and assignment["publish_at"] > datetime.now(timezone.utc)):
                 raise HTTPException(403, detail={"error": "student_submission_unavailable"})
             cur.execute("""INSERT INTO verifyd_circle_class_uploads
                 (upload_id,assignment_id,owner_id,purpose,storage_key,original_name,
@@ -211,11 +231,14 @@ def list_uploads(class_id: str, assignment_id: str,
     if not upload_enabled():
         raise HTTPException(404, detail={"error": "classroom_uploads_disabled"})
     user = _identity(authorization)
+    _prepare_classroom_audience()
     ensure_upload_schema()
     with get_db() as conn:
         cur=conn.cursor()
         membership = _member(cur, class_id, user)
         _assignment(cur, class_id, assignment_id)
+        if membership["teacher_id"] != user and not _classroom_assignment_visible(cur, assignment_id, user):
+            raise HTTPException(404, detail={"error": "assignment_not_found"})
         cur.execute("""SELECT upload_id,owner_id,purpose,original_name,content_type,
             byte_size,scan_status,created_at
             FROM verifyd_circle_class_uploads

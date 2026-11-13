@@ -73,6 +73,7 @@ from trust_voice_circle_safety import router as trust_voice_circle_safety_router
 from trust_voice_homework import router as trust_voice_homework_router
 from trust_voice_classrooms import router as trust_voice_classrooms_router
 from trust_voice_classroom_library import router as trust_voice_classroom_library_router
+from trust_voice_classroom_invitations import router as trust_voice_classroom_invitations_router
 from trust_voice_classroom_quarantine import router as trust_voice_classroom_quarantine_router
 from trust_voice_personal_coursework import router as trust_voice_personal_coursework_router
 from trust_voice_classroom_tools import router as trust_voice_classroom_tools_router
@@ -322,6 +323,7 @@ app.include_router(trust_voice_homework_router)
 # Isolated Classroom pilot (all endpoints disabled by default)
 app.include_router(trust_voice_classrooms_router)
 app.include_router(trust_voice_classroom_library_router)
+app.include_router(trust_voice_classroom_invitations_router)
 app.include_router(trust_voice_classroom_quarantine_router)
 app.include_router(trust_voice_personal_coursework_router)
 app.include_router(trust_voice_classroom_tools_router)
