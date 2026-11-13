@@ -279,13 +279,24 @@ class Review(BaseModel):
     feedback: str = Field(default="", max_length=12000)
 
 
+def _classroom_audience_active():
+    # Do not load optional invitation dependencies when the two feature flags are off.
+    enabled = ("1", "true", "yes", "on")
+    return (os.getenv("VERIFYD_CIRCLE_CLASSROOM_AUDIENCE_ENABLED", "0").strip().lower() in enabled
+            and os.getenv("VERIFYD_CIRCLE_CLASSROOM_INVITES_ENABLED", "0").strip().lower() in enabled)
+
+
 def _prepare_classroom_audience():
+    if not _classroom_audience_active():
+        return
     # Set up optional assignment restrictions before opening a student's transaction.
     from trust_voice_classroom_invitations import prepare_audience
     prepare_audience()
 
 
 def _classroom_assignment_visible(cur, assignment_id, student_id):
+    if not _classroom_audience_active():
+        return True
     from trust_voice_classroom_invitations import audience_allows
     return audience_allows(cur, assignment_id, student_id)
 
