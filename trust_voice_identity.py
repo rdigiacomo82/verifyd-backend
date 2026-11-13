@@ -18,6 +18,8 @@ from __future__ import annotations
 import logging
 import os
 import re
+import secrets
+import time
 import uuid
 import unicodedata
 from datetime import datetime, timezone
@@ -355,6 +357,25 @@ def lookup_handle(handle: str):
     return {"identity": _public_identity(dict(row))}
 
 
+# Claim the existing verified session model, rather than asking a newly
+# registered user to receive and enter a SECOND email OTP.
+# This helper is only called after database.verify_otp has accepted the code.
+def _issue_verified_claim_session(identity_row: dict) -> dict:
+    from trust_voice_signaling import _create_persistent_session, _sign, _secret
+    _secret()  # Fail closed if the normal HMAC session signer is unavailable.
+    now = int(time.time())
+    session_id = _create_persistent_session(identity_row["id"])
+    token = _sign({
+        "purpose": "trust_voice_session",
+        "session_id": session_id,
+        "identity_id": identity_row["id"],
+        "handle_lower": (identity_row.get("handle_lower") or "").lower(),
+        "iat": now,
+        "nonce": secrets.token_hex(8),
+    })
+    return {"token": token, "persistent": True, "expires_in_seconds": None}
+
+
 @router.post("/identity/claim")
 def claim_identity(payload: ClaimIdentityRequest):
     _require_enabled()
@@ -389,10 +410,14 @@ def claim_identity(payload: ClaimIdentityRequest):
         if existing_email:
             existing = dict(existing_email)
             if (existing.get("handle_lower") or "") == handle_lower:
+                # Existing account already proved ownership with the submitted
+                # one-time code. Issue its normal revocable session without
+                # asking the person to request a second code.
                 return {
                     "created": False,
                     "message": "identity_already_exists",
                     "identity": _public_identity(existing),
+                    **_issue_verified_claim_session(existing),
                 }
             raise HTTPException(
                 status_code=409,
@@ -447,8 +472,15 @@ def claim_identity(payload: ClaimIdentityRequest):
 
     identity = _public_identity(dict(row))
     log.info("Trust Voice identity claimed: %s by %s", identity["handle"], email)
+    try:
+        verified_session = _issue_verified_claim_session(dict(row))
+    except Exception:
+        # Identity creation is already committed. Preserve the successful
+        # account; let the user sign in through the original verified path.
+        log.exception("Post-claim session provisioning failed")
+        verified_session = {"signin_required": True}
     return {
         "created": True,
         "identity": identity,
-        "next_phase": "voice_calling_not_enabled_yet",
+        **verified_session,
     }
