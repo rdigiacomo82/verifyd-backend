@@ -610,9 +610,9 @@ def review_submission(class_id: str,assignment_id: str,student_id: str,payload: 
     # Ensure rank tables before starting the review transaction; never open a
     # nested connection while a submission row is locked.
     from trust_voice_ranks import _schema as ensure_rank_schema, enabled as ranking_enabled
-    ensure_rank_schema()
-    if not ranking_enabled():
-        raise HTTPException(503,detail={"error":"rank_service_unavailable_for_completion"})
+    rank_available = ranking_enabled()
+    if rank_available:
+        ensure_rank_schema()
     points_added = 0
     with get_db() as conn:
         cur=conn.cursor()
@@ -620,6 +620,9 @@ def review_submission(class_id: str,assignment_id: str,student_id: str,payload: 
         assignment=_assignment(cur,class_id,assignment_id)
         if payload.points_awarded > assignment["points_possible"]:
             raise HTTPException(400,detail={"error":"grade_exceeds_max"})
+        rank_points=int(assignment.get("rank_points") or 0)
+        if rank_points and not rank_available:
+            raise HTTPException(503,detail={"error":"rank_service_unavailable_for_completion"})
         # Only an APPROVED member may earn Classroom Rank points.
         cur.execute("""SELECT 1 FROM verifyd_circle_class_members
             WHERE class_id=%s AND student_id=%s AND status='approved'""", (class_id,student_id))
@@ -634,7 +637,6 @@ def review_submission(class_id: str,assignment_id: str,student_id: str,payload: 
         rec=cur.fetchone()
         if not rec:
             raise HTTPException(409,detail={"error":"submission_not_ready"})
-        rank_points=int(assignment.get("rank_points") or 0)
         if rank_points:
             cur.execute("""INSERT INTO verifyd_circle_rank_awards
                 (award_id, identity_id, challenge_id, kind, points, evidence_ref)
