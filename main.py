@@ -4857,7 +4857,7 @@ def admin_data(key: str = ""):
 def admin_user_certs(key: str = "", email: str = ""):
     """
     Returns all certificates scanned by a specific user.
-    Usage: /admin-user-certs/?key=ADMIN_KEY&email=user@example.com
+    Usage: /admin-user-certs/?key=REDACTED&email=user@example.com
     """
     if not _is_admin(key):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
@@ -4963,7 +4963,7 @@ def admin_update_apikey(
 ):
     """
     Update branding fields on an enterprise API key.
-    Usage: /admin-update-apikey/?key=ADMIN_KEY&api_key=vfyd_live_...&company_name=...&logo_url=...&brand_color=...
+    Usage: /admin-update-apikey/?key=REDACTED&api_key=vfyd_live_...&company_name=...&logo_url=...&brand_color=...
     """
     if not _is_admin(key):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
@@ -5085,8 +5085,8 @@ def admin_disk_cleanup(key: str = "", dry_run: bool = False):
     3. Old raw upload files in /var/data/videos/
 
     Pass dry_run=true to see what would be deleted without deleting.
-    Example: /admin-disk-cleanup/?key=Honda%236915
-    Example: /admin-disk-cleanup/?key=Honda%236915&dry_run=true
+    Example: /admin-disk-cleanup/?key=REDACTED
+    Example: /admin-disk-cleanup/?key=REDACTED&dry_run=true
     """
     if not _is_admin(key):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
@@ -5201,7 +5201,7 @@ def admin_disk_cleanup(key: str = "", dry_run: bool = False):
 def admin_disk_usage(key: str = ""):
     """
     Show current disk usage breakdown.
-    Example: /admin-disk-usage/?key=Honda%236915
+    Example: /admin-disk-usage/?key=REDACTED
     """
     if not _is_admin(key):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
@@ -5536,7 +5536,7 @@ def admin_create_api_key(
     The generated key is shown ONCE — store it securely.
 
     Example:
-      POST /admin-create-api-key/?key=Honda%236915
+      POST /admin-create-api-key/?key=REDACTED
         &owner_email=client@company.com
         &company_name=Acme+News
         &logo_url=https://acme.com/logo.png
