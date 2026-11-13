@@ -139,6 +139,7 @@ def student_todo(class_id: str, authorization: Optional[str] = Header(default=No
             LEFT JOIN verifyd_circle_class_submissions s
             ON s.assignment_id=a.assignment_id AND s.student_id=%s
             WHERE a.class_id=%s AND a.status='published'
+            AND (a.publish_at IS NULL OR a.publish_at<=NOW())
             ORDER BY a.due_at NULLS LAST,a.created_at DESC LIMIT 200""",(user,class_id))
         items=[]
         now=datetime.now().astimezone()
@@ -204,7 +205,7 @@ def get_rubric(class_id: str,assignment_id: str,
         cur=conn.cursor()
         rec=_member(cur,class_id,user)
         assignment=_assignment(cur,class_id,assignment_id)
-        if rec["teacher_id"] != user and assignment["status"]!="published":
+        if rec["teacher_id"] != user and (assignment["status"] != "published" or (assignment["publish_at"] is not None and assignment["publish_at"] > datetime.now().astimezone())):
             raise HTTPException(404,detail={"error":"rubric_not_found"})
         cur.execute("SELECT criteria FROM verifyd_circle_assignment_rubrics WHERE assignment_id=%s",
                     (assignment_id,))
