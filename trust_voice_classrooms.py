@@ -108,9 +108,11 @@ def _schema():
                 publish_at TIMESTAMPTZ,
                 points_possible INTEGER NOT NULL DEFAULT 100 CHECK(points_possible BETWEEN 1 AND 1000),
                 status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft','published','archived')),
+                rank_points INTEGER NOT NULL DEFAULT 0 CHECK(rank_points BETWEEN 0 AND 5),
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )""")
             cur.execute("ALTER TABLE verifyd_circle_class_assignments ADD COLUMN IF NOT EXISTS publish_at TIMESTAMPTZ")
+            cur.execute("ALTER TABLE verifyd_circle_class_assignments ADD COLUMN IF NOT EXISTS rank_points INTEGER NOT NULL DEFAULT 0 CHECK(rank_points BETWEEN 0 AND 5)")
             cur.execute("""CREATE INDEX IF NOT EXISTS idx_circle_class_assignments_class
                 ON verifyd_circle_class_assignments(class_id,status)""")
             cur.execute("""CREATE TABLE IF NOT EXISTS verifyd_circle_class_submissions (
@@ -161,7 +163,7 @@ def _member(cur, class_id, identity_id):
 
 
 def _assignment(cur, class_id, assignment_id):
-    cur.execute("""SELECT assignment_id,class_id,title,instructions,due_at,publish_at,points_possible,status
+    cur.execute("""SELECT assignment_id,class_id,title,instructions,due_at,publish_at,points_possible,rank_points,status
         FROM verifyd_circle_class_assignments WHERE class_id=%s AND assignment_id=%s""",
         (class_id,assignment_id))
     record = cur.fetchone()
@@ -252,13 +254,15 @@ class AssignmentCreate(BaseModel):
     instructions: str = Field(min_length=1, max_length=16000)
     due_at: Optional[datetime] = None
     points_possible: int = Field(default=100, ge=1, le=1000)
+    rank_points: int = Field(default=0, ge=0, le=5)  # 0 for legacy clients; 1–5 when explicitly selected
 
 
 class AssignmentEdit(BaseModel):
-    """Only unpublished assignments may be edited; grades and points are unchanged."""
+    """Only unpublished assignments may be edited; grades and point rewards are locked after publish."""
     title: str = Field(min_length=3, max_length=160)
     instructions: str = Field(min_length=1, max_length=16000)
     due_at: Optional[datetime] = None
+    rank_points: Optional[int] = Field(default=None, ge=0, le=5)
 
 
 class ScheduleAssignment(BaseModel):
@@ -429,9 +433,9 @@ def create_assignment(class_id: str,payload: AssignmentCreate,
         cur=conn.cursor()
         _teacher(cur,class_id,user)
         cur.execute("""INSERT INTO verifyd_circle_class_assignments
-            (assignment_id,class_id,author_id,title,instructions,due_at,points_possible)
-            VALUES (%s,%s,%s,%s,%s,%s,%s)""",(assignment_id,class_id,user,payload.title,
-            payload.instructions,payload.due_at,payload.points_possible))
+            (assignment_id,class_id,author_id,title,instructions,due_at,points_possible,rank_points)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",(assignment_id,class_id,user,payload.title,
+            payload.instructions,payload.due_at,payload.points_possible,payload.rank_points))
     return {"assignment_id":assignment_id,"status":"draft"}
 
 
@@ -446,10 +450,10 @@ def edit_assignment(class_id: str, assignment_id: str, payload: AssignmentEdit,
         cur = conn.cursor()
         _teacher(cur, class_id, user)
         cur.execute("""UPDATE verifyd_circle_class_assignments
-            SET title=%s, instructions=%s, due_at=%s
+            SET title=%s, instructions=%s, due_at=%s, rank_points=COALESCE(%s,rank_points)
             WHERE assignment_id=%s AND class_id=%s AND status='draft'
-            RETURNING assignment_id,class_id,title,instructions,due_at,publish_at,points_possible,status""",
-            (payload.title.strip(), payload.instructions.strip(), payload.due_at, assignment_id, class_id))
+            RETURNING assignment_id,class_id,title,instructions,due_at,publish_at,points_possible,rank_points,status""",
+            (payload.title.strip(), payload.instructions.strip(), payload.due_at, payload.rank_points, assignment_id, class_id))
         row = cur.fetchone()
         if not row:
             raise HTTPException(409, detail={"error": "assignment_not_draft"})
@@ -511,7 +515,7 @@ def list_assignments(class_id: str, authorization: Optional[str] = Header(defaul
         cur=conn.cursor()
         rec=_member(cur,class_id,user)
         show_drafts=rec["teacher_id"]==user
-        cur.execute("""SELECT assignment_id,title,instructions,due_at,publish_at,points_possible,status,created_at
+        cur.execute("""SELECT assignment_id,title,instructions,due_at,publish_at,points_possible,rank_points,status,created_at
             FROM verifyd_circle_class_assignments WHERE class_id=%s
             AND (%s OR (status='published' AND (publish_at IS NULL OR publish_at<=NOW())))
             ORDER BY created_at DESC LIMIT 150""",
@@ -581,10 +585,13 @@ def teacher_submissions(class_id: str,assignment_id: str,
         cur=conn.cursor()
         _teacher(cur,class_id,user)
         _assignment(cur,class_id,assignment_id)
-        cur.execute("""SELECT student_id,status,response,points_awarded,feedback,
-            submitted_at,returned_at,updated_at FROM verifyd_circle_class_submissions
-            WHERE assignment_id=%s AND status IN ('submitted','returned')
-            ORDER BY submitted_at DESC LIMIT 300""",(assignment_id,))
+        cur.execute("""SELECT s.student_id, i.handle AS student_handle,
+            s.status,s.response,s.points_awarded,s.feedback,
+            s.submitted_at,s.returned_at,s.updated_at
+            FROM verifyd_circle_class_submissions s
+            JOIN verifyd_identities i ON i.id=s.student_id
+            WHERE s.assignment_id=%s AND s.status IN ('submitted','returned')
+            ORDER BY s.submitted_at DESC LIMIT 300""",(assignment_id,))
         rows=[_display(x) for x in cur.fetchall()]
     return {"submissions":rows}
 
@@ -592,15 +599,33 @@ def teacher_submissions(class_id: str,assignment_id: str,
 @router.post("/classes/{class_id}/assignments/{assignment_id}/submissions/{student_id}/review")
 def review_submission(class_id: str,assignment_id: str,student_id: str,payload: Review,
                       authorization: Optional[str] = Header(default=None)):
+    """Teacher review completes a submitted assignment and awards configured Rank credit once.
+
+    Rank credit is separate from academic grade points. It is never computed from
+    client-supplied point amounts, and is atomically committed with the review.
+    """
     user=_identity(authorization)
     _approved_teacher(user)
     _schema()
+    # Ensure rank tables before starting the review transaction; never open a
+    # nested connection while a submission row is locked.
+    from trust_voice_ranks import _schema as ensure_rank_schema, enabled as ranking_enabled
+    ensure_rank_schema()
+    if not ranking_enabled():
+        raise HTTPException(503,detail={"error":"rank_service_unavailable_for_completion"})
+    points_added = 0
     with get_db() as conn:
         cur=conn.cursor()
         _teacher(cur,class_id,user)
         assignment=_assignment(cur,class_id,assignment_id)
         if payload.points_awarded > assignment["points_possible"]:
             raise HTTPException(400,detail={"error":"grade_exceeds_max"})
+        # Only an APPROVED member may earn Classroom Rank points.
+        cur.execute("""SELECT 1 FROM verifyd_circle_class_members
+            WHERE class_id=%s AND student_id=%s AND status='approved'""", (class_id,student_id))
+        if not cur.fetchone():
+            raise HTTPException(403,detail={"error":"student_not_enrolled"})
+        # A completed review transitions submitted -> returned exactly once.
         cur.execute("""UPDATE verifyd_circle_class_submissions SET
             status='returned', points_awarded=%s,feedback=%s,returned_at=NOW(),updated_at=NOW()
             WHERE assignment_id=%s AND student_id=%s AND status='submitted'
@@ -609,5 +634,15 @@ def review_submission(class_id: str,assignment_id: str,student_id: str,payload: 
         rec=cur.fetchone()
         if not rec:
             raise HTTPException(409,detail={"error":"submission_not_ready"})
-    return {"review":_display(rec),"trust_rank_points_added":0,
-            "note":"Teacher grades do not automatically change Trust Rank."}
+        rank_points=int(assignment.get("rank_points") or 0)
+        if rank_points:
+            cur.execute("""INSERT INTO verifyd_circle_rank_awards
+                (award_id, identity_id, challenge_id, kind, points, evidence_ref)
+                VALUES (%s,%s,%s,'challenge',%s,%s)
+                ON CONFLICT DO NOTHING RETURNING award_id""",
+                (str(uuid.uuid4()),student_id,f"classroom:{assignment_id}",rank_points,
+                 f"classroom-review:{assignment_id}:{student_id}"))
+            points_added=rank_points if cur.fetchone() else 0
+    return {"review":_display(rec),"trust_rank_points_added":points_added,
+            "rank_credit": "awarded_once" if points_added else "none",
+            "note":"Trust Rank points reflect a completed teacher review, not proof of independent verification or academic achievement."}
