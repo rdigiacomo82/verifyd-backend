@@ -1,8 +1,8 @@
 """VeriFYD Circle Classroom — isolated opt-in assignment pilot.
 
 Never imports or mutates existing Homework, messages, calls, or voicemail.
-Teachers must be explicitly preapproved by the operator. Joining needs teacher
-approval. Raw file uploads are stored in a separate private R2 quarantine bucket
+Teachers may opt into adult-only, self-reported educator registration when
+explicitly enabled. Enrollment still requires classroom teacher approval. Raw file uploads are stored in a separate private R2 quarantine bucket
 and are NEVER returned, downloaded, rendered, analyzed or considered safe here.
 Feature flag: VERIFYD_CIRCLE_CLASSROOM_ENABLED=1 (default OFF).
 """
@@ -46,10 +46,29 @@ def _identity(authorization):
     return str(person["id"])
 
 
-def _approved_teacher(identity_id):
-    approved = {value.strip() for value in os.getenv("VERIFYD_CIRCLE_CLASSROOM_TEACHER_IDS", "").split(",") if value.strip()}
-    if identity_id not in approved:
-        raise HTTPException(403, detail={"error": "teacher_approval_required"})
+def _operator_teacher(identity_id):
+    return identity_id in {value.strip() for value in os.getenv(
+        "VERIFYD_CIRCLE_CLASSROOM_TEACHER_IDS", "").split(",") if value.strip()}
+
+
+def _teacher_allowed(identity_id, cur=None):
+    if _operator_teacher(identity_id):
+        return True
+    _schema()
+    if cur is not None:
+        cur.execute("SELECT status FROM verifyd_circle_teacher_profiles WHERE identity_id=%s", (identity_id,))
+        row = cur.fetchone()
+    else:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT status FROM verifyd_circle_teacher_profiles WHERE identity_id=%s", (identity_id,))
+            row = cursor.fetchone()
+    return bool(row and row["status"] == "active")
+
+
+def _approved_teacher(identity_id, cur=None):
+    if not _teacher_allowed(identity_id, cur):
+        raise HTTPException(403, detail={"error": "teacher_registration_required"})
 
 
 def _schema():
@@ -105,6 +124,18 @@ def _schema():
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 PRIMARY KEY(assignment_id,student_id)
             )""")
+            cur.execute("""CREATE TABLE IF NOT EXISTS verifyd_circle_teacher_profiles (
+                identity_id TEXT PRIMARY KEY REFERENCES verifyd_identities(id) ON DELETE CASCADE,
+                display_name TEXT NOT NULL,
+                organization TEXT NOT NULL DEFAULT '',
+                teaching_role TEXT NOT NULL,
+                subjects TEXT NOT NULL DEFAULT '',
+                credentials TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','suspended')),
+                adult_attested_at TIMESTAMPTZ NOT NULL,
+                terms_accepted_at TIMESTAMPTZ NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )""")
         _READY = True
 
 
@@ -113,6 +144,7 @@ def _teacher(cur, class_id, identity_id):
     record = cur.fetchone()
     if not record or record["teacher_id"] != identity_id:
         raise HTTPException(404, detail={"error": "class_not_found"})
+    _approved_teacher(identity_id, cur)
     return record
 
 
@@ -124,7 +156,7 @@ def _member(cur, class_id, identity_id):
     if not record or (record["teacher_id"] != identity_id and record["status"] != "approved"):
         raise HTTPException(404, detail={"error": "class_not_found"})
     if record["teacher_id"] == identity_id:
-        _approved_teacher(identity_id)  # Admin revocation removes teacher data access.
+        _approved_teacher(identity_id, cur)  # Revoked educators cannot read student content.
     return record
 
 
@@ -147,6 +179,63 @@ def _display(row):
     return result
 
 
+class TeacherRegistration(BaseModel):
+    display_name: str = Field(min_length=2, max_length=100)
+    organization: str = Field(default="", max_length=120)
+    teaching_role: Literal["Teacher", "Tutor", "Homeschool Educator", "Therapist", "Instructor", "Other"]
+    subjects: str = Field(default="", max_length=160)
+    credentials: str = Field(default="", max_length=500)
+    adult_attestation: bool = False
+    accept_terms: bool = False
+
+
+@router.get("/teachers/me")
+def my_teacher_profile(authorization: Optional[str] = Header(default=None)):
+    identity_id = _identity(authorization)
+    _schema()
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("""SELECT display_name,organization,teaching_role,subjects,credentials,status
+            FROM verifyd_circle_teacher_profiles WHERE identity_id=%s""", (identity_id,))
+        profile = cur.fetchone()
+    allowed = _operator_teacher(identity_id) or bool(profile and profile["status"] == "active")
+    return {"can_create_classes": allowed,
+            "status": "operator_approved" if _operator_teacher(identity_id) else (
+                "self_registered" if allowed else "suspended" if profile else "not_registered"),
+            "independently_verified": False,
+            "registration_available": os.getenv("VERIFYD_CIRCLE_CLASSROOM_SELF_REGISTER_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on"),
+            "profile": dict(profile) if profile else None}
+
+
+@router.post("/teachers/register")
+def register_teacher(payload: TeacherRegistration, authorization: Optional[str] = Header(default=None)):
+    identity_id = _identity(authorization)
+    if os.getenv("VERIFYD_CIRCLE_CLASSROOM_SELF_REGISTER_ENABLED", "0").strip().lower() not in ("1", "true", "yes", "on"):
+        raise HTTPException(403, detail={"error": "teacher_self_registration_disabled"})
+    if not payload.adult_attestation or not payload.accept_terms:
+        raise HTTPException(422, detail={"error": "adult_attestation_and_terms_required"})
+    _schema()
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT status FROM verifyd_circle_teacher_profiles WHERE identity_id=%s FOR UPDATE", (identity_id,))
+        row = cur.fetchone()
+        if row and row["status"] == "suspended":
+            raise HTTPException(403, detail={"error": "teacher_account_suspended"})
+        cur.execute("""INSERT INTO verifyd_circle_teacher_profiles
+            (identity_id,display_name,organization,teaching_role,subjects,credentials,adult_attested_at,terms_accepted_at)
+            VALUES (%s,%s,%s,%s,%s,%s,NOW(),NOW())
+            ON CONFLICT (identity_id) DO UPDATE SET
+                display_name=EXCLUDED.display_name,organization=EXCLUDED.organization,
+                teaching_role=EXCLUDED.teaching_role,subjects=EXCLUDED.subjects,
+                credentials=EXCLUDED.credentials,updated_at=NOW()
+            WHERE verifyd_circle_teacher_profiles.status='active'""",
+            (identity_id,payload.display_name.strip(),payload.organization.strip(),
+             payload.teaching_role,payload.subjects.strip(),payload.credentials.strip()))
+    return {"status": "self_registered", "can_create_classes": True,
+            "independently_verified": False,
+            "note": "Credentials are self-reported. Restricted adult-only text classroom pilot."}
+
+
 class ClassCreate(BaseModel):
     title: str = Field(min_length=3, max_length=120)
     subject: str = Field(min_length=2, max_length=80)
@@ -155,6 +244,7 @@ class ClassCreate(BaseModel):
 
 class JoinRequest(BaseModel):
     join_code: str = Field(min_length=16, max_length=48)
+    adult_attestation: bool = False
 
 
 class AssignmentCreate(BaseModel):
@@ -189,7 +279,7 @@ class Review(BaseModel):
 def health():
     _require()
     return {"service":"circle_classroom_pilot","enabled":True,
-            "teacher_access":"operator-approved","files":"quarantine_only",
+            "teacher_access":"operator-or-self-registered-adult","files":"quarantine_only",
             "scan_service":"not_connected","unsafe_files_downloadable":False}
 
 
@@ -197,6 +287,8 @@ def health():
 def create_class(payload: ClassCreate, authorization: Optional[str] = Header(default=None)):
     user = _identity(authorization)
     _approved_teacher(user)
+    if payload.grade_band != "Adult" and not _operator_teacher(user):
+        raise HTTPException(403, detail={"error": "self_registered_adult_classes_only"})
     _schema()
     class_id = str(uuid.uuid4())
     join_code = secrets.token_urlsafe(24)
@@ -222,10 +314,12 @@ def request_to_join(payload: JoinRequest, authorization: Optional[str] = Header(
     digest = hashlib.sha256(payload.join_code.encode()).hexdigest()
     with get_db() as conn:
         cur=conn.cursor()
-        cur.execute("SELECT class_id,teacher_id FROM verifyd_circle_classes WHERE join_hash=%s", (digest,))
+        cur.execute("SELECT class_id,teacher_id,grade_band FROM verifyd_circle_classes WHERE join_hash=%s", (digest,))
         record=cur.fetchone()
         if not record:
             raise HTTPException(404, detail={"error":"invalid_class_code"})
+        if record["grade_band"] == "Adult" and not payload.adult_attestation:
+            raise HTTPException(422, detail={"error": "adult_join_attestation_required"})
         if record["teacher_id"] == user:
             raise HTTPException(409, detail={"error":"already_teacher"})
         cur.execute("""SELECT count(*) AS n FROM verifyd_circle_class_members WHERE student_id=%s AND status='pending'""", (user,))
@@ -244,7 +338,7 @@ def request_to_join(payload: JoinRequest, authorization: Optional[str] = Header(
 def my_classes(authorization: Optional[str] = Header(default=None)):
     user=_identity(authorization)
     _schema()
-    teacher_allowed = user in {v.strip() for v in os.getenv("VERIFYD_CIRCLE_CLASSROOM_TEACHER_IDS", "").split(",") if v.strip()}
+    teacher_allowed = _teacher_allowed(user)
     with get_db() as conn:
         cur=conn.cursor()
         cur.execute("""SELECT c.class_id,c.title,c.subject,c.grade_band,c.created_at,
