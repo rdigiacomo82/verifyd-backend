@@ -399,88 +399,79 @@ def claim_identity(payload: ClaimIdentityRequest):
 
     _ensure_identity_schema()
 
+    # Keep account creation in a single, short database transaction.
+    # The separate session insert must happen AFTER the account transaction
+    # closes, avoiding nested pool acquisition under load.
+    created = False
     with get_db() as conn:
         cur = conn.cursor()
-
         cur.execute(
             "SELECT * FROM verifyd_identities WHERE email_lower = %s LIMIT 1",
             (email,),
         )
         existing_email = cur.fetchone()
         if existing_email:
-            existing = dict(existing_email)
-            if (existing.get("handle_lower") or "") == handle_lower:
-                # Existing account already proved ownership with the submitted
-                # one-time code. Issue its normal revocable session without
-                # asking the person to request a second code.
-                return {
-                    "created": False,
-                    "message": "identity_already_exists",
-                    "identity": _public_identity(existing),
-                    **_issue_verified_claim_session(existing),
-                }
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "error": "email_already_has_identity",
-                    "message": "This verified email already owns a VeriFYD Identity.",
-                },
+            identity_row = dict(existing_email)
+            if (identity_row.get("handle_lower") or "") != handle_lower:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "error": "email_already_has_identity",
+                        "message": "This verified email already owns a VeriFYD Identity.",
+                    },
+                )
+        else:
+            cur.execute(
+                "SELECT 1 FROM verifyd_identities WHERE handle_lower = %s LIMIT 1",
+                (handle_lower,),
             )
+            if cur.fetchone():
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "error": "handle_taken",
+                        "message": "That handle is already in use.",
+                    },
+                )
+            identity_id = "vfyd_usr_" + uuid.uuid4().hex
+            now = _now_iso()
+            cur.execute(
+                """
+                INSERT INTO verifyd_identities (
+                    id, email_lower, handle, handle_lower,
+                    display_name, display_emoji,
+                    email_verified, identity_verified, organization_verified,
+                    verification_level, can_receive_calls, call_privacy,
+                    status, created_at, updated_at
+                )
+                VALUES (
+                    %s, %s, %s, %s,
+                    %s, %s,
+                    TRUE, FALSE, FALSE,
+                    'email_verified', FALSE, 'verified_users',
+                    'active', %s, %s
+                )
+                RETURNING *
+                """,
+                (identity_id, email, handle, handle_lower, display_name,
+                 display_emoji, now, now),
+            )
+            identity_row = dict(cur.fetchone())
+            created = True
 
-        cur.execute(
-            "SELECT 1 FROM verifyd_identities WHERE handle_lower = %s LIMIT 1",
-            (handle_lower,),
-        )
-        if cur.fetchone():
-            raise HTTPException(
-                status_code=409,
-                detail={"error": "handle_taken", "message": "That handle is already in use."},
-            )
-
-        identity_id = "vfyd_usr_" + uuid.uuid4().hex
-        now = _now_iso()
-        cur.execute(
-            """
-            INSERT INTO verifyd_identities (
-                id, email_lower, handle, handle_lower,
-                display_name, display_emoji,
-                email_verified, identity_verified, organization_verified,
-                verification_level, can_receive_calls, call_privacy,
-                status, created_at, updated_at
-            )
-            VALUES (
-                %s, %s, %s, %s,
-                %s, %s,
-                TRUE, FALSE, FALSE,
-                'email_verified', FALSE, 'verified_users',
-                'active', %s, %s
-            )
-            RETURNING *
-            """,
-            (
-                identity_id,
-                email,
-                handle,
-                handle_lower,
-                display_name,
-                display_emoji,
-                now,
-                now,
-            ),
-        )
-        row = cur.fetchone()
-
-    identity = _public_identity(dict(row))
-    log.info("Trust Voice identity claimed: %s by %s", identity["handle"], email)
+    identity = _public_identity(identity_row)
     try:
-        verified_session = _issue_verified_claim_session(dict(row))
+        verified_session = _issue_verified_claim_session(identity_row)
     except Exception:
-        # Identity creation is already committed. Preserve the successful
-        # account; let the user sign in through the original verified path.
+        # Identity ownership was verified. Do not lose the account if signing
+        # or persistent-session storage is temporarily unavailable.
         log.exception("Post-claim session provisioning failed")
         verified_session = {"signin_required": True}
+    if created:
+        log.info("Trust Voice identity claimed: %s by %s", identity["handle"], email)
     return {
-        "created": True,
+        "created": created,
         "identity": identity,
+        **({"message": "identity_already_exists"} if not created else {}),
         **verified_session,
     }
