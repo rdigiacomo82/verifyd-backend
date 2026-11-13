@@ -402,6 +402,12 @@ def remove_member(program_id:str,client_id:str,authorization:Optional[str]=Heade
             raise HTTPException(404,detail={"error":"client_not_enrolled"})
         cur.execute("""UPDATE verifyd_therapy_invitations SET status='revoked',responded_at=NOW()
             WHERE program_id=%s AND client_id=%s AND status='pending'""",(program_id,client_id))
+        # Preserve historical responses for the existing retention workflow, but
+        # never silently re-grant access to old practice tasks if re-invited later.
+        cur.execute("""DELETE FROM verifyd_therapy_task_recipients
+            WHERE client_id=%s AND task_id IN
+            (SELECT task_id FROM verifyd_therapy_tasks WHERE program_id=%s)""",
+            (client_id,program_id))
     return {"removed":True,"note":"Client access revoked; retained submissions require a separate retention/deletion workflow."}
 
 
