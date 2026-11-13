@@ -296,5 +296,48 @@ class ClassroomPostgresTests(unittest.TestCase):
             self.assertEqual(cur.fetchone()["n"],0)
 
 
+    def test_06_adult_educator_self_registration_and_revocation(self):
+        from fastapi import HTTPException
+        with patch.dict(os.environ, {
+            "VERIFYD_CIRCLE_CLASSROOM_SELF_REGISTER_ENABLED": "1",
+            "VERIFYD_CIRCLE_CLASSROOM_TEACHER_IDS": "",
+        }):
+            self.assertEqual(
+                self.c.my_teacher_profile(authorization=self.bearer(self.other))["status"],
+                "not_registered",
+            )
+            with self.assertRaises(HTTPException):
+                self.c.create_class(self.c.ClassCreate(
+                    title="Premature class", subject="Science", grade_band="Adult"),
+                    authorization=self.bearer(self.other))
+            base = dict(display_name="Adult Tutor", teaching_role="Tutor",
+                        organization="", subjects="Science", credentials="Self-declared",
+                        accept_terms=True)
+            with self.assertRaises(HTTPException):
+                self.c.register_teacher(self.c.TeacherRegistration(
+                    **base, adult_attestation=False), authorization=self.bearer(self.other))
+            result = self.c.register_teacher(self.c.TeacherRegistration(
+                **base, adult_attestation=True), authorization=self.bearer(self.other))
+            self.assertEqual(result["status"], "self_registered")
+            self.assertFalse(result["independently_verified"])
+            self.assertTrue(
+                self.c.my_teacher_profile(authorization=self.bearer(self.other))["can_create_classes"])
+            created = self.c.create_class(self.c.ClassCreate(
+                title="Adult tutoring", subject="Science", grade_band="Adult"),
+                authorization=self.bearer(self.other))
+            self.assertTrue(created["join_code"])
+            self.assertEqual(self.c.my_classes(
+                authorization=self.bearer(self.other))["classes"][0]["my_role"], "teacher")
+            with db() as conn:
+                conn.cursor().execute("UPDATE verifyd_circle_teacher_profiles SET status='suspended' WHERE identity_id=%s", (self.other,))
+            with self.assertRaises(HTTPException):
+                self.c.members(created["class_id"], authorization=self.bearer(self.other))
+            with self.assertRaises(HTTPException):
+                self.c.create_class(self.c.ClassCreate(
+                    title="Suspended class", subject="Science", grade_band="Adult"),
+                    authorization=self.bearer(self.other))
+            with db() as conn:
+                conn.cursor().execute("UPDATE verifyd_circle_teacher_profiles SET status='active' WHERE identity_id=%s", (self.other,))
+
 if __name__=="__main__":
     unittest.main()
