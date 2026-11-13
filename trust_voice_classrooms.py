@@ -164,6 +164,13 @@ class AssignmentCreate(BaseModel):
     points_possible: int = Field(default=100, ge=1, le=1000)
 
 
+class AssignmentEdit(BaseModel):
+    """Only unpublished assignments may be edited; grades and points are unchanged."""
+    title: str = Field(min_length=3, max_length=160)
+    instructions: str = Field(min_length=1, max_length=16000)
+    due_at: Optional[datetime] = None
+
+
 class ScheduleAssignment(BaseModel):
     publish_at: datetime
 
@@ -250,6 +257,42 @@ def my_classes(authorization: Optional[str] = Header(default=None)):
     return {"classes":rows}
 
 
+@router.delete("/classes/{class_id}/members/me")
+def leave_class_and_erase_my_work(class_id: str, authorization: Optional[str] = Header(default=None)):
+    """Member-directed deletion of their own class enrollment and submissions."""
+    user = _identity(authorization)
+    _schema()
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("""SELECT 1 FROM verifyd_circle_class_members
+                       WHERE class_id=%s AND student_id=%s""", (class_id, user))
+        if not cur.fetchone():
+            raise HTTPException(404, detail={"error": "membership_not_found"})
+        cur.execute("""DELETE FROM verifyd_circle_class_submissions
+                       WHERE student_id=%s AND assignment_id IN
+                       (SELECT assignment_id FROM verifyd_circle_class_assignments WHERE class_id=%s)""",
+                    (user, class_id))
+        cur.execute("""DELETE FROM verifyd_circle_class_members
+                       WHERE student_id=%s AND class_id=%s""", (user, class_id))
+    return {"left": True, "my_classwork_deleted": True}
+
+
+@router.delete("/classes/{class_id}")
+def delete_teacher_class(class_id: str, authorization: Optional[str] = Header(default=None)):
+    """Erase an entire teacher-owned classroom and related text-based records."""
+    user = _identity(authorization)
+    _approved_teacher(user)
+    _schema()
+    with get_db() as conn:
+        cur = conn.cursor()
+        _teacher(cur, class_id, user)
+        cur.execute("DELETE FROM verifyd_circle_classes WHERE class_id=%s AND teacher_id=%s RETURNING class_id",
+                    (class_id, user))
+        if not cur.fetchone():
+            raise HTTPException(404, detail={"error": "class_not_found"})
+    return {"deleted": True, "class_id": class_id}
+
+
 @router.get("/classes/{class_id}/members")
 def members(class_id: str, authorization: Optional[str] = Header(default=None)):
     user=_identity(authorization)
@@ -296,6 +339,27 @@ def create_assignment(class_id: str,payload: AssignmentCreate,
             VALUES (%s,%s,%s,%s,%s,%s,%s)""",(assignment_id,class_id,user,payload.title,
             payload.instructions,payload.due_at,payload.points_possible))
     return {"assignment_id":assignment_id,"status":"draft"}
+
+
+@router.put("/classes/{class_id}/assignments/{assignment_id}")
+def edit_assignment(class_id: str, assignment_id: str, payload: AssignmentEdit,
+                    authorization: Optional[str] = Header(default=None)):
+    """Edit the teacher's draft; published student-visible content is immutable."""
+    user = _identity(authorization)
+    _approved_teacher(user)
+    _schema()
+    with get_db() as conn:
+        cur = conn.cursor()
+        _teacher(cur, class_id, user)
+        cur.execute("""UPDATE verifyd_circle_class_assignments
+            SET title=%s, instructions=%s, due_at=%s
+            WHERE assignment_id=%s AND class_id=%s AND status='draft'
+            RETURNING assignment_id,class_id,title,instructions,due_at,publish_at,points_possible,status""",
+            (payload.title.strip(), payload.instructions.strip(), payload.due_at, assignment_id, class_id))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(409, detail={"error": "assignment_not_draft"})
+    return {"assignment": _display(row)}
 
 
 @router.post("/classes/{class_id}/assignments/{assignment_id}/publish")
