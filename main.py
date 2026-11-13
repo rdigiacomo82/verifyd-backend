@@ -5286,7 +5286,7 @@ def admin_disk_cleanup(key: str = ""):
     """
     Emergency disk cleanup — removes old temp files, uploaded videos,
     and certified videos older than 2 hours from the persistent disk.
-    Call when disk is full: /admin-disk-cleanup/?key=Honda%236915
+    Do not put administrative keys into source code, URLs, screenshots or logs.
     """
     if not _is_admin(key):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
