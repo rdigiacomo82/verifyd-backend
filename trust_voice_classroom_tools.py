@@ -160,11 +160,13 @@ def teacher_gradebook(class_id: str, authorization: Optional[str] = Header(defau
         cur=conn.cursor()
         _teacher(cur,class_id,user)
         cur.execute("""SELECT a.assignment_id,a.title,a.points_possible,
-            m.student_id,COALESCE(s.status,'not_started') AS status,
+            m.student_id,i.handle AS student_handle,a.rank_points,
+            COALESCE(s.status,'not_started') AS status,
             s.points_awarded,s.submitted_at,s.returned_at
             FROM verifyd_circle_class_assignments a
             JOIN verifyd_circle_class_members m
                 ON m.class_id=a.class_id AND m.status='approved'
+            JOIN verifyd_identities i ON i.id=m.student_id
             LEFT JOIN verifyd_circle_class_submissions s
                 ON s.assignment_id=a.assignment_id AND s.student_id=m.student_id
             WHERE a.class_id=%s AND a.status='published'
