@@ -14,7 +14,7 @@ import re
 import secrets
 import threading
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Header, HTTPException
@@ -86,10 +86,12 @@ def _schema():
                 author_id TEXT NOT NULL REFERENCES verifyd_identities(id) ON DELETE CASCADE,
                 title TEXT NOT NULL, instructions TEXT NOT NULL,
                 due_at TIMESTAMPTZ,
+                publish_at TIMESTAMPTZ,
                 points_possible INTEGER NOT NULL DEFAULT 100 CHECK(points_possible BETWEEN 1 AND 1000),
                 status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft','published','archived')),
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )""")
+            cur.execute("ALTER TABLE verifyd_circle_class_assignments ADD COLUMN IF NOT EXISTS publish_at TIMESTAMPTZ")
             cur.execute("""CREATE INDEX IF NOT EXISTS idx_circle_class_assignments_class
                 ON verifyd_circle_class_assignments(class_id,status)""")
             cur.execute("""CREATE TABLE IF NOT EXISTS verifyd_circle_class_submissions (
@@ -127,7 +129,7 @@ def _member(cur, class_id, identity_id):
 
 
 def _assignment(cur, class_id, assignment_id):
-    cur.execute("""SELECT assignment_id,class_id,title,instructions,due_at,points_possible,status
+    cur.execute("""SELECT assignment_id,class_id,title,instructions,due_at,publish_at,points_possible,status
         FROM verifyd_circle_class_assignments WHERE class_id=%s AND assignment_id=%s""",
         (class_id,assignment_id))
     record = cur.fetchone()
@@ -138,7 +140,7 @@ def _assignment(cur, class_id, assignment_id):
 
 def _display(row):
     result = dict(row)
-    for field in ("created_at", "requested_at", "approved_at", "due_at", "submitted_at", "returned_at", "updated_at"):
+    for field in ("created_at", "requested_at", "approved_at", "due_at", "publish_at", "submitted_at", "returned_at", "updated_at"):
         value = result.get(field)
         if isinstance(value, datetime):
             result[field] = value.isoformat()
@@ -160,6 +162,10 @@ class AssignmentCreate(BaseModel):
     instructions: str = Field(min_length=1, max_length=16000)
     due_at: Optional[datetime] = None
     points_possible: int = Field(default=100, ge=1, le=1000)
+
+
+class ScheduleAssignment(BaseModel):
+    publish_at: datetime
 
 
 class Work(BaseModel):
@@ -299,12 +305,42 @@ def publish_assignment(class_id: str,assignment_id: str,
     with get_db() as conn:
         cur=conn.cursor()
         _teacher(cur,class_id,user)
-        cur.execute("""UPDATE verifyd_circle_class_assignments SET status='published'
+        cur.execute("""UPDATE verifyd_circle_class_assignments SET status='published',publish_at=NULL
             WHERE class_id=%s AND assignment_id=%s AND status='draft' RETURNING assignment_id""",
             (class_id,assignment_id))
         if not cur.fetchone():
             raise HTTPException(409,detail={"error":"assignment_not_draft"})
     return {"status":"published"}
+
+
+@router.post("/classes/{class_id}/assignments/{assignment_id}/schedule")
+def schedule_assignment(class_id: str, assignment_id: str, payload: ScheduleAssignment,
+                        authorization: Optional[str] = Header(default=None)):
+    user = _identity(authorization)
+    _approved_teacher(user)
+    _schema()
+    when = payload.publish_at
+    if when.tzinfo is None or when.utcoffset() is None:
+        raise HTTPException(400, detail={"error": "schedule_requires_timezone"})
+    now = datetime.now(timezone.utc)
+    when = when.astimezone(timezone.utc)
+    if not now + timedelta(minutes=1) <= when <= now + timedelta(days=365):
+        raise HTTPException(400, detail={"error": "invalid_schedule_time"})
+    with get_db() as conn:
+        cur = conn.cursor()
+        _teacher(cur, class_id, user)
+        rec = _assignment(cur, class_id, assignment_id)
+        if rec["status"] != "draft":
+            raise HTTPException(409, detail={"error": "assignment_not_draft"})
+        if rec["due_at"] and rec["due_at"] < when:
+            raise HTTPException(400, detail={"error": "due_date_before_publish"})
+        cur.execute("""UPDATE verifyd_circle_class_assignments
+            SET status='published',publish_at=%s
+            WHERE class_id=%s AND assignment_id=%s AND status='draft'
+            RETURNING assignment_id""", (when, class_id, assignment_id))
+        if not cur.fetchone():
+            raise HTTPException(409, detail={"error": "assignment_not_draft"})
+    return {"status": "scheduled", "publish_at": when.isoformat()}
 
 
 @router.get("/classes/{class_id}/assignments")
@@ -315,9 +351,10 @@ def list_assignments(class_id: str, authorization: Optional[str] = Header(defaul
         cur=conn.cursor()
         rec=_member(cur,class_id,user)
         show_drafts=rec["teacher_id"]==user
-        cur.execute("""SELECT assignment_id,title,instructions,due_at,points_possible,status,created_at
+        cur.execute("""SELECT assignment_id,title,instructions,due_at,publish_at,points_possible,status,created_at
             FROM verifyd_circle_class_assignments WHERE class_id=%s
-            AND (%s OR status='published') ORDER BY created_at DESC LIMIT 150""",
+            AND (%s OR (status='published' AND (publish_at IS NULL OR publish_at<=NOW())))
+            ORDER BY created_at DESC LIMIT 150""",
             (class_id,show_drafts))
         rows=[_display(x) for x in cur.fetchall()]
     return {"assignments":rows}
@@ -334,7 +371,8 @@ def save_or_turn_in(class_id: str,assignment_id: str,payload: Work,
         if rec["teacher_id"]==user:
             raise HTTPException(403,detail={"error":"students_only"})
         assignment=_assignment(cur,class_id,assignment_id)
-        if assignment["status"]!="published":
+        if (assignment["status"] != "published" or
+                (assignment["publish_at"] is not None and assignment["publish_at"] > datetime.now(timezone.utc))):
             raise HTTPException(409,detail={"error":"assignment_unavailable"})
         cur.execute("""INSERT INTO verifyd_circle_class_submissions(assignment_id,student_id)
             VALUES (%s,%s) ON CONFLICT DO NOTHING""",(assignment_id,user))
