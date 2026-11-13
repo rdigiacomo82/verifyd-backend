@@ -585,10 +585,13 @@ def teacher_submissions(class_id: str,assignment_id: str,
         cur=conn.cursor()
         _teacher(cur,class_id,user)
         _assignment(cur,class_id,assignment_id)
-        cur.execute("""SELECT student_id,status,response,points_awarded,feedback,
-            submitted_at,returned_at,updated_at FROM verifyd_circle_class_submissions
-            WHERE assignment_id=%s AND status IN ('submitted','returned')
-            ORDER BY submitted_at DESC LIMIT 300""",(assignment_id,))
+        cur.execute("""SELECT s.student_id, i.handle AS student_handle,
+            s.status,s.response,s.points_awarded,s.feedback,
+            s.submitted_at,s.returned_at,s.updated_at
+            FROM verifyd_circle_class_submissions s
+            JOIN verifyd_identities i ON i.id=s.student_id
+            WHERE s.assignment_id=%s AND s.status IN ('submitted','returned')
+            ORDER BY s.submitted_at DESC LIMIT 300""",(assignment_id,))
         rows=[_display(x) for x in cur.fetchall()]
     return {"submissions":rows}
 
