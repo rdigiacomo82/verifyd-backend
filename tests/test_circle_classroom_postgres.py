@@ -322,9 +322,20 @@ class ClassroomPostgresTests(unittest.TestCase):
             self.assertFalse(result["independently_verified"])
             self.assertTrue(
                 self.c.my_teacher_profile(authorization=self.bearer(self.other))["can_create_classes"])
+            with self.assertRaises(HTTPException):
+                self.c.create_class(self.c.ClassCreate(
+                    title="Unapproved K12", subject="Science", grade_band="3-5"),
+                    authorization=self.bearer(self.other))
             created = self.c.create_class(self.c.ClassCreate(
                 title="Adult tutoring", subject="Science", grade_band="Adult"),
                 authorization=self.bearer(self.other))
+            with self.assertRaises(HTTPException):
+                self.c.request_to_join(self.c.JoinRequest(join_code=created["join_code"]),
+                    authorization=self.bearer(self.student))
+            self.assertEqual(
+                self.c.request_to_join(self.c.JoinRequest(
+                    join_code=created["join_code"], adult_attestation=True),
+                    authorization=self.bearer(self.student))["status"], "pending")
             self.assertTrue(created["join_code"])
             self.assertEqual(self.c.my_classes(
                 authorization=self.bearer(self.other))["classes"][0]["my_role"], "teacher")
