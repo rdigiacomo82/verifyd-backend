@@ -8,7 +8,7 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone
 from typing import Literal, Optional
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlsplit, urlunsplit, parse_qs
 
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
@@ -24,7 +24,7 @@ PLATFORMS = frozenset({'instagram', 'facebook', 'youtube', 'tiktok', 'linkedin',
 VISIBILITY = frozenset({'private', 'trust_circle', 'everyone'})
 HOSTS = {
     'instagram': {'instagram.com', 'www.instagram.com'},
-    'facebook': {'facebook.com', 'www.facebook.com', 'm.facebook.com'},
+    'facebook': {'facebook.com', 'www.facebook.com', 'm.facebook.com', 'web.facebook.com', 'fb.com', 'www.fb.com'},
     'youtube': {'youtube.com', 'www.youtube.com'},
     'tiktok': {'tiktok.com', 'www.tiktok.com'},
     'linkedin': {'linkedin.com', 'www.linkedin.com'},
@@ -51,6 +51,13 @@ def _normalize_url(platform: str, supplied: str) -> str:
                 ):
             raise ValueError('Unsafe or unsupported URL')
         segments = [v for v in parsed.path.split('/') if v]
+        # Facebook's standard numeric-ID profile URL requires its id query
+        # parameter. Preserve ONLY the numeric id, never tracking parameters.
+        if platform == 'facebook' and len(segments) == 1 and segments[0].lower() == 'profile.php':
+            profile_ids = parse_qs(parsed.query, keep_blank_values=True).get('id', [])
+            if len(profile_ids) != 1 or not re.fullmatch(r'[0-9]{1,30}', profile_ids[0]):
+                raise ValueError('Facebook profile.php requires a numeric id')
+            return urlunsplit(('https', 'www.facebook.com', '/profile.php', 'id=' + profile_ids[0], ''))
         if not segments or len(segments) > 3:
             raise ValueError('A profile URL is required')
         first = segments[0].lower()
@@ -64,6 +71,15 @@ def _normalize_url(platform: str, supplied: str) -> str:
             raise ValueError('Use a YouTube channel URL')
         if platform == 'linkedin' and (first not in {'in', 'company', 'school'} or len(segments) < 2):
             raise ValueError('Use a LinkedIn profile or company URL')
+        if platform == 'facebook':
+            # Do not turn a shared post, Reel or login redirect into a falsely
+            # labeled profile link. People/profile-ID URLs are allowed.
+            if first in {'reel', 'reels', 'posts', 'stories', 'permalink.php', 'photo.php', 'share', 'groups', 'events', 'gaming', 'pages'}:
+                raise ValueError('Use a Facebook profile URL instead of content/share links')
+            if first == 'people' and (len(segments) != 3 or not re.fullmatch(r'[0-9]{1,30}', segments[-1])):
+                raise ValueError('Facebook people profiles need a numeric identifier')
+            if first != 'people' and len(segments) != 1:
+                raise ValueError('Use a direct Facebook profile URL')
         if platform in {'instagram', 'x', 'pinterest'} and len(segments) != 1:
             raise ValueError('Use a direct social profile URL')
         # Social apps often append share/tracking parameters. Preserve only the
@@ -72,7 +88,7 @@ def _normalize_url(platform: str, supplied: str) -> str:
     except (ValueError, TypeError) as exc:
         raise HTTPException(status_code=422, detail={
             'error': 'invalid_social_profile',
-            'message': f'Please enter a valid, direct {platform} profile URL using HTTPS.',
+            'message': ('Please use https://www.facebook.com/username or https://www.facebook.com/profile.php?id=123456. Facebook share links are not direct profiles.' if platform == 'facebook' else f'Please enter a valid, direct {platform} profile URL using HTTPS.'),
         }) from exc
 
 
@@ -122,7 +138,7 @@ def set_my_social_links(payload: SocialLinksUpdate,
         platform = item.platform.strip().lower()
         if platform not in PLATFORMS or platform in seen or item.position in slots:
             raise HTTPException(422, detail={'error': 'duplicate_or_unsupported_social_link',
-                                             'message': 'Choose up to four different social networks.'})
+                                             'message': 'Choose up to six different social networks.'})
         seen.add(platform)
         slots.add(item.position)
         clean.append((owner_id, platform, _normalize_url(platform, item.url),
