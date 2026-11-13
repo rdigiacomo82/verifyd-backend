@@ -411,8 +411,10 @@ def members(class_id: str, authorization: Optional[str] = Header(default=None)):
     with get_db() as conn:
         cur=conn.cursor()
         _teacher(cur,class_id,user)
-        cur.execute("""SELECT student_id,status,requested_at,approved_at
-            FROM verifyd_circle_class_members WHERE class_id=%s ORDER BY requested_at LIMIT 300""",(class_id,))
+        cur.execute("""SELECT m.student_id,m.status,m.requested_at,m.approved_at,i.handle AS student_handle
+            FROM verifyd_circle_class_members m
+            JOIN verifyd_identities i ON i.id=m.student_id AND i.status='active'
+            WHERE m.class_id=%s ORDER BY m.requested_at LIMIT 300""",(class_id,))
         rows=[_display(x) for x in cur.fetchall()]
     return {"members":rows}
 
