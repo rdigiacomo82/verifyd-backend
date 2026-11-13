@@ -208,11 +208,14 @@ def create_rubric(class_id: str,assignment_id: str,payload: Rubric,
 def get_rubric(class_id: str,assignment_id: str,
                authorization: Optional[str] = Header(default=None)):
     user=_identity(authorization)
+    _prepare_classroom_audience()
     schema()
     with get_db() as conn:
         cur=conn.cursor()
         rec=_member(cur,class_id,user)
         assignment=_assignment(cur,class_id,assignment_id)
+        if rec["teacher_id"] != user and not _classroom_assignment_visible(cur,assignment_id,user):
+            raise HTTPException(404,detail={"error":"rubric_not_found"})
         if rec["teacher_id"] != user and (assignment["status"] != "published" or (assignment["publish_at"] is not None and assignment["publish_at"] > datetime.now().astimezone())):
             raise HTTPException(404,detail={"error":"rubric_not_found"})
         cur.execute("SELECT criteria FROM verifyd_circle_assignment_rubrics WHERE assignment_id=%s",
