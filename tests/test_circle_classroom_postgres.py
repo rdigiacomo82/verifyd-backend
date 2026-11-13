@@ -351,7 +351,7 @@ class ClassroomPostgresTests(unittest.TestCase):
             with db() as conn:
                 conn.cursor().execute("UPDATE verifyd_circle_teacher_profiles SET status='active' WHERE identity_id=%s", (self.other,))
 
-    def test_07_rank_points_after_teacher_completion_exactly_once(self):
+    def test_02a_rank_points_after_teacher_completion_exactly_once(self):
         from fastapi import HTTPException
         from trust_voice_ranks import _schema as ensure_rank_schema
         ensure_rank_schema()
