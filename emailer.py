@@ -85,11 +85,11 @@ def send_otp_email(to_email: str, code: str) -> bool:
 <p style="font-size:13px;color:#475569">Need help? Reply to this email.</p>
 </main></body></html>"""
     plain = (
-        "Your VeriFYD verification code\\n\\n"
-        f"{code}\\n\\n"
-        "Enter this code in VeriFYD to finish signing in or registering.\\n"
-        "The code expires in 10 minutes. If you didn't request it, ignore this message.\\n"
-        "Need help? Reply to this email.\\n"
+        "Your VeriFYD verification code\n\n"
+        f"{code}\n\n"
+        "Enter this code in VeriFYD to finish signing in or registering.\n"
+        "The code expires in 10 minutes. If you didn't request it, ignore this message.\n"
+        "Need help? Reply to this email.\n"
     )
     return _send({
         "from": "VeriFYD Circle <support@vfvid.com>",
