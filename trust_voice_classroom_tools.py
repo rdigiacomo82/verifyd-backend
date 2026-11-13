@@ -12,7 +12,8 @@ from pydantic import BaseModel, Field
 
 from database import get_db
 from trust_voice_classrooms import (
-    _identity, _schema as class_schema, _teacher, _member, _assignment, _approved_teacher, _display
+    _identity, _schema as class_schema, _teacher, _member, _assignment, _approved_teacher, _display,
+    _prepare_classroom_audience, _classroom_assignment_visible
 )
 
 router = APIRouter(prefix="/trust-voice/classroom", tags=["Circle Classroom Tools"])
@@ -127,6 +128,7 @@ def remove_member(class_id: str, student_id: str,
 @router.get("/classes/{class_id}/my-todo")
 def student_todo(class_id: str, authorization: Optional[str] = Header(default=None)):
     user=_identity(authorization)
+    _prepare_classroom_audience()
     class_schema()
     with get_db() as conn:
         cur=conn.cursor()
@@ -144,6 +146,8 @@ def student_todo(class_id: str, authorization: Optional[str] = Header(default=No
         items=[]
         now=datetime.now().astimezone()
         for rec in cur.fetchall():
+            if not _classroom_assignment_visible(cur,rec["assignment_id"],user):
+                continue
             item=_display(rec)
             item["overdue"]=bool(rec["due_at"] and rec["due_at"]<now
                                 and rec["my_status"] in ("not_started","draft"))
@@ -155,6 +159,7 @@ def student_todo(class_id: str, authorization: Optional[str] = Header(default=No
 def teacher_gradebook(class_id: str, authorization: Optional[str] = Header(default=None)):
     user=_identity(authorization)
     _approved_teacher(user)
+    _prepare_classroom_audience()
     class_schema()
     with get_db() as conn:
         cur=conn.cursor()
@@ -172,6 +177,7 @@ def teacher_gradebook(class_id: str, authorization: Optional[str] = Header(defau
             WHERE a.class_id=%s AND a.status='published'
             ORDER BY a.created_at DESC,m.student_id LIMIT 5000""",(class_id,))
         rows=[_display(x) for x in cur.fetchall()]
+        rows=[item for item in rows if _classroom_assignment_visible(cur,item["assignment_id"],item["student_id"])]
     return {"gradebook":rows,"teacher_only":True}
 
 
