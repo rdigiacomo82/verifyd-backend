@@ -112,6 +112,9 @@ def remove_member(class_id: str, student_id: str,
                   authorization: Optional[str] = Header(default=None)):
     user=_identity(authorization)
     _approved_teacher(user)
+    from trust_voice_classroom_invitations import invites_enabled, prepare_invites
+    if invites_enabled():
+        prepare_invites()
     class_schema()
     with get_db() as conn:
         cur=conn.cursor()
@@ -121,6 +124,15 @@ def remove_member(class_id: str, student_id: str,
             RETURNING student_id""",(class_id,student_id))
         if not cur.fetchone():
             raise HTTPException(404,detail={"error":"member_not_found"})
+        if invites_enabled():
+            # A removed student must not be able to accept an old pending invitation.
+            cur.execute("""UPDATE verifyd_circle_class_invitations SET status='revoked',responded_at=NOW()
+                WHERE class_id=%s AND student_id=%s AND status='pending'""",(class_id,student_id))
+            # Rejoining later must not silently restore assignment-specific access.
+            cur.execute("""DELETE FROM verifyd_circle_assignment_audience_students
+                WHERE student_id=%s AND assignment_id IN
+                (SELECT assignment_id FROM verifyd_circle_class_assignments WHERE class_id=%s)""",
+                (student_id,class_id))
     return {"removed":True,
             "note":"Access revoked. Existing submissions remain stored until an explicit deletion and retention workflow is implemented."}
 
