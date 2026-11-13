@@ -69,6 +69,7 @@ class ClassroomPostgresTests(unittest.TestCase):
         cls.modules.start()
         cls.flags=patch.dict(os.environ,{
             "VERIFYD_CIRCLE_CLASSROOM_ENABLED":"1",
+            "VERIFYD_CIRCLE_RANKING_ENABLED":"1",
             "VERIFYD_CIRCLE_CLASSROOM_TEACHER_IDS":cls.teacher})
         cls.flags.start()
         cls.c=load("trust_voice_classrooms","trust_voice_classrooms.py")
@@ -349,6 +350,67 @@ class ClassroomPostgresTests(unittest.TestCase):
                     authorization=self.bearer(self.other))
             with db() as conn:
                 conn.cursor().execute("UPDATE verifyd_circle_teacher_profiles SET status='active' WHERE identity_id=%s", (self.other,))
+
+    def test_07_rank_points_after_teacher_completion_exactly_once(self):
+        from fastapi import HTTPException
+        from trust_voice_ranks import _schema as ensure_rank_schema
+        ensure_rank_schema()
+        payload=self.c.AssignmentCreate(
+            title="A graded adult reflection", instructions="Describe your reasoning",
+            points_possible=100, rank_points=5)
+        made=self.c.create_assignment(self.class_id,payload,
+            authorization=self.bearer(self.teacher))
+        assignment_id=made["assignment_id"]
+        teacher_list=self.c.list_assignments(self.class_id,
+            authorization=self.bearer(self.teacher))["assignments"]
+        self.assertEqual(next(x["rank_points"] for x in teacher_list
+            if x["assignment_id"]==assignment_id),5)
+        self.c.publish_assignment(self.class_id,assignment_id,
+            authorization=self.bearer(self.teacher))
+        self.c.save_or_turn_in(self.class_id,assignment_id,
+            self.c.Work(response="Carefully considered answer",action="turn_in"),
+            authorization=self.bearer(self.student))
+        with db() as conn:
+            cur=conn.cursor()
+            cur.execute("SELECT COUNT(*) AS n FROM verifyd_circle_rank_awards WHERE identity_id=%s AND challenge_id=%s",
+                (self.student,"classroom:"+assignment_id))
+            self.assertEqual(cur.fetchone()["n"],0)  # submit alone never awards
+        grade=self.c.review_submission(self.class_id,assignment_id,self.student,
+            self.c.Review(points_awarded=95, feedback="Complete and reviewed"),
+            authorization=self.bearer(self.teacher))
+        self.assertEqual(grade["trust_rank_points_added"],5)
+        with db() as conn:
+            cur=conn.cursor()
+            cur.execute("SELECT COUNT(*) AS n, COALESCE(SUM(points),0) AS total FROM verifyd_circle_rank_awards WHERE identity_id=%s AND challenge_id=%s",
+                (self.student,"classroom:"+assignment_id))
+            row=cur.fetchone()
+            self.assertEqual(row["n"],1)
+            self.assertEqual(row["total"],5)
+        with self.assertRaises(HTTPException) as error:
+            self.c.review_submission(self.class_id,assignment_id,self.student,
+                self.c.Review(points_awarded=95),
+                authorization=self.bearer(self.teacher))
+        self.assertEqual(error.exception.status_code,409)
+        from pydantic import ValidationError
+        with self.assertRaises(ValidationError):
+            self.c.AssignmentCreate(title="Bad points",instructions="Try this",rank_points=9)
+
+    def test_08_rank_points_immutable_after_publish(self):
+        from fastapi import HTTPException
+        made=self.c.create_assignment(self.class_id,self.c.AssignmentCreate(
+            title="Draft with points", instructions="Write a short note",rank_points=2),
+            authorization=self.bearer(self.teacher))
+        key=made["assignment_id"]
+        updated=self.c.edit_assignment(self.class_id,key,self.c.AssignmentEdit(
+            title="Revised draft",instructions="Write an original note",rank_points=4),
+            authorization=self.bearer(self.teacher))
+        self.assertEqual(updated["assignment"]["rank_points"],4)
+        self.c.publish_assignment(self.class_id,key,authorization=self.bearer(self.teacher))
+        with self.assertRaises(HTTPException) as error:
+            self.c.edit_assignment(self.class_id,key,self.c.AssignmentEdit(
+                title="Late revision",instructions="Try again",rank_points=5),
+                authorization=self.bearer(self.teacher))
+        self.assertEqual(error.exception.status_code,409)
 
 if __name__=="__main__":
     unittest.main()
