@@ -459,6 +459,14 @@ def claim_identity(payload: ClaimIdentityRequest):
             identity_row = dict(cur.fetchone())
             created = True
 
+    # A verified email address must not reactivate a suspended or otherwise
+    # inactive account. Enforce account status before issuing any session.
+    if (identity_row.get("status") or "").lower() != "active":
+        raise HTTPException(
+            status_code=403,
+            detail={"error": "identity_inactive", "message": "This account is not active. Contact support."},
+        )
+
     identity = _public_identity(identity_row)
     try:
         verified_session = _issue_verified_claim_session(identity_row)
