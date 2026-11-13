@@ -244,6 +244,7 @@ class ClassCreate(BaseModel):
 
 class JoinRequest(BaseModel):
     join_code: str = Field(min_length=16, max_length=48)
+    adult_attestation: bool = False
 
 
 class AssignmentCreate(BaseModel):
@@ -286,6 +287,8 @@ def health():
 def create_class(payload: ClassCreate, authorization: Optional[str] = Header(default=None)):
     user = _identity(authorization)
     _approved_teacher(user)
+    if payload.grade_band != "Adult" and not _operator_teacher(user):
+        raise HTTPException(403, detail={"error": "self_registered_adult_classes_only"})
     _schema()
     class_id = str(uuid.uuid4())
     join_code = secrets.token_urlsafe(24)
@@ -311,10 +314,12 @@ def request_to_join(payload: JoinRequest, authorization: Optional[str] = Header(
     digest = hashlib.sha256(payload.join_code.encode()).hexdigest()
     with get_db() as conn:
         cur=conn.cursor()
-        cur.execute("SELECT class_id,teacher_id FROM verifyd_circle_classes WHERE join_hash=%s", (digest,))
+        cur.execute("SELECT class_id,teacher_id,grade_band FROM verifyd_circle_classes WHERE join_hash=%s", (digest,))
         record=cur.fetchone()
         if not record:
             raise HTTPException(404, detail={"error":"invalid_class_code"})
+        if record["grade_band"] == "Adult" and not payload.adult_attestation:
+            raise HTTPException(422, detail={"error": "adult_join_attestation_required"})
         if record["teacher_id"] == user:
             raise HTTPException(409, detail={"error":"already_teacher"})
         cur.execute("""SELECT count(*) AS n FROM verifyd_circle_class_members WHERE student_id=%s AND status='pending'""", (user,))
