@@ -17,6 +17,7 @@ TOKEN_RULES = {
     "github_token": re.compile(rb"\bgh(?:p|o|u|s|r)_[A-Za-z0-9_]{30,}\b"),
     "github_fine_grained_token": re.compile(rb"\bgithub_pat_[A-Za-z0-9_]{40,}\b"),
     "stripe_secret_key": re.compile(rb"\bsk_live_[A-Za-z0-9]{20,}\b"),
+    "admin_key_in_url": re.compile(rb"/admin[A-Za-z0-9_/-]*\?key=(?!REDACTED|YOUR_KEY|EXAMPLE)[A-Za-z0-9%#_-]{8,}", re.I),
 }
 
 def classify(name: str, data: bytes) -> list[str]:
