@@ -1,0 +1,41 @@
+name: Therapy Practice Privacy and Integration
+on:
+  pull_request:
+    paths:
+      - 'trust_voice_therapy_practice.py'
+      - 'tests/test_therapy_practice_*.py'
+      - '.github/workflows/therapy-practice-privacy.yml'
+      - 'main.py'
+  workflow_dispatch:
+
+jobs:
+  therapy-pilot:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: verifydtest
+          POSTGRES_PASSWORD: testpass
+          POSTGRES_DB: verifydtest
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s --health-timeout 5s --health-retries 5
+    env:
+      TEST_PG_DSN: postgresql://verifydtest:testpass@localhost:5432/verifydtest
+      VERIFYD_CIRCLE_THERAPY_PRACTICE_ENABLED: '0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install isolated test requirements
+        run: python -m pip install --disable-pip-version-check 'fastapi>=0.115,<1' 'pydantic>=2,<3' psycopg2-binary
+      - name: Compile new backend module and its tests
+        run: python -m py_compile trust_voice_therapy_practice.py tests/test_therapy_practice_unit.py tests/test_therapy_practice_postgres.py
+      - name: Check disabled defaults and permission gates
+        run: python -m unittest discover -s tests -p 'test_therapy_practice_unit.py' -v
+      - name: Test isolated PostgreSQL practice exchange
+        run: python -m unittest discover -s tests -p 'test_therapy_practice_postgres.py' -v
