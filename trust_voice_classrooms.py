@@ -279,6 +279,17 @@ class Review(BaseModel):
     feedback: str = Field(default="", max_length=12000)
 
 
+def _prepare_classroom_audience():
+    # Set up optional assignment restrictions before opening a student's transaction.
+    from trust_voice_classroom_invitations import prepare_audience
+    prepare_audience()
+
+
+def _classroom_assignment_visible(cur, assignment_id, student_id):
+    from trust_voice_classroom_invitations import audience_allows
+    return audience_allows(cur, assignment_id, student_id)
+
+
 @router.get("/health")
 def health():
     _require()
@@ -510,6 +521,7 @@ def schedule_assignment(class_id: str, assignment_id: str, payload: ScheduleAssi
 @router.get("/classes/{class_id}/assignments")
 def list_assignments(class_id: str, authorization: Optional[str] = Header(default=None)):
     user=_identity(authorization)
+    _prepare_classroom_audience()
     _schema()
     with get_db() as conn:
         cur=conn.cursor()
@@ -521,6 +533,8 @@ def list_assignments(class_id: str, authorization: Optional[str] = Header(defaul
             ORDER BY created_at DESC LIMIT 150""",
             (class_id,show_drafts))
         rows=[_display(x) for x in cur.fetchall()]
+        if not show_drafts:
+            rows=[item for item in rows if _classroom_assignment_visible(cur,item["assignment_id"],user)]
     return {"assignments":rows}
 
 
@@ -528,6 +542,7 @@ def list_assignments(class_id: str, authorization: Optional[str] = Header(defaul
 def save_or_turn_in(class_id: str,assignment_id: str,payload: Work,
                     authorization: Optional[str] = Header(default=None)):
     user=_identity(authorization)
+    _prepare_classroom_audience()
     _schema()
     with get_db() as conn:
         cur=conn.cursor()
@@ -535,6 +550,8 @@ def save_or_turn_in(class_id: str,assignment_id: str,payload: Work,
         if rec["teacher_id"]==user:
             raise HTTPException(403,detail={"error":"students_only"})
         assignment=_assignment(cur,class_id,assignment_id)
+        if not _classroom_assignment_visible(cur,assignment_id,user):
+            raise HTTPException(404,detail={"error":"assignment_not_found"})
         if (assignment["status"] != "published" or
                 (assignment["publish_at"] is not None and assignment["publish_at"] > datetime.now(timezone.utc))):
             raise HTTPException(409,detail={"error":"assignment_unavailable"})
@@ -563,11 +580,14 @@ def save_or_turn_in(class_id: str,assignment_id: str,payload: Work,
 @router.get("/classes/{class_id}/assignments/{assignment_id}/my-work")
 def my_work(class_id: str,assignment_id: str,authorization: Optional[str] = Header(default=None)):
     user=_identity(authorization)
+    _prepare_classroom_audience()
     _schema()
     with get_db() as conn:
         cur=conn.cursor()
-        _member(cur,class_id,user)
+        membership=_member(cur,class_id,user)
         _assignment(cur,class_id,assignment_id)
+        if membership["teacher_id"] != user and not _classroom_assignment_visible(cur,assignment_id,user):
+            raise HTTPException(404,detail={"error":"assignment_not_found"})
         cur.execute("""SELECT assignment_id,status,response,points_awarded,feedback,
             submitted_at,returned_at,updated_at FROM verifyd_circle_class_submissions
             WHERE assignment_id=%s AND student_id=%s""",(assignment_id,user))
