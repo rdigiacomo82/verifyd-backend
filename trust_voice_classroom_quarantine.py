@@ -14,6 +14,7 @@ import re
 import secrets
 import threading
 from pathlib import PurePosixPath
+from datetime import datetime, timezone
 from typing import Literal, Optional
 
 import boto3
@@ -143,7 +144,7 @@ async def upload(class_id: str, assignment_id: str,
             if membership["teacher_id"] != user:
                 raise HTTPException(404, detail={"error": "assignment_not_found"})
         else:
-            if membership["teacher_id"] == user or assignment["status"] != "published":
+            if membership["teacher_id"] == user or assignment["status"] != "published" or (assignment["publish_at"] is not None and assignment["publish_at"] > datetime.now(timezone.utc)):
                 raise HTTPException(403, detail={"error": "student_submission_unavailable"})
             cur.execute("""SELECT status FROM verifyd_circle_class_submissions
                 WHERE assignment_id=%s AND student_id=%s""", (assignment_id, user))
@@ -183,7 +184,7 @@ async def upload(class_id: str, assignment_id: str,
             if purpose == "teacher_material":
                 if membership["teacher_id"] != user:
                     raise HTTPException(404, detail={"error": "assignment_not_found"})
-            elif membership["teacher_id"] == user or assignment["status"] != "published":
+            elif membership["teacher_id"] == user or assignment["status"] != "published" or (assignment["publish_at"] is not None and assignment["publish_at"] > datetime.now(timezone.utc)):
                 raise HTTPException(403, detail={"error": "student_submission_unavailable"})
             cur.execute("""INSERT INTO verifyd_circle_class_uploads
                 (upload_id,assignment_id,owner_id,purpose,storage_key,original_name,
