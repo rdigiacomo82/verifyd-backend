@@ -52,7 +52,7 @@ class ClassroomPostgresTests(unittest.TestCase):
     def setUpClass(cls):
         with db() as conn:
             conn.cursor().execute("""CREATE TABLE IF NOT EXISTS verifyd_identities
-                (id TEXT PRIMARY KEY,handle TEXT,status TEXT NOT NULL DEFAULT 'active')""")
+                (id TEXT PRIMARY KEY,handle TEXT,display_name TEXT,status TEXT NOT NULL DEFAULT 'active')""")
         cls.teacher="edu-"+uuid.uuid4().hex
         cls.student="edu-"+uuid.uuid4().hex
         cls.other="edu-"+uuid.uuid4().hex
@@ -69,12 +69,15 @@ class ClassroomPostgresTests(unittest.TestCase):
         cls.modules.start()
         cls.flags=patch.dict(os.environ,{
             "VERIFYD_CIRCLE_CLASSROOM_ENABLED":"1",
+            "VERIFYD_CIRCLE_CLASSROOM_LIBRARY_ENABLED":"1",
+            "VERIFYD_CIRCLE_CLASSROOM_LIBRARY_MODERATOR_IDS":cls.teacher,
             "VERIFYD_CIRCLE_RANKING_ENABLED":"1",
             "VERIFYD_CIRCLE_CLASSROOM_TEACHER_IDS":cls.teacher})
         cls.flags.start()
         cls.c=load("trust_voice_classrooms","trust_voice_classrooms.py")
         cls.personal=load("trust_voice_personal_coursework","trust_voice_personal_coursework.py")
         cls.tools=load("trust_voice_classroom_tools","trust_voice_classroom_tools.py")
+        cls.library=load("trust_voice_classroom_library","trust_voice_classroom_library.py")
         cls.c._schema()
         cls.personal.schema()
         cls.tools.schema()
@@ -91,6 +94,7 @@ class ClassroomPostgresTests(unittest.TestCase):
             sys.modules.pop("trust_voice_classrooms",None)
             sys.modules.pop("trust_voice_personal_coursework",None)
             sys.modules.pop("trust_voice_classroom_tools",None)
+            sys.modules.pop("trust_voice_classroom_library",None)
 
     def bearer(self,identity):
         return "Bearer "+identity
@@ -442,6 +446,50 @@ class ClassroomPostgresTests(unittest.TestCase):
         result=self.c.review_submission(self.class_id,key,self.student,
             self.c.Review(points_awarded=93),authorization=self.bearer(self.teacher))
         self.assertEqual(result["trust_rank_points_added"],3)
+
+    def test_02b_moderated_community_lesson_library(self):
+        from fastapi import HTTPException
+        entry = self.library.ShareLesson(
+            title="Foundations of listening and speaking",
+            instructions="Use a familiar picture to build a clear sentence. Discuss choices and reflect on your approach.",
+            grade_band="Adult", subject="Communication",
+            category="Communication & AAC", skills=["Expressive language", "Turn taking"],
+            share_with_community=True, confirm_rights_and_privacy=True,
+        )
+        with self.assertRaises(HTTPException):
+            self.library.submit(entry, authorization=self.bearer(self.student))
+        posted=self.library.submit(entry,authorization=self.bearer(self.teacher))
+        lesson=posted["lesson_id"]
+        self.assertEqual(posted["status"],"pending")
+        self.assertEqual(self.library.catalog(authorization=self.bearer(self.student))["lessons"],[])
+        mine=self.library.mine(authorization=self.bearer(self.teacher))["submissions"]
+        self.assertIn(lesson,[x["lesson_id"] for x in mine])
+        with self.assertRaises(HTTPException):
+            self.library.moderation(authorization=self.bearer(self.student))
+        pending=self.library.moderation(authorization=self.bearer(self.teacher))["pending"]
+        self.assertIn(lesson,[x["lesson_id"] for x in pending])
+        self.library.decide(lesson,self.library.ReviewDecision(decision="approved"),
+            authorization=self.bearer(self.teacher))
+        library=self.library.catalog(authorization=self.bearer(self.student))["lessons"]
+        self.assertIn(lesson,[x["lesson_id"] for x in library])
+        row=next(x for x in library if x["lesson_id"]==lesson)
+        self.assertNotIn("teacher_id",row)
+        self.assertIn("Self-reported",row["author_verification"])
+        suggestions=self.library.suggestions(subject="Communication",
+            grade_band="Adult",authorization=self.bearer(self.teacher))["suggestions"]
+        self.assertTrue(any(x["name"]=="Communication & AAC" for x in suggestions))
+        with self.assertRaises(HTTPException):
+            self.library.withdraw(lesson,authorization=self.bearer(self.student))
+        self.library.withdraw(lesson,authorization=self.bearer(self.teacher))
+        self.assertNotIn(lesson,[x["lesson_id"] for x in
+            self.library.catalog(authorization=self.bearer(self.student))["lessons"]])
+        with self.assertRaises(HTTPException):
+            self.library.submit(self.library.ShareLesson(
+                title="Has personal details",
+                instructions="Please email learner@example.org with your work, then discuss your approach.",
+                grade_band="Adult",subject="Communication",category="Communication & AAC",
+                skills=["Speaking"],share_with_community=True,confirm_rights_and_privacy=True),
+                authorization=self.bearer(self.teacher))
 
 if __name__=="__main__":
     unittest.main()
