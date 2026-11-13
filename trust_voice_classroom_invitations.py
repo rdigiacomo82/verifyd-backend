@@ -27,9 +27,18 @@ _READY = False
 _LOCK = threading.Lock()
 
 
+def invites_enabled() -> bool:
+    return os.getenv('VERIFYD_CIRCLE_CLASSROOM_INVITES_ENABLED', '0').strip().lower() in ('1', 'true', 'yes', 'on')
+
+
 def _require_invites():
-    if os.getenv('VERIFYD_CIRCLE_CLASSROOM_INVITES_ENABLED', '0').strip().lower() not in ('1', 'true', 'yes', 'on'):
+    if not invites_enabled():
         raise HTTPException(404, detail={'error': 'classroom_invitations_unavailable'})
+
+
+def prepare_invites():
+    if invites_enabled():
+        _schema()
 
 
 def _schema():
