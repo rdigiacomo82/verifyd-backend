@@ -478,6 +478,10 @@ class ClassroomPostgresTests(unittest.TestCase):
         suggestions=self.library.suggestions(subject="Communication",
             grade_band="Adult",authorization=self.bearer(self.teacher))["suggestions"]
         self.assertTrue(any(x["name"]=="Communication & AAC" for x in suggestions))
+        self.library.decide(lesson,self.library.ReviewDecision(decision="rejected"),
+            authorization=self.bearer(self.teacher))
+        self.assertNotIn(lesson,[x["lesson_id"] for x in
+            self.library.catalog(authorization=self.bearer(self.student))["lessons"]])
         with self.assertRaises(HTTPException):
             self.library.withdraw(lesson,authorization=self.bearer(self.student))
         self.library.withdraw(lesson,authorization=self.bearer(self.teacher))
