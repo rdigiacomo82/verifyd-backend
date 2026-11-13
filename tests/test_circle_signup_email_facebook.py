@@ -19,6 +19,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 def extract_function(filepath, name, globals_dict):
     tree=ast.parse((ROOT/filepath).read_text(encoding="utf-8"))
     func=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name==name)
+    func.decorator_list=[]  # Isolated unit test: do not register FastAPI routes.
     exec(compile(ast.Module(body=[func],type_ignores=[]),str(ROOT/filepath),"exec"),globals_dict)
     return globals_dict[name]
 
