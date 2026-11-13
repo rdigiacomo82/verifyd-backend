@@ -43,13 +43,13 @@ def prepare_invites():
 
 def _schema():
     global _READY
-    classroom_schema()
-    ensure_trust_circle_schema()
     if _READY:
         return
     with _LOCK:
         if _READY:
             return
+        classroom_schema()
+        ensure_trust_circle_schema()
         with get_db() as conn:
             cur = conn.cursor()
             cur.execute('''CREATE TABLE IF NOT EXISTS verifyd_circle_class_invitations (
