@@ -412,5 +412,36 @@ class ClassroomPostgresTests(unittest.TestCase):
                 authorization=self.bearer(self.teacher))
         self.assertEqual(error.exception.status_code,409)
 
+    def test_02d_zero_reward_grading_when_rank_service_disabled(self):
+        from fastapi import HTTPException
+        made=self.c.create_assignment(self.class_id,self.c.AssignmentCreate(
+            title="Legacy zero reward",instructions="Complete without rank",rank_points=0),
+            authorization=self.bearer(self.teacher))
+        key=made["assignment_id"]
+        self.c.publish_assignment(self.class_id,key,authorization=self.bearer(self.teacher))
+        self.c.save_or_turn_in(self.class_id,key,self.c.Work(
+            response="Completed legacy assignment",action="turn_in"),
+            authorization=self.bearer(self.student))
+        with patch.dict(os.environ,{"VERIFYD_CIRCLE_RANKING_ENABLED":"0"}):
+            result=self.c.review_submission(self.class_id,key,self.student,
+                self.c.Review(points_awarded=90),authorization=self.bearer(self.teacher))
+            self.assertEqual(result["trust_rank_points_added"],0)
+        made=self.c.create_assignment(self.class_id,self.c.AssignmentCreate(
+            title="Rank reward requires service",instructions="Complete with rank",rank_points=3),
+            authorization=self.bearer(self.teacher))
+        key=made["assignment_id"]
+        self.c.publish_assignment(self.class_id,key,authorization=self.bearer(self.teacher))
+        self.c.save_or_turn_in(self.class_id,key,self.c.Work(
+            response="Completed reward assignment",action="turn_in"),
+            authorization=self.bearer(self.student))
+        with patch.dict(os.environ,{"VERIFYD_CIRCLE_RANKING_ENABLED":"0"}):
+            with self.assertRaises(HTTPException) as failure:
+                self.c.review_submission(self.class_id,key,self.student,
+                    self.c.Review(points_awarded=93),authorization=self.bearer(self.teacher))
+            self.assertEqual(failure.exception.status_code,503)
+        result=self.c.review_submission(self.class_id,key,self.student,
+            self.c.Review(points_awarded=93),authorization=self.bearer(self.teacher))
+        self.assertEqual(result["trust_rank_points_added"],3)
+
 if __name__=="__main__":
     unittest.main()
