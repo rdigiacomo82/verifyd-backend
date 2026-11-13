@@ -11,7 +11,7 @@ class SecretGuardTests(unittest.TestCase):
                 self.assertIn("sensitive_filename", classify(name, b"TEST=1"))
 
     def test_private_keys_blocked(self):
-        self.assertIn("private_key", classify("fixture.txt", b"-----BEGIN PRIVATE KEY-----\nFAKE\n"))
+        self.assertIn("private_key", classify("fixture.txt", b"-----BEGIN " + b"PRIVATE KEY-----\nFAKE\n"))
 
     def test_normal_code_and_examples_pass(self):
         self.assertEqual([], classify(".env.example", b"DATABASE_URL=\n"))
