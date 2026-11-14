@@ -266,7 +266,11 @@ def begin(payload:Begin,authorization:Optional[str]=Header(default=None)):
             (session_id,user,payload.game,payload.level,seed,payload.target_language,linked))
     result={'session_id':session_id,'seed':seed,'game':payload.game,'level':payload.level,
             'target_language':payload.target_language,'round':0,'total_rounds':ROUND_COUNTS[payload.level]}
-    if payload.game in BONUS_IDS: result['bonus_puzzle']=public_round(payload.game,payload.level,0,seed)
+    if payload.game in BONUS_IDS:
+        # Unlike legacy visual puzzles, these rounds are generated entirely by
+        # the server. Never expose the secret seed used to select the answers.
+        result.pop('seed',None)
+        result['bonus_puzzle']=public_round(payload.game,payload.level,0,seed)
     return result
 
 
@@ -284,6 +288,7 @@ def round_complete(session_id:str,payload:RoundProof,authorization:Optional[str]
         row=cur.fetchone()
         if not row:
             raise HTTPException(404,detail={'error':'game_session_unavailable'})
+        require_bonus_game(row['game'])
         if row['completed_at']:
             raise HTTPException(409,detail={'error':'game_session_completed'})
         if row['expires_at']<datetime.now(timezone.utc):
