@@ -122,7 +122,7 @@ class ArcadePostgresTests(unittest.TestCase):
             self.assertEqual(err.exception.status_code,404)
 
     def test_01_all_five_game_types_and_levels_one_time_only(self):
-        for g in self.arcade.GAMES:
+        for g in self.arcade.GAMES[:5]:
             for level,points in enumerate((10,25,50)):
                 _,done=self.finish(g,level,self.student)
                 self.assertEqual(done['points_added'],points)
@@ -150,6 +150,64 @@ class ArcadePostgresTests(unittest.TestCase):
         self.assertEqual(m.assignment_results(self.class_id,aid,self.bearer(self.teacher))['recipients'][0]['student_id'],self.student)
         with self.assertRaises(HTTPException):
             m.assignment_results(self.class_id,aid,self.bearer(self.other))
+
+    def test_04_bonus_graphical_game_unlocks_and_classroom(self):
+        m=self.arcade
+        from trust_voice_arcade_bonus import BONUS_IDS,required_points,build_round
+        # The other test account has not earned any points and cannot bypass a lock.
+        with self.assertRaises(HTTPException) as locked:
+            m.begin(m.Begin(game='budget-boss',level=0),self.bearer(self.other))
+        self.assertEqual(locked.exception.status_code,403)
+        self.assertEqual(locked.exception.detail['error'],'game_locked')
+        with self.assertRaises(HTTPException) as cannot_assign:
+            m.assign_to_class(self.class_id,m.TeacherGameAssignment(
+                title='Advanced money game',game='budget-boss',level=2,recipient_ids=[self.other]),
+                self.bearer(self.teacher))
+        self.assertEqual(cannot_assign.exception.status_code,422)
+        # Successful rounds require real server-side answers. A client-complete
+        # claim or numeric points total can never create a Rank award.
+        for game in BONUS_IDS:
+            for level in (0,1,2):
+                self.assertGreaterEqual(
+                    self.rank.my_rank(self.bearer(self.student))['points'],required_points(game,level))
+                session=m.begin(m.Begin(game=game,level=level),self.bearer(self.student))
+                self.assertNotIn('correct',session['bonus_puzzle'])
+                for index in range(m.ROUND_COUNTS[level]):
+                    wrong=m.round_complete(session['session_id'],
+                        m.RoundProof(round=index,proof='99'),self.bearer(self.student))
+                    self.assertFalse(wrong['correct'])
+                    answer=build_round(game,level,index,session['seed'])['correct']
+                    passed=m.round_complete(session['session_id'],
+                        m.RoundProof(round=index,proof=answer),self.bearer(self.student))
+                    self.assertTrue(passed['correct'])
+                    if index<m.ROUND_COUNTS[level]-1:
+                        self.assertNotIn('correct',passed['bonus_puzzle'])
+                self.assertEqual(passed['points_added'],(10,25,50)[level])
+        # A repeat cannot earn further global points.
+        session=m.begin(m.Begin(game='math-orbit',level=0),self.bearer(self.student))
+        for index in range(m.ROUND_COUNTS[0]):
+            answer=build_round('math-orbit',0,index,session['seed'])['correct']
+            result=m.round_complete(session['session_id'],m.RoundProof(round=index,proof=answer),self.bearer(self.student))
+        self.assertEqual(result['points_added'],0)
+        self.assertTrue(result['already_earned'])
+        # Teacher-selected game works with the new games and keeps its own
+        # classroom completion record even if global points were earned before.
+        new=m.assign_to_class(self.class_id,m.TeacherGameAssignment(
+            title='Budget challenge',game='budget-boss',level=2,
+            recipient_ids=[self.student]),self.bearer(self.teacher))
+        student_assignment=new['assignment_id']
+        self.assertFalse(any(a['assignment_id']==student_assignment for a
+            in m.game_assignments(self.class_id,self.bearer(self.other))['assignments']))
+        linked=m.begin(m.Begin(game='budget-boss',level=2,assignment_id=student_assignment),
+            self.bearer(self.student))
+        for index in range(m.ROUND_COUNTS[2]):
+            answer=build_round('budget-boss',2,index,linked['seed'])['correct']
+            completed=m.round_complete(linked['session_id'],m.RoundProof(round=index,proof=answer),
+                self.bearer(self.student))
+        self.assertTrue(completed['completed'])
+        self.assertEqual(completed['points_added'],0)
+        self.assertEqual(len(m.assignment_results(self.class_id,student_assignment,
+            self.bearer(self.teacher))['recipients']),1)
 
     def test_03_wrong_round_and_other_account_cannot_finish(self):
         m=self.arcade
