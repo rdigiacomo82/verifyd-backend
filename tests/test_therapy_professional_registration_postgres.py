@@ -158,6 +158,13 @@ class TherapyProfessionalRegistrationTests(unittest.TestCase):
         self.assertTrue(read['read'])
 
     def test_04_revocation_blocks_access_and_writes_audit(self):
+        # Identity deactivation immediately disables the verified professional.
+        with database() as conn:
+            conn.cursor().execute("UPDATE verifyd_identities SET status='suspended' WHERE id=%s",(self.applicant,))
+        self.assertFalse(self.therapy._is_professional(self.applicant))
+        with database() as conn:
+            conn.cursor().execute("UPDATE verifyd_identities SET status='active' WHERE id=%s",(self.applicant,))
+        self.assertTrue(self.therapy._is_professional(self.applicant))
         outcome=self.pro.decide(self.applicant,self.pro.Decision(action='revoke',reason='Pilot access withdrawn'),self.token(self.reviewer))
         self.assertEqual(outcome['status'],'revoked')
         self.assertFalse(self.therapy._is_professional(self.applicant))
