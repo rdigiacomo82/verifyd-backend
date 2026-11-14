@@ -333,7 +333,7 @@ app.include_router(trust_voice_personal_coursework_router)
 app.include_router(trust_voice_classroom_tools_router)
 app.include_router(trust_voice_therapy_practice_router)
 app.include_router(trust_voice_therapy_professionals_router)
-app.include_router(trust_voice_therapy_library_router
+app.include_router(trust_voice_therapy_library_router)
 # VERIFYD_CIRCLE_RANKING_PHASE1 — disabled by default
 app.include_router(trust_voice_ranks_router)
 app.include_router(trust_voice_arcade_ranked_router)
