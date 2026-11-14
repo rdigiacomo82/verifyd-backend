@@ -138,9 +138,13 @@ def professional_status(identity_id):
     _schema()
     with get_db() as conn:
         cur = conn.cursor()
-        cur.execute('''SELECT status FROM verifyd_therapy_professional_applications
-            WHERE identity_id=%s''', (identity_id,))
+        cur.execute('''SELECT a.status,i.status AS account_status,i.email_verified
+            FROM verifyd_therapy_professional_applications a
+            JOIN verifyd_identities i ON i.id=a.identity_id
+            WHERE a.identity_id=%s''', (identity_id,))
         result = cur.fetchone()
+    if result and (result['account_status']!='active' or not result['email_verified']):
+        return 'revoked'  # fail closed when account verification is lost
     return result['status'] if result else None
 
 
