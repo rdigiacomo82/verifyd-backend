@@ -92,7 +92,10 @@ class ArcadePostgresTests(unittest.TestCase):
     def tearDownClass(cls):
         try:
             with db() as conn:
-                conn.cursor().execute('DELETE FROM verifyd_identities WHERE id=ANY(%s)',([cls.teacher,cls.student,cls.other],))
+                cur=conn.cursor()
+                cur.execute('DELETE FROM verifyd_circle_class_members WHERE class_id=%s',(cls.class_id,))
+                cur.execute('DELETE FROM verifyd_circle_classes WHERE class_id=%s',(cls.class_id,))
+                cur.execute('DELETE FROM verifyd_identities WHERE id=ANY(%s)',([cls.teacher,cls.student,cls.other],))
         finally:
             cls.env_patch.stop();cls.module_patch.stop()
             sys.modules.pop('trust_voice_ranks',None);sys.modules.pop('trust_voice_arcade_ranked',None)
