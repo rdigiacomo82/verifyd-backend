@@ -15,9 +15,10 @@ from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
 from database import get_db
 from trust_voice_messages import _identity_from_bearer
+from trust_voice_arcade_bonus import BONUS_GAMES,BONUS_IDS,required_points,public_round,verify_bonus_round
 
 router = APIRouter(prefix='/trust-voice/arcade', tags=['Circle Ranked Games'])
-GAMES = ('pattern', 'logic', 'word', 'route', 'mosaic')
+GAMES = ('pattern', 'logic', 'word', 'route', 'mosaic') + BONUS_IDS
 LEVEL_POINTS = (10, 25, 50)
 LEVEL_NAMES = ('Beginner', 'Explorer', 'Expert')
 ROUND_COUNTS = (4, 5, 6)
@@ -34,6 +35,13 @@ def enabled():
 
 def classroom_enabled():
     return enabled() and os.getenv('VERIFYD_CIRCLE_CLASSROOM_GAME_ASSIGNMENTS_ENABLED', '0').lower().strip() in _YES
+
+def bonus_enabled():
+    return enabled() and os.getenv('VERIFYD_CIRCLE_ARCADE_EDUCATION_ENABLED','0').lower().strip() in _YES
+
+def require_bonus_game(game):
+    if game not in GAMES: raise HTTPException(422,detail={'error':'invalid_game'})
+    if game in BONUS_IDS and not bonus_enabled(): raise HTTPException(404,detail={'error':'bonus_games_unavailable'})
 
 
 def require():
@@ -181,7 +189,7 @@ def challenge_id(game,level):
 
 
 class Begin(BaseModel):
-    game: Literal['pattern','logic','word','route','mosaic']
+    game: str = Field(min_length=3,max_length=40)
     level: int = Field(ge=0,le=2)
     target_language: str = Field(default='en-US',max_length=12)
     assignment_id: Optional[str] = Field(default=None,max_length=128)
@@ -195,7 +203,7 @@ class RoundProof(BaseModel):
 class TeacherGameAssignment(BaseModel):
     title: str = Field(min_length=3,max_length=160)
     instructions: str = Field(default='',max_length=2000)
-    game: Literal['pattern','logic','word','route','mosaic']
+    game: str = Field(min_length=3,max_length=40)
     level: int = Field(ge=0,le=2)
     recipient_ids: list[str] = Field(min_length=1,max_length=100)
 
@@ -209,7 +217,11 @@ def catalog(authorization:Optional[str]=Header(default=None)):
         cur.execute('''SELECT challenge_id FROM verifyd_circle_rank_awards WHERE identity_id=%s
             AND challenge_id LIKE 'arcade-%%' ''',(user,))
         earned = {r['challenge_id'] for r in cur.fetchall()}
-    return {'games':list(GAMES),'levels':[{'level':i,'label':LEVEL_NAMES[i],'points':LEVEL_POINTS[i]} for i in range(3)],
+        cur.execute('SELECT COALESCE(SUM(points),0) AS points FROM verifyd_circle_rank_awards WHERE identity_id=%s',(user,))
+        points=int(cur.fetchone()['points'])
+    return {'games':list(GAMES if bonus_enabled() else GAMES[:5]),'points':points,
+            'bonus_enabled':bonus_enabled(),
+            'bonus_games':[{'id':gid,**meta,'required_beginner_points':required_points(gid,0)} for gid,meta in BONUS_GAMES.items()] if bonus_enabled() else [],'levels':[{'level':i,'label':LEVEL_NAMES[i],'points':LEVEL_POINTS[i]} for i in range(3)],
             'earned_challenges':sorted(earned),'once_per_game_and_level':True,
             'warning':'Activity points are not identity verification or a clinical score.'}
 
@@ -217,6 +229,7 @@ def catalog(authorization:Optional[str]=Header(default=None)):
 @router.post('/sessions')
 def begin(payload:Begin,authorization:Optional[str]=Header(default=None)):
     user = identity(authorization)
+    require_bonus_game(payload.game)
     schema()
     if payload.target_language not in ('en-US','es-MX','zh-CN','zh-TW','fr-FR','pt-BR','ar','hi-IN','ja-JP'):
         raise HTTPException(422,detail={'error':'unsupported_language'})
@@ -227,6 +240,11 @@ def begin(payload:Begin,authorization:Optional[str]=Header(default=None)):
     seed = secrets.token_urlsafe(18)
     with get_db() as conn:
         cur = conn.cursor()
+        if payload.game in BONUS_IDS:
+            minimum=required_points(payload.game,payload.level)
+            cur.execute('SELECT COALESCE(SUM(points),0) AS score FROM verifyd_circle_rank_awards WHERE identity_id=%s',(user,))
+            if int(cur.fetchone()['score'])<minimum:
+                raise HTTPException(403,detail={'error':'game_locked','required_points':minimum})
         if linked:
             from trust_voice_classrooms import _member
             cur.execute('''SELECT g.class_id,g.game,g.level FROM verifyd_class_game_assignments g
@@ -246,8 +264,14 @@ def begin(payload:Begin,authorization:Optional[str]=Header(default=None)):
             (session_id,identity_id,game,level,seed,target_language,assignment_id)
             VALUES (%s,%s,%s,%s,%s,%s,%s)''',
             (session_id,user,payload.game,payload.level,seed,payload.target_language,linked))
-    return {'session_id':session_id,'seed':seed,'game':payload.game,'level':payload.level,
+    result={'session_id':session_id,'seed':seed,'game':payload.game,'level':payload.level,
             'target_language':payload.target_language,'round':0,'total_rounds':ROUND_COUNTS[payload.level]}
+    if payload.game in BONUS_IDS:
+        # Unlike legacy visual puzzles, these rounds are generated entirely by
+        # the server. Never expose the secret seed used to select the answers.
+        result.pop('seed',None)
+        result['bonus_puzzle']=public_round(payload.game,payload.level,0,seed)
+    return result
 
 
 @router.post('/sessions/{session_id}/round')
@@ -264,6 +288,7 @@ def round_complete(session_id:str,payload:RoundProof,authorization:Optional[str]
         row=cur.fetchone()
         if not row:
             raise HTTPException(404,detail={'error':'game_session_unavailable'})
+        require_bonus_game(row['game'])
         if row['completed_at']:
             raise HTTPException(409,detail={'error':'game_session_completed'})
         if row['expires_at']<datetime.now(timezone.utc):
@@ -274,6 +299,8 @@ def round_complete(session_id:str,payload:RoundProof,authorization:Optional[str]
         if isinstance(payload.proof,list) and (len(payload.proof)>64 or any(
             not isinstance(x,(int,str)) or (isinstance(x,str) and len(x)>12) for x in payload.proof)):
             raise HTTPException(422,detail={'error':'invalid_round_proof'})
+        if isinstance(payload.proof,str) and len(payload.proof)>32:
+            raise HTTPException(422,detail={'error':'invalid_round_proof'})
         if row['assignment_id'] and payload.round+1 == ROUND_COUNTS[row['level']]:
             from trust_voice_classrooms import _member
             cur.execute('''SELECT class_id FROM verifyd_class_game_assignments a
@@ -282,7 +309,9 @@ def round_complete(session_id:str,payload:RoundProof,authorization:Optional[str]
             assigned=cur.fetchone()
             if not assigned: raise HTTPException(404,detail={'error':'game_assignment_unavailable'})
             _member(cur,assigned['class_id'],user)
-        verified=verify_round(row['game'],row['level'],payload.round,row['seed'],payload.proof)
+        verified=(verify_bonus_round(row['game'],row['level'],payload.round,row['seed'],payload.proof)
+                  if row['game'] in BONUS_IDS else
+                  verify_round(row['game'],row['level'],payload.round,row['seed'],payload.proof))
         if verified:
             next_round=payload.round+1
             done=next_round>=ROUND_COUNTS[row['level']]
@@ -301,10 +330,13 @@ def round_complete(session_id:str,payload:RoundProof,authorization:Optional[str]
                     cur.execute('''INSERT INTO verifyd_class_game_completions
                         (assignment_id,student_id,evidence_session_id) VALUES (%s,%s,%s)
                         ON CONFLICT DO NOTHING''',(row['assignment_id'],user,session_id))
-    return {'correct':verified,'round':payload.round+1 if verified else payload.round,
+    result={'correct':verified,'round':payload.round+1 if verified else payload.round,
             'completed':bool(verified and payload.round+1>=ROUND_COUNTS[row['level']]),
             'points_added':added,'already_earned':already_earned,
             'rank_updated':bool(added),'next_step':'continue' if verified else 'try_again'}
+    if verified and row['game'] in BONUS_IDS and payload.round+1<ROUND_COUNTS[row['level']]:
+        result['bonus_puzzle']=public_round(row['game'],row['level'],payload.round+1,row['seed'])
+    return result
 
 
 @router.get('/classes/{class_id}/assignments')
@@ -340,6 +372,7 @@ def game_assignments(class_id:str,authorization:Optional[str]=Header(default=Non
 def assign_to_class(class_id:str,payload:TeacherGameAssignment,authorization:Optional[str]=Header(default=None)):
     user=identity(authorization)
     if not classroom_enabled(): raise HTTPException(404,detail={'error':'classroom_game_unavailable'})
+    require_bonus_game(payload.game)
     if len(set(payload.recipient_ids))!=len(payload.recipient_ids):
         raise HTTPException(422,detail={'error':'duplicate_recipients'})
     if any(not isinstance(i,str) or not (1<=len(i)<=128) for i in payload.recipient_ids):
@@ -354,6 +387,14 @@ def assign_to_class(class_id:str,payload:TeacherGameAssignment,authorization:Opt
             WHERE class_id=%s AND status='approved' AND student_id=ANY(%s)''',(class_id,payload.recipient_ids))
         if len(cur.fetchall())!=len(payload.recipient_ids):
             raise HTTPException(422,detail={'error':'recipient_not_enrolled'})
+        if payload.game in BONUS_IDS:
+            minimum=required_points(payload.game,payload.level)
+            cur.execute('''SELECT identity_id,COALESCE(SUM(points),0) AS points
+                FROM verifyd_circle_rank_awards WHERE identity_id=ANY(%s)
+                GROUP BY identity_id''',(payload.recipient_ids,))
+            scores={item['identity_id']:int(item['points']) for item in cur.fetchall()}
+            if any(scores.get(student_id,0)<minimum for student_id in payload.recipient_ids):
+                raise HTTPException(422,detail={'error':'game_locked_for_some_students','required_points':minimum})
         cur.execute('''INSERT INTO verifyd_class_game_assignments
             (assignment_id,class_id,teacher_id,title,instructions,game,level)
             VALUES(%s,%s,%s,%s,%s,%s,%s)''',

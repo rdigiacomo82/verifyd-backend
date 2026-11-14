@@ -46,6 +46,9 @@ for _game, _label in (
     ("pattern", "Pattern Builder"), ("logic", "Logic Sequences"),
     ("word", "Word Explorer"), ("route", "Route Finder"),
     ("mosaic", "Mosaic Match"),
+    ("math-orbit", "Math Orbit"), ("eco-explorer", "Eco Explorer"),
+    ("story-sleuth", "Story Sleuth"), ("map-quest", "Map Quest"),
+    ("code-runner", "Code Runner"), ("budget-boss", "Budget Boss"),
 ):
     for _level, _points in (("beginner", 10), ("explorer", 25), ("expert", 50)):
         CHALLENGES[f"arcade-{_game}-{_level}"] = {
