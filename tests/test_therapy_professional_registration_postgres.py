@@ -49,7 +49,7 @@ class TherapyProfessionalRegistrationTests(unittest.TestCase):
             cur=conn.cursor()
             cur.execute('''CREATE TABLE IF NOT EXISTS verifyd_identities(
                 id TEXT PRIMARY KEY,status TEXT NOT NULL DEFAULT 'active',
-                email_verified BOOLEAN NOT NULL DEFAULT FALSE,handle TEXT NOT NULL)''')
+                email_verified BOOLEAN NOT NULL DEFAULT FALSE,handle TEXT NOT NULL, display_name TEXT NOT NULL DEFAULT '')''')
             for index,user in enumerate((cls.reviewer,cls.applicant,cls.outsider,cls.unverified)):
                 cur.execute('''INSERT INTO verifyd_identities(id,status,email_verified,handle)
                     VALUES (%s,'active',%s,%s)''',(user,index!=3,'test_handle'+str(index)))
