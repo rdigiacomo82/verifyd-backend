@@ -1,0 +1,46 @@
+name: Arcade rank integrity and classroom games
+on:
+  push:
+    paths:
+      - 'trust_voice_arcade_ranked.py'
+      - 'trust_voice_ranks.py'
+      - 'main.py'
+      - 'tests/test_arcade_ranked_postgres.py'
+      - '.github/workflows/arcade-rank-integrity.yml'
+  pull_request:
+    paths:
+      - 'trust_voice_arcade_ranked.py'
+      - 'trust_voice_ranks.py'
+      - 'main.py'
+      - 'tests/test_arcade_ranked_postgres.py'
+      - '.github/workflows/arcade-rank-integrity.yml'
+jobs:
+  rank:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: verifydtest
+          POSTGRES_PASSWORD: localtestonly
+          POSTGRES_DB: verifydtest
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      TEST_PG_DSN: postgresql://verifydtest:localtestonly@localhost:5432/verifydtest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install isolated test dependencies
+        run: pip install fastapi 'pydantic>=2' psycopg2-binary
+      - name: Compile ranked game modules
+        run: python -m py_compile trust_voice_arcade_ranked.py trust_voice_ranks.py tests/test_arcade_ranked_postgres.py main.py
+      - name: Run disposable-Postgres rank + classroom assignment tests
+        run: python -m unittest discover -s tests -p 'test_arcade_ranked_postgres.py' -v
