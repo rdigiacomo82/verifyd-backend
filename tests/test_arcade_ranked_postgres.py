@@ -154,6 +154,11 @@ class ArcadePostgresTests(unittest.TestCase):
     def test_04_bonus_graphical_game_unlocks_and_classroom(self):
         m=self.arcade
         from trust_voice_arcade_bonus import BONUS_IDS,required_points,build_round
+        def server_seed(session_id):
+            with db() as conn:
+                cur=conn.cursor()
+                cur.execute('SELECT seed FROM verifyd_arcade_sessions WHERE session_id=%s',(session_id,))
+                return cur.fetchone()['seed']
         # The other test account has not earned any points and cannot bypass a lock.
         with self.assertRaises(HTTPException) as locked:
             m.begin(m.Begin(game='budget-boss',level=0),self.bearer(self.other))
@@ -171,12 +176,13 @@ class ArcadePostgresTests(unittest.TestCase):
                 self.assertGreaterEqual(
                     self.rank.my_rank(self.bearer(self.student))['points'],required_points(game,level))
                 session=m.begin(m.Begin(game=game,level=level),self.bearer(self.student))
+                self.assertNotIn('seed',session)
                 self.assertNotIn('correct',session['bonus_puzzle'])
                 for index in range(m.ROUND_COUNTS[level]):
                     wrong=m.round_complete(session['session_id'],
                         m.RoundProof(round=index,proof='99'),self.bearer(self.student))
                     self.assertFalse(wrong['correct'])
-                    answer=build_round(game,level,index,session['seed'])['correct']
+                    answer=build_round(game,level,index,server_seed(session['session_id']))['correct']
                     passed=m.round_complete(session['session_id'],
                         m.RoundProof(round=index,proof=answer),self.bearer(self.student))
                     self.assertTrue(passed['correct'])
@@ -186,7 +192,7 @@ class ArcadePostgresTests(unittest.TestCase):
         # A repeat cannot earn further global points.
         session=m.begin(m.Begin(game='math-orbit',level=0),self.bearer(self.student))
         for index in range(m.ROUND_COUNTS[0]):
-            answer=build_round('math-orbit',0,index,session['seed'])['correct']
+            answer=build_round('math-orbit',0,index,server_seed(session['session_id']))['correct']
             result=m.round_complete(session['session_id'],m.RoundProof(round=index,proof=answer),self.bearer(self.student))
         self.assertEqual(result['points_added'],0)
         self.assertTrue(result['already_earned'])
@@ -201,7 +207,7 @@ class ArcadePostgresTests(unittest.TestCase):
         linked=m.begin(m.Begin(game='budget-boss',level=2,assignment_id=student_assignment),
             self.bearer(self.student))
         for index in range(m.ROUND_COUNTS[2]):
-            answer=build_round('budget-boss',2,index,linked['seed'])['correct']
+            answer=build_round('budget-boss',2,index,server_seed(linked['session_id']))['correct']
             completed=m.round_complete(linked['session_id'],m.RoundProof(round=index,proof=answer),
                 self.bearer(self.student))
         self.assertTrue(completed['completed'])
