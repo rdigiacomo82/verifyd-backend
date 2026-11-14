@@ -40,6 +40,19 @@ TIERS = [
 CHALLENGES = {
     "circle-match": {"label": "Circle Match (any difficulty)", "kind": "game", "points": 100},
 }
+# Approved once-per-game-and-difficulty Arcade achievements. Only the
+# authenticated server-side round validator may insert these awards.
+for _game, _label in (
+    ("pattern", "Pattern Builder"), ("logic", "Logic Sequences"),
+    ("word", "Word Explorer"), ("route", "Route Finder"),
+    ("mosaic", "Mosaic Match"),
+):
+    for _level, _points in (("beginner", 10), ("explorer", 25), ("expert", 50)):
+        CHALLENGES[f"arcade-{_game}-{_level}"] = {
+            "label": f"{_label} · {_level.title()}",
+            "kind": "game", "points": _points,
+        }
+
 AVATAR_UNLOCKS = {
     level: ["default", *["nova", "pixel", "echo", "spark", "luna"][:level]]
     for level in range(6)
@@ -181,7 +194,7 @@ def catalog():
     _require_enabled()
     return {
         "version": "0.1.0", "tiers": TIERS,
-        "challenges": [{**c, "id": key, "status": "verification_integration_pending"}
+        "challenges": [{**c, "id": key, "status": "server_verified" if key.startswith("arcade-") else "verification_integration_pending"}
                        for key, c in CHALLENGES.items()],
         "warning": "Achievements are not a substitute for VeriFYD identity verification.",
     }
