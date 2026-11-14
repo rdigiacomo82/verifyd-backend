@@ -82,7 +82,7 @@ class ArcadePostgresTests(unittest.TestCase):
         cls.module_patch.start()
         cls.env_patch=patch.dict(os.environ,{
             'VERIFYD_CIRCLE_RANKING_ENABLED':'1','VERIFYD_CIRCLE_ARCADE_RANK_ENABLED':'1',
-            'VERIFYD_CIRCLE_CLASSROOM_GAME_ASSIGNMENTS_ENABLED':'1'})
+            'VERIFYD_CIRCLE_CLASSROOM_GAME_ASSIGNMENTS_ENABLED':'1','VERIFYD_CIRCLE_ARCADE_EDUCATION_ENABLED':'1'})
         cls.env_patch.start()
         cls.rank=load('trust_voice_ranks','trust_voice_ranks.py')
         cls.arcade=load('trust_voice_arcade_ranked','trust_voice_arcade_ranked.py')
