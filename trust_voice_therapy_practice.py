@@ -51,10 +51,20 @@ def _identity(authorization):
 
 
 def _is_professional(identity_id):
-    return bool(identity_id and identity_id in {
+    if not identity_id:
+        return False
+    legacy_allowlisted = identity_id in {
         item.strip() for item in os.getenv("VERIFYD_CIRCLE_THERAPY_PROFESSIONAL_IDS", "").split(",")
         if item.strip()
-    })
+    }
+    # Independently verified registration decisions are checked on the server.
+    # Revocation/rejection wins over a stale legacy allowlist. No client-supplied
+    # professional role or status is ever accepted for authorization.
+    from trust_voice_therapy_professionals import professional_status
+    decision = professional_status(identity_id)
+    if decision in ("revoked", "rejected"):
+        return False
+    return legacy_allowlisted or decision == "approved"
 
 
 def _professional(identity_id):
