@@ -18,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 import os, uuid, requests, tempfile, logging, hashlib, hmac
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 
 from detection import run_detection   # returns (authenticity, label, detail)
 from queue_helper import (enqueue_upload, enqueue_link,
@@ -85,6 +86,12 @@ log = logging.getLogger("verifyd.main")
 # Admin key — must be explicitly configured via ADMIN_KEY environment variable
 # VERIFYD_ADMIN_KEY_FAIL_CLOSED_V1
 _ADMIN_KEY = os.environ.get("ADMIN_KEY", "").strip()
+# Carry the administrator header into synchronous FastAPI handlers.
+_ADMIN_HEADER_CONTEXT = ContextVar("verifyd_admin_header", default="")
+# Compatibility: set 0 only after admin clients migrate to the header.
+_ADMIN_LEGACY_QUERY_ALLOWED = os.environ.get(
+    "VERIFYD_ADMIN_ALLOW_QUERY_KEY", "1"
+).strip().lower() in {"1", "true", "yes", "on"}
 
 def _cleanup_old_files(max_age_hours: float = 2.0) -> None:
     """
@@ -108,12 +115,19 @@ def _cleanup_old_files(max_age_hours: float = 2.0) -> None:
 def _is_admin(key: str) -> bool:
     """Fail closed unless ADMIN_KEY is explicitly configured."""
     configured = (_ADMIN_KEY or "").strip()
-    supplied = (key or "").strip()
-    if not configured or not supplied:
+    header = (_ADMIN_HEADER_CONTEXT.get("") or "").strip()
+    query = (key or "").strip()
+    if not configured or (header and query and header != query):
+        return False
+    if not _ADMIN_LEGACY_QUERY_ALLOWED and query:
+        return False
+    supplied = header or (query if _ADMIN_LEGACY_QUERY_ALLOWED else "")
+    if not supplied:
         return False
     return (
         hmac.compare_digest(supplied, configured)
-        or hmac.compare_digest(supplied, configured.replace("#", "%23"))
+        or (_ADMIN_LEGACY_QUERY_ALLOWED and not header and
+            hmac.compare_digest(supplied, configured.replace("#", "%23")))
     )
 
 
@@ -259,6 +273,16 @@ async def lifespan(app: FastAPI):
     # Shutdown (add cleanup here if needed)
 
 app = FastAPI(title="VeriFYD", lifespan=lifespan)
+
+@app.middleware("http")
+async def _admin_header_auth_context(request: Request, call_next):
+    # Do not log the header or add it to a query string.
+    token = _ADMIN_HEADER_CONTEXT.set(request.headers.get("x-verifyd-admin-key", ""))
+    try:
+        return await call_next(request)
+    finally:
+        _ADMIN_HEADER_CONTEXT.reset(token)
+
 
 # VERIFYD_TRUST_VOICE_IDENTITY_MVP_V1
 app.include_router(trust_voice_identity_router)
@@ -4872,7 +4896,7 @@ def admin_data(key: str = ""):
 def admin_user_certs(key: str = "", email: str = ""):
     """
     Returns all certificates scanned by a specific user.
-    Usage: /admin-user-certs/?key=ADMIN_KEY&email=user@example.com
+    Usage: /admin-user-certs/?key=REDACTED&email=user@example.com
     """
     if not _is_admin(key):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
@@ -4978,7 +5002,7 @@ def admin_update_apikey(
 ):
     """
     Update branding fields on an enterprise API key.
-    Usage: /admin-update-apikey/?key=ADMIN_KEY&api_key=vfyd_live_...&company_name=...&logo_url=...&brand_color=...
+    Usage: /admin-update-apikey/?key=REDACTED&api_key=vfyd_live_...&company_name=...&logo_url=...&brand_color=...
     """
     if not _is_admin(key):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
@@ -5100,8 +5124,8 @@ def admin_disk_cleanup(key: str = "", dry_run: bool = False):
     3. Old raw upload files in /var/data/videos/
 
     Pass dry_run=true to see what would be deleted without deleting.
-    Example: /admin-disk-cleanup/?key=Honda%236915
-    Example: /admin-disk-cleanup/?key=Honda%236915&dry_run=true
+    Example: /admin-disk-cleanup/?key=REDACTED
+    Example: /admin-disk-cleanup/?key=REDACTED&dry_run=true
     """
     if not _is_admin(key):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
@@ -5216,7 +5240,7 @@ def admin_disk_cleanup(key: str = "", dry_run: bool = False):
 def admin_disk_usage(key: str = ""):
     """
     Show current disk usage breakdown.
-    Example: /admin-disk-usage/?key=Honda%236915
+    Example: /admin-disk-usage/?key=REDACTED
     """
     if not _is_admin(key):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
@@ -5301,7 +5325,7 @@ def admin_disk_cleanup(key: str = ""):
     """
     Emergency disk cleanup — removes old temp files, uploaded videos,
     and certified videos older than 2 hours from the persistent disk.
-    Call when disk is full: /admin-disk-cleanup/?key=Honda%236915
+    Do not put administrative keys into source code, URLs, screenshots or logs.
     """
     if not _is_admin(key):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
@@ -5551,7 +5575,7 @@ def admin_create_api_key(
     The generated key is shown ONCE — store it securely.
 
     Example:
-      POST /admin-create-api-key/?key=Honda%236915
+      POST /admin-create-api-key/?key=REDACTED
         &owner_email=client@company.com
         &company_name=Acme+News
         &logo_url=https://acme.com/logo.png

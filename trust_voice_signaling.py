@@ -2225,6 +2225,11 @@ async def apply_call_action(call_id: str, identity_id: str, action: str, *,
 # Legacy query-token clients remain supported throughout the migration.
 _WS_AUTH_PROTOCOL = "verifyd-auth-v1"
 _WS_TOKEN_PREFIX = "verifyd-session."
+# Rollout flag: set to 0 only after all native/legacy clients use the
+# protocol-based handshake. Prevents session tokens leaking into proxy URLs.
+_WS_LEGACY_QUERY_ALLOWED = os.environ.get(
+    "VERIFYD_WS_ALLOW_LEGACY_QUERY_TOKEN", "1"
+).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _websocket_auth_from_scope(websocket: WebSocket, legacy_query_token: str) -> tuple[str, Optional[str]]:
@@ -2236,6 +2241,8 @@ def _websocket_auth_from_scope(websocket: WebSocket, legacy_query_token: str) ->
         if len(tokens) != 1 or not tokens[0] or _WS_AUTH_PROTOCOL not in offered:
             return "", None
         return tokens[0], _WS_AUTH_PROTOCOL
+    if not _WS_LEGACY_QUERY_ALLOWED:
+        return "", None
     return legacy_query_token, None
 
 
