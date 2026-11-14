@@ -3,6 +3,8 @@ on:
   push:
     paths:
       - 'trust_voice_arcade_ranked.py'
+      - 'trust_voice_arcade_bonus.py'
+      - 'tests/test_arcade_bonus_unit.py'
       - 'trust_voice_ranks.py'
       - 'main.py'
       - 'tests/test_arcade_ranked_postgres.py'
@@ -10,6 +12,8 @@ on:
   pull_request:
     paths:
       - 'trust_voice_arcade_ranked.py'
+      - 'trust_voice_arcade_bonus.py'
+      - 'tests/test_arcade_bonus_unit.py'
       - 'trust_voice_ranks.py'
       - 'main.py'
       - 'tests/test_arcade_ranked_postgres.py'
@@ -41,6 +45,8 @@ jobs:
       - name: Install isolated test dependencies
         run: pip install fastapi 'pydantic>=2' psycopg2-binary
       - name: Compile ranked game modules
-        run: python -m py_compile trust_voice_arcade_ranked.py trust_voice_ranks.py tests/test_arcade_ranked_postgres.py main.py
+        run: python -m py_compile trust_voice_arcade_ranked.py trust_voice_arcade_bonus.py trust_voice_ranks.py tests/test_arcade_ranked_postgres.py tests/test_arcade_bonus_unit.py main.py
+      - name: Verify 6 new game engines across levels, rounds and unlocks
+        run: python -m unittest discover -s tests -p 'test_arcade_bonus_unit.py' -v
       - name: Run disposable-Postgres rank + classroom assignment tests
         run: python -m unittest discover -s tests -p 'test_arcade_ranked_postgres.py' -v
