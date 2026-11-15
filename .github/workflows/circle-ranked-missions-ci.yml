@@ -1,0 +1,26 @@
+name: Circle Ranked Missions Contract
+on:
+  pull_request:
+    paths:
+      - 'trust_voice_mission_arcade.py'
+      - 'tests/test_ranked_missions.py'
+      - 'main.py'
+      - '.github/workflows/circle-ranked-missions-ci.yml'
+  workflow_dispatch:
+jobs:
+  ranked-mission-unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install isolated API test dependencies
+        run: python -m pip install --disable-pip-version-check 'fastapi>=0.110,<1' 'pydantic>=2,<3' 'pytest>=8,<10'
+      - name: Syntax validation
+        run: python -m py_compile trust_voice_mission_arcade.py tests/test_ranked_missions.py
+      - name: Ranked mission tests (no database or secrets)
+        run: python -m pytest -q tests/test_ranked_missions.py
