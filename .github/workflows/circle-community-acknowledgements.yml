@@ -1,0 +1,27 @@
+name: Community Board One-Time Acknowledgements
+on:
+  pull_request:
+    paths:
+      - 'trust_voice_community_consents.py'
+      - 'trust_voice_circle_hub.py'
+      - 'tests/test_community_acknowledgements.py'
+      - '.github/workflows/circle-community-acknowledgements.yml'
+      - 'main.py'
+  workflow_dispatch:
+jobs:
+  community-acknowledgements:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install isolated test dependencies
+        run: python -m pip install --disable-pip-version-check 'fastapi>=0.110,<1' 'pydantic>=2,<3' 'pytest>=8,<10'
+      - name: Validate syntax
+        run: python -m py_compile trust_voice_community_consents.py trust_voice_circle_hub.py tests/test_community_acknowledgements.py
+      - name: Run account and notice contract tests
+        run: python -m pytest -q tests/test_community_acknowledgements.py
