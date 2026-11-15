@@ -163,7 +163,7 @@ def _mars_bank(level):
       (f"The rover travels {east} km east then {west} km west. How far east is it from the starting point?",
        str(east - west), str(east + west), str(west), "Find the net eastward distance."),
       (f"A rescue pod carries {supply} kg. It uses {food} kg food and {repairs} kg parts. How much capacity remains?",
-       str(supply - food - repairs), str(supply - food), str(supply - repairs), "Subtract both items from available capacity."),
+       str(supply - food - repairs), str(supply - food), str(supply - repairs + 4), "Subtract both items from available capacity."),
     ]
 
 def _questions(game, level):
