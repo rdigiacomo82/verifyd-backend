@@ -436,6 +436,11 @@ def create_post(payload: PostCreate, tasks: BackgroundTasks, authorization: Opti
     ensure_schema()
     if payload.rules_accepted is not True:
         raise HTTPException(400,detail={'error':'rules_acknowledgment_required'})
+    # Rollout-safe: once Horizons has the new one-time UI, require the actual
+    # server-persisted acceptance. Old browsers remain functional while the
+    # enforcement flag is disabled during staged deployment.
+    from trust_voice_community_consents import verify_post_acknowledgements
+    verify_post_acknowledgements(uid, is_public=payload.visibility == 'public')
     # Public submissions are accepted but are PRIVATE to moderation until
     # an allowlisted human moderator explicitly approves them.
     title=clean(payload.title,140)
