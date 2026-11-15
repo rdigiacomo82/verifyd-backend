@@ -229,6 +229,16 @@ def _verification_status_payload(email: str) -> dict:
 async def lifespan(app: FastAPI):
     # Startup
     init_db()
+    # The private Universal Handle Registry is opt-in and additive.
+    # Create its three tables at startup when enabled; do not prevent unrelated
+    # calling, messaging or detector services from starting on migration failure.
+    try:
+        from trust_voice_handle_registry_phase2 import enabled as registry_enabled, ensure_schema as ensure_registry_schema
+        if registry_enabled():
+            await asyncio.to_thread(ensure_registry_schema)
+            log.info("Universal Handle Registry Phase 2 tables verified")
+    except Exception:
+        log.exception("Universal Handle Registry migration could not complete; other services remain available")
     start_push_scheduler()
     log.info("VeriFYD startup complete")
 
