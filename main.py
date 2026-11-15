@@ -16,7 +16,7 @@ from fastapi import FastAPI, UploadFile, File, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
-import os, uuid, requests, tempfile, logging, hashlib, hmac
+import os, uuid, requests, tempfile, logging, hashlib, hmac, asyncio
 from contextlib import asynccontextmanager
 
 from detection import run_detection   # returns (authenticity, label, detail)
