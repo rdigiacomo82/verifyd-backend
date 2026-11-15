@@ -85,6 +85,7 @@ from trust_voice_ranks import router as trust_voice_ranks_router
 from trust_voice_arcade_ranked import router as trust_voice_arcade_ranked_router
 from trust_voice_mission_arcade import router as trust_voice_mission_arcade_router
 from trust_voice_community_consents import router as trust_voice_community_consents_router
+from trust_voice_handle_registry_phase2 import router as universal_handle_registry_router
 
 log = logging.getLogger("verifyd.main")
 
@@ -344,6 +345,8 @@ app.include_router(trust_voice_arcade_ranked_router)
 app.include_router(trust_voice_mission_arcade_router)
 # Per-user, versioned Community Board rules/notice acknowledgements
 app.include_router(trust_voice_community_consents_router)
+# Universal Handle Registry Phase 2 — isolated and off by default
+app.include_router(universal_handle_registry_router)
 
 # VERIFYD_MAIL_SHIELD_STATIC_ICONS_V1
 # Public static assets for Microsoft Outlook add-in validation icons.
