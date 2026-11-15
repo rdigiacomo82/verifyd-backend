@@ -2694,10 +2694,14 @@ async def signaling_ws(
                 # Pilot push is sent in addition to live WebSocket signaling.
                 # An open socket can exist while a locked browser is suspended.
                 push_sent = False
+                web_push_sent = False
+                native_sent = False
+                android_sent = False
                 if pilot_push_reachable:
-                    push_sent = await _send_incoming_call_pilot_push(
+                    web_push_sent = await _send_incoming_call_pilot_push(
                         str(target["id"]), call_id, call_type
                     )
+                    push_sent = web_push_sent
 
                 if native_push_reachable or android_push_reachable:
                     async def still_ringing():
@@ -2715,6 +2719,20 @@ async def signaling_ws(
                     from trust_voice_android_calls import dispatch_invite as dispatch_android_invite
                     android_sent = await dispatch_android_invite(target, call, still_ringing)
                     push_sent = push_sent or android_sent
+
+                # Only non-sensitive call identifiers and delivery booleans are logged.
+                # This distinguishes an eligible target with no registered native
+                # device from FCM acceptance and from a suspended WebSocket.
+                log.info(
+                    "call_trace event=delivery call_id=%s ws_sockets=%d "
+                    "web_push_eligible=%s web_push_sent=%s "
+                    "native_push_eligible=%s native_push_sent=%s "
+                    "android_push_eligible=%s android_push_sent=%s",
+                    call_id, int(delivered), bool(pilot_push_reachable),
+                    bool(web_push_sent), bool(native_push_reachable),
+                    bool(native_sent), bool(android_push_reachable),
+                    bool(android_sent),
+                )
 
                 # Reconcile answers/cancellation/expiry received during delivery.
                 # A stale ringing event must not follow its terminal event.
