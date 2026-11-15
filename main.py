@@ -80,6 +80,7 @@ from trust_voice_classroom_tools import router as trust_voice_classroom_tools_ro
 from trust_voice_therapy_practice import router as trust_voice_therapy_practice_router
 from trust_voice_therapy_professionals import router as trust_voice_therapy_professionals_router
 from trust_voice_therapy_library import router as trust_voice_therapy_library_router
+from trust_voice_therapy_achievements import router as trust_voice_therapy_achievements_router
 from trust_voice_ranks import router as trust_voice_ranks_router
 from trust_voice_arcade_ranked import router as trust_voice_arcade_ranked_router
 
@@ -334,6 +335,7 @@ app.include_router(trust_voice_classroom_tools_router)
 app.include_router(trust_voice_therapy_practice_router)
 app.include_router(trust_voice_therapy_professionals_router)
 app.include_router(trust_voice_therapy_library_router)
+app.include_router(trust_voice_therapy_achievements_router)
 # VERIFYD_CIRCLE_RANKING_PHASE1 — disabled by default
 app.include_router(trust_voice_ranks_router)
 app.include_router(trust_voice_arcade_ranked_router)
