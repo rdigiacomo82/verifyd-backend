@@ -60,10 +60,21 @@ def allowed_bundle_ids() -> set[str]:
 
 
 def pilot_allowed(identity: dict) -> bool:
+    """Explicit pilot or, once enabled, all signed-in iOS VoIP opt-ins.
+
+    APNs device delivery additionally requires a registered token bound to an
+    unrevoked session, a permitted signed bundle ID and APNs credentials.
+    """
+    if not enabled():
+        return False
+    handle = str(identity.get("handle_lower") or identity.get("handle") or "").strip().lower().lstrip("@")
+    if not handle:
+        return False
+    if os.getenv("VERIFYD_NATIVE_CALLS_ALL_OPTED_IN_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}:
+        return True
     handles = {h.strip().lower().lstrip("@") for h in
                os.getenv("VERIFYD_NATIVE_CALLS_PILOT_HANDLES", "").split(",") if h.strip()}
-    handle = str(identity.get("handle_lower") or identity.get("handle") or "").lower().lstrip("@")
-    return enabled() and bool(handle and handle in handles)
+    return handle in handles
 
 
 def _require_enabled() -> None:
