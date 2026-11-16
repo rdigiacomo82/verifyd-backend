@@ -52,6 +52,14 @@ def authentication(row=None):
 
 
 class NativeAPI(unittest.TestCase):
+    def test_ios_global_opt_in_has_no_handle_allowlist(self):
+        with patch.dict(os.environ, dict(ENV, VERIFYD_NATIVE_CALLS_PILOT_HANDLES='',
+                                        VERIFYD_NATIVE_CALLS_ALL_OPTED_IN_ENABLED='1'), clear=True):
+            self.assertTrue(native.pilot_allowed({'handle': 'new-circle-member'}))
+            self.assertFalse(native.pilot_allowed({'handle': ''}))
+        with patch.dict(os.environ, dict(ENV, VERIFYD_NATIVE_CALLS_PILOT_HANDLES=''), clear=True):
+            self.assertFalse(native.pilot_allowed({'handle': 'new-circle-member'}))
+
     def test_circle_registration_is_off_by_default(self):
         body = dict(installation_id=DEVICE['installation_id'], token=DEVICE['token'],
                     environment='production', bundle_id='com.verifyd.circle', opted_in=True)
