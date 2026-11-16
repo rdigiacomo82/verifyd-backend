@@ -235,6 +235,19 @@ class CallState(unittest.IsolatedAsyncioTestCase):
         self.assertEqual('call_declined',result['type'])
         self.assertNotIn(CALL_ID,signal._active_calls)
 
+    async def test_snapshot_authenticates_before_revealing_caller_handle(self):
+        with patch.object(signal, '_identity_by_id', side_effect=lambda id: {
+            'id': id, 'handle': 'trustedfriend' if id == 'caller' else 'callee',
+        }):
+            callee_view = await signal.native_call_snapshot(CALL_ID, 'callee')
+            caller_view = await signal.native_call_snapshot(CALL_ID, 'caller')
+        self.assertEqual(callee_view['caller_handle'], 'trustedfriend')
+        self.assertTrue(callee_view['is_callee'])
+        self.assertIsNone(caller_view['caller_handle'])
+        with self.assertRaises(HTTPException) as error:
+            await signal.native_call_snapshot(CALL_ID, 'outsider')
+        self.assertEqual(error.exception.status_code, 404)
+
     async def test_snapshot_uses_original_deadline(self):
         item=await signal.native_call_snapshot(CALL_ID,'callee')
         self.assertEqual(int(signal._active_calls[CALL_ID]['created_at']+30),item['expires_at'])
