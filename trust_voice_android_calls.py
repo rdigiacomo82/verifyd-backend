@@ -54,10 +54,21 @@ def enabled() -> bool:
 
 
 def pilot_allowed(identity: dict) -> bool:
+    """Permit explicit pilot users or, when rolled out, registered opted-in users.
+
+    Device delivery still requires a bound, unrevoked session, an encrypted
+    live device token, and an allowed package. No per-user environment list.
+    """
+    if not enabled():
+        return False
+    handle = str(identity.get('handle_lower') or identity.get('handle') or '').strip().lower().lstrip('@')
+    if not handle:
+        return False
+    if os.getenv('VERIFYD_ANDROID_CALLS_ALL_OPTED_IN_ENABLED', '0').strip().lower() in {'1', 'true', 'yes', 'on'}:
+        return True
     allowlist = {v.strip().lower().lstrip('@') for v in
                  os.getenv('VERIFYD_ANDROID_CALLS_PILOT_HANDLES', '').split(',') if v.strip()}
-    handle = str(identity.get('handle_lower') or identity.get('handle') or '').lower().lstrip('@')
-    return enabled() and bool(handle and handle in allowlist)
+    return handle in allowlist
 
 
 def allowed_packages() -> set[str]:
@@ -223,6 +234,41 @@ def redeem_pairing(body: AndroidDeviceRegistration, response: Response,
         _write_device(cur, body, pairing['identity_id'], pairing['session_id'], _digest(device_token))
     response.headers['Cache-Control'] = 'no-store'
     return {'device_token': device_token}
+
+
+@router.post('/android-call-devices/auto-register')
+def register_authenticated_device(
+    body: AndroidDeviceRegistration,
+    response: Response,
+    authorization: Optional[str] = Header(default=None),
+):
+    """One-step opt-in native registration using a verified authenticated session.
+
+    This is NOT called from an arbitrary browser WebView or a URL that carries
+    a session token. It is for a future verified native bridge that receives
+    scoped credentials from the signed-in user through a trusted channel.
+    Retains existing per-installation ownership, encryption, revocation and
+    device-cap checks. Off until the native bridge is shipped and verified.
+    """
+    _require_enabled()
+    auto_flag = os.getenv('VERIFYD_ANDROID_CALLS_AUTO_REGISTRATION_ENABLED', '0').strip().lower()
+    if auto_flag not in {'1', 'true', 'yes', 'on'}:
+        raise HTTPException(404, detail={'error': 'not_found'})
+    identity, session = _auth(authorization)
+    ensure_schema()
+    device_token = 'ac_' + secrets.token_urlsafe(32)
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute('''SELECT 1 FROM verifyd_voice_sessions
+          WHERE session_id=%s AND identity_id=%s AND revoked_at IS NULL
+          FOR UPDATE''', (str(session['session_id']), str(identity['id'])))
+        if not cur.fetchone():
+            raise HTTPException(401, detail={'error': 'invalid_session'})
+        _write_device(cur, body, str(identity['id']), str(session['session_id']), _digest(device_token))
+    response.headers['Cache-Control'] = 'no-store'
+    return {'device_token': device_token}
+
+
 
 
 def _control_token_hash(authorization: Optional[str]) -> str:
