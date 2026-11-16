@@ -82,6 +82,31 @@ class IncomingPushPilotTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(env["_incoming_call_push_pilot_enabled"]({"handle_lower": "pilot"}))
             self.assertFalse(env["_incoming_call_push_pilot_enabled"]({"handle": "pilot_extra"}))
 
+    async def test_all_opted_in_users_need_no_handle_allowlist(self):
+        env, _ = harness()
+        with patch.dict(os.environ, {
+            "VERIFYD_INCOMING_CALL_PUSH_ALL_SUBSCRIBERS_ENABLED": "1",
+            "VERIFYD_INCOMING_CALL_PUSH_PILOT_ENABLED": "0",
+            "VERIFYD_INCOMING_CALL_PUSH_PILOT_HANDLES": "",
+        }):
+            self.assertTrue(env["_incoming_call_push_pilot_enabled"]({"handle": "newuser"}))
+            self.assertTrue(env["_incoming_call_push_pilot_enabled"]({"handle_lower": "roberttest22"}))
+            self.assertFalse(env["_incoming_call_push_pilot_enabled"]({"handle": ""}))
+
+    async def test_global_rollout_does_not_skip_valid_subscription_gate(self):
+        env, _ = harness()
+        mod = types.ModuleType("trust_voice_push")
+        mod._enabled = lambda: True
+        mod._configured = lambda: True
+        mod._active_subscriptions = lambda identity: [{"endpoint": "push"}] if identity == "callee-b" else []
+        with patch.dict(os.environ, {"VERIFYD_INCOMING_CALL_PUSH_ALL_SUBSCRIBERS_ENABLED": "true"}), \
+                patch.dict(sys.modules, {"trust_voice_push": mod}):
+            self.assertTrue(env["_incoming_call_push_pilot_enabled"]({"handle": "anyuser"}))
+            self.assertTrue(env["_incoming_call_push_subscription_ready"]("callee-b"))
+            self.assertFalse(env["_incoming_call_push_subscription_ready"]("other"))
+            mod._configured = lambda: False
+            self.assertFalse(env["_incoming_call_push_subscription_ready"]("callee-b"))
+
     async def test_subscription_readiness_requires_enabled_config_and_live_sub(self):
         env, _ = harness()
         mod = types.ModuleType("trust_voice_push")
