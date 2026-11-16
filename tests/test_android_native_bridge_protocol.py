@@ -9,16 +9,26 @@ from pathlib import Path
 from uuid import uuid4
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-# Pure contract tests use no database connection.
-sys.modules.setdefault("database", types.SimpleNamespace(get_db=lambda: None))
+from importlib.util import module_from_spec, spec_from_file_location
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from fastapi import HTTPException
-from trust_voice_android_bridge import (
-    PACKAGE, enabled, message_to_sign, parse_public_key, verify_proof,
-    _require_enabled, _unb64,
-)
+
+# Pure contract tests must not replace the real database module for other tests.
+_db_stub = types.ModuleType("database")
+_db_stub.get_db = lambda: None
+_path = Path(__file__).resolve().parents[1] / "trust_voice_android_bridge.py"
+_spec = spec_from_file_location("verifyd_bridge_contract_under_test", _path)
+with patch.dict(sys.modules, {"database": _db_stub}):
+    _bridge = module_from_spec(_spec)
+    _spec.loader.exec_module(_bridge)
+PACKAGE = _bridge.PACKAGE
+enabled = _bridge.enabled
+message_to_sign = _bridge.message_to_sign
+parse_public_key = _bridge.parse_public_key
+verify_proof = _bridge.verify_proof
+_require_enabled = _bridge._require_enabled
+_unb64 = _bridge._unb64
 
 
 def b64(data): return base64.urlsafe_b64encode(data).decode().rstrip('=')
