@@ -72,6 +72,10 @@ class BridgeContract(unittest.TestCase):
             self.assertFalse(enabled())
             with self.assertRaises(HTTPException) as ex: _require_enabled()
             self.assertEqual(ex.exception.status_code,404)
+    def test_malformed_base64url_length_rejected_cleanly(self):
+        # Schema-length-valid malformed input must not become an HTTP 500.
+        with self.assertRaises(ValueError): parse_public_key('A' * 101)
+
     def test_no_embedded_web_session(self):
         self.assertNotIn('Bearer', message_to_sign(self.intent,self.nonce,self.iid,PACKAGE,self.digest).decode())
 
