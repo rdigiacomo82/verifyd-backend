@@ -206,6 +206,11 @@ def redeem_intent(body: RedeemRequest, response: Response):
     except (ValueError, TypeError) as exc:
         raise HTTPException(401, detail={'error': 'invalid_device_proof'}) from exc
     _schema()
+    # A fresh pilot database may not yet have the Android device registry.
+    # Create/upgrade the existing registry before opening the redemption txn.
+    # Never attempt the device write against an uninitialized schema.
+    from trust_voice_android_calls import ensure_schema as ensure_android_device_schema
+    ensure_android_device_schema()
     with get_db() as conn:
         cur = conn.cursor()
         cur.execute("""SELECT i.*,s.revoked_at FROM verifyd_android_native_bridge_intents i
