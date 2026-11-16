@@ -1,0 +1,7 @@
+:root { color-scheme: light; font-family: system-ui, -apple-system, Segoe UI, sans-serif; }
+body { margin: 0; background: #f5f7fa; color: #15243a; }
+main { max-width: 680px; margin: 5vh auto; padding: 24px; }
+section { background: #fff; padding: 22px; border: 1px solid #cad5e0; border-radius: 14px; margin: 25px 0; }
+.muted { color: #4e6074; line-height: 1.55; }
+button { cursor: pointer; font: inherit; padding: 14px 20px; min-height: 44px; border: 0; border-radius: 9px; background: #134b81; color: white; }
+button:disabled { background: #64788c; cursor: not-allowed; }
