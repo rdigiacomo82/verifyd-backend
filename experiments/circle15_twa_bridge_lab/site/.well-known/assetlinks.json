@@ -1,0 +1,15 @@
+[
+  {
+    "relation": [
+      "delegate_permission/common.handle_all_urls",
+      "delegate_permission/common.use_as_origin"
+    ],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "com.verifyd.circle.pilot.dev",
+      "sha256_cert_fingerprints": [
+        "F4:85:53:26:06:B8:CA:71:34:E9:D8:08:4E:36:F8:A1:43:07:CA:44:F0:9D:85:51:6C:D0:03:EB:2C:38:4C:81"
+      ]
+    }
+  }
+]
