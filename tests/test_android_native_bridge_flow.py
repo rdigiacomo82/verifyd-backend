@@ -75,6 +75,7 @@ class BridgeRedemptionFlow(unittest.TestCase):
         calls = types.ModuleType("trust_voice_android_calls")
         calls.AndroidDeviceRegistration = lambda **kwargs: types.SimpleNamespace(**kwargs)
         calls._write_device = lambda *args: self.registrations.append(args)
+        calls.ensure_schema = lambda: None  # Fresh-registry prerequisite is tested separately.
         calls.allowed_packages = lambda: {_bridge.PACKAGE}
         calls.pilot_allowed = lambda identity: True
         signaling = types.ModuleType("trust_voice_signaling")
