@@ -185,6 +185,8 @@ def _write_device(cur, body: AndroidDeviceRegistration, identity_id: str, sessio
 def pairing_available(authorization: Optional[str] = Header(default=None)):
     _require_enabled()
     _auth(authorization)
+    if not configured():
+        raise HTTPException(503, detail={'error': 'android_call_server_configuration_pending'})
     return {'available': True}
 
 
@@ -192,6 +194,8 @@ def pairing_available(authorization: Optional[str] = Header(default=None)):
 def issue_pairing(response: Response, authorization: Optional[str] = Header(default=None)):
     _require_enabled()
     identity, session = _auth(authorization)
+    if not configured():
+        raise HTTPException(503, detail={'error': 'android_call_server_configuration_pending'})
     ensure_schema()
     code = 'ap_' + secrets.token_urlsafe(32)
     with get_db() as conn:
@@ -214,6 +218,8 @@ def redeem_pairing(body: AndroidDeviceRegistration, response: Response,
     code = _token_from_authorization(authorization)
     if not PAIR_CODE_PATTERN.fullmatch(code):
         raise HTTPException(401, detail={'error': 'invalid_pairing'})
+    if not configured():
+        raise HTTPException(503, detail={'error': 'android_call_server_configuration_pending'})
     ensure_schema()
     device_token = 'ac_' + secrets.token_urlsafe(32)
     with get_db() as conn:
