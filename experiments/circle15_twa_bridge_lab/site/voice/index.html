@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; base-uri 'none'; form-action 'none'; connect-src 'none'; object-src 'none'" />
+  <meta name="robots" content="noindex, nofollow" />
+  <title>VeriFYD Circle — Android Bridge Lab</title>
+  <link rel="stylesheet" href="./lab.css" />
+  <script src="./lab.js" defer></script>
+</head>
+<body>
+  <main>
+    <h1>VeriFYD Circle — Native Bridge Lab</h1>
+    <p class="muted">Isolated verification page. This is not the VeriFYD Circle application.</p>
+    <section aria-labelledby="status-heading">
+      <h2 id="status-heading">TWA PostMessage status</h2>
+      <p id="status" role="status" aria-live="polite">Waiting for a verified Android pilot bridge…</p>
+      <p id="detail" class="muted">No user sign-in or backend registration happens on this page.</p>
+      <button id="check" type="button" disabled>Check local native status</button>
+    </section>
+    <p class="muted">The lab does not request microphone access, call anyone, or store credentials. A regular browser will not be connected to the Android bridge.</p>
+  </main>
+</body>
+</html>
