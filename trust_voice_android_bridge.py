@@ -10,6 +10,7 @@ Never expand PACKAGE to release builds until app attestation is enforced.
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import hmac
 import os
@@ -68,7 +69,12 @@ def _require_enabled() -> None:
 def _unb64(value: str, *, minimum: int, maximum: int) -> bytes:
     if not _B64_PATTERN.fullmatch(value) or '=' in value:
         raise ValueError('invalid_base64url')
-    data = base64.urlsafe_b64decode(value + '=' * (-len(value) % 4))
+    if len(value) % 4 == 1:
+        raise ValueError('invalid_base64url_length')
+    try:
+        data = base64.urlsafe_b64decode(value + '=' * (-len(value) % 4))
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError('invalid_base64url') from exc
     if not minimum <= len(data) <= maximum:
         raise ValueError('invalid_length')
     if base64.urlsafe_b64encode(data).decode().rstrip('=') != value:
@@ -234,6 +240,10 @@ def bridge_status(installation_id: UUID, response: Response,
     _require_enabled()
     identity, session = _web_identity(authorization)
     _schema()
+    # Device table is created by the existing isolated Android registry,
+    # not by the bridge intent-table initializer.
+    from trust_voice_android_calls import ensure_schema as ensure_android_device_schema
+    ensure_android_device_schema()
     with get_db() as conn:
         cur = conn.cursor()
         cur.execute("""SELECT 1 FROM verifyd_android_call_devices d
