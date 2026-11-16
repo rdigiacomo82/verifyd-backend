@@ -52,6 +52,14 @@ def authentication(row=None):
 
 
 class NativeAPI(unittest.TestCase):
+    def test_ios_global_opt_in_has_no_handle_allowlist(self):
+        with patch.dict(os.environ, dict(ENV, VERIFYD_NATIVE_CALLS_PILOT_HANDLES='',
+                                        VERIFYD_NATIVE_CALLS_ALL_OPTED_IN_ENABLED='1'), clear=True):
+            self.assertTrue(native.pilot_allowed({'handle': 'new-circle-member'}))
+            self.assertFalse(native.pilot_allowed({'handle': ''}))
+        with patch.dict(os.environ, dict(ENV, VERIFYD_NATIVE_CALLS_PILOT_HANDLES=''), clear=True):
+            self.assertFalse(native.pilot_allowed({'handle': 'new-circle-member'}))
+
     def test_circle_registration_is_off_by_default(self):
         body = dict(installation_id=DEVICE['installation_id'], token=DEVICE['token'],
                     environment='production', bundle_id='com.verifyd.circle', opted_in=True)
@@ -226,6 +234,19 @@ class CallState(unittest.IsolatedAsyncioTestCase):
         result=await signal.apply_call_action(CALL_ID,'callee','call_decline')
         self.assertEqual('call_declined',result['type'])
         self.assertNotIn(CALL_ID,signal._active_calls)
+
+    async def test_snapshot_authenticates_before_revealing_caller_handle(self):
+        with patch.object(signal, '_identity_by_id', side_effect=lambda id: {
+            'id': id, 'handle': 'trustedfriend' if id == 'caller' else 'callee',
+        }):
+            callee_view = await signal.native_call_snapshot(CALL_ID, 'callee')
+            caller_view = await signal.native_call_snapshot(CALL_ID, 'caller')
+        self.assertEqual(callee_view['caller_handle'], 'trustedfriend')
+        self.assertTrue(callee_view['is_callee'])
+        self.assertIsNone(caller_view['caller_handle'])
+        with self.assertRaises(HTTPException) as error:
+            await signal.native_call_snapshot(CALL_ID, 'outsider')
+        self.assertEqual(error.exception.status_code, 404)
 
     async def test_snapshot_uses_original_deadline(self):
         item=await signal.native_call_snapshot(CALL_ID,'callee')

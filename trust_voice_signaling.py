@@ -2091,10 +2091,20 @@ async def native_call_snapshot(call_id: str, identity_id: str) -> dict:
     from trust_voice_blocking import identities_blocked
     if await asyncio.to_thread(identities_blocked, call["caller_id"], call["callee_id"]):
         raise HTTPException(403, detail={"error": "not_allowed"})
+    # Reveal the caller's public @handle only to an authenticated participant,
+    # after blocking/permission checks. Native UI decides whether it is safe to
+    # show caller details on a locked screen; the unauthenticated push stays generic.
+    is_callee = identity_id == call["callee_id"]
+    caller_handle = None
+    if is_callee:
+        caller = await asyncio.to_thread(_identity_by_id, str(call["caller_id"]))
+        if caller:
+            caller_handle = str(caller.get("handle") or caller.get("handle_lower") or "").strip()[:80] or None
     return {"ok": True, "call_id": call_id, "state": call["state"],
             "call_type": call["call_type"],
             "expires_at": int(call["created_at"] + INVITE_TTL_SECONDS),
-            "is_callee": identity_id == call["callee_id"]}
+            "is_callee": is_callee,
+            "caller_handle": caller_handle}
 
 
 async def relay_call_media(call_id: str, identity_id: str, message: dict, *,

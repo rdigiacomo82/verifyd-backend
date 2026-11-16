@@ -39,6 +39,56 @@ class AndroidPilotTests(unittest.TestCase):
         app.include_router(android.router)
         self.client = TestClient(app)
 
+    def test_global_android_opt_in_requires_feature_flag_and_identity(self):
+        env = dict(ENV, VERIFYD_ANDROID_CALLS_PILOT_HANDLES='',
+                   VERIFYD_ANDROID_CALLS_ALL_OPTED_IN_ENABLED='1')
+        with patch.dict(os.environ, env, clear=True):
+            self.assertTrue(android.pilot_allowed({'handle': 'new-circle-member'}))
+            self.assertFalse(android.pilot_allowed({'handle': ''}))
+            self.assertEqual({'com.verifyd.circle'}, android.allowed_packages())
+        with patch.dict(os.environ, dict(ENV, VERIFYD_ANDROID_CALLS_PILOT_HANDLES=''), clear=True):
+            self.assertFalse(android.pilot_allowed({'handle': 'new-circle-member'}))
+
+    def test_automatic_registration_disabled_without_feature_flag(self):
+        with patch.dict(os.environ, ENV, clear=True), patch.object(android, '_auth') as auth:
+            result = self.client.post('/trust-voice/android-call-devices/auto-register', json=BODY)
+            self.assertEqual(result.status_code, 404)
+            auth.assert_not_called()
+
+    def test_authenticated_opt_in_registration_binds_unrevoked_session(self):
+        db = MagicMock()
+        cursor = db.return_value.__enter__.return_value.cursor.return_value
+        cursor.fetchone.return_value = (1,)
+        env = dict(ENV, VERIFYD_ANDROID_CALLS_AUTO_REGISTRATION_ENABLED='1')
+        with patch.dict(os.environ, env, clear=True), \
+             patch.object(android, '_auth', return_value=(IDENTITY, {'session_id': 'session'})), \
+             patch.object(android, 'ensure_schema'), patch.object(android, 'get_db', db), \
+             patch.object(android, '_write_device') as write:
+            result = self.client.post('/trust-voice/android-call-devices/auto-register', json=BODY,
+                                      headers={'Authorization': 'Bearer test-session'})
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(result.headers['cache-control'], 'no-store')
+        self.assertTrue(result.json()['device_token'].startswith('ac_'))
+        self.assertEqual(len(result.json()['device_token']), 46)
+        sql, arguments = cursor.execute.call_args.args
+        self.assertIn('revoked_at IS NULL', sql)
+        self.assertEqual(arguments, ('session', IDENTITY['id']))
+        self.assertEqual(write.call_args.args[2:4], (IDENTITY['id'], 'session'))
+        self.assertEqual(write.call_args.args[4], android._digest(result.json()['device_token']))
+
+    def test_automatic_registration_rejects_revoked_session(self):
+        db = MagicMock()
+        db.return_value.__enter__.return_value.cursor.return_value.fetchone.return_value = None
+        env = dict(ENV, VERIFYD_ANDROID_CALLS_AUTO_REGISTRATION_ENABLED='1')
+        with patch.dict(os.environ, env, clear=True), \
+             patch.object(android, '_auth', return_value=(IDENTITY, {'session_id': 'revoked'})), \
+             patch.object(android, 'ensure_schema'), patch.object(android, 'get_db', db), \
+             patch.object(android, '_write_device') as write:
+            result = self.client.post('/trust-voice/android-call-devices/auto-register', json=BODY,
+                                      headers={'Authorization': 'Bearer test-session'})
+        self.assertEqual(result.status_code, 401)
+        write.assert_not_called()
+
     def test_disabled_routes_do_not_touch_auth_or_registry(self):
         with patch.dict(os.environ, {
             'VERIFYD_TRUST_VOICE_SIGNALING_ENABLED': '1',
