@@ -1,11 +1,11 @@
-"""Stage 5 Android TWA native-calling enrollment bridge (PILOT ONLY, OFF BY DEFAULT).
+"""VeriFYD Circle Android native enrollment (pilot + attested production, OFF by default).
 
 The authenticated webpage creates an intent; the device redeems it with an
 Android Keystore P-256 signature, without receiving the web session token.
 
-Important: this does NOT yet verify Play Integrity or a production app-signing
-certificate. It is deliberately restricted to the isolated Circle debug pilot.
-Never expand PACKAGE to release builds until app attestation is enforced.
+Production enrollment verifies Google Play Integrity verdicts, Play app signing,
+intent/request-hash freshness, token ownership, and live persistent sessions.
+Production remains OFF without every explicit security flag and signed build.
 """
 from __future__ import annotations
 
@@ -30,7 +30,10 @@ from pydantic import BaseModel, Field
 from database import get_db
 
 router = APIRouter(prefix='/trust-voice/native-bridge/android', tags=['Android Native Bridge Pilot'])
-PACKAGE = 'com.verifyd.circle.pilot.dev'
+PILOT_PACKAGE = 'com.verifyd.circle.pilot.dev'
+PRODUCTION_PACKAGE = 'com.verifyd.circle'
+PACKAGE = PILOT_PACKAGE  # Keep pilot protocol tests backward compatible.
+SUPPORTED_PACKAGES = {PILOT_PACKAGE, PRODUCTION_PACKAGE}
 TTL_SECONDS = 60
 MAX_INTENTS_PER_HOUR = 15
 _ID_PATTERN = re.compile(r'^nbi_[A-Za-z0-9_-]{32}$')
@@ -42,7 +45,7 @@ _schema_ready = False
 
 class IntentRequest(BaseModel):
     installation_id: UUID
-    package_name: Literal['com.verifyd.circle.pilot.dev']
+    package_name: Literal['com.verifyd.circle.pilot.dev', 'com.verifyd.circle']
     public_key_spki_b64: str = Field(min_length=100, max_length=256)
     opted_in: Literal[True]
 
@@ -52,6 +55,7 @@ class RedeemRequest(IntentRequest):
     challenge: str = Field(min_length=43, max_length=43)
     signature_b64: str = Field(min_length=40, max_length=256)
     fcm_token: str = Field(min_length=80, max_length=4096, pattern=r'^[A-Za-z0-9_:\-]{80,4096}$')
+    play_integrity_token: Optional[str] = Field(default=None, min_length=100, max_length=8192)
 
 
 def enabled() -> bool:
@@ -98,7 +102,7 @@ def message_to_sign(intent_id: str, challenge: str, installation_id: str,
     if not _ID_PATTERN.fullmatch(intent_id) or not _NONCE_PATTERN.fullmatch(challenge):
         raise ValueError('invalid_intent')
     UUID(installation_id)
-    if package_name != PACKAGE or not re.fullmatch('[0-9a-f]{64}', public_key_hash):
+    if package_name not in SUPPORTED_PACKAGES or not re.fullmatch('[0-9a-f]{64}', public_key_hash):
         raise ValueError('invalid_binding')
     return ('verifyd.native-bridge.android.v1\n' + intent_id + '\n' + challenge + '\n'
             + installation_id + '\n' + package_name + '\n' + public_key_hash).encode('ascii')
@@ -141,11 +145,21 @@ def _schema() -> None:
         _schema_ready = True
 
 
-def _web_identity(auth: Optional[str]):
-    from trust_voice_android_calls import _auth, allowed_packages
+def _require_package(package_name: str) -> None:
+    from trust_voice_android_calls import allowed_packages
+    if package_name not in SUPPORTED_PACKAGES or package_name not in allowed_packages():
+        raise HTTPException(403, detail={'error': 'native_package_disabled'})
+    if package_name == PRODUCTION_PACKAGE:
+        from trust_voice_android_integrity import production_enabled, expected_certificate_digest
+        if not production_enabled():
+            raise HTTPException(404, detail={'error': 'native_production_disabled'})
+        expected_certificate_digest()  # Fail closed until the real Play signing cert is configured.
+
+
+def _web_identity(auth: Optional[str], package_name: str):
+    from trust_voice_android_calls import _auth
+    _require_package(package_name)
     identity, session = _auth(auth)
-    if PACKAGE not in allowed_packages():
-        raise HTTPException(403, detail={'error': 'pilot_package_disabled'})
     return identity, session
 
 
@@ -153,7 +167,7 @@ def _web_identity(auth: Optional[str]):
 def issue_intent(body: IntentRequest, response: Response,
                  authorization: Optional[str] = Header(default=None)):
     _require_enabled()
-    identity, session = _web_identity(authorization)
+    identity, session = _web_identity(authorization, body.package_name)
     try:
         _, digest = parse_public_key(body.public_key_spki_b64)
     except (ValueError, TypeError) as exc:
@@ -194,8 +208,7 @@ def redeem_intent(body: RedeemRequest, response: Response):
         AndroidDeviceRegistration, _write_device, allowed_packages, pilot_allowed,
     )
     from trust_voice_signaling import _identity_by_id
-    if body.package_name != PACKAGE or PACKAGE not in allowed_packages():
-        raise HTTPException(403, detail={'error': 'pilot_package_disabled'})
+    _require_package(body.package_name)
     if not _ID_PATTERN.fullmatch(body.intent_id) or not _NONCE_PATTERN.fullmatch(body.challenge):
         raise HTTPException(400, detail={'error': 'invalid_intent'})
     try:
@@ -205,6 +218,17 @@ def redeem_intent(body: RedeemRequest, response: Response):
                               installation_id=str(body.installation_id),package_name=body.package_name)
     except (ValueError, TypeError) as exc:
         raise HTTPException(401, detail={'error': 'invalid_device_proof'}) from exc
+    if body.package_name == PRODUCTION_PACKAGE:
+        from trust_voice_android_integrity import (
+            integrity_request_hash, require_production_integrity,
+        )
+        signed = message_to_sign(
+            body.intent_id, body.challenge, str(body.installation_id),
+            body.package_name, digest,
+        )
+        expected_hash = integrity_request_hash(signed, body.fcm_token)
+        require_production_integrity(token=body.play_integrity_token or '',
+                                     request_hash=expected_hash)
     _schema()
     # A fresh pilot database may not yet have the Android device registry.
     # Create/upgrade the existing registry before opening the redemption txn.
@@ -240,10 +264,11 @@ def redeem_intent(body: RedeemRequest, response: Response):
 
 @router.get('/status/{installation_id}')
 def bridge_status(installation_id: UUID, response: Response,
+                  package_name: Literal['com.verifyd.circle.pilot.dev', 'com.verifyd.circle'] = PILOT_PACKAGE,
                   authorization: Optional[str] = Header(default=None)):
     """Only the signed-in owner/session can confirm its own native registration."""
     _require_enabled()
-    identity, session = _web_identity(authorization)
+    identity, session = _web_identity(authorization, package_name)
     _schema()
     # Device table is created by the existing isolated Android registry,
     # not by the bridge intent-table initializer.
@@ -257,7 +282,7 @@ def bridge_status(installation_id: UUID, response: Response,
             WHERE d.installation_id=%s AND d.package_name=%s
               AND d.identity_id=%s AND d.session_id=%s AND d.disabled_at IS NULL
               AND d.control_token_hash IS NOT NULL AND d.fcm_token_invalidated_at IS NULL""",
-            (str(installation_id),PACKAGE,str(identity['id']),str(session['session_id'])))
+            (str(installation_id),package_name,str(identity['id']),str(session['session_id'])))
         active = cur.fetchone() is not None
     response.headers['Cache-Control'] = 'no-store'
     return {'registered': active, 'schema': 'verifyd.native-bridge.android.v1'}
