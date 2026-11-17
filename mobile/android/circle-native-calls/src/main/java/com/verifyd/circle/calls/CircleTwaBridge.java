@@ -3,6 +3,7 @@ package com.verifyd.circle.calls;
 import android.Manifest;
 import android.app.NotificationManager;
 import android.content.Context;
+import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Build;
@@ -83,6 +84,8 @@ public final class CircleTwaBridge {
                 if (!intent.matches("nbi_[A-Za-z0-9_-]{32}")
                         || !challenge.matches("[A-Za-z0-9_-]{43}")) return;
                 if (!notificationsAllowed()) {
+                    context.startActivity(new Intent(context, CircleNotificationsPermissionActivity.class)
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
                     sendResult(action, requestID, false, "permission_required");
                     return;
                 }
