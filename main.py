@@ -322,6 +322,14 @@ app.include_router(trust_voice_devices_router)
 app.include_router(trust_voice_native_calls_router)
 app.include_router(trust_voice_android_calls_router)
 
+# VERIFYD_CIRCLE_ANDROID_VERIFIED_BRIDGE_V1 — PILOT ONLY.
+# Do not even mount the enrollment routes unless the isolated feature is enabled.
+# Endpoint handlers independently enforce the native-call and pilot restrictions.
+# This changes no existing call, messaging, email or detector routing when disabled.
+if os.environ.get("VERIFYD_ANDROID_NATIVE_BRIDGE_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}:
+    from trust_voice_android_bridge import router as trust_voice_android_bridge_router
+    app.include_router(trust_voice_android_bridge_router)
+
 # VERIFYD_TRUST_VOICE_CALENDAR_V1
 app.include_router(trust_voice_calendar_router)
 

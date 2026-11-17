@@ -185,6 +185,8 @@ def _write_device(cur, body: AndroidDeviceRegistration, identity_id: str, sessio
 def pairing_available(authorization: Optional[str] = Header(default=None)):
     _require_enabled()
     _auth(authorization)
+    if not configured():
+        raise HTTPException(503, detail={'error': 'android_call_server_configuration_pending'})
     return {'available': True}
 
 
@@ -192,6 +194,8 @@ def pairing_available(authorization: Optional[str] = Header(default=None)):
 def issue_pairing(response: Response, authorization: Optional[str] = Header(default=None)):
     _require_enabled()
     identity, session = _auth(authorization)
+    if not configured():
+        raise HTTPException(503, detail={'error': 'android_call_server_configuration_pending'})
     ensure_schema()
     code = 'ap_' + secrets.token_urlsafe(32)
     with get_db() as conn:
@@ -214,6 +218,8 @@ def redeem_pairing(body: AndroidDeviceRegistration, response: Response,
     code = _token_from_authorization(authorization)
     if not PAIR_CODE_PATTERN.fullmatch(code):
         raise HTTPException(401, detail={'error': 'invalid_pairing'})
+    if not configured():
+        raise HTTPException(503, detail={'error': 'android_call_server_configuration_pending'})
     ensure_schema()
     device_token = 'ac_' + secrets.token_urlsafe(32)
     with get_db() as conn:
@@ -378,9 +384,23 @@ def active_devices(identity_id:str) -> list[dict]:
 
 
 def configured() -> bool:
-    return bool(os.getenv('VERIFYD_ANDROID_FIREBASE_PROJECT_ID')
-                and os.getenv('GOOGLE_APPLICATION_CREDENTIALS')
-                and os.getenv('VERIFYD_NATIVE_CALL_TOKEN_ENCRYPTION_KEY'))
+    """Check local prerequisites only; live FCM authorization is tested on send.
+
+    A populated GOOGLE_APPLICATION_CREDENTIALS value is not enough if Render
+    does not actually mount its secret file. Never expose credential details.
+    """
+    project = (os.getenv('VERIFYD_ANDROID_FIREBASE_PROJECT_ID') or '').strip()
+    credentials_path = (os.getenv('GOOGLE_APPLICATION_CREDENTIALS') or '').strip()
+    key = (os.getenv('VERIFYD_NATIVE_CALL_TOKEN_ENCRYPTION_KEY') or '').strip()
+    if not re.fullmatch(r'[a-z0-9][a-z0-9-]{5,62}', project):
+        return False
+    if not credentials_path or not os.path.isfile(credentials_path) or not key:
+        return False
+    try:
+        Fernet(key.encode())
+    except (ValueError, TypeError):
+        return False
+    return True
 
 
 def _devices_for_call(identity_id: str, call_type: str) -> list[dict]:
