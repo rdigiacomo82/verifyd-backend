@@ -21,9 +21,11 @@ import org.json.JSONObject;
 final class CircleCallApi {
     private static final String KEY = "verifyd-circle-native-calls";
     private final SharedPreferences prefs;
+    private final Context context;
     private final String origin;
 
     CircleCallApi(Context context) {
+        this.context = context.getApplicationContext();
         prefs = context.getSharedPreferences(KEY, Context.MODE_PRIVATE);
         origin = "https://verifyd-backend.onrender.com";
     }
@@ -113,7 +115,12 @@ final class CircleCallApi {
         java.security.Signature signer = java.security.Signature.getInstance("SHA256withECDSA");
         signer.initSign(pair.getPrivate());
         signer.update(message.getBytes(StandardCharsets.US_ASCII));
+        // Only the exact Google Play-signed production app may redeem this
+        // device credential. No web bearer or manual pairing code is used.
+        final String appAttestation = CirclePlayIntegrity.attest(
+                context, message, fcmToken);
         JSONObject body = new JSONObject()
+                .put("play_integrity_token", appAttestation)
                 .put("installation_id", installationId())
                 .put("package_name", "com.verifyd.circle")
                 .put("public_key_spki_b64", b64url(encoded))
