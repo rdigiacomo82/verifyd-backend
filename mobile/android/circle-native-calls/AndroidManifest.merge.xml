@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Source-only merge fragment for the *production* com.verifyd.circle app.
+     Add to the existing manifest after confirming signed app source and DAL. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <application android:usesCleartextTraffic="false">
+        <!-- Replace, don't duplicate, the existing Circle TWA launcher intent-filter. -->
+        <activity android:name="com.verifyd.circle.calls.CircleTwaLauncherActivity"
+                  android:exported="true" android:launchMode="singleTop">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+        </activity>
+        <activity android:name="com.verifyd.circle.calls.CircleAnswerActivity"
+                  android:exported="false" android:showWhenLocked="true"
+                  android:turnScreenOn="true" />
+        <activity android:name="com.verifyd.circle.calls.CircleNotificationsPermissionActivity"
+                  android:exported="false"/>
+        <receiver android:name="com.verifyd.circle.calls.CircleDeclineReceiver"
+                  android:exported="false"/>
+        <service android:name="com.verifyd.circle.calls.CircleAudioService"
+                 android:exported="false" android:foregroundServiceType="microphone"/>
+        <service android:name="com.verifyd.circle.calls.CircleIncomingCallMessagingService"
+                 android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT"/>
+            </intent-filter>
+        </service>
+        <service android:name="androidx.browser.customtabs.PostMessageService"
+                 android:exported="true"/>
+    </application>
+</manifest>
