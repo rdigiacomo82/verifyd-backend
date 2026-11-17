@@ -1,0 +1,40 @@
+name: Circle 16 Android native source check (unsigned)
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compile-unsigned-source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: mobile/android/circle-native-calls
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/circle16-android-production-native-host-source-20261116
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
+      - name: Install Android API 36 tools
+        run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
+      - name: Compile debug SOURCE ONLY; no real Firebase or signing
+        run: gradle :app:assembleDebug -PcircleUnsignedSourceCheck=true --stacktrace
+      - name: Store unsigned debug source-check artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Circle16-Android-UNSIGNED-debug-only
+          path: mobile/android/circle-native-calls/app/build/outputs/apk/debug/*.apk
+          retention-days: 1
+      # This workflow NEVER signs, distributes, publishes, or deploys native calling.
+      # A checked-in google-services.json or private signing key is forbidden.
