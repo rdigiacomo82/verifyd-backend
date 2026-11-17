@@ -32,3 +32,17 @@ The current checked-out backend GitHub repository does NOT contain this signed A
 
 ## Fallback and scope
 The existing Horizons browser WebSocket/Web Push ringing remains authoritative when no per-call verified native presentation receipt exists. `nativeOwnsIncomingCalls()` stays false. This native source currently handles **one-to-one audio**; video still follows existing browser flow. The Android app and backend need FCM presentation acknowledgement, accurate call cancel handling, per-call arbitration, production Play Integrity, and a signed release before the all-user feature can be called complete.
+
+## Circle 16 production attestation additions (dependent PR)
+- `CirclePlayIntegrity.java` requests a Standard Play Integrity verdict bound
+  to the one-time Keystore proof AND SHA-256 of FCM token. The actual
+  `com.verifyd.circle` signed app must supply string resource
+  `circle_play_integrity_cloud_project_number` matching its linked Cloud
+  project number. Without this resource native enrollment fails closed.
+- Add the official Google Play Integrity Android dependency to the **signed
+  Circle project**, plus Google Play services Tasks, as specified in Android
+  developer docs; do not reuse Detector pilot package or its services file.
+- Backend enrollment support is in separate branch/PR based on draft #108:
+  it requires real Play signing SHA256 and successful Google-side decode. The
+  backend, Horizons frontend, and native app must be deployed together only
+  after signed-app provisioning. No native source or Render flag was activated.
