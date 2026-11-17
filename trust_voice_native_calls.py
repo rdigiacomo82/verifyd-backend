@@ -23,7 +23,7 @@ from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Header, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
 from database import get_db
@@ -124,6 +124,39 @@ def ensure_schema() -> None:
             cur.execute("""CREATE INDEX IF NOT EXISTS idx_native_call_identity
                 ON verifyd_native_call_devices(identity_id, disabled_at)""")
         _schema_ready = True
+
+
+# Circle native iOS host: authenticate the already-signed-in browser session
+# before storing it in the device-only Keychain. The response does not expose
+# any bearer credentials and must never be cached.
+@router.get("/native-call-devices/session")
+def ios_native_session_status(authorization: Optional[str] = Header(default=None)):
+    _require_enabled()
+    identity, session = _auth(authorization, require_pilot=False)
+    if not pilot_allowed(identity):
+        raise HTTPException(403, detail={"error": "native_call_opt_in_not_available"})
+    return {"verified": True, "identity_id": str(identity["id"]),
+            "schema": "verifyd.ios.native-session.v1"}
+
+
+@router.get("/native-call-devices/{installation_id}/status")
+def ios_native_device_status(installation_id: UUID,
+                             authorization: Optional[str] = Header(default=None)):
+    _require_enabled()
+    identity, session = _auth(authorization, require_pilot=False)
+    ensure_schema()
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("""SELECT 1 FROM verifyd_native_call_devices d
+            JOIN verifyd_voice_sessions s ON d.session_id=s.session_id
+              AND d.identity_id=s.identity_id AND s.revoked_at IS NULL
+            WHERE d.installation_id=%s AND d.identity_id=%s
+              AND d.session_id=%s AND d.bundle_id=%s
+              AND d.disabled_at IS NULL""",
+            (str(installation_id), str(identity["id"]),
+             str(session["session_id"]), "com.verifyd.circle"))
+        return {"registered": cur.fetchone() is not None,
+                "schema": "verifyd.ios.native-session.v1"}
 
 
 @router.post("/native-call-devices")
@@ -323,3 +356,135 @@ async def call_action(call_id: str, action: Literal["answer", "decline", "end"],
     identity, _ = await asyncio.to_thread(_auth, authorization)
     from trust_voice_signaling import apply_call_action
     return await apply_call_action(call_id, str(identity["id"]), "call_" + action)
+
+
+# CIRCLE16_IOS_NATIVE_AUDIO_MEDIA_V1 — independent default-OFF iOS native leg.
+# The current session-bound device registry and caller permissions are checked
+# again before answering; CallKit's display alone never answers the server.
+def _ios_media_device_allowed(installation_id: str, identity_id: str, session_id: str) -> bool:
+    if not re.fullmatch(r'[0-9a-fA-F-]{36}', installation_id):
+        return False
+    if 'com.verifyd.circle' not in allowed_bundle_ids():
+        return False
+    ensure_schema()
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("""SELECT 1 FROM verifyd_native_call_devices d
+            JOIN verifyd_voice_sessions s ON d.session_id=s.session_id
+                AND d.identity_id=s.identity_id AND s.revoked_at IS NULL
+            WHERE d.installation_id=%s AND d.identity_id=%s AND d.session_id=%s
+                AND d.bundle_id=%s AND d.disabled_at IS NULL LIMIT 1""",
+                    (installation_id, identity_id, session_id, 'com.verifyd.circle'))
+        return cur.fetchone() is not None
+
+
+@router.websocket("/native-calls/{call_id}/media")
+async def ios_native_audio_media(websocket: WebSocket, call_id: str):
+    from native_call_contract import CALL_ID_PATTERN
+    from trust_voice_signaling import native_call_snapshot, apply_call_action, relay_call_media
+
+    if (not enabled() or
+        os.getenv('VERIFYD_IOS_NATIVE_AUDIO_ENABLED', '0').strip() != '1' or
+        not CALL_ID_PATTERN.fullmatch(call_id)):
+        await websocket.close(code=4404)
+        return
+
+    authorization = websocket.headers.get('authorization')
+    installation = websocket.headers.get('x-verifyd-installation-id', '')
+    identity_id = None
+    session_id = None
+    did_claim = False
+    try:
+        _require_enabled()
+        identity, session = await asyncio.to_thread(_auth, authorization)
+        identity_id = str(identity['id'])
+        session_id = str(session['session_id'])
+        registered = await asyncio.to_thread(
+            _ios_media_device_allowed, installation, identity_id, session_id,
+        )
+        if not registered:
+            await websocket.close(code=4403)
+            return
+        snapshot = await native_call_snapshot(call_id, identity_id)
+        if not snapshot['is_callee'] or snapshot['state'] != 'ringing' or snapshot['call_type'] != 'audio':
+            await websocket.close(code=4404)
+            return
+
+        await websocket.accept()
+        # The native client prepares RTC audio before asking the authoritative
+        # server to claim the call; no silent auto-answer from PushKit.
+        ready = await asyncio.wait_for(websocket.receive_json(), timeout=5.0)
+        if not isinstance(ready, dict) or ready != {'type': 'call_answer'}:
+            await websocket.close(code=4400)
+            return
+        identity, session = await asyncio.to_thread(_auth, authorization)
+        if (str(identity['id']) != identity_id or str(session['session_id']) != session_id or
+            not await asyncio.to_thread(_ios_media_device_allowed, installation, identity_id, session_id)):
+            await websocket.close(code=4403)
+            return
+        did_claim = True
+        # The shared signaling backend uses android_socket as the native media
+        # owner argument for both platforms until its internal field is renamed.
+        # This preserves Android/browser state-arbitration without duplication.
+        await apply_call_action(
+            call_id, identity_id, 'call_answer',
+            android_socket=websocket, transport='ios_native_media',
+        )
+        # Native iOS has no browser signaling connection; ACK to the owning
+        # CallKit socket itself so it can complete the system Answer action.
+        await websocket.send_json({"type": "call_answered", "call_id": call_id})
+        next_auth = time.monotonic() + 20
+        while True:
+            if time.monotonic() >= next_auth:
+                identity, session = await asyncio.to_thread(_auth, authorization)
+                if (str(identity['id']) != identity_id or
+                    str(session['session_id']) != session_id or
+                    not await asyncio.to_thread(
+                        _ios_media_device_allowed, installation, identity_id, session_id)):
+                    await websocket.close(code=4403)
+                    return
+                await native_call_snapshot(call_id, identity_id)
+                next_auth = time.monotonic() + 20
+            try:
+                message = await asyncio.wait_for(
+                    websocket.receive_json(), timeout=max(0.01, next_auth - time.monotonic()),
+                )
+            except asyncio.TimeoutError:
+                continue
+            if not isinstance(message, dict) or 'call_id' in message:
+                await websocket.close(code=4400)
+                return
+            kind = message.get('type')
+            if kind == 'call_end':
+                return
+            if kind == 'ping':
+                await websocket.send_json({'type': 'pong'})
+            elif kind in ('webrtc_answer', 'webrtc_ice'):
+                await relay_call_media(
+                    call_id, identity_id, message, android_socket=websocket,
+                )
+            else:
+                await websocket.close(code=4400)
+                return
+    except HTTPException as exc:
+        code = 4401 if exc.status_code == 401 else 4403 if exc.status_code == 403 else 4409
+        try:
+            await websocket.close(code=code)
+        except RuntimeError:
+            pass
+    except asyncio.TimeoutError:
+        try:
+            await websocket.close(code=4408)
+        except RuntimeError:
+            pass
+    except (WebSocketDisconnect, ValueError, RuntimeError):
+        pass
+    finally:
+        if did_claim and identity_id:
+            try:
+                await apply_call_action(
+                    call_id, identity_id, 'call_end',
+                    android_socket=websocket, transport='ios_native_media',
+                )
+            except HTTPException:
+                pass
