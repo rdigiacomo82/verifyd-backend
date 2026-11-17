@@ -4,73 +4,112 @@ import android.Manifest;
 import android.app.Activity;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.os.Build;
 import android.os.Bundle;
+import android.view.WindowManager;
 import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
-/** User-visible entry point for while-in-use microphone permission. */
+/** Ringing UI does NOT auto-answer when the screen wakes. */
 public final class CircleAnswerActivity extends Activity {
-    private boolean attempted;
     private TextView status;
+    private String callId;
+    private long expiry;
+    private boolean answering;
 
-    @Override protected void onCreate(Bundle state) {
-        super.onCreate(state);
-        attempted = state != null && state.getBoolean("attempted");
+    @Override protected void onCreate(Bundle saved) {
+        super.onCreate(saved);
+        if (Build.VERSION.SDK_INT >= 27) {
+            setShowWhenLocked(true);
+            setTurnScreenOn(true);
+        } else {
+            getWindow().addFlags(WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED
+                    | WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON);
+        }
+        callId = getIntent().getStringExtra("call_id");
+        expiry = getIntent().getLongExtra("expires_at", 0);
+        if (!isActive()) { finish(); return; }
+
         LinearLayout layout = new LinearLayout(this);
         layout.setOrientation(LinearLayout.VERTICAL);
+        int pad = Math.round(getResources().getDisplayMetrics().density * 24);
+        layout.setPadding(pad, pad, pad, pad);
         status = new TextView(this);
-        status.setText("VeriFYD Circle audio call");
+        status.setText("Incoming VeriFYD Circle audio call");
+        status.setTextSize(22);
         layout.addView(status);
-        Button close = new Button(this);
-        close.setText("Close");
-        close.setOnClickListener(view -> finish());
-        layout.addView(close);
+        Button answer = new Button(this);
+        answer.setText("Answer");
+        answer.setMinHeight(Math.round(getResources().getDisplayMetrics().density * 48));
+        answer.setOnClickListener(view -> answer());
+        layout.addView(answer);
+        Button decline = new Button(this);
+        decline.setText("Decline");
+        decline.setMinHeight(Math.round(getResources().getDisplayMetrics().density * 48));
+        decline.setOnClickListener(view -> decline());
+        layout.addView(decline);
         setContentView(layout);
+        // The CallStyle notification Answer action is a direct user gesture;
+        // merely displaying a full-screen call must never acquire the microphone.
+        if (getIntent().getBooleanExtra("answer_from_notification", false)) answer();
     }
 
-    @Override protected void onSaveInstanceState(Bundle state) {
-        state.putBoolean("attempted", attempted);
-        super.onSaveInstanceState(state);
+    private boolean isActive() {
+        long now = System.currentTimeMillis() / 1000L;
+        return CircleNativeCallPayload.validId(callId)
+                && expiry > now && expiry <= now + 30
+                && new CircleCallApi(this).enrolled();
     }
 
-    @Override public void onWindowFocusChanged(boolean focused) {
-        super.onWindowFocusChanged(focused);
-        if (!focused || attempted) return;
-        attempted = true;
-        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
-            startAudio();
-        } else {
-            requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, 1);
+    private void answer() {
+        if (answering || !isActive()) {
+            if (status != null) status.setText("This call is no longer available.");
+            return;
         }
+        answering = true;
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, 1);
+            return;
+        }
+        startAudio();
     }
 
-    @Override public void onRequestPermissionsResult(int request, String[] permissions, int[] results) {
-        super.onRequestPermissionsResult(request, permissions, results);
-        if (request != 1) return;
-        if (results.length == 1 && results[0] == PackageManager.PERMISSION_GRANTED) {
-            attempted = false;
-            if (hasWindowFocus()) onWindowFocusChanged(true);
-        } else {
-            status.setText("Microphone access is required to answer.");
+    @Override public void onRequestPermissionsResult(int code, String[] permissions, int[] grants) {
+        super.onRequestPermissionsResult(code, permissions, grants);
+        if (code != 1) return;
+        if (grants.length > 0 && grants[0] == PackageManager.PERMISSION_GRANTED) startAudio();
+        else {
+            answering = false;
+            status.setText("Allow microphone access to answer this call.");
         }
     }
 
     private void startAudio() {
-        String callId = getIntent().getStringExtra("call_id");
-        long expiry = getIntent().getLongExtra("expires_at", 0);
-        long now = System.currentTimeMillis() / 1000;
-        if (!CircleNativeCallPayload.validId(callId) || expiry <= now || expiry > now + 30
-                || !new CircleCallApi(this).enrolled()) {
-            status.setText("This call is no longer available.");
+        if (!isActive()) {
+            answering = false;
+            status.setText("This call has expired.");
             return;
         }
         try {
             startForegroundService(new Intent(this, CircleAudioService.class)
                     .putExtra("call_id", callId).putExtra("expires_at", expiry));
-            status.setText("Connecting. Use the ongoing call notification to hang up.");
+            status.setText("Connecting secure audio…");
+            CircleIncomingCallNotification.cancel(this, callId);
+            finish();
         } catch (RuntimeException ignored) {
-            status.setText("Android could not start the microphone service.");
+            answering = false;
+            status.setText("Android could not start the call. Please retry.");
         }
+    }
+
+    private void decline() {
+        if (!isActive()) { finish(); return; }
+        final String id = callId;
+        new Thread(() -> {
+            try { new CircleCallApi(getApplicationContext()).decline(id); }
+            catch (Exception ignored) { }
+            runOnUiThread(() -> { CircleIncomingCallNotification.cancel(this, id); finish(); });
+        }, "verifyd-circle-decline").start();
     }
 }
