@@ -13,9 +13,9 @@ import android.os.IBinder;
 import com.verifyd.circle.R;
 
 public final class CircleAudioService extends Service {
-    private static final String HANG_UP = "com.verifyd.app.pilot.HANG_UP";
+    private static final String HANG_UP = "com.verifyd.circle.HANG_UP";
     private static final int NOTIFICATION_ID = 31518;
-    private static final String CHANNEL = "verifyd_detector_active_pilot";
+    private static final String CHANNEL = "verifyd_circle_active_audio";
     private HandlerThread worker;
     private Handler executor;
     private CircleWebRtc session;
@@ -48,7 +48,7 @@ public final class CircleAudioService extends Service {
             previousMode = audio.getMode();
             audio.setMode(AudioManager.MODE_IN_COMMUNICATION);
             ownsAudioMode = true;
-            worker = new HandlerThread("verifyd-pilot-audio");
+            worker = new HandlerThread("verifyd-circle-audio");
             worker.start();
             executor = new Handler(worker.getLooper());
             session = new CircleWebRtc(getApplicationContext(), executor, callId,
