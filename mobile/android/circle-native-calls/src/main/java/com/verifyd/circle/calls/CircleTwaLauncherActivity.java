@@ -3,7 +3,7 @@ package com.verifyd.circle.calls;
 import android.content.ComponentName;
 import android.net.Uri;
 import android.os.Bundle;
-import androidx.appcompat.app.AppCompatActivity;
+import android.app.Activity;
 import androidx.browser.customtabs.CustomTabsCallback;
 import androidx.browser.customtabs.CustomTabsClient;
 import androidx.browser.customtabs.CustomTabsService;
@@ -12,7 +12,7 @@ import androidx.browser.customtabs.CustomTabsSession;
 import androidx.browser.trusted.TrustedWebActivityIntentBuilder;
 
 /** Replacement source for the Circle *launcher only*, using the existing /voice URL. */
-public final class CircleTwaLauncherActivity extends AppCompatActivity {
+public final class CircleTwaLauncherActivity extends Activity {
     private static final Uri URL = Uri.parse("https://vfvid.com/voice");
     private CustomTabsClient client;
     private CustomTabsSession session;
