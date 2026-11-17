@@ -29,3 +29,20 @@ Gradle `sourceSets.main.java.srcDirs` and the existing manifest fragment.
 Development APKs cannot pass production Play Integrity: install through the
 proper Play track with the **original Play signing identity**. No automatic
 release, backend activation or Play Console upload is performed.
+
+## Cloud-built unsigned source check
+A manual GitHub Actions workflow at `.github/workflows/circle16-android-source-check.yml`
+can compile `:app:assembleDebug -PcircleUnsignedSourceCheck=true` without
+fake Firebase credentials or the original Windows computer. This is
+not a usable native-calling app or signed update; normal builds fail
+closed without the Circle-specific real Firebase config.
+
+## Preserving a Play listing without the original Gradle source
+Google Play App Signing preserves the store's app signing key even if the
+source Gradle project is recreated. A new build can update the existing
+listing only if it uses the same applicationId, compatible versionCode,
+and the accepted upload key (or a completed reset). If VeriFYD Circle
+has no existing Play listing, create the separate Circle app record;
+never overwrite the installed Detector package. Verify all facts with
+Google Play Console before signing. See
+`docs/CIRCLE16_RECREATED_NATIVE_RELEASE_PATH.md` in backend PR #114.
