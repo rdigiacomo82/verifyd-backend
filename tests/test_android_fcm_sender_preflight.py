@@ -58,6 +58,21 @@ class FcmPreflight(unittest.TestCase):
             "SECRET_FILE_UNREADABLE",
         )
 
+    def test_existing_valid_encryption_key_is_accepted(self):
+        from cryptography.fernet import Fernet
+        with patch.dict(os.environ, {
+            "VERIFYD_NATIVE_CALL_TOKEN_ENCRYPTION_KEY": Fernet.generate_key().decode()
+        }, clear=True):
+            self.assertTrue(module.token_encryption_ready())
+
+    def test_missing_or_invalid_encryption_key_is_blocked(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(module.token_encryption_ready())
+        with patch.dict(os.environ, {
+            "VERIFYD_NATIVE_CALL_TOKEN_ENCRYPTION_KEY": "invalid"
+        }, clear=True):
+            self.assertFalse(module.token_encryption_ready())
+
     def test_default_run_fails_closed_without_env_or_network(self):
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(module.run(), 1)
