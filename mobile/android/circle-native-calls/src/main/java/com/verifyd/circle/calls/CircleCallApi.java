@@ -99,7 +99,7 @@ final class CircleCallApi {
 
     /** Redeem web-authorized, single-use 60-second signed challenge. NO web bearer. */
     void redeemIntent(String id, String challenge, String fcmToken) throws Exception {
-        if (!"com.verifyd.circle".equals(android.app.Application.getProcessName()))
+        if (!"com.verifyd.circle".equals(context.getPackageName()))
             throw new IllegalStateException("Invalid installed Circle app");
         if (!id.matches("nbi_[A-Za-z0-9_-]{32}") || !challenge.matches("[A-Za-z0-9_-]{43}"))
             throw new IllegalArgumentException("Invalid enrollment intent");
