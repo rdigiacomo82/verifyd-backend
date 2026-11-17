@@ -251,8 +251,8 @@ async def lifespan(app: FastAPI):
         def _circle_fcm_preflight_worker():
             try:
                 from scripts.check_circle_fcm_sender import run as _run_fcm_preflight
-                code = _run_fcm_preflight(emit=lambda line: log.info("%s", line))
-                log.info("FCM_PREFLIGHT FINISHED EXIT_CODE=%s", code)
+                code = _run_fcm_preflight(emit=lambda line: log.warning("%s", line))
+                log.warning("FCM_PREFLIGHT FINISHED EXIT_CODE=%s", code)
             except Exception:
                 # Never log OAuth exceptions, tokens, or credential contents.
                 log.warning("FCM_PREFLIGHT RESULT=FAIL REASON=UNEXPECTED_ERROR")
