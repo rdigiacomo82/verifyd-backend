@@ -73,3 +73,21 @@ permissions. It is source staging, NOT universal calling activation.
 iPhone remains separate in private Circle iOS PR #11: PushKit and CallKit
 source is staged; signed Xcode target, native session source, APNs signing and
 real WebRTC media remain outstanding. Web push fallback stays active.
+
+## iOS native audio handoff staged on this same branch
+`trust_voice_native_calls.py` now contains a **separately default-OFF**
+`wss://verifyd-backend.onrender.com/trust-voice/native-calls/{call_id}/media`
+endpoint, gated by `VERIFYD_IOS_NATIVE_AUDIO_ENABLED=0` and ordinary native
+calling enablement. It accepts the signed Circle app's existing authenticated
+Trust Voice bearer via an HTTPS-upgraded WebSocket header and verifies its
+current server-side installation ID, identity ID, persistent session and
+allowed `com.verifyd.circle` bundle. It reuses the single caller/callee
+authoritative signaling + native media arbitration from the existing Android
+media leg and only relays SDP/ICE.
+
+The actual iOS source counterpart `CircleWebRTCAudioEngine.swift`,
+`CircleNativeSessionVault.swift`, CallKit adapter and Keychain APNs enrollment
+are staged in private `verifyd-circle-ios` PR #11. The real signed Xcode target
+does not exist in the connected checkout, so the engine is NOT compiled or
+installed; real microphone/CallKit activation and two-way audio still require
+physical-device verification. No APNs/Render native enablement flags were set.
