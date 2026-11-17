@@ -43,6 +43,19 @@ def check_metadata(path, project):
     return None
 
 
+def token_encryption_ready():
+    """Validate existing persistent token-encryption key without showing it."""
+    value = (os.getenv("VERIFYD_NATIVE_CALL_TOKEN_ENCRYPTION_KEY") or "").strip()
+    if not value:
+        return False
+    try:
+        from cryptography.fernet import Fernet
+        Fernet(value.encode())
+        return True
+    except (ValueError, TypeError):
+        return False
+
+
 def run():
     project = (os.getenv("VERIFYD_ANDROID_FIREBASE_PROJECT_ID") or "").strip()
     path = (os.getenv("GOOGLE_APPLICATION_CREDENTIALS") or "").strip()
@@ -54,6 +67,8 @@ def run():
         print("FCM_PREFLIGHT RESULT=FAIL REASON=" + failure)
         return 1
     print("FCM_PREFLIGHT SECRET_FILE=OK PROJECT_MATCH=OK")
+    encryption_ready = token_encryption_ready()
+    print("FCM_PREFLIGHT TOKEN_ENCRYPTION=" + ("OK" if encryption_ready else "MISSING_OR_INVALID"))
 
     try:
         from google.auth.transport.requests import Request
@@ -88,6 +103,9 @@ def run():
         # HTTP status is useful, unlike the potentially sensitive response body.
         print("FCM_PREFLIGHT RESULT=FAIL FCM_HTTP_STATUS=" + str(response.status_code))
         return 1
+    if not encryption_ready:
+        print("FCM_PREFLIGHT RESULT=PARTIAL FCM_SEND_PERMISSION=OK ENROLLMENT_BLOCKED=TOKEN_ENCRYPTION")
+        return 2
     print("FCM_PREFLIGHT RESULT=PASS FCM_SEND_PERMISSION=OK DELIVERY=NONE_VALIDATE_ONLY")
     return 0
 
