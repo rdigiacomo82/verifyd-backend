@@ -17,7 +17,7 @@ public final class CircleTwaLauncherActivity extends AppCompatActivity {
     private CustomTabsClient client;
     private CustomTabsSession session;
     private CustomTabsServiceConnection connection;
-    private final CircleTwaBridge bridge = new CircleTwaBridge(this);
+    private CircleTwaBridge bridge;
 
     private final CustomTabsCallback callbacks = new CustomTabsCallback() {
         @Override public void onRelationshipValidationResult(
@@ -37,6 +37,7 @@ public final class CircleTwaLauncherActivity extends AppCompatActivity {
 
     @Override protected void onCreate(Bundle saved) {
         super.onCreate(saved);
+        bridge = new CircleTwaBridge(this);
         String browser = CustomTabsClient.getPackageName(this, null);
         if (browser == null) {
             // A TWA-capable browser is required; never silently switch to an
