@@ -1,14 +1,19 @@
 plugins {
     id 'com.android.application'
-    id 'com.google.gms.google-services'
 }
 
-// Explicitly fail closed. The Circle app needs its OWN Firebase config,
-// distinct from the VeriFYD Video Authenticator and Detector pilot.
-if (!file('google-services.json').exists()) {
-    throw new GradleException(
-        'Missing PRIVATE app/google-services.json for com.verifyd.circle. ' +
-        'Do not copy the Detector pilot configuration.')
+// A source-only unsigned CI compile can skip resource generation. This does
+// NOT enable device push or yield a deployable application. Normal builds
+// require Circle's actual Firebase config, never the Detector pilot's.
+def unsignedCi = providers.gradleProperty('circleUnsignedSourceCheck')
+        .map { it.toBoolean() }.orElse(false).get()
+if (!unsignedCi) {
+    apply plugin: 'com.google.gms.google-services'
+    if (!file('google-services.json').exists()) {
+        throw new GradleException(
+            'Missing PRIVATE app/google-services.json for com.verifyd.circle. ' +
+            'Do not copy the Detector pilot configuration.')
+    }
 }
 
 def playProject = providers.gradleProperty('CIRCLE_PLAY_INTEGRITY_CLOUD_PROJECT_NUMBER')
