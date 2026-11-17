@@ -37,7 +37,8 @@ final class CircleIncomingCallNotification {
             manager.createNotificationChannel(channel);
         }
         Intent answer = new Intent(context, CircleAnswerActivity.class)
-                .setData(Uri.parse("verifyd-circle://answer/" + invite.id))\n                .putExtra("answer_from_notification", true)
+                .setData(Uri.parse("verifyd-circle://answer/" + invite.id))
+                .putExtra("answer_from_notification", true)
                 .putExtra("call_id", invite.id)
                 .putExtra("expires_at", invite.expirySeconds);
         Intent display = new Intent(context, CircleAnswerActivity.class)
@@ -71,9 +72,9 @@ final class CircleIncomingCallNotification {
             notification.addAction(new Notification.Action.Builder(android.R.drawable.ic_menu_close_clear_cancel,
                     "Decline", declineAction).build());
         }
-        // The authenticated pilot is supported on Android 8+ so expiry always uses the OS timer.
-        if (Build.VERSION.SDK_INT < 26) return;
-        notification.setTimeoutAfter(remaining);\n        // CallStyle falls back to heads-up when Android 14+ denies full-screen intent.\n        notification.setFullScreenIntent(answerAction, true);
+        // Original invitation deadline; Android 14+ shows heads-up if FSI not allowed.
+        if (Build.VERSION.SDK_INT >= 26) notification.setTimeoutAfter(remaining);
+        notification.setFullScreenIntent(fullScreenAction, true);
         manager.notify(invite.id, ID, notification.build());
     }
 
