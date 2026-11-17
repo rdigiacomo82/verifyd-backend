@@ -92,8 +92,10 @@ public final class CircleAnswerActivity extends Activity {
             return;
         }
         try {
-            startForegroundService(new Intent(this, CircleAudioService.class)
-                    .putExtra("call_id", callId).putExtra("expires_at", expiry));
+            Intent service = new Intent(this, CircleAudioService.class)
+                    .putExtra("call_id", callId).putExtra("expires_at", expiry);
+            if (Build.VERSION.SDK_INT >= 26) startForegroundService(service);
+            else startService(service);
             status.setText("Connecting secure audio…");
             CircleIncomingCallNotification.cancel(this, callId);
             finish();
