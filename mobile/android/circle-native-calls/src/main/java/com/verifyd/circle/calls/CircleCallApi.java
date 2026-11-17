@@ -97,7 +97,7 @@ final class CircleCallApi {
 
     /** Redeem web-authorized, single-use 60-second signed challenge. NO web bearer. */
     void redeemIntent(String id, String challenge, String fcmToken) throws Exception {
-        if (!"com.verifyd.circle".equals(prefs.getString("circle_package", "com.verifyd.circle")))
+        if (!"com.verifyd.circle".equals(android.app.Application.getProcessName()))
             throw new IllegalStateException("Invalid installed Circle app");
         if (!id.matches("nbi_[A-Za-z0-9_-]{32}") || !challenge.matches("[A-Za-z0-9_-]{43}"))
             throw new IllegalArgumentException("Invalid enrollment intent");
@@ -107,9 +107,9 @@ final class CircleCallApi {
         byte[] digest = sha.digest(encoded);
         StringBuilder hash = new StringBuilder(64);
         for (byte b : digest) hash.append(String.format(java.util.Locale.ROOT, "%02x", b & 0xff));
-        String message = "verifyd.native-bridge.android.v1\\n" + id + "\\n"
-                + challenge + "\\n" + installationId() + "\\n"
-                + "com.verifyd.circle" + "\\n" + hash;
+        String message = "verifyd.native-bridge.android.v1\n" + id + "\n"
+                + challenge + "\n" + installationId() + "\n"
+                + "com.verifyd.circle" + "\n" + hash;
         java.security.Signature signer = java.security.Signature.getInstance("SHA256withECDSA");
         signer.initSign(pair.getPrivate());
         signer.update(message.getBytes(StandardCharsets.US_ASCII));
