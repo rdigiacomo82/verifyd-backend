@@ -23,6 +23,7 @@ public final class CircleTwaLauncherActivity extends AppCompatActivity {
         @Override public void onRelationshipValidationResult(
                 int relation, Uri requestedOrigin, boolean result, Bundle extras) {
             bridge.onRelationshipValidationResult(relation, requestedOrigin, result);
+            if (result) bridge.onNavigationFinished();
         }
         @Override public void onNavigationEvent(int event, Bundle extras) {
             if (event == NAVIGATION_FINISHED) bridge.onNavigationFinished();
