@@ -37,13 +37,19 @@ final class CircleIncomingCallNotification {
             manager.createNotificationChannel(channel);
         }
         Intent answer = new Intent(context, CircleAnswerActivity.class)
-                .setData(Uri.parse("verifyd-circle://answer/" + invite.id))
+                .setData(Uri.parse("verifyd-circle://answer/" + invite.id))\n                .putExtra("answer_from_notification", true)
                 .putExtra("call_id", invite.id)
                 .putExtra("expires_at", invite.expirySeconds);
+        Intent display = new Intent(context, CircleAnswerActivity.class)
+                .setData(Uri.parse("verifyd-circle://incoming/" + invite.id))
+                .putExtra("call_id", invite.id)
+                .putExtra("expires_at", invite.expirySeconds);
+        PendingIntent fullScreenAction = PendingIntent.getActivity(context, 0, display,
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
         PendingIntent answerAction = PendingIntent.getActivity(context, 0, answer,
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
         Intent decline = new Intent(context, CircleDeclineReceiver.class)
-                .setData(Uri.parse("verifyd-pilot://decline/" + invite.id))
+                .setData(Uri.parse("verifyd-circle://decline/" + invite.id))
                 .putExtra("call_id", invite.id);
         PendingIntent declineAction = PendingIntent.getBroadcast(context, 0, decline,
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
