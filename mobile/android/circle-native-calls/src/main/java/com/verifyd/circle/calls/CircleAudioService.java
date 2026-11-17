@@ -10,7 +10,6 @@ import android.media.AudioManager;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.IBinder;
-import com.verifyd.circle.R;
 
 public final class CircleAudioService extends Service {
     private static final String HANG_UP = "com.verifyd.circle.HANG_UP";
