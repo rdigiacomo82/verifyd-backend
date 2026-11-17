@@ -242,6 +242,27 @@ async def lifespan(app: FastAPI):
     start_push_scheduler()
     log.info("VeriFYD startup complete")
 
+    # Optional Circle FCM credential check; OFF by default. This does not
+    # deliver notifications, register devices, or change Android call flags.
+    # Use a thread so temporary Google/API delays cannot delay app startup.
+    if os.getenv("VERIFYD_CIRCLE_FCM_PREFLIGHT_ON_STARTUP", "0") == "1":
+        import threading as _fcm_preflight_threading
+
+        def _circle_fcm_preflight_worker():
+            try:
+                from scripts.check_circle_fcm_sender import run as _run_fcm_preflight
+                code = _run_fcm_preflight(emit=lambda line: log.info("%s", line))
+                log.info("FCM_PREFLIGHT FINISHED EXIT_CODE=%s", code)
+            except Exception:
+                # Never log OAuth exceptions, tokens, or credential contents.
+                log.warning("FCM_PREFLIGHT RESULT=FAIL REASON=UNEXPECTED_ERROR")
+
+        _fcm_preflight_threading.Thread(
+            target=_circle_fcm_preflight_worker,
+            daemon=True,
+            name="circle-fcm-preflight",
+        ).start()
+
     # ── Keepalive scheduler ─────────────────────────────────
     # Enqueues a lightweight no-op job every 8 minutes to prevent
     # Render from suspending the worker process between real jobs.
