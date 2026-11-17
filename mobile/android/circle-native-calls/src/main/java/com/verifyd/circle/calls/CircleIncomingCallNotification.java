@@ -13,7 +13,6 @@ import android.media.AudioAttributes;
 import android.media.RingtoneManager;
 import android.net.Uri;
 import android.os.Build;
-import com.verifyd.circle.R;
 
 final class CircleIncomingCallNotification {
     private static final String CHANNEL = "verifyd_circle_calls";
