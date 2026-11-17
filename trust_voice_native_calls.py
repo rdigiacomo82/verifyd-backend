@@ -126,6 +126,39 @@ def ensure_schema() -> None:
         _schema_ready = True
 
 
+# Circle native iOS host: authenticate the already-signed-in browser session
+# before storing it in the device-only Keychain. The response does not expose
+# any bearer credentials and must never be cached.
+@router.get("/native-call-devices/session")
+def ios_native_session_status(authorization: Optional[str] = Header(default=None)):
+    _require_enabled()
+    identity, session = _auth(authorization, require_pilot=False)
+    if not pilot_allowed(identity):
+        raise HTTPException(403, detail={"error": "native_call_opt_in_not_available"})
+    return {"verified": True, "identity_id": str(identity["id"]),
+            "schema": "verifyd.ios.native-session.v1"}
+
+
+@router.get("/native-call-devices/{installation_id}/status")
+def ios_native_device_status(installation_id: UUID,
+                             authorization: Optional[str] = Header(default=None)):
+    _require_enabled()
+    identity, session = _auth(authorization, require_pilot=False)
+    ensure_schema()
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("""SELECT 1 FROM verifyd_native_call_devices d
+            JOIN verifyd_voice_sessions s ON d.session_id=s.session_id
+              AND d.identity_id=s.identity_id AND s.revoked_at IS NULL
+            WHERE d.installation_id=%s AND d.identity_id=%s
+              AND d.session_id=%s AND d.bundle_id=%s
+              AND d.disabled_at IS NULL""",
+            (str(installation_id), str(identity["id"]),
+             str(session["session_id"]), "com.verifyd.circle"))
+        return {"registered": cur.fetchone() is not None,
+                "schema": "verifyd.ios.native-session.v1"}
+
+
 @router.post("/native-call-devices")
 def register_device(body: DeviceRegistration, authorization: Optional[str] = Header(default=None)):
     _require_enabled()
@@ -397,6 +430,9 @@ async def ios_native_audio_media(websocket: WebSocket, call_id: str):
             call_id, identity_id, 'call_answer',
             android_socket=websocket, transport='ios_native_media',
         )
+        # Native iOS has no browser signaling connection; ACK to the owning
+        # CallKit socket itself so it can complete the system Answer action.
+        await websocket.send_json({"type": "call_answered", "call_id": call_id})
         next_auth = time.monotonic() + 20
         while True:
             if time.monotonic() >= next_auth:
