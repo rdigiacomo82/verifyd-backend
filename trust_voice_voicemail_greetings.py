@@ -136,6 +136,16 @@ class GreetingUpdate(BaseModel):
     text: str = Field(default="", max_length=MAX_TEXT_CHARS)
 
 
+@router.get("/voicemail-greetings/health")
+def greeting_health():
+    """Sanitized readiness; never expose R2 bucket, key or caller data."""
+    return {
+        "feature": "trust_voice_voicemail_greetings_v1",
+        "enabled": _enabled(),
+        "private_audio_storage_configured": _storage_configured(),
+    }
+
+
 @router.get("/voicemail-greetings/me")
 def get_my_greeting(authorization: Optional[str] = Header(default=None)):
     identity = _owner(authorization)
