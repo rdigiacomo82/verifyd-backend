@@ -35,7 +35,7 @@ _schema_ready = False
 MAX_AUDIO_BYTES = 3 * 1024 * 1024
 MAX_TEXT_CHARS = 400
 AUDIO_EXTENSIONS = {".webm", ".m4a", ".mp3", ".ogg", ".wav"}
-DEFAULT_GREETING = "Hi, I can't answer right now. Please leave a message after the tone."
+DEFAULT_GREETING = "Hi, I can't answer right now. Please leave a message when you're ready."
 
 
 def _enabled():
