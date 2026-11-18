@@ -17,6 +17,7 @@ ENV = {
     "Optional": Optional,
     "_WS_AUTH_PROTOCOL": "verifyd-auth-v1",
     "_WS_TOKEN_PREFIX": "verifyd-session.",
+    "_WS_LEGACY_QUERY_ALLOWED": True,
 }
 exec(compile(ast.Module(body=[HELPER], type_ignores=[]), str(ROOT / "trust_voice_signaling.py"), "exec"), ENV)
 extract = ENV[NAME]
@@ -30,6 +31,18 @@ class FakeWebSocket:
 class WebSocketAuthRegressionTests(unittest.TestCase):
     def test_existing_query_token_is_still_supported(self):
         self.assertEqual(extract(FakeWebSocket([]), "legacy.test"), ("legacy.test", None))
+
+    def test_legacy_query_tokens_can_be_disabled_after_client_migration(self):
+        before = ENV["_WS_LEGACY_QUERY_ALLOWED"]
+        try:
+            ENV["_WS_LEGACY_QUERY_ALLOWED"] = False
+            self.assertEqual(extract(FakeWebSocket([]), "legacy.test"), ("", None))
+            self.assertEqual(
+                extract(FakeWebSocket(["verifyd-auth-v1", "verifyd-session.secure.test"]), ""),
+                ("secure.test", "verifyd-auth-v1"),
+            )
+        finally:
+            ENV["_WS_LEGACY_QUERY_ALLOWED"] = before
 
     def test_header_token_negotiates_fixed_protocol(self):
         self.assertEqual(
