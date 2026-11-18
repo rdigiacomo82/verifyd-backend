@@ -69,6 +69,7 @@ from trust_voice_attachments import router as trust_voice_attachments_router
 from trust_voice_attachment_analysis import router as trust_voice_attachment_analysis_router
 from trust_voice_location import router as trust_voice_location_router
 from trust_voice_voicemail_intelligence import router as trust_voice_voicemail_intelligence_router
+from trust_voice_voicemail_greetings import router as trust_voice_voicemail_greetings_router
 from trust_voice_circle_safety import router as trust_voice_circle_safety_router
 from trust_voice_homework import router as trust_voice_homework_router
 from trust_voice_classrooms import router as trust_voice_classrooms_router
@@ -355,6 +356,7 @@ app.include_router(trust_voice_attachment_analysis_router)
 # VERIFYD_CIRCLE_LOCATION_PHASE_A_V1 (opt-in; disabled by default)
 app.include_router(trust_voice_location_router)
 app.include_router(trust_voice_voicemail_intelligence_router)
+app.include_router(trust_voice_voicemail_greetings_router)
 # VERIFYD_CIRCLE_SAFETY_V1 -- isolated, opt-in, disabled by default
 app.include_router(trust_voice_circle_safety_router)
 # VERIFYD_CIRCLE_HOMEWORK_V1 -- off until the server pilot is enabled
