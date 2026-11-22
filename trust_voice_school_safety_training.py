@@ -331,9 +331,12 @@ def create_training_report(payload: ReportInput, authorization: Optional[str] = 
     actor = _actor(authorization)
     student_id = str(actor["id"])
     _schema()
+    from trust_voice_school_safety_consents import _consent_schema, require_training_signoffs
+    _consent_schema()  # DDL before report transaction, never while holding row locks
     with get_db() as conn:
         cur = conn.cursor()
         _membership(cur, payload.school_id, student_id, {"student"})
+        require_training_signoffs(cur, payload.school_id, student_id)
         cur.execute("""SELECT primary_id, backup_id FROM verifyd_safety_training_contacts
             WHERE school_id=%s AND student_id=%s""", (payload.school_id, student_id))
         contacts = cur.fetchone()
@@ -533,10 +536,24 @@ def guardian_training_view(student_id: str, authorization: Optional[str] = Heade
     actor = _actor(authorization)
     _schema()
     guardian_id = str(actor["id"])
+    from trust_voice_school_safety_consents import _consent_schema
+    _consent_schema()
     with get_db() as conn:
         cur = conn.cursor()
-        cur.execute("""SELECT school_id FROM verifyd_safety_training_guardians
-            WHERE child_id=%s AND guardian_id=%s""", (student_id,guardian_id))
+        # A historical guardian link is insufficient once a person loses the
+        # verified school guardian role or withdraws their own acknowledgment.
+        # This prevents access via a bookmarked direct URL after revocation.
+        from trust_voice_school_safety_consents import POLICY_VERSION
+        cur.execute("""SELECT g.school_id
+           FROM verifyd_safety_training_guardians g
+           JOIN verifyd_safety_training_members m
+             ON m.school_id=g.school_id AND m.identity_id=g.guardian_id AND m.role='guardian'
+           JOIN verifyd_safety_training_signoffs x
+             ON x.school_id=g.school_id AND x.actor_id=g.guardian_id
+                AND x.subject_id=g.child_id AND x.kind='guardian'
+                AND x.policy_version=%s AND x.revoked_at IS NULL
+           WHERE g.child_id=%s AND g.guardian_id=%s""",
+           (POLICY_VERSION,student_id,guardian_id))
         school_ids = [row["school_id"] for row in cur.fetchall()]
         if not school_ids:
             raise HTTPException(404, detail={"error": "no_verified_guardian_link"})
