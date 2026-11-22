@@ -83,6 +83,29 @@ class SchoolTrainingSignoffsTests(unittest.TestCase):
         self.assertFalse("actor_id" in consent.SignoffInput.model_fields)
         self.assertFalse("school_id" in consent.SignoffInput.model_fields)
 
+    def test_guardian_direct_child_view_rechecks_role_and_consent(self):
+        from contextlib import contextmanager
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        import trust_voice_school_safety_training as training
+        cursor = Mock()
+        cursor.fetchall.return_value = []
+        @contextmanager
+        def fake_db():
+            yield SimpleNamespace(cursor=lambda: cursor)
+        with patch.object(training, "_actor", return_value={"id": "former-guardian"}), \
+             patch.object(training, "_schema"), \
+             patch.object(consent, "_consent_schema"), \
+             patch.object(training, "get_db", side_effect=fake_db):
+            with self.assertRaises(HTTPException) as raised:
+                training.guardian_training_view("child1", "Bearer test")
+        self.assertEqual(raised.exception.status_code, 404)
+        sql = cursor.execute.call_args.args[0]
+        self.assertIn("verifyd_safety_training_members m", sql)
+        self.assertIn("m.role='guardian'", sql)
+        self.assertIn("verifyd_safety_training_signoffs x", sql)
+        self.assertIn("x.revoked_at IS NULL", sql)
+
     def test_feature_off_fails_closed(self):
         with patch.dict(os.environ, {"VERIFYD_SAFETY_TRAINING_ENABLED": "0"}):
             with self.assertRaises(HTTPException) as raised:
