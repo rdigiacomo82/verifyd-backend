@@ -1,0 +1,29 @@
+name: VeriFYD Safety Training Contract
+on:
+  pull_request:
+    paths:
+      - 'trust_voice_school_safety_training.py'
+      - 'tests/test_verifyd_school_safety_training.py'
+      - '.github/workflows/verifyd-safety-training.yml'
+      - 'main.py'
+  push:
+    branches:
+      - main
+    paths:
+      - 'trust_voice_school_safety_training.py'
+      - 'tests/test_verifyd_school_safety_training.py'
+      - '.github/workflows/verifyd-safety-training.yml'
+jobs:
+  training-contract:
+    name: Safety training isolation, roles and no dispatch
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install --disable-pip-version-check 'fastapi>=0.109,<1' 'pydantic>=2,<3' 'psycopg2-binary>=2.9,<3'
+      - run: python -m py_compile trust_voice_school_safety_training.py tests/test_verifyd_school_safety_training.py
+      - run: python -m unittest discover -s tests -p 'test_verifyd_school_safety_training.py' -v

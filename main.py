@@ -71,6 +71,7 @@ from trust_voice_location import router as trust_voice_location_router
 from trust_voice_voicemail_intelligence import router as trust_voice_voicemail_intelligence_router
 from trust_voice_voicemail_greetings import router as trust_voice_voicemail_greetings_router
 from trust_voice_circle_safety import router as trust_voice_circle_safety_router
+from trust_voice_school_safety_training import router as school_safety_training_router
 from trust_voice_homework import router as trust_voice_homework_router
 from trust_voice_classrooms import router as trust_voice_classrooms_router
 from trust_voice_classroom_library import router as trust_voice_classroom_library_router
@@ -359,6 +360,7 @@ app.include_router(trust_voice_voicemail_intelligence_router)
 app.include_router(trust_voice_voicemail_greetings_router)
 # VERIFYD_CIRCLE_SAFETY_V1 -- isolated, opt-in, disabled by default
 app.include_router(trust_voice_circle_safety_router)
+app.include_router(school_safety_training_router)
 # VERIFYD_CIRCLE_HOMEWORK_V1 -- off until the server pilot is enabled
 app.include_router(trust_voice_homework_router)
 # Isolated Classroom pilot (all endpoints disabled by default)
