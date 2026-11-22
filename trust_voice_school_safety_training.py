@@ -350,6 +350,13 @@ def create_training_report(payload: ReportInput, authorization: Optional[str] = 
             _membership(cur, payload.school_id, adult_id, {"guardian","principal","responder"})
             if identities_blocked(student_id, adult_id) or not trust_circle_contains(student_id, adult_id):
                 raise HTTPException(409, detail={"error": "selected_contact_no_longer_eligible"})
+        # Serialize attempts with the same per-student idempotency key, even if
+        # clients retry with different categories at the same time.
+        replay_lock_hash = hashlib.sha256(
+            (student_id + ":" + payload.idempotency_key).encode()
+        ).digest()
+        replay_lock = int.from_bytes(replay_lock_hash[:8], "big") % (2**63 - 1)
+        cur.execute("SELECT pg_advisory_xact_lock(%s)", (replay_lock,))
         cur.execute("""SELECT report_id,incident_id FROM verifyd_safety_training_reports
              WHERE student_id=%s AND client_key=%s""", (student_id, payload.idempotency_key))
         previous = cur.fetchone()
