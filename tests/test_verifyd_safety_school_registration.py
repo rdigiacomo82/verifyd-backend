@@ -31,6 +31,18 @@ class SchoolOwnerApprovalTests(unittest.TestCase):
             reg.ReviewDecision(decision="approve", verified_official_authority=True,
                                review_note="ok")
 
+    def test_internal_test_school_must_have_explicit_test_only_name_and_owner_scope(self):
+        payload = reg.ReviewDecision(decision="approve", verified_official_authority=False,
+                   internal_test_school=True, review_note="Owner-confirmed internal practice")
+        self.assertTrue(reg._approval_verified(payload, "VeriFYD Safety School — TEST ONLY"))
+        self.assertFalse(reg._approval_verified(payload, "Real City High School"))
+        not_verified = reg.ReviewDecision(decision="approve", verified_official_authority=False,
+                   internal_test_school=False, review_note="Unverified applicant pending")
+        self.assertFalse(reg._approval_verified(not_verified, "VeriFYD Safety School — TEST ONLY"))
+        real_verified = reg.ReviewDecision(decision="approve", verified_official_authority=True,
+                   internal_test_school=False, review_note="Independently called district office")
+        self.assertTrue(reg._approval_verified(real_verified, "Real City High School"))
+
     def test_school_admin_can_only_manage_non_privileged_roster_roles(self):
         with self.assertRaises(ValidationError):
             reg.RosterMember(handle="@fake", role="principal")
