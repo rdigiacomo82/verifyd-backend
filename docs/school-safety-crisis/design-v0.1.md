@@ -1,5 +1,5 @@
-# VeriFYD VeriFYD School Safety — School Crisis Coordination v0.1
-**Naming note: “SafeSignal” is already in use for emergency-alert software, so use “VeriFYD School Safety” as a descriptive working title until counsel reviews naming.**
+# VeriFYD VeriFYD Safety — School Crisis Coordination v0.1
+**Working product name: VeriFYD Safety. Public preview page `/Safety`, with legacy `/crisis` and `/Crisis` redirects. Legal naming review remains advisable.**
 
 **Status: design only; production feature OFF. Do not use for real emergency reporting.**
 
@@ -51,4 +51,7 @@ Design review → signed school/district requirements and privacy approval → f
 **Proposed flag:** `VERIFYD_SCHOOL SAFETY_ENABLED=0` by default.
 
 ## Frontend
-VeriFYD School Safety Phase A Horizons preview (separate delivery): route `/crisis` + `/Crisis`, PWA identity `/crisis`, sample-only student/school/family screens and five-second activation. It intentionally has **no network calls** and does not send alerts. Existing `/voice` manifests, root call worker, and personal distress remain unchanged.
+VeriFYD Safety Phase A Horizons preview (separate delivery): route `/Safety` + `/Crisis`, PWA identity `/Safety`, sample-only student/school/family screens and five-second activation. It intentionally has **no network calls** and does not send alerts. Existing `/voice` manifests, root call worker, and personal distress remain unchanged.
+
+## Frontend rename (2026-11-22)
+The first-phase Horizons design preview is branded **VeriFYD Safety**. The standalone preview PWA uses `id: /Safety`, `start_url: /Safety`, `scope: /Safety`. `/crisis` and `/Crisis` are redirects. This is **preview only** with no emergency delivery. Renaming does not authorize live school crisis services, student enrollment, guardian location, E911/911 or notifications.
