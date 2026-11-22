@@ -331,9 +331,12 @@ def create_training_report(payload: ReportInput, authorization: Optional[str] = 
     actor = _actor(authorization)
     student_id = str(actor["id"])
     _schema()
+    from trust_voice_school_safety_consents import _consent_schema, require_training_signoffs
+    _consent_schema()  # DDL before report transaction, never while holding row locks
     with get_db() as conn:
         cur = conn.cursor()
         _membership(cur, payload.school_id, student_id, {"student"})
+        require_training_signoffs(cur, payload.school_id, student_id)
         cur.execute("""SELECT primary_id, backup_id FROM verifyd_safety_training_contacts
             WHERE school_id=%s AND student_id=%s""", (payload.school_id, student_id))
         contacts = cur.fetchone()
