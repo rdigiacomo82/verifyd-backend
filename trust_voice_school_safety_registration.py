@@ -109,7 +109,7 @@ class SchoolApplication(BaseModel):
 
 class ReviewDecision(BaseModel):
     decision: Literal["approve", "reject"]
-    verified_official_authority: Literal[True]
+    verified_official_authority: bool = False
     review_note: str = Field(min_length=12, max_length=1000)
 
 
@@ -207,6 +207,8 @@ def review_school_application(application_id: str, payload: ReviewDecision,
             raise HTTPException(404, detail={"error": "application_not_found"})
         if app["status"] != "pending":
             raise HTTPException(409, detail={"error": "application_already_reviewed"})
+        if payload.decision == "approve" and payload.verified_official_authority is not True:
+            raise HTTPException(422, detail={"error": "independent_school_authority_verification_required"})
         school_id = None
         if payload.decision == "approve":
             if str(app["applicant_id"]) == owner_id:
