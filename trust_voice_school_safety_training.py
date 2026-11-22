@@ -504,6 +504,23 @@ def resolve_training_incident(incident_id: str, payload: ResolveInput, authoriza
     return {"ok": True, "mode": "TRAINING ONLY", "real_notifications_sent": 0}
 
 
+@router.get("/family/children")
+def guardian_training_children(authorization: Optional[str] = Header(default=None)):
+    actor = _actor(authorization)
+    _schema()
+    guardian_id = str(actor["id"])
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("""SELECT g.school_id,g.child_id,i.display_name,i.handle
+          FROM verifyd_safety_training_guardians g
+          JOIN verifyd_identities i ON i.id=g.child_id
+          JOIN verifyd_safety_training_members m
+          ON m.school_id=g.school_id AND m.identity_id=g.guardian_id AND m.role='guardian'
+          WHERE g.guardian_id=%s ORDER BY i.handle""", (guardian_id,))
+        children = [dict(row) for row in cur.fetchall()]
+    return {"ok": True, "mode": "TRAINING ONLY", "children": children}
+
+
 @router.get("/family/my-child/{student_id}")
 def guardian_training_view(student_id: str, authorization: Optional[str] = Header(default=None)):
     actor = _actor(authorization)
