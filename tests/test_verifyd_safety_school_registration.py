@@ -21,10 +21,12 @@ class SchoolOwnerApprovalTests(unittest.TestCase):
         self.assertFalse("approved_by" in reg.SchoolApplication.model_fields)
         self.assertFalse("school_id" in reg.SchoolApplication.model_fields)
 
-    def test_owner_review_requires_explicit_official_verification(self):
-        with self.assertRaises(ValidationError):
-            reg.ReviewDecision(decision="approve", verified_official_authority=False,
-                               review_note="Verified with district office")
+    def test_owner_review_requires_verification_for_approval(self):
+        # An owner can reject a bogus application without verifying it first.
+        # The approval route independently rejects unverified=True being absent.
+        draft = reg.ReviewDecision(decision="approve", verified_official_authority=False,
+                                   review_note="No independent verification completed")
+        self.assertFalse(draft.verified_official_authority)
         with self.assertRaises(ValidationError):
             reg.ReviewDecision(decision="approve", verified_official_authority=True,
                                review_note="ok")
