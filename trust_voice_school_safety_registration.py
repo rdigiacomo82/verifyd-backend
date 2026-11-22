@@ -12,9 +12,9 @@ import uuid
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Header, HTTPException
-from pydantic import BaseModel, Field, EmailStr
+from pydantic import BaseModel, Field
 
-from database import get_db
+from database import get_db, is_valid_email
 from trust_voice_school_safety_training import (
     _actor, _audit, _id_for_handle, _membership, _operator, _operators, _schema,
 )
@@ -135,7 +135,7 @@ def submit_school_application(payload: SchoolApplication, authorization: Optiona
     school_name = payload.school_name.strip()
     if payload.school_website and not payload.school_website.strip().startswith("https://"):
         raise HTTPException(422, detail={"error": "https_school_website_required"})
-    if "@" not in payload.official_email or len(payload.official_email.split("@")) != 2:
+    if not is_valid_email(payload.official_email.strip()):
         raise HTTPException(422, detail={"error": "valid_official_email_required"})
     with get_db() as conn:
         cur = conn.cursor()
