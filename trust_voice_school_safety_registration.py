@@ -114,6 +114,15 @@ class ReviewDecision(BaseModel):
     review_note: str = Field(min_length=12, max_length=1000)
 
 
+def _approval_verified(payload: ReviewDecision, school_name: str) -> bool:
+    """Explicit independent authority OR owner-controlled fictional test school."""
+    return bool(
+        payload.verified_official_authority is True
+        or (payload.internal_test_school is True and
+            str(school_name).strip().upper().endswith("TEST ONLY"))
+    )
+
+
 class BackupApproval(BaseModel):
     backup_handle: str = Field(min_length=3, max_length=40)
     verified_official_authority: Literal[True]
@@ -212,9 +221,7 @@ def review_school_application(application_id: str, payload: ReviewDecision,
             # For the explicitly test-only service, the operator may approve
             # a fictional school they control without falsely attesting to
             # independently verified real-world district authority.
-            test_only = (payload.internal_test_school is True and
-                         str(app["school_name"]).strip().upper().endswith("TEST ONLY"))
-            if not (payload.verified_official_authority is True or test_only):
+            if not _approval_verified(payload, app["school_name"]):
                 raise HTTPException(422, detail={"error": "independent_school_authority_verification_or_internal_test_required"})
         school_id = None
         if payload.decision == "approve":
