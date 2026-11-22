@@ -27,7 +27,7 @@ _lock = threading.Lock()
 
 def _application_schema():
     global _ready
-    _schema()
+    _consent_schema()
     if _ready:
         return
     with _lock:
@@ -414,8 +414,9 @@ def deactivate_school_roster_member(school_id:str,member_id:str,
         cur.execute("""DELETE FROM verifyd_safety_training_contacts
            WHERE school_id=%s AND (student_id=%s OR primary_id=%s OR backup_id=%s)""",
            (school_id,member_id,member_id,member_id))
-        cur.execute("""DELETE FROM verifyd_safety_training_signoffs
-           WHERE school_id=%s AND (actor_id=%s OR subject_id=%s)""",
+        cur.execute("""UPDATE verifyd_safety_training_signoffs SET revoked_at=NOW()
+           WHERE school_id=%s AND (actor_id=%s OR subject_id=%s)
+             AND revoked_at IS NULL""",
            (school_id,member_id,member_id))
         cur.execute("""DELETE FROM verifyd_safety_training_members
            WHERE school_id=%s AND identity_id=%s""",(school_id,member_id))
