@@ -68,7 +68,7 @@ class Review(BaseModel):
 def _availability(cur,lower):
     cur.execute("SELECT 1 FROM verifyd_identities WHERE handle_lower=%s",(lower,))
     if cur.fetchone(): return False
-    cur.execute("SELECT 1 FROM verifyd_safety_family_intake WHERE handle_lower=%s AND status='pending'",(lower,))
+    cur.execute("SELECT 1 FROM verifyd_safety_family_intake WHERE handle_lower=%s AND status IN ('pending','reviewed')",(lower,))
     return not bool(cur.fetchone())
 
 @router.get("/family/onboarding/handle-availability/{handle}")
