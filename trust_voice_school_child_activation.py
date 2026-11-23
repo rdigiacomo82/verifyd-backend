@@ -9,12 +9,15 @@ import html
 import os
 import threading
 import uuid
+import secrets
+import hashlib
+import hmac
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
-from database import create_otp, get_db, verify_otp
-from emailer import _send, FROM_NAME, FROM_ADDRESS, send_otp_email
-from trust_voice_identity import _recent_otp_request
+from database import get_db
+from emailer import _send, FROM_NAME, FROM_ADDRESS
 from trust_voice_school_family_onboarding import _schema as _intake_schema
 from trust_voice_school_safety_training import _actor, _audit
 from trust_voice_school_safety_registration import _school_admin
@@ -45,7 +48,17 @@ def _schema():
                 child_identity_id TEXT UNIQUE REFERENCES verifyd_identities(id),
                 activated_at TIMESTAMPTZ
             )""")
+            conn.cursor().execute("""CREATE TABLE IF NOT EXISTS verifyd_safety_child_activation_codes (
+                guardian_id TEXT PRIMARY KEY REFERENCES verifyd_identities(id),
+                salt TEXT NOT NULL, code_hash TEXT NOT NULL,
+                sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                expires_at TIMESTAMPTZ NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0
+            )""")
         _ready=True
+
+def _digest(salt: str, code: str) -> str:
+    return hashlib.sha256((salt+":"+code).encode("utf-8")).hexdigest()
 
 class SchoolVerify(BaseModel):
     independently_verified: bool=False
@@ -103,24 +116,42 @@ def my_activation_status(authorization:Optional[str]=Header(default=None)):
 @router.post("/family/child-activation/request-code")
 def request_activation_code(authorization:Optional[str]=Header(default=None)):
     guardian=_actor(authorization);_schema();_require_pilot()
+    gid=str(guardian["id"])
     with get_db() as conn:
         cur=conn.cursor()
-        cur.execute("SELECT email_lower FROM verifyd_identities WHERE id=%s AND status='active'",
-                    (str(guardian["id"]),))
+        cur.execute("SELECT email_lower FROM verifyd_identities WHERE id=%s AND status='active'",(gid,))
         account=cur.fetchone()
         if not account or not account["email_lower"]:
             raise HTTPException(403,detail={"error":"active_verified_guardian_required"})
         cur.execute("""SELECT 1 FROM verifyd_safety_child_activation a
             JOIN verifyd_safety_family_intake r ON r.request_id=a.request_id
-            WHERE r.guardian_id=%s AND r.status='reviewed' AND a.activated_at IS NULL
-            LIMIT 1""",(str(guardian["id"]),))
-        if not cur.fetchone():raise HTTPException(409,detail={"error":"no_verified_child_ready"})
+            WHERE r.guardian_id=%s AND r.status='reviewed' AND a.activated_at IS NULL LIMIT 1""",(gid,))
+        if not cur.fetchone():
+            raise HTTPException(409,detail={"error":"no_verified_child_ready"})
+        cur.execute("SELECT sent_at FROM verifyd_safety_child_activation_codes WHERE guardian_id=%s FOR UPDATE",(gid,))
+        previous=cur.fetchone()
+        if previous and previous["sent_at"]>datetime.now(timezone.utc)-timedelta(seconds=60):
+            raise HTTPException(429,detail={"error":"activation_code_recently_sent"})
+        code=str(secrets.randbelow(900000)+100000)
+        salt=secrets.token_hex(16)
+        cur.execute("""INSERT INTO verifyd_safety_child_activation_codes
+           (guardian_id,salt,code_hash,sent_at,expires_at,attempts)
+           VALUES(%s,%s,%s,NOW(),NOW()+INTERVAL '10 minutes',0)
+           ON CONFLICT(guardian_id) DO UPDATE SET
+            salt=EXCLUDED.salt, code_hash=EXCLUDED.code_hash,
+            sent_at=NOW(), expires_at=NOW()+INTERVAL '10 minutes', attempts=0""",
+            (gid,salt,_digest(salt,code)))
         email=account["email_lower"]
-    if _recent_otp_request(email):
-        raise HTTPException(429,detail={"error":"verification_code_recently_requested"})
-    otp=create_otp(email)
-    if not send_otp_email(email,otp):
-        raise HTTPException(503,detail={"error":"verification_email_send_failed"})
+    delivered=_send({"from":f"{FROM_NAME} <{FROM_ADDRESS}>","to":[email],
+                     "subject":"VeriFYD Safety supervised child activation code",
+                     "html":"<p>Your one-time school-supervised child activation code is <strong>"+
+                         html.escape(code)+"</strong>.</p><p>It expires in 10 minutes. "+
+                         "Do not share it. This code cannot sign you into VeriFYD Circle.</p>"})
+    if not delivered:
+        with get_db() as conn:
+            conn.cursor().execute("DELETE FROM verifyd_safety_child_activation_codes WHERE guardian_id=%s AND code_hash=%s",
+                                  (gid,_digest(salt,code)))
+        raise HTTPException(503,detail={"error":"activation_email_delivery_failed"})
     return {"ok":True,"email_sent":True,"expires_minutes":10}
 
 @router.post("/family/child-activation/activate")
@@ -161,10 +192,24 @@ def activate_children(payload:ActivateChildren,authorization:Optional[str]=Heade
             cur.execute("SELECT 1 FROM verifyd_identities WHERE handle_lower=%s",(req["handle_lower"],))
             if cur.fetchone():raise HTTPException(409,detail={"error":"proposed_handle_already_claimed",
                                                                "handle":"@"+req["suggested_handle"]})
-        # Guardian proves continued access to the verified parent email.
-        # This one-time code can confirm multiple siblings in one transaction.
-        valid,reason=verify_otp(email,payload.email_code)
-        if not valid:raise HTTPException(403,detail={"error":"invalid_guardian_email_code"})
+        # Purpose-scoped, attempt-limited challenge; normal /voice login codes
+        # cannot be used to activate supervised child identities.
+        cur.execute("""SELECT salt,code_hash,expires_at,attempts
+            FROM verifyd_safety_child_activation_codes
+            WHERE guardian_id=%s FOR UPDATE""",(gid,))
+        challenge=cur.fetchone()
+        if not challenge:
+            raise HTTPException(403,detail={"error":"activation_code_required"})
+        if challenge["expires_at"]<datetime.now(timezone.utc) or challenge["attempts"]>=5:
+            raise HTTPException(403,detail={"error":"activation_code_expired_or_locked"})
+        if not hmac.compare_digest(challenge["code_hash"],_digest(challenge["salt"],payload.email_code)):
+            cur.execute("""UPDATE verifyd_safety_child_activation_codes SET attempts=attempts+1
+                WHERE guardian_id=%s""",(gid,))
+            # Commit the failed-attempt counter before raising (FastAPI errors
+            # otherwise roll back the surrounding database transaction).
+            conn.commit()
+            raise HTTPException(403,detail={"error":"invalid_activation_code"})
+        cur.execute("DELETE FROM verifyd_safety_child_activation_codes WHERE guardian_id=%s",(gid,))
         created=[]
         for req in requests:
             child_id="vfyd_usr_"+uuid.uuid4().hex
