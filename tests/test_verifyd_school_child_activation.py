@@ -40,6 +40,15 @@ class SupervisedChildContract(unittest.TestCase):
         self.assertIn("activation_code_recently_sent",request_code)
         self.assertIn("activation_code_expired_or_locked",activate)
         self.assertIn("attempts=attempts+1",activate)
+    def test_pilot_school_allowlist_fails_closed(self):
+        with patch.dict("os.environ",{"VERIFYD_SAFETY_CHILD_ACTIVATION_SCHOOL_IDS":"sschool_test"}):
+            a._allowed_school("sschool_test")
+            with self.assertRaises(HTTPException) as error:
+                a._allowed_school("sschool_other")
+            self.assertEqual(error.exception.status_code,403)
+        with patch.dict("os.environ",{"VERIFYD_SAFETY_CHILD_ACTIVATION_SCHOOL_IDS":""}):
+            with self.assertRaises(HTTPException):
+                a._allowed_school("sschool_test")
     def test_pilot_default_off(self):
         with patch.dict("os.environ",{"VERIFYD_SAFETY_CHILD_ACTIVATION_ENABLED":"0"}):
             with self.assertRaises(HTTPException) as e:
