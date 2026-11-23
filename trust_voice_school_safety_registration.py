@@ -319,11 +319,11 @@ def _send_principal_decision_notification(application_id: str) -> str:
                    else "VeriFYD Safety — Your Principal Application Was Rejected")
         body = (
             "Your VeriFYD Safety Principal application for " + app["school_name"] +
-            (" has been approved." if approved else " has been rejected.") + "\\n\\n" +
-            ("Sign in as your approved Principal account and complete the pre-activation school acknowledgment before managing the school roster.\\n\\n"
-             if approved else "You do not have Principal access for this application. Contact VeriFYD support if you believe this decision is incorrect.\\n\\n") +
-            "Application reference: " + app["application_id"] + "\\n" +
-            "Open VeriFYD Safety: https://vfvid.com/Safety\\n\\n" +
+            (" has been approved." if approved else " has been rejected.") + "\n\n" +
+            ("Sign in as your approved Principal account and complete the pre-activation school acknowledgment before managing the school roster.\n\n"
+             if approved else "You do not have Principal access for this application. Contact VeriFYD support if you believe this decision is incorrect.\n\n") +
+            "Application reference: " + app["application_id"] + "\n" +
+            "Open VeriFYD Safety: https://vfvid.com/Safety\n\n" +
             "School Safety is training/setup only. No real emergency alerts are active."
         )
         req = urlrequest.Request(
