@@ -44,6 +44,8 @@ def _schema():
                 shared_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 expires_at TIMESTAMPTZ NOT NULL DEFAULT (NOW()+INTERVAL '2 hours')
             )""")
+            conn.cursor().execute("""ALTER TABLE verifyd_safety_demo_report_locations
+                ADD COLUMN IF NOT EXISTS reported_area TEXT NOT NULL DEFAULT ''""")
         _ready=True
 
 class DemoLocation(BaseModel):
@@ -52,6 +54,7 @@ class DemoLocation(BaseModel):
     accuracy_m: float=Field(ge=1,le=5000)
     captured_at: datetime
     explicit_opt_in: bool=False
+    reported_area: str=Field(default="",max_length=120)
 
 def _purge(cur):
     cur.execute("DELETE FROM verifyd_safety_demo_report_locations WHERE expires_at<=NOW()")
@@ -85,14 +88,15 @@ def share_demo_location(report_id:str,payload:DemoLocation,authorization:Optiona
         if record["closed_at"] is not None or record["incident_status"]!="active":
             raise HTTPException(409,detail={"error":"practice_report_closed"})
         cur.execute("""INSERT INTO verifyd_safety_demo_report_locations(
-            report_id,school_id,student_id,latitude,longitude,accuracy_m,captured_at,shared_at,expires_at)
-            VALUES(%s,%s,%s,%s,%s,%s,%s,NOW(),NOW()+INTERVAL '2 hours')
+            report_id,school_id,student_id,latitude,longitude,accuracy_m,captured_at,reported_area,shared_at,expires_at)
+            VALUES(%s,%s,%s,%s,%s,%s,%s,%s,NOW(),NOW()+INTERVAL '2 hours')
             ON CONFLICT(report_id) DO UPDATE SET
             latitude=EXCLUDED.latitude,longitude=EXCLUDED.longitude,
             accuracy_m=EXCLUDED.accuracy_m,captured_at=EXCLUDED.captured_at,
+            reported_area=EXCLUDED.reported_area,
             shared_at=NOW(),expires_at=NOW()+INTERVAL '2 hours'""",
             (report_id,record["school_id"],student_id,payload.latitude,payload.longitude,
-             payload.accuracy_m,when))
+             payload.accuracy_m,when,payload.reported_area.strip()))
         _audit(cur,record["school_id"],student_id,"demo_location_explicitly_shared",report_id)
     return {"ok":True,"demo_only":True,"staff_can_view":True,"expires_in_minutes":120,
             "real_notifications_sent":0,"dispatch_confirmed":False}
@@ -123,7 +127,7 @@ def incident_demo_locations(incident_id:str,authorization:Optional[str]=Header(d
         _school_admin(cur,incident["school_id"],str(actor["id"]))
         _purge(cur)
         cur.execute("""SELECT l.report_id,l.latitude,l.longitude,l.accuracy_m,l.captured_at,
-            l.shared_at,l.expires_at,i.handle AS student_handle,i.display_name AS student_name,
+            l.shared_at,l.expires_at,l.reported_area,i.handle AS student_handle,i.display_name AS student_name,
             r.student_status
             FROM verifyd_safety_demo_report_locations l
             JOIN verifyd_safety_training_reports r ON r.report_id=l.report_id
