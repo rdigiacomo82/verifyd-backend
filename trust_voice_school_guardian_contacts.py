@@ -131,6 +131,10 @@ def my_guardian_contacts(authorization:Optional[str]=Header(default=None)):
           ORDER BY c.created_at DESC LIMIT 80""",(gid,gid,gid,gid,gid))
         changes=[dict(x) for x in cur.fetchall() if
           _verified_link(cur,x["school_id"],x["student_id"],gid)]
+        for item in changes:
+            item["my_action_required"]=bool(item["status"]=="pending" and
+                item["my_confirmation"] is None and gid in
+                (item["proposed_primary_id"],item["proposed_backup_id"]))
     return {"ok":True,"children":children,"changes":changes,
             "live_emergency_delivery":False}
 
