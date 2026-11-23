@@ -78,6 +78,9 @@ def queue_report(cur,report_id,school_id,student_id,recipients):
     if not _allowed(school_id):return
     for ident in recipients:
         if str(ident)==str(student_id):continue
+        # Only active, individually authorized school recipients may be queued.
+        try:_authorize(cur,report_id,str(ident))
+        except HTTPException:continue
         cur.execute("""INSERT INTO verifyd_safety_incident_outbox(
             report_id,recipient_id,event_key) VALUES(%s,%s,'created')
             ON CONFLICT DO NOTHING""",(report_id,str(ident)))
@@ -93,6 +96,9 @@ def _dispatch(report_id, event_key):
     attempted=0;accepted=0
     for job in jobs:
         if not _allowed(job["school_id"]):continue
+        with get_db() as conn:
+            try:_authorize(conn.cursor(),report_id,str(job["recipient_id"]))
+            except HTTPException:continue
         result=notify_identity_push(str(job["recipient_id"]),
             notification_type="school_safety_test_alert",
             title="VeriFYD Safety — Test School notification",
@@ -173,6 +179,8 @@ def send_reply(report_id:str,payload:Reply,authorization:Optional[str]=Header(de
             for who in cur.fetchall():
                 rid=str(who["recipient_id"])
                 if rid!=aid:
+                    try:_authorize(cur,report_id,rid)
+                    except HTTPException:continue
                     cur.execute("""INSERT INTO verifyd_safety_incident_outbox
                        (report_id,recipient_id,event_key) VALUES(%s,%s,%s)
                        ON CONFLICT DO NOTHING""",(report_id,rid,"reply:"+mid))
