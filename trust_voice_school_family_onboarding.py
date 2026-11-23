@@ -48,6 +48,9 @@ def _schema():
             )""")
             cur.execute("""CREATE UNIQUE INDEX IF NOT EXISTS safety_unique_pending_handle_proposal
               ON verifyd_safety_family_intake(handle_lower) WHERE status='pending'""")
+            cur.execute("""CREATE UNIQUE INDEX IF NOT EXISTS safety_unique_outstanding_handle_proposal
+              ON verifyd_safety_family_intake(handle_lower)
+              WHERE status IN ('pending','reviewed')""")
             cur.execute("""CREATE INDEX IF NOT EXISTS safety_family_intake_scope
               ON verifyd_safety_family_intake(school_id,status,created_at DESC)""")
         _ready=True
