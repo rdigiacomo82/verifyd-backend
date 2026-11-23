@@ -42,6 +42,11 @@ def _schema():
             accepted INT NOT NULL DEFAULT 0,
             state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending','attempted')),
             PRIMARY KEY(report_id,recipient_id,event_key))""")
+        cur.execute("""CREATE TABLE IF NOT EXISTS verifyd_safety_incident_acknowledgments(
+            report_id TEXT NOT NULL REFERENCES verifyd_safety_training_reports(report_id),
+            recipient_id TEXT NOT NULL REFERENCES verifyd_identities(id),
+            acknowledged_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY(report_id,recipient_id))""")
         cur.execute("""CREATE INDEX IF NOT EXISTS safety_alert_inbox_idx
             ON verifyd_safety_incident_outbox(recipient_id,created_at DESC)""")
 
@@ -129,6 +134,8 @@ def inbox(authorization:Optional[str]=Header(default=None)):
         cur=conn.cursor()
         cur.execute("""SELECT r.report_id,r.school_id,r.category,r.student_status,r.created_at,
           i.status AS incident_status,
+          EXISTS(SELECT 1 FROM verifyd_safety_incident_acknowledgments a
+             WHERE a.report_id=r.report_id AND a.recipient_id=%s) AS acknowledged,
           EXISTS(SELECT 1 FROM verifyd_safety_incident_outbox o
              WHERE o.report_id=r.report_id AND o.recipient_id=%s
                  AND o.event_key='created' AND o.accepted>0) AS push_provider_accepted
@@ -137,7 +144,7 @@ def inbox(authorization:Optional[str]=Header(default=None)):
           WHERE r.student_id=%s OR EXISTS(
              SELECT 1 FROM verifyd_safety_training_recipients x
              WHERE x.report_id=r.report_id AND x.recipient_id=%s)
-          ORDER BY r.created_at DESC LIMIT 80""",(aid,aid,aid))
+          ORDER BY r.created_at DESC LIMIT 80""",(aid,aid,aid,aid))
         rows=[]
         for row in cur.fetchall():
             try:
@@ -146,6 +153,17 @@ def inbox(authorization:Optional[str]=Header(default=None)):
             except HTTPException:continue
     return {"ok":True,"reports":rows,"test_only":True,
             "automatic_911_delivery":False}
+
+@router.post("/alerts/{report_id}/acknowledge")
+def acknowledge_alert(report_id:str,authorization:Optional[str]=Header(default=None)):
+    actor=_actor(authorization);_schema();aid=str(actor["id"])
+    with get_db() as conn:
+        cur=conn.cursor();r=_authorize(cur,report_id,aid)
+        cur.execute("""INSERT INTO verifyd_safety_incident_acknowledgments
+            (report_id,recipient_id) VALUES(%s,%s) ON CONFLICT DO NOTHING""",(report_id,aid))
+        _audit(cur,r["school_id"],aid,"school_test_alert_acknowledged",report_id)
+    return {"ok":True,"acknowledged":True,"test_only":True,
+            "device_notification_delivery_confirmed":False}
 
 @router.get("/reports/{report_id}/conversation")
 def conversation(report_id:str,authorization:Optional[str]=Header(default=None)):
