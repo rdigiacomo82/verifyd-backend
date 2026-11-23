@@ -297,7 +297,7 @@ def staff_review_contact_change(school_id:str,change_id:str,payload:AdminReview,
     emails_sent=0
     emails_failed=0
     if outcome=="approved":
-        targets={str(row["requested_by"]),str(row["proposed_primary_id"]),str(row["proposed_backup_id"])}
+        targets={str(x) for x in (row["requested_by"],row["proposed_primary_id"],row["proposed_backup_id"],row["previous_primary_id"],row["previous_backup_id"]) if x}
         with get_db() as conn:
             cur=conn.cursor()
             cur.execute("""SELECT email_lower FROM verifyd_identities
