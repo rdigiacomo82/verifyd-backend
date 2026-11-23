@@ -184,14 +184,14 @@ def _send_owner_application_notification(application_id: str) -> str:
     # Intentional minimal information in email; detailed application is available
     # only after authenticated owner review.
     body = (
-        "A VeriFYD Safety Principal application is pending your review.\\n\\n"
-        "School: " + app["school_name"] + "\\n"
-        "District: " + app["district_name"] + "\\n"
-        "Requested Principal: " + app["principal_name"] + "\\n"
-        "Applicant handle: @" + app["applicant_handle"] + "\\n"
-        "Application reference: " + app["application_id"] + "\\n"
-        "Submitted: " + str(app["submitted_at"]) + "\\n\\n"
-        "Sign in to review: " + _OWNER_DASHBOARD_URL + "\\n\\n"
+        "A VeriFYD Safety Principal application is pending your review.\n\n"
+        "School: " + app["school_name"] + "\n"
+        "District: " + app["district_name"] + "\n"
+        "Requested Principal: " + app["principal_name"] + "\n"
+        "Applicant handle: @" + app["applicant_handle"] + "\n"
+        "Application reference: " + app["application_id"] + "\n"
+        "Submitted: " + str(app["submitted_at"]) + "\n\n"
+        "Sign in to review: " + _OWNER_DASHBOARD_URL + "\n\n"
         "No school access has been granted. Email links cannot approve applications."
     )
     provider_id = None
