@@ -140,6 +140,10 @@ def _dispatch(report_id, event_key):
 
 def dispatch_school_pending_once():
     """Bounded scheduler: only test-allowlisted schools, no emergency services."""
+    enabled=os.getenv("VERIFYD_SAFETY_TEST_NOTIFICATIONS_ENABLED","0").lower() in ("1","yes","true","on")
+    allowlist=os.getenv("VERIFYD_SAFETY_TEST_NOTIFICATION_SCHOOL_IDS","").strip()
+    if not enabled or not allowlist:return {"jobs":0,"provider_accepted":0}
+    _schema()
     with get_db() as conn:
         cur=conn.cursor()
         cur.execute("""SELECT DISTINCT r.school_id,o.report_id,o.event_key
