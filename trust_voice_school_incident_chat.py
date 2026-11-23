@@ -13,7 +13,7 @@ from database import get_db
 from trust_voice_school_safety_training import _actor,_schema as _school_schema,_audit,_membership
 from trust_voice_school_safety_registration import _school_admin
 from trust_voice_school_safety_consents import POLICY_VERSION
-from trust_voice_push import notify_identity_push
+from trust_voice_push import notify_identity_push, _enabled as _web_push_enabled, _configured as _web_push_configured, _active_subscriptions
 
 router=APIRouter(prefix="/trust-voice/school-safety",tags=["School Incident Conversations"])
 
@@ -126,6 +126,22 @@ def dispatch_report(report_id):
 class Reply(BaseModel):
     client_id: str=Field(min_length=12,max_length=100)
     body: str=Field(min_length=1,max_length=1500)
+
+@router.get("/alerts/readiness")
+def alert_readiness(authorization:Optional[str]=Header(default=None)):
+    actor=_actor(authorization);_schema();aid=str(actor["id"])
+    with get_db() as conn:
+        cur=conn.cursor()
+        cur.execute("""SELECT school_id,role FROM verifyd_safety_training_members
+            WHERE identity_id=%s ORDER BY school_id""",(aid,))
+        memberships=[dict(x) for x in cur.fetchall()]
+    return {"ok":True,"test_school_scopes":[
+           {"school_id":m["school_id"],"role":m["role"],"test_push_gate_enabled":_allowed(m["school_id"])}
+           for m in memberships],
+           "web_push_backend_configured":bool(_web_push_enabled() and _web_push_configured()),
+           "this_account_web_push_subscription_count":len(_active_subscriptions(aid)),
+           "device_delivery_verified":False,
+           "automatic_emergency_services_dispatch":False}
 
 @router.get("/alerts/inbox")
 def inbox(authorization:Optional[str]=Header(default=None)):
