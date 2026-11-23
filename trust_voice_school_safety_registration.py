@@ -6,9 +6,12 @@ It does not create, delete, or edit underlying VeriFYD identity accounts.
 """
 from __future__ import annotations
 
+import json
+import logging
 import os
 import threading
 import uuid
+from urllib import request as urlrequest
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Header, HTTPException
@@ -21,6 +24,7 @@ from trust_voice_school_safety_training import (
 from trust_voice_school_safety_consents import _consent_schema, _school_accepted
 
 router = APIRouter(prefix="/trust-voice/school-safety", tags=["School Safety Owner Registration and Roster"])
+_notification_log = logging.getLogger("verifyd.safety.registration_notification")
 _ready = False
 _lock = threading.Lock()
 
@@ -69,6 +73,14 @@ def _application_schema():
             cur.execute("""CREATE UNIQUE INDEX IF NOT EXISTS safety_one_active_backup_per_school
                 ON verifyd_safety_school_admin_delegations(school_id)
                 WHERE revoked_at IS NULL""")
+            cur.execute("""CREATE TABLE IF NOT EXISTS verifyd_safety_school_application_notifications (
+                application_id TEXT PRIMARY KEY REFERENCES verifyd_safety_school_applications(application_id),
+                status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','sending','sent','failed')),
+                attempts INTEGER NOT NULL DEFAULT 0,
+                last_attempt_at TIMESTAMPTZ,
+                sent_at TIMESTAMPTZ,
+                provider_message_id TEXT
+            )""")
         _ready = True
 
 
@@ -137,6 +149,122 @@ class RosterRoleEdit(BaseModel):
     role: Literal["student", "guardian", "responder"]
 
 
+
+# A notification is informational only. A message or link never grants school access.
+_OWNER_NOTIFICATION_ADDRESS = "support@vfvid.com"
+_OWNER_NOTIFICATION_FROM = "VeriFYD Safety <support@vfvid.com>"
+_OWNER_DASHBOARD_URL = "https://vfvid.com/Safety"
+
+
+def _send_owner_application_notification(application_id: str) -> str:
+    """Claim one durable notification; send with a stable provider idempotency key.
+
+    Sending must not run inside the application-creation transaction. A failed
+    provider request is recorded without losing a successfully saved application.
+    """
+    _application_schema()
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("""UPDATE verifyd_safety_school_application_notifications
+            SET status='sending', attempts=attempts+1, last_attempt_at=NOW()
+            WHERE application_id=%s
+              AND (status IN ('pending','failed')
+                  OR (status='sending'
+                      AND last_attempt_at < NOW()-INTERVAL '10 minutes'))
+            RETURNING application_id""", (application_id,))
+        if not cur.fetchone():
+            return "already_sent_or_in_progress"
+        cur.execute("""SELECT a.application_id,a.school_name,a.district_name,
+                     a.principal_name,a.submitted_at,i.handle AS applicant_handle
+            FROM verifyd_safety_school_applications a
+            JOIN verifyd_identities i ON i.id=a.applicant_id
+            WHERE a.application_id=%s""", (application_id,))
+        app = dict(cur.fetchone())
+
+    # Intentional minimal information in email; detailed application is available
+    # only after authenticated owner review.
+    body = (
+        "A VeriFYD Safety Principal application is pending your review.\\n\\n"
+        "School: " + app["school_name"] + "\\n"
+        "District: " + app["district_name"] + "\\n"
+        "Requested Principal: " + app["principal_name"] + "\\n"
+        "Applicant handle: @" + app["applicant_handle"] + "\\n"
+        "Application reference: " + app["application_id"] + "\\n"
+        "Submitted: " + str(app["submitted_at"]) + "\\n\\n"
+        "Sign in to review: " + _OWNER_DASHBOARD_URL + "\\n\\n"
+        "No school access has been granted. Email links cannot approve applications."
+    )
+    provider_id = None
+    try:
+        key = os.getenv("RESEND_API_KEY", "").strip()
+        if not key:
+            raise RuntimeError("resend_not_configured")
+        payload = json.dumps({
+            "from": _OWNER_NOTIFICATION_FROM,
+            "to": [_OWNER_NOTIFICATION_ADDRESS],
+            "subject": "VeriFYD Safety — New Principal Application Pending Approval",
+            "text": body,
+        }).encode("utf-8")
+        req = urlrequest.Request(
+            "https://api.resend.com/emails",
+            data=payload, method="POST",
+            headers={
+                "Authorization": "Bearer " + key,
+                "Content-Type": "application/json",
+                "Idempotency-Key": "verifyd-safety-application-" + application_id,
+            },
+        )
+        with urlrequest.urlopen(req, timeout=8) as resp:
+            if not (200 <= resp.status < 300):
+                raise RuntimeError("provider_rejected")
+            provider_id = json.loads(resp.read(4096).decode("utf-8")).get("id")
+        if not provider_id:
+            raise RuntimeError("provider_response_missing_id")
+    except Exception:
+        # Do not log application details, credentials or provider error bodies.
+        _notification_log.warning("school_application_owner_notification_failed")
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("""UPDATE verifyd_safety_school_application_notifications
+                SET status='failed' WHERE application_id=%s AND status='sending'""",
+                (application_id,))
+        return "failed"
+
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("""UPDATE verifyd_safety_school_application_notifications
+            SET status='sent',sent_at=NOW(),provider_message_id=%s
+            WHERE application_id=%s AND status='sending'""",
+            (provider_id,application_id))
+    return "accepted_by_provider"
+
+
+@router.post("/owner/notifications/retry")
+def retry_owner_notifications(authorization: Optional[str] = Header(default=None)):
+    owner = _actor(authorization)
+    _owner(owner)
+    _application_schema()
+    with get_db() as conn:
+        cur = conn.cursor()
+        # Includes pending applications from before the email feature was added.
+        cur.execute("""INSERT INTO verifyd_safety_school_application_notifications (application_id)
+            SELECT a.application_id FROM verifyd_safety_school_applications a
+            WHERE a.status='pending'
+            ON CONFLICT(application_id) DO NOTHING""")
+        cur.execute("""SELECT n.application_id
+            FROM verifyd_safety_school_application_notifications n
+            JOIN verifyd_safety_school_applications a USING(application_id)
+            WHERE a.status='pending' AND n.status IN ('pending','failed')
+            ORDER BY a.submitted_at LIMIT 20""")
+        ids = [row["application_id"] for row in cur.fetchall()]
+    counts = {"accepted_by_provider": 0, "failed": 0, "already_sent_or_in_progress": 0}
+    for application_id in ids:
+        result = _send_owner_application_notification(application_id)
+        counts[result] += 1
+    return {"ok": True, "attempted": len(ids), "results": counts,
+            "school_access_granted": False}
+
+
 @router.post("/applications")
 def submit_school_application(payload: SchoolApplication, authorization: Optional[str] = Header(default=None)):
     applicant = _actor(authorization)
@@ -167,6 +295,13 @@ def submit_school_application(payload: SchoolApplication, authorization: Optiona
             payload.official_email.strip().lower(),payload.principal_name.strip(),
             payload.backup_handle.strip().lstrip("@"),payload.reason.strip()))
         _audit(cur, "pending_application", applicant_id, "school_application_submitted", application_id)
+        cur.execute("""INSERT INTO verifyd_safety_school_application_notifications (application_id)
+            VALUES(%s) ON CONFLICT(application_id) DO NOTHING""", (application_id,))
+    # Notification failures never grant access or roll back the saved application.
+    try:
+        _send_owner_application_notification(application_id)
+    except Exception:
+        _notification_log.warning("school_application_owner_notification_unavailable")
     return {"ok": True, "application_id": application_id, "status": "pending_owner_review",
             "school_access_granted": False, "emergency_alerts_active": False}
 
