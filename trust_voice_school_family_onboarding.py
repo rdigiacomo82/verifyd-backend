@@ -42,6 +42,7 @@ def _schema():
               status TEXT NOT NULL DEFAULT 'pending'
                 CHECK(status IN ('pending','reviewed','cancelled')),
               email_status TEXT NOT NULL DEFAULT 'pending',
+              supervised_creation_consent BOOLEAN NOT NULL DEFAULT FALSE,
               created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
               reviewed_by TEXT REFERENCES verifyd_identities(id),
               reviewed_at TIMESTAMPTZ
@@ -51,6 +52,8 @@ def _schema():
             cur.execute("""CREATE UNIQUE INDEX IF NOT EXISTS safety_unique_outstanding_handle_proposal
               ON verifyd_safety_family_intake(handle_lower)
               WHERE status IN ('pending','reviewed')""")
+            cur.execute("""ALTER TABLE verifyd_safety_family_intake
+                ADD COLUMN IF NOT EXISTS supervised_creation_consent BOOLEAN NOT NULL DEFAULT FALSE""")
             cur.execute("""CREATE INDEX IF NOT EXISTS safety_family_intake_scope
               ON verifyd_safety_family_intake(school_id,status,created_at DESC)""")
         _ready=True
@@ -64,6 +67,7 @@ class Intake(BaseModel):
     relationship: Literal['parent','legal_guardian','authorized_caregiver']='parent'
     children: list[ChildChoice]=Field(min_length=1,max_length=5)
     parental_authority_acknowledged: bool=False
+    supervised_creation_consent: bool=False
 
 class Review(BaseModel):
     decision: Literal['reviewed','cancelled']
@@ -89,6 +93,7 @@ def submit(payload:Intake,authorization:Optional[str]=Header(default=None)):
     guardian=_actor(authorization);_schema()
     if not payload.parental_authority_acknowledged:
         raise HTTPException(422,detail={'error':'parental_authority_confirmation_required'})
+    # Optional for legacy clients; only TRUE permits automatic supervised creation.
     gid=str(guardian['id'])
     normalized=[]
     for child in payload.children:
@@ -120,9 +125,9 @@ def submit(payload:Intake,authorization:Optional[str]=Header(default=None)):
         for raw,lower,label in normalized:
             rid='ssint_'+uuid.uuid4().hex
             cur.execute("""INSERT INTO verifyd_safety_family_intake
-               (request_id,school_id,guardian_id,suggested_handle,handle_lower,child_label,relationship)
-               VALUES(%s,%s,%s,%s,%s,%s,%s)""",
-               (rid,payload.school_id,gid,raw,lower,label,payload.relationship))
+               (request_id,school_id,guardian_id,suggested_handle,handle_lower,child_label,relationship,supervised_creation_consent)
+               VALUES(%s,%s,%s,%s,%s,%s,%s,%s)""",
+               (rid,payload.school_id,gid,raw,lower,label,payload.relationship,bool(payload.supervised_creation_consent)))
             _audit(cur,payload.school_id,gid,'family_handle_intake_submitted',rid)
             ids.append((rid,raw))
         email=account['email_lower']
