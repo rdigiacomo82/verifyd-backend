@@ -31,6 +31,11 @@ def _require_pilot():
     if os.getenv("VERIFYD_SAFETY_CHILD_ACTIVATION_ENABLED","0").strip().lower() not in ("1","true","yes","on"):
         raise HTTPException(503,detail={"error":"supervised_child_activation_not_enabled"})
 
+def _allowed_school(school_id: str):
+    allowed={x.strip() for x in os.getenv("VERIFYD_SAFETY_CHILD_ACTIVATION_SCHOOL_IDS","").split(",") if x.strip()}
+    if not allowed or school_id not in allowed:
+        raise HTTPException(403,detail={"error":"child_activation_school_not_authorized"})
+
 def _schema():
     global _ready
     _intake_schema()
@@ -72,7 +77,7 @@ class ActivateChildren(BaseModel):
 @router.post("/schools/{school_id}/family/onboarding/{request_id}/verify")
 def verify_child(school_id:str,request_id:str,payload:SchoolVerify,
                  authorization:Optional[str]=Header(default=None)):
-    actor=_actor(authorization);_schema();_require_pilot()
+    actor=_actor(authorization);_schema();_require_pilot();_allowed_school(school_id)
     if not payload.independently_verified:
         raise HTTPException(422,detail={"error":"independent_guardian_verification_required"})
     aid=str(actor["id"])
@@ -125,7 +130,7 @@ def request_activation_code(authorization:Optional[str]=Header(default=None)):
             raise HTTPException(403,detail={"error":"active_verified_guardian_required"})
         cur.execute("""SELECT 1 FROM verifyd_safety_child_activation a
             JOIN verifyd_safety_family_intake r ON r.request_id=a.request_id
-            WHERE r.guardian_id=%s AND r.status='reviewed' AND a.activated_at IS NULL LIMIT 1""",(gid,))
+            WHERE r.guardian_id=%s AND r.status='reviewed' AND a.activated_at IS NULL AND r.school_id=ANY(%s) LIMIT 1""",(gid, list({x.strip() for x in os.getenv("VERIFYD_SAFETY_CHILD_ACTIVATION_SCHOOL_IDS","").split(",") if x.strip()})))
         if not cur.fetchone():
             raise HTTPException(409,detail={"error":"no_verified_child_ready"})
         cur.execute("SELECT sent_at FROM verifyd_safety_child_activation_codes WHERE guardian_id=%s FOR UPDATE",(gid,))
@@ -179,6 +184,7 @@ def activate_children(payload:ActivateChildren,authorization:Optional[str]=Heade
         if len(requests)!=len(payload.request_ids):
             raise HTTPException(403,detail={"error":"all_children_must_be_verified_for_guardian"})
         for req in requests:
+            _allowed_school(req["school_id"])
             if req["status"]!="reviewed" or req["activated_at"]:
                 raise HTTPException(409,detail={"error":"child_request_not_activation_ready"})
             if not _school_accepted(cur,req["school_id"]):
