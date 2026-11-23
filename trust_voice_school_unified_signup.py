@@ -109,8 +109,8 @@ def register_family(payload:UnifiedFamilyApplication):
             rid="ssint_"+uuid.uuid4().hex
             cur.execute("""INSERT INTO verifyd_safety_family_intake(
               request_id,school_id,guardian_id,suggested_handle,handle_lower,
-              child_label,relationship)
-              VALUES(%s,%s,%s,%s,%s,%s,%s)""",
+              child_label,relationship,supervised_creation_consent)
+              VALUES(%s,%s,%s,%s,%s,%s,%s,%s)""",
               (rid,payload.school_id,identity_id,handle,lower,label,payload.relationship,bool(payload.supervised_creation_consent)))
             _audit(cur,payload.school_id,identity_id,"family_handle_intake_submitted",rid)
             ids.append((rid,handle))
