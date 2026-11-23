@@ -99,7 +99,7 @@ class SchoolOwnerApprovalTests(unittest.TestCase):
     def test_owner_notification_address_is_fixed_and_not_applicant_controlled(self):
         self.assertEqual(reg._OWNER_NOTIFICATION_ADDRESS, "support@vfvid.com")
         self.assertEqual(reg._OWNER_NOTIFICATION_FROM, "VeriFYD Safety <support@vfvid.com>")
-        self.assertTrue(reg._OWNER_DASHBOARD_URL.startswith("https://"))
+        self.assertEqual(reg._OWNER_DASHBOARD_URL, "https://vfvid.com/admin")
 
     def test_email_failure_does_not_grant_school_access(self):
         # Notification exceptions must be contained by registration. The
