@@ -95,5 +95,34 @@ class SchoolOwnerApprovalTests(unittest.TestCase):
                 reg.my_school_applications("Bearer anything")
         self.assertEqual(err.exception.status_code, 503)
 
+
+    def test_owner_notification_address_is_fixed_and_not_applicant_controlled(self):
+        self.assertEqual(reg._OWNER_NOTIFICATION_ADDRESS, "support@vfvid.com")
+        self.assertEqual(reg._OWNER_NOTIFICATION_FROM, "VeriFYD Safety <support@vfvid.com>")
+        self.assertTrue(reg._OWNER_DASHBOARD_URL.startswith("https://"))
+
+    def test_email_failure_does_not_grant_school_access(self):
+        # Notification exceptions must be contained by registration. The
+        # applicant's role cannot change based on mail delivery.
+        import inspect
+        source = inspect.getsource(reg.submit_school_application)
+        self.assertIn("_send_owner_application_notification(application_id)", source)
+        self.assertIn("except Exception:", source)
+        self.assertIn('"school_access_granted": False', source)
+
+    def test_notification_retry_is_owner_only(self):
+        with patch.object(reg, "_actor", return_value={"id": "unprivileged"}), \
+             patch.object(reg, "_owner", side_effect=HTTPException(403, "training_operator_required")):
+            with self.assertRaises(HTTPException) as err:
+                reg.retry_owner_notifications("Bearer token")
+        self.assertEqual(err.exception.status_code, 403)
+
+    def test_notification_subject_does_not_approve_school(self):
+        import inspect
+        source = inspect.getsource(reg._send_owner_application_notification)
+        self.assertIn("Idempotency-Key", source)
+        self.assertIn("No school access has been granted", source)
+        self.assertNotIn("principal_application_approved", source)
+
 if __name__=="__main__":
     unittest.main()
