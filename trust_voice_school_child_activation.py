@@ -101,6 +101,64 @@ def verify_child(school_id:str,request_id:str,payload:SchoolVerify,
         _audit(cur,school_id,aid,"child_identity_independently_verified",request_id)
     return {"ok":True,"verified":True,"activated":False,"guardian_confirmation_required":True}
 
+
+class FamilyBatchItem(BaseModel):
+    request_id: str=Field(min_length=8,max_length=100)
+    independently_verified: bool=False
+    verification_note: str=Field(min_length=12,max_length=500)
+
+class FamilyBatchVerify(BaseModel):
+    # Each child has its own independent verification note and checkbox.
+    requests: list[FamilyBatchItem]=Field(min_length=1,max_length=20)
+
+@router.post("/schools/{school_id}/family/child-activation/verify-batch")
+def verify_family_batch(school_id:str,payload:FamilyBatchVerify,
+    authorization:Optional[str]=Header(default=None)):
+    actor=_actor(authorization);_schema();_require_pilot();_allowed_school(school_id)
+    aid=str(actor["id"])
+    request_ids=[item.request_id for item in payload.requests]
+    if len(set(request_ids))!=len(request_ids):
+        raise HTTPException(422,detail={"error":"duplicate_request_ids"})
+    if any(not item.independently_verified for item in payload.requests):
+        raise HTTPException(422,detail={"error":"each_child_must_be_independently_verified"})
+    with get_db() as conn:
+        cur=conn.cursor()
+        _school_admin(cur,school_id,aid)
+        cur.execute("""SELECT request_id,guardian_id,status FROM verifyd_safety_family_intake
+            WHERE school_id=%s AND request_id=ANY(%s) ORDER BY request_id FOR UPDATE""",
+            (school_id,sorted(request_ids)))
+        records={r["request_id"]:r for r in cur.fetchall()}
+        if len(records)!=len(request_ids):
+            raise HTTPException(404,detail={"error":"one_or_more_children_not_found"})
+        guardian_ids={str(r["guardian_id"]) for r in records.values()}
+        if len(guardian_ids)!=1:
+            raise HTTPException(422,detail={"error":"batch_requires_same_parent"})
+        if aid in guardian_ids:
+            raise HTTPException(403,detail={"error":"self_verification_denied"})
+        for item in payload.requests:
+            record=records[item.request_id]
+            if record["status"]=="cancelled":
+                raise HTTPException(409,detail={"error":"request_cancelled"})
+            cur.execute("""SELECT 1 FROM verifyd_safety_child_activation
+                WHERE request_id=%s""",(item.request_id,))
+            if cur.fetchone():
+                raise HTTPException(409,detail={"error":"request_already_verified",
+                    "request_id":item.request_id})
+        for item in payload.requests:
+            record=records[item.request_id]
+            cur.execute("""INSERT INTO verifyd_safety_child_activation
+              (request_id,school_id,guardian_id,verified_by,verification_note)
+              VALUES(%s,%s,%s,%s,%s)""",
+              (item.request_id,school_id,record["guardian_id"],aid,item.verification_note.strip()))
+            cur.execute("""UPDATE verifyd_safety_family_intake
+                SET status='reviewed',reviewed_by=%s,reviewed_at=NOW()
+                WHERE request_id=%s""",(aid,item.request_id))
+            _audit(cur,school_id,aid,"child_identity_independently_verified",item.request_id)
+    return {"ok":True,"verified_request_ids":request_ids,
+            "verified_count":len(request_ids),"activated_count":0,
+            "guardian_email_confirmation_required":True,
+            "emergency_delivery_active":False}
+
 @router.get("/family/child-activation/status")
 def my_activation_status(authorization:Optional[str]=Header(default=None)):
     guardian=_actor(authorization);_schema()
