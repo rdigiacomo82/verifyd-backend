@@ -331,6 +331,8 @@ def create_training_report(payload: ReportInput, authorization: Optional[str] = 
     actor = _actor(authorization)
     student_id = str(actor["id"])
     _schema()
+    from trust_voice_school_incident_chat import _schema as _incident_schema,queue_report,dispatch_report
+    _incident_schema()
     from trust_voice_school_safety_consents import _consent_schema, require_training_signoffs
     _consent_schema()  # DDL before report transaction, never while holding row locks
     with get_db() as conn:
@@ -391,10 +393,19 @@ def create_training_report(payload: ReportInput, authorization: Optional[str] = 
             cur.execute("""INSERT INTO verifyd_safety_training_recipients
                 (report_id,recipient_id,reason) VALUES(%s,%s,%s) ON CONFLICT DO NOTHING""",
                 (report_id,recipient,"TRAINING_ONLY_NEVER_SENT"))
+        queue_report(cur, report_id, payload.school_id, student_id, recipients)
         _audit(cur, payload.school_id, student_id, "training_report_created", report_id)
         cur.execute("SELECT COUNT(*) AS count FROM verifyd_safety_training_reports WHERE incident_id=%s", (incident_id,))
         count = cur.fetchone()["count"]
-    return _report_receipt({"report_id":report_id,"incident_id":incident_id}, count)
+    # A database receipt is NOT a device receipt. The test push outbox is
+    # durable even if this best-effort dispatch fails.
+    push={"attempted_recipients":0,"push_provider_accepted":0}
+    try:
+        push=dispatch_report(report_id)
+    except Exception:
+        pass
+    return {**_report_receipt({"report_id":report_id,"incident_id":incident_id}, count),
+            "test_notifications":push}
 
 
 def _report_access(cur, report_id, actor_id):
