@@ -66,6 +66,16 @@ class SupervisedChildContract(unittest.TestCase):
         self.assertIn("activated_count",source)
         self.assertIn("FOR UPDATE",source)
         self.assertIn("self_verification_denied",source)
+    def test_verification_notes_are_optional_but_acknowledgment_required(self):
+        single=a.SchoolVerify(independently_verified=True)
+        self.assertEqual(single.verification_note,"")
+        batch=a.FamilyBatchVerify(requests=[
+            a.FamilyBatchItem(request_id="ssint_test123",independently_verified=True)])
+        self.assertEqual(batch.requests[0].verification_note,"")
+        self.assertFalse(a.SchoolVerify().independently_verified)
+        self.assertFalse(a.FamilyBatchItem(request_id="ssint_test123").independently_verified)
+        source=inspect.getsource(a.verify_family_batch)
+        self.assertIn("each_child_must_be_independently_verified",source)
     def test_pilot_default_off(self):
         with patch.dict("os.environ",{"VERIFYD_SAFETY_CHILD_ACTIVATION_ENABLED":"0"}):
             with self.assertRaises(HTTPException) as e:
