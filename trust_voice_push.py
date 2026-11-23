@@ -452,7 +452,7 @@ def notify_identity_push(
 
     # A 30-second incoming call can expire while the handset is idle.
     # RFC 8030 defines high urgency for incoming calls.
-    is_incoming_call = notification_type == "call_incoming"
+    is_incoming_call = notification_type in {"call_incoming", "school_safety_test_alert"}
 
     for subscription in subscriptions:
         subscription_id = str(
@@ -1020,6 +1020,13 @@ def run_push_dispatch_once() -> dict:
         result["circle_safety_reminders"] = run_safety_dispatch_once()
     except Exception:
         log.warning("Circle Safety reminder dispatch unavailable", exc_info=True)
+    # Isolated Test School notifications, gated by school-specific environment
+    # values. Do not block existing voice calls, calendar, or meeting reminders.
+    try:
+        from trust_voice_school_incident_chat import dispatch_school_pending_once
+        result["school_safety_test_notifications"] = dispatch_school_pending_once()
+    except Exception:
+        log.warning("School Safety test push retry unavailable", exc_info=True)
     return result
 
 
