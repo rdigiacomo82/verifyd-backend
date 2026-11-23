@@ -212,3 +212,20 @@ def activate_children(payload:ActivateChildren,authorization:Optional[str]=Heade
             "supervised_voice_login_available":False,
             "calls_enabled":False,"messaging_enabled":False,
             "emergency_alerts_active":False}
+
+@router.get("/schools/{school_id}/family/child-activation")
+def school_activation_status(school_id:str,authorization:Optional[str]=Header(default=None)):
+    actor=_actor(authorization);_schema()
+    with get_db() as conn:
+        cur=conn.cursor()
+        _school_admin(cur,school_id,str(actor["id"]))
+        cur.execute("""SELECT r.request_id,r.suggested_handle,r.child_label,
+            guardian.handle AS guardian_handle,a.verified_at,a.activated_at,
+            child.handle AS global_child_handle,child.status AS identity_status
+            FROM verifyd_safety_family_intake r
+            JOIN verifyd_identities guardian ON guardian.id=r.guardian_id
+            LEFT JOIN verifyd_safety_child_activation a ON a.request_id=r.request_id
+            LEFT JOIN verifyd_identities child ON child.id=a.child_identity_id
+            WHERE r.school_id=%s ORDER BY r.created_at DESC LIMIT 150""",(school_id,))
+        rows=[dict(x) for x in cur.fetchall()]
+    return {"ok":True,"children":rows,"training_only":True}
