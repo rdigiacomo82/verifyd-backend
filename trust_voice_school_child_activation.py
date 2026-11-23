@@ -399,6 +399,7 @@ def school_activation_status(school_id:str,authorization:Optional[str]=Header(de
         _school_admin(cur,school_id,str(actor["id"]))
         cur.execute("""SELECT r.request_id,r.suggested_handle,r.child_label,
             guardian.handle AS guardian_handle,a.verified_at,a.activated_at,
+            a.approval_email_status,a.approval_email_sent_at,a.approval_email_attempts,
             child.handle AS global_child_handle,child.status AS identity_status
             FROM verifyd_safety_family_intake r
             JOIN verifyd_identities guardian ON guardian.id=r.guardian_id
