@@ -60,10 +60,62 @@ def _schema():
                 expires_at TIMESTAMPTZ NOT NULL,
                 attempts INTEGER NOT NULL DEFAULT 0
             )""")
+            conn.cursor().execute("""ALTER TABLE verifyd_safety_child_activation ADD COLUMN IF NOT EXISTS approval_email_status TEXT NOT NULL DEFAULT 'pending'""")
+            conn.cursor().execute("""ALTER TABLE verifyd_safety_child_activation ADD COLUMN IF NOT EXISTS approval_email_sent_at TIMESTAMPTZ""")
+            conn.cursor().execute("""ALTER TABLE verifyd_safety_child_activation ADD COLUMN IF NOT EXISTS approval_email_attempts INTEGER NOT NULL DEFAULT 0""")
         _ready=True
 
 def _digest(salt: str, code: str) -> str:
     return hashlib.sha256((salt+":"+code).encode("utf-8")).hexdigest()
+
+
+def _notify_parent_after_approval(school_id:str, request_ids:list[str]):
+    """Send one informational guardian email after a committed school approval."""
+    if not request_ids:return {"status":"none","sent":False}
+    with get_db() as conn:
+        cur=conn.cursor()
+        cur.execute("""SELECT r.request_id,r.guardian_id,r.suggested_handle,
+            s.school_name,g.email_lower,g.email_verified,a.approval_email_status
+            FROM verifyd_safety_child_activation a
+            JOIN verifyd_safety_family_intake r ON r.request_id=a.request_id
+            JOIN verifyd_safety_training_schools s ON s.school_id=r.school_id
+            JOIN verifyd_identities g ON g.id=r.guardian_id
+            WHERE a.school_id=%s AND r.request_id=ANY(%s)
+              AND a.activated_at IS NULL AND r.status='reviewed'""",
+            (school_id,request_ids))
+        records=[dict(x) for x in cur.fetchall()]
+    if len(records)!=len(request_ids) or len({str(x["guardian_id"]) for x in records})!=1:
+        return {"status":"unavailable","sent":False}
+    pending=[x for x in records if x["approval_email_status"]!="sent"]
+    if not pending:return {"status":"already_sent","sent":True}
+    email=pending[0]["email_lower"]
+    if not email or not pending[0]["email_verified"]:
+        return {"status":"guardian_email_not_verified","sent":False}
+    handles=", ".join("@"+html.escape(x["suggested_handle"]) for x in pending)
+    school=html.escape(pending[0]["school_name"])
+    delivered=_send({
+        "from":f"{FROM_NAME} <{FROM_ADDRESS}>",
+        "to":[email],
+        "subject":"VeriFYD Safety — school verification completed; parent action needed",
+        "html":("<p>Your school, <strong>"+school+"</strong>, has verified the "
+          "guardian relationship for these requested child handles: "+handles+".</p>"
+          "<p><strong>Your next step:</strong> sign in to "
+          '<a href="https://vfvid.com/voice">VeriFYD Circle</a>, open VeriFYD Safety, '
+          "then select the approved children and request a fresh parent activation code.</p>"
+          "<p>Approval does not activate a child account. The parent must complete "
+          "the separate confirmation step. Emergency delivery is not enabled.</p>"
+          "<p>If you did not submit these requests, contact the school directly.</p>")
+    })
+    with get_db() as conn:
+        cur=conn.cursor()
+        cur.execute("""UPDATE verifyd_safety_child_activation
+            SET approval_email_status=%s,approval_email_attempts=approval_email_attempts+1,
+                approval_email_sent_at=CASE WHEN %s THEN NOW() ELSE approval_email_sent_at END
+            WHERE request_id=ANY(%s) AND school_id=%s
+                AND approval_email_status<>'sent'""",
+            ("sent" if delivered else "failed",delivered,[x["request_id"] for x in pending],school_id))
+    return {"status":"sent" if delivered else "failed","sent":bool(delivered),
+            "requested_children":len(pending)}
 
 class SchoolVerify(BaseModel):
     independently_verified: bool=False
@@ -99,7 +151,9 @@ def verify_child(school_id:str,request_id:str,payload:SchoolVerify,
             SET status='reviewed',reviewed_by=%s,reviewed_at=NOW()
             WHERE request_id=%s""",(aid,request_id))
         _audit(cur,school_id,aid,"child_identity_independently_verified",request_id)
-    return {"ok":True,"verified":True,"activated":False,"guardian_confirmation_required":True}
+    delivery=_notify_parent_after_approval(school_id,[request_id])
+    return {"ok":True,"verified":True,"activated":False,"guardian_confirmation_required":True,
+            "parent_approval_email":delivery}
 
 
 class FamilyBatchItem(BaseModel):
@@ -154,10 +208,25 @@ def verify_family_batch(school_id:str,payload:FamilyBatchVerify,
                 SET status='reviewed',reviewed_by=%s,reviewed_at=NOW()
                 WHERE request_id=%s""",(aid,item.request_id))
             _audit(cur,school_id,aid,"child_identity_independently_verified",item.request_id)
+    delivery=_notify_parent_after_approval(school_id,request_ids)
     return {"ok":True,"verified_request_ids":request_ids,
             "verified_count":len(request_ids),"activated_count":0,
-            "guardian_email_confirmation_required":True,
+            "guardian_email_confirmation_required":True,"parent_approval_email":delivery,
             "emergency_delivery_active":False}
+
+class ApprovalEmailRetry(BaseModel):
+    request_ids: list[str]=Field(min_length=1,max_length=20)
+
+@router.post("/schools/{school_id}/family/child-activation/approval-email/retry")
+def retry_parent_approval_email(school_id:str,payload:ApprovalEmailRetry,
+    authorization:Optional[str]=Header(default=None)):
+    actor=_actor(authorization);_schema();_require_pilot();_allowed_school(school_id)
+    with get_db() as conn:
+        cur=conn.cursor()
+        _school_admin(cur,school_id,str(actor["id"]))
+    if len(set(payload.request_ids))!=len(payload.request_ids):
+        raise HTTPException(422,detail={"error":"duplicate_request_ids"})
+    return {"ok":True,"parent_approval_email":_notify_parent_after_approval(school_id,payload.request_ids)}
 
 @router.get("/family/child-activation/status")
 def my_activation_status(authorization:Optional[str]=Header(default=None)):
