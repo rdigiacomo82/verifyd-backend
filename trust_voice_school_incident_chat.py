@@ -96,7 +96,9 @@ def _dispatch(report_id, event_key):
         cur.execute("""SELECT o.recipient_id,o.attempts,r.school_id FROM verifyd_safety_incident_outbox o
            JOIN verifyd_safety_training_reports r ON r.report_id=o.report_id
            WHERE o.report_id=%s AND o.event_key=%s AND o.state='pending'
-              AND o.attempts<4 ORDER BY o.created_at LIMIT 100""",(report_id,event_key))
+              AND o.attempts<4
+              AND (o.attempted_at IS NULL OR o.attempted_at < NOW()-INTERVAL '75 seconds')
+           ORDER BY o.created_at LIMIT 100""",(report_id,event_key))
         jobs=[dict(x) for x in cur.fetchall()]
     attempted=0;accepted=0
     for job in jobs:
@@ -104,21 +106,56 @@ def _dispatch(report_id, event_key):
         with get_db() as conn:
             try:_authorize(conn.cursor(),report_id,str(job["recipient_id"]))
             except HTTPException:continue
-        result=notify_identity_push(str(job["recipient_id"]),
-            notification_type="school_safety_test_alert",
-            title="VeriFYD Safety — Test School notification",
-            body="A test incident needs your attention. Open VeriFYD Safety.",
-            url="/Safety",tag="verifyd-school-"+report_id,ttl=600)
+        recipient=str(job["recipient_id"])
+        # Keep unsent notification queued until a device has opted into push.
+        if not _active_subscriptions(recipient):continue
+        with get_db() as conn:
+            cur=conn.cursor()
+            cur.execute("""UPDATE verifyd_safety_incident_outbox
+                 SET attempts=attempts+1,attempted_at=NOW()
+                 WHERE report_id=%s AND recipient_id=%s AND event_key=%s
+                    AND state='pending' AND attempts<4
+                    AND (attempted_at IS NULL OR attempted_at<NOW()-INTERVAL '75 seconds')
+                 RETURNING recipient_id""",(report_id,recipient,event_key))
+            claimed=bool(cur.fetchone())
+        if not claimed:continue
+        try:
+            result=notify_identity_push(recipient,
+                notification_type="school_safety_test_alert",
+                title="VeriFYD Safety — Test School notification",
+                body="A test incident needs your attention. Open VeriFYD Safety.",
+                url="/Safety",tag="verifyd-school-"+report_id,ttl=600)
+        except Exception:
+            result={"sent":0}
         n=int(result.get("sent") or 0)
         with get_db() as conn:
             conn.cursor().execute("""UPDATE verifyd_safety_incident_outbox
-               SET attempts=attempts+1,attempted_at=NOW(),accepted=accepted+%s,
+               SET accepted=accepted+%s,
                    state=CASE WHEN %s>0 THEN 'attempted' ELSE 'pending' END
                WHERE report_id=%s AND recipient_id=%s AND event_key=%s""",
-               (n,n,report_id,str(job["recipient_id"]),event_key))
+               (n,n,report_id,recipient,event_key))
         attempted+=1;accepted+=n
     return {"attempted_recipients":attempted,"push_provider_accepted":accepted,
             "device_delivery_confirmed":False}
+
+def dispatch_school_pending_once():
+    """Bounded scheduler: only test-allowlisted schools, no emergency services."""
+    with get_db() as conn:
+        cur=conn.cursor()
+        cur.execute("""SELECT DISTINCT r.school_id,o.report_id,o.event_key
+           FROM verifyd_safety_incident_outbox o
+           JOIN verifyd_safety_training_reports r ON r.report_id=o.report_id
+           WHERE o.state='pending' AND o.attempts<4
+             AND (o.attempted_at IS NULL OR o.attempted_at<NOW()-INTERVAL '75 seconds')
+           ORDER BY r.school_id,o.report_id,o.event_key LIMIT 30""")
+        jobs=[dict(x) for x in cur.fetchall()]
+    result={"jobs":0,"provider_accepted":0}
+    for job in jobs:
+        if not _allowed(job["school_id"]):continue
+        delivered=_dispatch(job["report_id"],job["event_key"])
+        result["jobs"]+=1
+        result["provider_accepted"]+=delivered["push_provider_accepted"]
+    return result
 
 def dispatch_report(report_id):
     return _dispatch(report_id,"created")
