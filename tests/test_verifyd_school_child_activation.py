@@ -76,6 +76,30 @@ class SupervisedChildContract(unittest.TestCase):
         self.assertFalse(a.FamilyBatchItem(request_id="ssint_test123").independently_verified)
         source=inspect.getsource(a.verify_family_batch)
         self.assertIn("each_child_must_be_independently_verified",source)
+    def test_parent_approval_emails_follow_both_school_verification_paths(self):
+        import inspect
+        single=inspect.getsource(a.verify_child)
+        batch=inspect.getsource(a.verify_family_batch)
+        self.assertIn("_notify_parent_after_approval(school_id,[request_id])",single)
+        self.assertIn("_notify_parent_after_approval(school_id,request_ids)",batch)
+        self.assertIn('parent_approval_email',single)
+        self.assertIn('parent_approval_email',batch)
+        delivery=inspect.getsource(a._notify_parent_after_approval)
+        self.assertIn("approval_email_status",delivery)
+        self.assertIn("approval_email_attempts",delivery)
+        self.assertIn("approval_email_sent_at",delivery)
+        self.assertIn("pending=[",delivery)
+        self.assertIn("activated_at IS NULL",delivery)
+        self.assertIn("email_verified",delivery)
+        self.assertIn("parent must complete",delivery)
+        self.assertNotIn("email_code",delivery)
+    def test_approval_email_retry_requires_school_admin(self):
+        import inspect
+        retry=inspect.getsource(a.retry_parent_approval_email)
+        self.assertIn("_school_admin(cur,school_id",retry)
+        self.assertIn("_require_pilot()",retry)
+        self.assertIn("_allowed_school(school_id)",retry)
+        self.assertIn("duplicate_request_ids",retry)
     def test_pilot_default_off(self):
         with patch.dict("os.environ",{"VERIFYD_SAFETY_CHILD_ACTIVATION_ENABLED":"0"}):
             with self.assertRaises(HTTPException) as e:
