@@ -108,7 +108,7 @@ def _dispatch(report_id, event_key):
             notification_type="school_safety_test_alert",
             title="VeriFYD Safety — Test School notification",
             body="A test incident needs your attention. Open VeriFYD Safety.",
-            url="/safety",tag="verifyd-school-"+report_id,ttl=600)
+            url="/Safety",tag="verifyd-school-"+report_id,ttl=600)
         n=int(result.get("sent") or 0)
         with get_db() as conn:
             conn.cursor().execute("""UPDATE verifyd_safety_incident_outbox
