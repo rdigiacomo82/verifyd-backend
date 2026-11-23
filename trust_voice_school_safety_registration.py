@@ -12,6 +12,7 @@ import os
 import threading
 import uuid
 from urllib import request as urlrequest
+from urllib.error import HTTPError, URLError
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Header, HTTPException
@@ -153,7 +154,7 @@ class RosterRoleEdit(BaseModel):
 # A notification is informational only. A message or link never grants school access.
 _OWNER_NOTIFICATION_ADDRESS = "support@vfvid.com"
 _OWNER_NOTIFICATION_FROM = "VeriFYD Safety <support@vfvid.com>"
-_OWNER_DASHBOARD_URL = "https://vfvid.com/Safety"
+_OWNER_DASHBOARD_URL = "https://vfvid.com/admin"
 
 
 def _send_owner_application_notification(application_id: str) -> str:
@@ -220,9 +221,18 @@ def _send_owner_application_notification(application_id: str) -> str:
             provider_id = json.loads(resp.read(4096).decode("utf-8")).get("id")
         if not provider_id:
             raise RuntimeError("provider_response_missing_id")
-    except Exception:
-        # Do not log application details, credentials or provider error bodies.
-        _notification_log.warning("school_application_owner_notification_failed")
+    except Exception as exc:
+        # Only log sanitized diagnostic categories; never the response body,
+        # applicant fields, provider headers, URL, or any API credentials.
+        if isinstance(exc, HTTPError):
+            category = "provider_http_" + str(exc.code) if exc.code in (400, 401, 403, 404, 409, 422, 429, 500, 502, 503) else "provider_http_other"
+        elif isinstance(exc, URLError):
+            category = "provider_network_error"
+        elif isinstance(exc, RuntimeError) and str(exc) in ("resend_not_configured", "provider_rejected", "provider_response_missing_id"):
+            category = str(exc)
+        else:
+            category = "provider_other_error"
+        _notification_log.warning("school_application_owner_notification_failed category=%s", category)
         with get_db() as conn:
             cur = conn.cursor()
             cur.execute("""UPDATE verifyd_safety_school_application_notifications
