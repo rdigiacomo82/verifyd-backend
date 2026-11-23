@@ -157,6 +157,7 @@ def activate_children(payload:ActivateChildren,authorization:Optional[str]=Heade
             member=cur.fetchone()
             if member and member["role"]!="guardian":
                 raise HTTPException(403,detail={"error":"guardian_has_another_school_role"})
+            req["guardian_already_member"]=bool(member)
             cur.execute("SELECT 1 FROM verifyd_identities WHERE handle_lower=%s",(req["handle_lower"],))
             if cur.fetchone():raise HTTPException(409,detail={"error":"proposed_handle_already_claimed",
                                                                "handle":"@"+req["suggested_handle"]})
@@ -181,7 +182,7 @@ def activate_children(payload:ActivateChildren,authorization:Optional[str]=Heade
               (school_id,identity_id,role,verified_by) VALUES(%s,%s,'student',%s)
               ON CONFLICT(school_id,identity_id) DO NOTHING""",
               (req["school_id"],child_id,req["verified_by"]))
-            if not member:
+            if not req["guardian_already_member"]:
                 cur.execute("""INSERT INTO verifyd_safety_training_members
                   (school_id,identity_id,role,verified_by) VALUES(%s,%s,'guardian',%s)
                   ON CONFLICT(school_id,identity_id) DO NOTHING""",
