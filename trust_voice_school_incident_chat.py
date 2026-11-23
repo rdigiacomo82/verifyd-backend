@@ -221,8 +221,12 @@ def send_reply(report_id:str,payload:Reply,authorization:Optional[str]=Header(de
         if saved:_audit(cur,r["school_id"],aid,"school_incident_reply_saved",report_id)
     delivery={"attempted_recipients":0,"push_provider_accepted":0}
     if saved and _allowed(r["school_id"]):
-        # Background retry will be needed for subscriptions missing at send time.
-        delivery=_dispatch(report_id,"reply:"+mid)
+        # The message is durably saved even if push dispatch is temporarily unavailable.
+        try:
+            delivery=_dispatch(report_id,"reply:"+mid)
+        except Exception:
+            delivery={"attempted_recipients":0,"push_provider_accepted":0,
+                      "device_delivery_confirmed":False}
     return {"ok":True,"saved":True,"duplicate":not bool(saved),
             "notification":delivery,"test_only":True,"emergency_dispatch":False}
 
