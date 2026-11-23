@@ -69,6 +69,90 @@ def _digest(salt: str, code: str) -> str:
     return hashlib.sha256((salt+":"+code).encode("utf-8")).hexdigest()
 
 
+
+def _auto_activate_after_school_approval(school_id:str, request_ids:list[str]):
+    """Automatic creation only when original, explicit guardian consent was recorded.
+
+    Uses the same restricted identity and school-link model as manual activation.
+    Legacy requests (consent FALSE), non-email-verified guardians, and blocked
+    school authorizations remain on the existing email-code path.
+    """
+    if not request_ids:return {"activated":[],"confirmation_required":[]}
+    completed=[];fallback=[]
+    for rid in request_ids:
+        created=None;parent_email=None
+        with get_db() as conn:
+            cur=conn.cursor()
+            cur.execute("""SELECT r.request_id,r.school_id,r.guardian_id,r.status,r.suggested_handle,
+                 r.handle_lower,r.child_label,r.supervised_creation_consent,
+                 a.verified_by,a.activated_at,g.email_lower,g.email_verified
+                 FROM verifyd_safety_family_intake r
+                 JOIN verifyd_safety_child_activation a ON a.request_id=r.request_id
+                 JOIN verifyd_identities g ON g.id=r.guardian_id AND g.status='active'
+                 WHERE r.school_id=%s AND r.request_id=%s
+                 FOR UPDATE OF r,a""",(school_id,rid))
+            row=cur.fetchone()
+            if not row or row["activated_at"]:
+                continue
+            if not row["supervised_creation_consent"] or not row["email_verified"]:
+                fallback.append(rid);continue
+            _require_pilot();_allowed_school(school_id)
+            if row["status"]!="reviewed" or not _school_accepted(cur,school_id):
+                fallback.append(rid);continue
+            gid=str(row["guardian_id"])
+            if gid==str(row["verified_by"]):
+                fallback.append(rid);continue
+            cur.execute("""SELECT role FROM verifyd_safety_training_members
+                WHERE school_id=%s AND identity_id=%s""",(school_id,gid))
+            member=cur.fetchone()
+            if member and member["role"]!="guardian":
+                fallback.append(rid);continue
+            cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))",("safety_handle_"+row["handle_lower"],))
+            cur.execute("SELECT 1 FROM verifyd_identities WHERE handle_lower=%s",(row["handle_lower"],))
+            if cur.fetchone():
+                fallback.append(rid);continue
+            child_id="vfyd_usr_"+uuid.uuid4().hex
+            hidden_email="supervised-"+uuid.uuid4().hex+"@child.verifyd.invalid"
+            cur.execute("""INSERT INTO verifyd_identities (
+                id,email_lower,handle,handle_lower,display_name,display_emoji,
+                email_verified,identity_verified,organization_verified,
+                verification_level,can_receive_calls,call_privacy,status,
+                created_at,updated_at)
+                VALUES(%s,%s,%s,%s,%s,'',FALSE,FALSE,FALSE,
+                  'guardian_supervised',FALSE,'nobody','supervised_child',
+                  NOW()::text,NOW()::text)""",
+                (child_id,hidden_email,row["suggested_handle"],row["handle_lower"],row["child_label"]))
+            cur.execute("""INSERT INTO verifyd_safety_training_members
+                (school_id,identity_id,role,verified_by) VALUES(%s,%s,'student',%s)
+                ON CONFLICT(school_id,identity_id) DO NOTHING""",
+                (school_id,child_id,row["verified_by"]))
+            if not member:
+                cur.execute("""INSERT INTO verifyd_safety_training_members
+                    (school_id,identity_id,role,verified_by) VALUES(%s,%s,'guardian',%s)
+                    ON CONFLICT(school_id,identity_id) DO NOTHING""",
+                    (school_id,gid,row["verified_by"]))
+            cur.execute("""INSERT INTO verifyd_safety_training_guardians
+                (school_id,child_id,guardian_id,verified_by) VALUES(%s,%s,%s,%s)""",
+                (school_id,child_id,gid,row["verified_by"]))
+            cur.execute("""UPDATE verifyd_safety_child_activation
+                SET child_identity_id=%s,activated_at=NOW()
+                WHERE request_id=%s AND activated_at IS NULL""",(child_id,rid))
+            _audit(cur,school_id,str(row["verified_by"]),"supervised_child_created_with_prior_parent_consent",rid)
+            created={"request_id":rid,"handle":"@"+row["suggested_handle"],
+                     "identity_status":"supervised_child"}
+            parent_email=row["email_lower"]
+        if created:
+            completed.append(created)
+            _send({"from":f"{FROM_NAME} <{FROM_ADDRESS}>","to":[parent_email],
+                   "subject":"VeriFYD Safety — supervised child registration completed",
+                   "html":"<p>Following verified school approval and your original supervised-account consent, "
+                   "the requested child handle "+html.escape(created["handle"])+
+                   " has been created as a restricted supervised identity.</p>"
+                   "<p>Sign in to VeriFYD Safety to view your family dashboard. "
+                   "This account cannot independently sign in, call, or message. "
+                   "Emergency alert delivery is not enabled.</p>"})
+    return {"activated":completed,"confirmation_required":fallback}
+
 def _notify_parent_after_approval(school_id:str, request_ids:list[str]):
     """Send one informational guardian email after a committed school approval."""
     if not request_ids:return {"status":"none","sent":False}
@@ -151,8 +235,12 @@ def verify_child(school_id:str,request_id:str,payload:SchoolVerify,
             SET status='reviewed',reviewed_by=%s,reviewed_at=NOW()
             WHERE request_id=%s""",(aid,request_id))
         _audit(cur,school_id,aid,"child_identity_independently_verified",request_id)
-    delivery=_notify_parent_after_approval(school_id,[request_id])
-    return {"ok":True,"verified":True,"activated":False,"guardian_confirmation_required":True,
+    automatic=_auto_activate_after_school_approval(school_id,[request_id])
+    delivery=_notify_parent_after_approval(school_id,automatic["confirmation_required"]) if automatic["confirmation_required"] else {"status":"not_needed","sent":False}
+    return {"ok":True,"verified":True,
+            "activated":bool(automatic["activated"]),
+            "automatic_activation":automatic,
+            "guardian_confirmation_required":bool(automatic["confirmation_required"]),
             "parent_approval_email":delivery}
 
 
@@ -208,10 +296,13 @@ def verify_family_batch(school_id:str,payload:FamilyBatchVerify,
                 SET status='reviewed',reviewed_by=%s,reviewed_at=NOW()
                 WHERE request_id=%s""",(aid,item.request_id))
             _audit(cur,school_id,aid,"child_identity_independently_verified",item.request_id)
-    delivery=_notify_parent_after_approval(school_id,request_ids)
+    automatic=_auto_activate_after_school_approval(school_id,request_ids)
+    delivery=_notify_parent_after_approval(school_id,automatic["confirmation_required"]) if automatic["confirmation_required"] else {"status":"not_needed","sent":False}
     return {"ok":True,"verified_request_ids":request_ids,
-            "verified_count":len(request_ids),"activated_count":0,
-            "guardian_email_confirmation_required":True,"parent_approval_email":delivery,
+            "verified_count":len(request_ids),"activated_count":len(automatic["activated"]),
+            "automatic_activation":automatic,
+            "guardian_email_confirmation_required":bool(automatic["confirmation_required"]),
+            "parent_approval_email":delivery,
             "emergency_delivery_active":False}
 
 class ApprovalEmailRetry(BaseModel):
