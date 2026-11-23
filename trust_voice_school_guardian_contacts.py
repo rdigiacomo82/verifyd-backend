@@ -13,6 +13,7 @@ from typing import Optional, Literal
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
 from database import get_db
+from emailer import _send, FROM_NAME, FROM_ADDRESS
 from trust_voice_school_safety_training import _actor, _audit, _schema as _school_schema
 from trust_voice_school_safety_registration import _school_admin
 from trust_voice_school_safety_consents import _consent_schema, POLICY_VERSION
@@ -291,7 +292,28 @@ def staff_review_contact_change(school_id:str,change_id:str,payload:AdminReview,
             SET status=%s,reviewed_by=%s,reviewed_at=NOW(),review_note=%s
             WHERE change_id=%s""",(outcome,aid,payload.note.strip(),change_id))
         _audit(cur,school_id,aid,"guardian_contact_change_"+outcome,change_id)
-    # Status is visible to authenticated guardians on their next refresh.
+    # Notify verified, affected adults after the transaction commits.
+    # In-app status remains authoritative if a message fails.
+    emails_sent=0
+    emails_failed=0
+    if outcome=="approved":
+        targets={str(row["requested_by"]),str(row["proposed_primary_id"]),str(row["proposed_backup_id"])}
+        with get_db() as conn:
+            cur=conn.cursor()
+            cur.execute("""SELECT email_lower FROM verifyd_identities
+                WHERE id=ANY(%s) AND status='active' AND email_verified=TRUE""",(list(targets),))
+            recipients=sorted({r["email_lower"] for r in cur.fetchall() if r["email_lower"]})
+        for recipient in recipients:
+            delivered=_send({
+                "from":f"{FROM_NAME} <{FROM_ADDRESS}>",
+                "to":[recipient],
+                "subject":"VeriFYD Safety — school guardian contacts updated",
+                "html":"<p>A school administrator approved a change to the primary or backup guardian contact designation.</p>"
+                       "<p>Sign in to VeriFYD Safety and open Manage Guardian Contacts to review the updated details.</p>"
+                       "<p>Your verified family relationship is not changed by this notification.</p>"})
+            emails_sent+=1 if delivered else 0
+            emails_failed+=0 if delivered else 1
     return {"ok":True,"status":outcome,"contacts_changed":outcome=="approved",
-            "in_app_confirmation_available":True,"email_or_push_sent":False,
-            "live_emergency_delivery":False}
+            "in_app_confirmation_available":True,
+            "confirmation_emails_sent":emails_sent,"confirmation_emails_failed":emails_failed,
+            "push_sent":False,"live_emergency_delivery":False}
