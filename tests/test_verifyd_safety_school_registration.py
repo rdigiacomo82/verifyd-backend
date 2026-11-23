@@ -124,5 +124,28 @@ class SchoolOwnerApprovalTests(unittest.TestCase):
         self.assertIn("No school access has been granted", source)
         self.assertNotIn("principal_application_approved", source)
 
+
+    def test_principal_decision_notice_is_addressed_to_verified_applicant(self):
+        import inspect
+        source = inspect.getsource(reg._send_principal_decision_notification)
+        self.assertIn('i.email_lower,i.email_verified', source)
+        self.assertIn('app["email_verified"]', source)
+        self.assertIn('app["email_lower"]', source)
+        self.assertIn('Idempotency-Key', source)
+        self.assertIn('https://vfvid.com/Safety', source)
+
+    def test_owner_review_commits_before_sending_principal_notification(self):
+        import inspect
+        source = inspect.getsource(reg.review_school_application)
+        self.assertIn('_send_principal_decision_notification(application_id)', source)
+        self.assertIn('except Exception:', source)
+        self.assertIn('school_application_"+payload.decision', source)
+
+    def test_principal_decision_retry_requires_owner(self):
+        with patch.object(reg, "_actor", return_value={"id": "ordinary-user"}), patch.object(reg, "_owner", side_effect=HTTPException(403, "training_operator_required")):
+            with self.assertRaises(HTTPException) as err:
+                reg.retry_principal_decision_notifications("Bearer token")
+        self.assertEqual(err.exception.status_code, 403)
+
 if __name__=="__main__":
     unittest.main()
