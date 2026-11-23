@@ -22,6 +22,15 @@ class DemoLocationContracts(unittest.TestCase):
         self.assertIn("_school_admin(cur,incident[\"school_id\"]",s)
         self.assertIn("r.incident_id=%s",s)
         self.assertIn("expires_at",inspect.getsource(loc._purge))
+    def test_indoor_room_label_is_client_entered_and_unverified(self):
+        loc_input=loc.DemoLocation(latitude=40.7,longitude=-73.9,accuracy_m=500,
+            captured_at="2026-11-23T16:00:00+00:00",reported_area="Main building, level 2")
+        self.assertEqual(loc_input.reported_area,"Main building, level 2")
+        with self.assertRaises(ValidationError):
+            loc.DemoLocation(latitude=40.7,longitude=-73.9,accuracy_m=30,
+                captured_at="2026-11-23T16:00:00+00:00",reported_area="x"*121)
+        self.assertIn("reported_area",inspect.getsource(loc.share_demo_location))
+        self.assertIn("reported_area",inspect.getsource(loc.incident_demo_locations))
     def test_default_disabled(self):
         with patch.dict("os.environ",{"VERIFYD_SAFETY_DEMO_LOCATION_ENABLED":"0","VERIFYD_SAFETY_DEMO_LOCATION_SCHOOL_IDS":"sschool_example"}):
             with self.assertRaises(HTTPException) as x:loc._enabled_for("sschool_example")
