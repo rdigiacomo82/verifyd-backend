@@ -19,9 +19,11 @@ on:
       - 'trust_voice_school_safety_training.py'
       - 'trust_voice_school_safety_consents.py'
       - 'trust_voice_school_safety_registration.py'
+      - 'trust_voice_school_family_portal.py'
       - 'tests/test_verifyd_school_safety_training.py'
       - 'tests/test_verifyd_safety_consents.py'
       - 'tests/test_verifyd_safety_school_registration.py'
+      - 'tests/test_verifyd_school_family_portal.py'
       - '.github/workflows/verifyd-safety-training.yml'
 jobs:
   training-contract:
