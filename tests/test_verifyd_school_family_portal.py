@@ -16,6 +16,13 @@ class FamilyPortalSecurityContract(unittest.TestCase):
                                     relationship="parent")
         self.assertEqual(valid.relationship, "parent")
 
+    def test_supervised_child_handle_resolves_only_through_school_student_roster(self):
+        source=inspect.getsource(family.request_family_link)
+        self.assertIn("i.status IN ('active','supervised_child')",source)
+        self.assertIn("m.school_id=%s AND m.role='student'",source)
+        self.assertIn("school_student_unavailable",source)
+        self.assertIn("_membership(cur, payload.school_id, student_id",source)
+
     def test_approval_defaults_unverified(self):
         review = family.FamilyReview(decision="approve", note="Verified offline school record")
         self.assertFalse(review.verified_relationship)
