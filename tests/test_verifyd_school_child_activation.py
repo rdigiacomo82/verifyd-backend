@@ -100,6 +100,26 @@ class SupervisedChildContract(unittest.TestCase):
         self.assertIn("_require_pilot()",retry)
         self.assertIn("_allowed_school(school_id)",retry)
         self.assertIn("duplicate_request_ids",retry)
+    def test_original_consent_required_for_automatic_creation(self):
+        source=inspect.getsource(a._auto_activate_after_school_approval)
+        self.assertIn("supervised_creation_consent",source)
+        self.assertIn('not row["supervised_creation_consent"]',source)
+        self.assertIn('not row["email_verified"]',source)
+        self.assertIn("_school_accepted(cur,school_id)",source)
+        self.assertIn("_allowed_school(school_id)",source)
+        self.assertIn("status='supervised_child'",source.replace("'supervised_child',","status='supervised_child'"))
+        self.assertIn("can_receive_calls,call_privacy,status",source)
+        self.assertIn("supervised_child_created_with_prior_parent_consent",source)
+
+    def test_verification_endpoints_dispatch_auto_only_after_commit(self):
+        one=inspect.getsource(a.verify_child)
+        many=inspect.getsource(a.verify_family_batch)
+        self.assertIn("_auto_activate_after_school_approval(school_id,[request_id])",one)
+        self.assertIn("_auto_activate_after_school_approval(school_id,request_ids)",many)
+        self.assertIn("automatic_activation",one)
+        self.assertIn("activated_count",many)
+        self.assertIn("guardian_email_confirmation_required",many)
+
     def test_pilot_default_off(self):
         with patch.dict("os.environ",{"VERIFYD_SAFETY_CHILD_ACTIVATION_ENABLED":"0"}):
             with self.assertRaises(HTTPException) as e:
