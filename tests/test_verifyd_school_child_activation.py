@@ -55,6 +55,17 @@ class SupervisedChildContract(unittest.TestCase):
         self.assertIn('child_login_enabled":False',source)
         self.assertIn('emergency_alerts_active":False',source)
         self.assertNotIn("email_lower",source.split("return {")[-1])
+    def test_family_batch_requires_individual_verification(self):
+        source=inspect.getsource(a.verify_family_batch)
+        self.assertIn("_school_admin(cur,school_id,aid)",source)
+        self.assertIn("_allowed_school(school_id)",source)
+        self.assertIn("each_child_must_be_independently_verified",source)
+        self.assertIn("batch_requires_same_parent",source)
+        self.assertIn("request_already_verified",source)
+        self.assertIn("guardian_email_confirmation_required",source)
+        self.assertIn("activated_count",source)
+        self.assertIn("FOR UPDATE",source)
+        self.assertIn("self_verification_denied",source)
     def test_pilot_default_off(self):
         with patch.dict("os.environ",{"VERIFYD_SAFETY_CHILD_ACTIVATION_ENABLED":"0"}):
             with self.assertRaises(HTTPException) as e:
