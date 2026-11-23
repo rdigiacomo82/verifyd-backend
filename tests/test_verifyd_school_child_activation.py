@@ -28,9 +28,18 @@ class SupervisedChildContract(unittest.TestCase):
         self.assertIn("'nobody'",src)
         self.assertIn("FALSE,'nobody'",src)
         self.assertIn("_school_accepted",src)
-        self.assertIn("verify_otp(email",src)
+        self.assertIn("verifyd_safety_child_activation_codes",src)
+        self.assertIn("hmac.compare_digest",src)
         self.assertIn("verifyd_safety_training_guardians",src)
         self.assertIn("supervised_voice_login_available",src)
+    def test_activation_challenge_is_independent_of_voice_login(self):
+        request_code=inspect.getsource(a.request_activation_code)
+        activate=inspect.getsource(a.activate_children)
+        self.assertNotIn("create_otp(",request_code)
+        self.assertNotIn("verify_otp(",activate)
+        self.assertIn("activation_code_recently_sent",request_code)
+        self.assertIn("activation_code_expired_or_locked",activate)
+        self.assertIn("attempts=attempts+1",activate)
     def test_pilot_default_off(self):
         with patch.dict("os.environ",{"VERIFYD_SAFETY_CHILD_ACTIVATION_ENABLED":"0"}):
             with self.assertRaises(HTTPException) as e:
