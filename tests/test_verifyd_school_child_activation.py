@@ -1,0 +1,43 @@
+"""Non-escalation and guardian/school separation for supervised child identities."""
+import inspect
+import unittest
+from unittest.mock import patch
+from fastapi import HTTPException
+from pydantic import ValidationError
+import trust_voice_school_child_activation as a
+
+class SupervisedChildContract(unittest.TestCase):
+    def test_bulk_activation_max_five_and_requires_acknowledgment(self):
+        with self.assertRaises(ValidationError):
+            a.ActivateChildren(request_ids=[str(i) for i in range(6)],email_code="123456",supervised_account_acknowledged=True)
+        with patch.object(a,"_actor",return_value={"id":"guardian"}),patch.object(a,"_schema"):
+            with patch.object(a,"_require_pilot"):
+                with self.assertRaises(HTTPException) as e:
+                    a.activate_children(a.ActivateChildren(request_ids=["x"],email_code="123456"))
+                self.assertEqual(e.exception.status_code,422)
+    def test_staff_verification_requires_school_auth_and_independent_evidence(self):
+        src=inspect.getsource(a.verify_child)
+        self.assertIn("_school_admin(cur,school_id",src)
+        self.assertIn("independently_verified",src)
+        self.assertIn("self_verification_denied",src)
+        self.assertNotIn("INSERT INTO verifyd_identities",src)
+    def test_child_created_with_global_unique_handle_and_no_voice(self):
+        src=inspect.getsource(a.activate_children)
+        self.assertIn("INSERT INTO verifyd_identities",src)
+        self.assertIn("'supervised_child'",src)
+        self.assertIn("'nobody'",src)
+        self.assertIn("FALSE,'nobody'",src)
+        self.assertIn("_school_accepted",src)
+        self.assertIn("verify_otp(email",src)
+        self.assertIn("verifyd_safety_training_guardians",src)
+        self.assertIn("supervised_voice_login_available",src)
+    def test_pilot_default_off(self):
+        with patch.dict("os.environ",{"VERIFYD_SAFETY_CHILD_ACTIVATION_ENABLED":"0"}):
+            with self.assertRaises(HTTPException) as e:
+                a._require_pilot()
+            self.assertEqual(e.exception.status_code,503)
+    def test_no_unauthenticated_status(self):
+        with patch.object(a,"_actor",side_effect=HTTPException(401,"session_required")):
+            with self.assertRaises(HTTPException):
+                a.my_activation_status(None)
+if __name__=="__main__":unittest.main()
