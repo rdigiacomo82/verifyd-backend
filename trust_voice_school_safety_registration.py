@@ -82,6 +82,15 @@ def _application_schema():
                 sent_at TIMESTAMPTZ,
                 provider_message_id TEXT
             )""")
+            cur.execute("""CREATE TABLE IF NOT EXISTS verifyd_safety_school_decision_notifications (
+                application_id TEXT PRIMARY KEY REFERENCES verifyd_safety_school_applications(application_id),
+                decision TEXT NOT NULL CHECK (decision IN ('approved','rejected')),
+                status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','sending','sent','failed')),
+                attempts INTEGER NOT NULL DEFAULT 0,
+                last_attempt_at TIMESTAMPTZ,
+                sent_at TIMESTAMPTZ,
+                provider_message_id TEXT
+            )""")
         _ready = True
 
 
@@ -275,6 +284,107 @@ def retry_owner_notifications(authorization: Optional[str] = Header(default=None
             "school_access_granted": False}
 
 
+
+def _send_principal_decision_notification(application_id: str) -> str:
+    """Send one outcome notice to the applicant's verified account email.
+
+    A failed notification never undoes an owner's committed review. Retrying
+    uses the same provider idempotency key and never resends an accepted email.
+    """
+    _application_schema()
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("""UPDATE verifyd_safety_school_decision_notifications
+            SET status='sending', attempts=attempts+1, last_attempt_at=NOW()
+            WHERE application_id=%s AND
+                (status IN ('pending','failed') OR
+                (status='sending' AND last_attempt_at < NOW()-INTERVAL '10 minutes'))
+            RETURNING application_id""", (application_id,))
+        if not cur.fetchone():
+            return "already_sent_or_in_progress"
+        cur.execute("""SELECT a.application_id,a.school_name,a.status,a.review_note,
+                i.email_lower,i.email_verified
+            FROM verifyd_safety_school_applications a
+            JOIN verifyd_identities i ON i.id=a.applicant_id
+            WHERE a.application_id=%s""", (application_id,))
+        app = dict(cur.fetchone())
+    try:
+        if app["status"] not in ("approved", "rejected") or not app["email_verified"] or not is_valid_email(app["email_lower"] or ""):
+            raise RuntimeError("applicant_email_unverified")
+        api_key = os.getenv("RESEND_API_KEY", "").strip()
+        if not api_key:
+            raise RuntimeError("resend_not_configured")
+        approved = app["status"] == "approved"
+        subject = ("VeriFYD Safety — Your Principal Application Was Approved" if approved
+                   else "VeriFYD Safety — Your Principal Application Was Rejected")
+        body = (
+            "Your VeriFYD Safety Principal application for " + app["school_name"] +
+            (" has been approved." if approved else " has been rejected.") + "\\n\\n" +
+            ("Sign in as your approved Principal account and complete the pre-activation school acknowledgment before managing the school roster.\\n\\n"
+             if approved else "You do not have Principal access for this application. Contact VeriFYD support if you believe this decision is incorrect.\\n\\n") +
+            "Application reference: " + app["application_id"] + "\\n" +
+            "Open VeriFYD Safety: https://vfvid.com/Safety\\n\\n" +
+            "School Safety is training/setup only. No real emergency alerts are active."
+        )
+        req = urlrequest.Request(
+            "https://api.resend.com/emails", method="POST",
+            data=json.dumps({
+                "from": _OWNER_NOTIFICATION_FROM,
+                "to": [app["email_lower"]],
+                "subject": subject, "text": body,
+            }).encode("utf-8"),
+            headers={
+                "Authorization": "Bearer " + api_key,
+                "Content-Type": "application/json",
+                "Idempotency-Key": "verifyd-safety-decision-" + application_id,
+            },
+        )
+        with urlrequest.urlopen(req, timeout=8) as response:
+            provider_id = json.loads(response.read(4096).decode("utf-8")).get("id")
+        if not provider_id:
+            raise RuntimeError("provider_response_missing_id")
+    except Exception as exc:
+        if isinstance(exc, HTTPError):
+            category = "provider_http_" + str(exc.code) if 400 <= exc.code <= 599 else "provider_http_other"
+        elif isinstance(exc, URLError):
+            category = "provider_network_error"
+        elif isinstance(exc, RuntimeError) and str(exc) in ("applicant_email_unverified", "resend_not_configured", "provider_response_missing_id"):
+            category = str(exc)
+        else:
+            category = "provider_other_error"
+        _notification_log.warning("school_principal_decision_notification_failed category=%s", category)
+        with get_db() as conn:
+            conn.cursor().execute("""UPDATE verifyd_safety_school_decision_notifications
+                SET status='failed' WHERE application_id=%s AND status='sending'""", (application_id,))
+        return "failed"
+    with get_db() as conn:
+        conn.cursor().execute("""UPDATE verifyd_safety_school_decision_notifications
+            SET status='sent',sent_at=NOW(),provider_message_id=%s
+            WHERE application_id=%s AND status='sending'""", (provider_id,application_id))
+    return "accepted_by_provider"
+
+
+@router.post("/owner/decision-notifications/retry")
+def retry_principal_decision_notifications(authorization: Optional[str] = Header(default=None)):
+    owner = _actor(authorization)
+    _owner(owner)
+    _application_schema()
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("""INSERT INTO verifyd_safety_school_decision_notifications (application_id,decision)
+            SELECT application_id,status FROM verifyd_safety_school_applications
+            WHERE status IN ('approved','rejected')
+            ON CONFLICT(application_id) DO NOTHING""")
+        cur.execute("""SELECT application_id FROM verifyd_safety_school_decision_notifications
+            WHERE status IN ('pending','failed')
+            ORDER BY application_id LIMIT 20""")
+        ids = [row["application_id"] for row in cur.fetchall()]
+    results = {"accepted_by_provider":0,"failed":0,"already_sent_or_in_progress":0}
+    for app_id in ids:
+        results[_send_principal_decision_notification(app_id)] += 1
+    return {"ok":True,"attempted":len(ids),"results":results,"school_access_granted":False}
+
+
 @router.post("/applications")
 def submit_school_application(payload: SchoolApplication, authorization: Optional[str] = Header(default=None)):
     applicant = _actor(authorization)
@@ -388,6 +498,13 @@ def review_school_application(application_id: str, payload: ReviewDecision,
            owner_id,payload.review_note.strip(),school_id,application_id))
         _audit(cur,school_id or "application_review",owner_id,
                "school_application_"+payload.decision,application_id)
+        cur.execute("""INSERT INTO verifyd_safety_school_decision_notifications(application_id,decision)
+            VALUES(%s,%s) ON CONFLICT(application_id) DO NOTHING""",
+            (application_id,"approved" if payload.decision=="approve" else "rejected"))
+    try:
+        _send_principal_decision_notification(application_id)
+    except Exception:
+        _notification_log.warning("school_principal_decision_notification_unavailable")
     return {"ok": True, "status": payload.decision, "school_id": school_id,
             "emergency_alerts_active": False, "backup_admin_approved": False}
 
