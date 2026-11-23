@@ -49,6 +49,12 @@ class SupervisedChildContract(unittest.TestCase):
         with patch.dict("os.environ",{"VERIFYD_SAFETY_CHILD_ACTIVATION_SCHOOL_IDS":""}):
             with self.assertRaises(HTTPException):
                 a._allowed_school("sschool_test")
+    def test_readiness_authentication_and_no_child_login(self):
+        source=inspect.getsource(a.activation_readiness)
+        self.assertIn("_actor(authorization)",source)
+        self.assertIn('child_login_enabled":False',source)
+        self.assertIn('emergency_alerts_active":False',source)
+        self.assertNotIn("email_lower",source.split("return {")[-1])
     def test_pilot_default_off(self):
         with patch.dict("os.environ",{"VERIFYD_SAFETY_CHILD_ACTIVATION_ENABLED":"0"}):
             with self.assertRaises(HTTPException) as e:
