@@ -34,6 +34,21 @@ class UnifiedFamilyApplication(BaseModel):
     children: list[ChildChoice]=Field(min_length=1,max_length=5)
     parental_authority_acknowledged: bool=False
 
+@router.get("/family/onboarding/open-schools")
+def open_schools():
+    if not _school_enabled():
+        raise HTTPException(503,detail={"error":"school_registration_not_enabled"})
+    _family_schema()
+    with get_db() as conn:
+        cur=conn.cursor()
+        cur.execute("""SELECT DISTINCT s.school_id,s.school_name
+            FROM verifyd_safety_training_schools s
+            JOIN verifyd_safety_school_applications a
+              ON a.school_id=s.school_id AND a.status='approved'
+            ORDER BY s.school_name LIMIT 100""")
+        rows=[dict(x) for x in cur.fetchall()]
+    return {"ok":True,"schools":rows,"student_accounts_not_activated":True}
+
 @router.post("/family/onboarding/register-family")
 def register_family(payload:UnifiedFamilyApplication):
     # The school and parent identity features must both be explicitly enabled.
