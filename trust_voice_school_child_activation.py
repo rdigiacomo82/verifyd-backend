@@ -67,7 +67,7 @@ def _digest(salt: str, code: str) -> str:
 
 class SchoolVerify(BaseModel):
     independently_verified: bool=False
-    verification_note: str=Field(min_length=12,max_length=500)
+    verification_note: str=Field(default='',max_length=500)
 
 class ActivateChildren(BaseModel):
     request_ids: list[str]=Field(min_length=1,max_length=5)
@@ -105,7 +105,7 @@ def verify_child(school_id:str,request_id:str,payload:SchoolVerify,
 class FamilyBatchItem(BaseModel):
     request_id: str=Field(min_length=8,max_length=100)
     independently_verified: bool=False
-    verification_note: str=Field(min_length=12,max_length=500)
+    verification_note: str=Field(default='',max_length=500)
 
 class FamilyBatchVerify(BaseModel):
     # Each child has its own independent verification note and checkbox.
