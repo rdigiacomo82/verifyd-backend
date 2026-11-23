@@ -81,6 +81,7 @@ from trust_voice_school_family_onboarding import router as school_family_onboard
 from trust_voice_school_child_activation import router as school_child_activation_router
 from trust_voice_school_demo_location import router as school_demo_location_router
 from trust_voice_school_unified_signup import router as school_unified_signup_router
+from trust_voice_school_multi_admin import router as school_multi_admin_router
 from trust_voice_homework import router as trust_voice_homework_router
 from trust_voice_classrooms import router as trust_voice_classrooms_router
 from trust_voice_classroom_library import router as trust_voice_classroom_library_router
@@ -379,6 +380,7 @@ app.include_router(school_family_onboarding_router)
 app.include_router(school_child_activation_router)
 app.include_router(school_demo_location_router)
 app.include_router(school_unified_signup_router)
+app.include_router(school_multi_admin_router)
 # VERIFYD_CIRCLE_HOMEWORK_V1 -- off until the server pilot is enabled
 app.include_router(trust_voice_homework_router)
 # Isolated Classroom pilot (all endpoints disabled by default)
