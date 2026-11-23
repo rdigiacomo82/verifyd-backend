@@ -71,9 +71,9 @@ def _application_schema():
                 revoked_at TIMESTAMPTZ,
                 PRIMARY KEY(school_id,identity_id)
             )""")
-            cur.execute("""CREATE UNIQUE INDEX IF NOT EXISTS safety_one_active_backup_per_school
-                ON verifyd_safety_school_admin_delegations(school_id)
-                WHERE revoked_at IS NULL""")
+            # Multi-admin rollout: remove the old one-backup-per-school constraint.
+            # Each delegation remains unique by (school_id, identity_id).
+            cur.execute("DROP INDEX IF EXISTS safety_one_active_backup_per_school")
             cur.execute("""CREATE TABLE IF NOT EXISTS verifyd_safety_school_application_notifications (
                 application_id TEXT PRIMARY KEY REFERENCES verifyd_safety_school_applications(application_id),
                 status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','sending','sent','failed')),
@@ -531,11 +531,17 @@ def owner_approve_backup(school_id: str, payload: BackupApproval,
         existing = cur.fetchone()
         if existing and existing["role"] not in ("responder",):
             raise HTTPException(409, detail={"error": "backup_requires_separate_responder_account"})
-        # Activate only after owner approval and the designated backup's own
-        # acceptance in their authenticated session; previous backup revoked.
-        cur.execute("""UPDATE verifyd_safety_school_admin_delegations
-          SET revoked_at=NOW(), accepted_at=NULL
-          WHERE school_id=%s AND revoked_at IS NULL""", (school_id,))
+        # Approval is additive. Existing approved administrators remain authorized.
+        # A new administrator still must accept in their own signed-in account.
+        cur.execute("SELECT school_id FROM verifyd_safety_training_schools WHERE school_id=%s FOR UPDATE",(school_id,))
+        cur.execute("""SELECT COUNT(*) AS count FROM verifyd_safety_school_admin_delegations
+            WHERE school_id=%s AND revoked_at IS NULL""",(school_id,))
+        active_count=int(cur.fetchone()["count"])
+        cur.execute("""SELECT 1 FROM verifyd_safety_school_admin_delegations
+            WHERE school_id=%s AND identity_id=%s AND revoked_at IS NULL""",(school_id,candidate_id))
+        already_active=bool(cur.fetchone())
+        if active_count>=10 and not already_active:
+            raise HTTPException(409,detail={"error":"school_admin_limit_reached"})
         if not existing:
             cur.execute("""INSERT INTO verifyd_safety_training_members
               (school_id,identity_id,role,verified_by)
