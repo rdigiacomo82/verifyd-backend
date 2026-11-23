@@ -280,3 +280,36 @@ def school_activation_status(school_id:str,authorization:Optional[str]=Header(de
             WHERE r.school_id=%s ORDER BY r.created_at DESC LIMIT 150""",(school_id,))
         rows=[dict(x) for x in cur.fetchall()]
     return {"ok":True,"children":rows,"training_only":True}
+
+@router.get("/family/child-activation/readiness/{school_id}")
+def activation_readiness(school_id:str,authorization:Optional[str]=Header(default=None)):
+    """Authenticated, sanitized end-to-end readiness indicators (no secrets)."""
+    guardian=_actor(authorization);_schema()
+    gid=str(guardian["id"])
+    with get_db() as conn:
+        cur=conn.cursor()
+        cur.execute("""SELECT 1 FROM verifyd_safety_school_applications
+            WHERE school_id=%s AND status='approved' LIMIT 1""",(school_id,))
+        approved=bool(cur.fetchone())
+        cur.execute("SELECT email_verified FROM verifyd_identities WHERE id=%s AND status='active'",(gid,))
+        identity=cur.fetchone()
+        cur.execute("""SELECT count(*) AS n FROM verifyd_safety_family_intake
+            WHERE school_id=%s AND guardian_id=%s AND status IN ('pending','reviewed')""",(school_id,gid))
+        requested=int(cur.fetchone()["n"])
+        cur.execute("""SELECT count(*) AS n FROM verifyd_safety_child_activation a
+          JOIN verifyd_safety_family_intake r ON r.request_id=a.request_id
+          WHERE a.school_id=%s AND a.guardian_id=%s
+            AND r.status='reviewed' AND a.activated_at IS NULL""",(school_id,gid))
+        verified=int(cur.fetchone()["n"])
+        cur.execute("""SELECT count(*) AS n FROM verifyd_safety_child_activation a
+            WHERE a.school_id=%s AND a.guardian_id=%s AND a.activated_at IS NOT NULL""",(school_id,gid))
+        activated=int(cur.fetchone()["n"])
+        school_ack=_school_accepted(cur,school_id) if approved else False
+    enabled=os.getenv("VERIFYD_SAFETY_CHILD_ACTIVATION_ENABLED","0").lower().strip() in ("1","true","yes","on")
+    allowed={x.strip() for x in os.getenv("VERIFYD_SAFETY_CHILD_ACTIVATION_SCHOOL_IDS","").split(",") if x.strip()}
+    return {"ok":True,"pilot_enabled_for_school":bool(enabled and school_id in allowed),
+            "approved_school":approved,"school_acknowledgment_recorded":school_ack,
+            "guardian_email_verified":bool(identity and identity["email_verified"]),
+            "pending_or_verified_requests":requested,
+            "ready_for_parent_confirmation":verified,"activated_children":activated,
+            "child_login_enabled":False,"emergency_alerts_active":False}
