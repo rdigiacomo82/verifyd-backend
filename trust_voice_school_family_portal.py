@@ -103,12 +103,24 @@ def request_family_link(payload: FamilyRequest, authorization: Optional[str] = H
     guardian = _actor(authorization)
     _family_schema()
     guardian_id = str(guardian["id"])
-    student_id = _id_for_handle(payload.student_handle)
-    if guardian_id == student_id:
-        raise HTTPException(422, detail={"error":"distinct_people_required"})
     with get_db() as conn:
         cur = conn.cursor()
-        # Never expose whether a child exists except to an approved student roster.
+        # Child handles are global. Supervised child accounts are NOT active
+        # on /voice, but may still be linked by a verified second guardian.
+        # Only resolve the handle through the student roster of this school.
+        from trust_voice_identity import _validate_handle
+        _, child_handle_lower = _validate_handle(payload.student_handle)
+        cur.execute("""SELECT i.id FROM verifyd_identities i
+            JOIN verifyd_safety_training_members m ON m.identity_id=i.id
+            WHERE m.school_id=%s AND m.role='student'
+              AND i.handle_lower=%s AND i.status IN ('active','supervised_child')
+            LIMIT 1""",(payload.school_id, child_handle_lower))
+        child_row=cur.fetchone()
+        if not child_row:
+            raise HTTPException(404,detail={"error":"school_student_unavailable"})
+        student_id=str(child_row["id"])
+        if guardian_id == student_id:
+            raise HTTPException(422,detail={"error":"distinct_people_required"})
         _membership(cur, payload.school_id, student_id, {"student"})
         cur.execute("""SELECT role FROM verifyd_safety_training_members
             WHERE school_id=%s AND identity_id=%s""",(payload.school_id, guardian_id))
