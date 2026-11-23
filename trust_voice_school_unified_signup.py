@@ -33,6 +33,7 @@ class UnifiedFamilyApplication(BaseModel):
     relationship: Literal["parent","legal_guardian","authorized_caregiver"]="parent"
     children: list[ChildChoice]=Field(min_length=1,max_length=5)
     parental_authority_acknowledged: bool=False
+    supervised_creation_consent: bool=False
 
 @router.get("/family/onboarding/open-schools")
 def open_schools():
@@ -110,7 +111,7 @@ def register_family(payload:UnifiedFamilyApplication):
               request_id,school_id,guardian_id,suggested_handle,handle_lower,
               child_label,relationship)
               VALUES(%s,%s,%s,%s,%s,%s,%s)""",
-              (rid,payload.school_id,identity_id,handle,lower,label,payload.relationship))
+              (rid,payload.school_id,identity_id,handle,lower,label,payload.relationship,bool(payload.supervised_creation_consent)))
             _audit(cur,payload.school_id,identity_id,"family_handle_intake_submitted",rid)
             ids.append((rid,handle))
     receipts=[]
