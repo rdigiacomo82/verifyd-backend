@@ -80,8 +80,8 @@ class SupervisedChildContract(unittest.TestCase):
         import inspect
         single=inspect.getsource(a.verify_child)
         batch=inspect.getsource(a.verify_family_batch)
-        self.assertIn("_notify_parent_after_approval(school_id,[request_id])",single)
-        self.assertIn("_notify_parent_after_approval(school_id,request_ids)",batch)
+        self.assertIn('_notify_parent_after_approval(school_id,automatic["confirmation_required"])',single)
+        self.assertIn('_notify_parent_after_approval(school_id,automatic["confirmation_required"])',batch)
         self.assertIn('parent_approval_email',single)
         self.assertIn('parent_approval_email',batch)
         delivery=inspect.getsource(a._notify_parent_after_approval)
