@@ -6,7 +6,6 @@ The backend retains its six canonical incident categories for grouping.
 from __future__ import annotations
 
 import json
-import re
 import threading
 from typing import Literal, Optional
 
@@ -158,8 +157,12 @@ def update_school_safety_choices(
             (school_id,revision,choices,updated_by) VALUES(%s,%s,%s::jsonb,%s)
             ON CONFLICT(school_id) DO UPDATE SET
               revision=EXCLUDED.revision, choices=EXCLUDED.choices,
-              updated_by=EXCLUDED.updated_by, updated_at=NOW()""",
+              updated_by=EXCLUDED.updated_by, updated_at=NOW()
+            WHERE verifyd_safety_choice_catalog.revision=EXCLUDED.revision-1
+            RETURNING revision""",
             (school_id, current + 1, json.dumps(items), str(actor["id"])))
+        if not cur.fetchone():
+            raise HTTPException(409, detail={"error": "school_safety_choices_updated_elsewhere"})
         _audit(cur, school_id, str(actor["id"]), "school_safety_choices_updated")
     return {"ok": True, "test_only": True, "school_id": school_id,
             "revision": current + 1, "choices": items,
