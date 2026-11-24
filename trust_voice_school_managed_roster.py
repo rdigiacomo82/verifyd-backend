@@ -11,7 +11,7 @@ an individual's guardian signature.
 from __future__ import annotations
 import json
 import os
-from datetime import date
+from datetime import date, datetime
 import re
 import secrets
 import threading
@@ -19,13 +19,13 @@ import unicodedata
 import uuid
 from typing import Literal, Optional
 from fastapi import APIRouter, Header, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from database import get_db
 from trust_voice_identity import _validate_handle
 from trust_voice_school_safety_training import _actor, _audit
 from trust_voice_school_safety_registration import _application_schema, _school_admin
 
-router = APIRouter(prefix="/trust-voice/school-safety", tags=["TEST School Managed Roster"])
+router = APIRouter(prefix="/trust-voice/school-safety", tags=["School Managed Enrollment"])
 _lock = threading.Lock()
 _ready = False
 _CODE = re.compile(r"^[A-Z][A-Z0-9]{1,9}$")
@@ -131,6 +131,23 @@ class SchoolAuthorizationItem(BaseModel):
     signed_date: Optional[date] = None
     authority_reference: Optional[str] = Field(default=None, max_length=180)
     individually_verified: Literal[True]
+
+    @field_validator("signed_date", mode="before")
+    @classmethod
+    def normalize_spreadsheet_date(cls, value):
+        # Older school exports use US dates; normalize to a real date rather
+        # than allowing a string to pass the frontend eligibility check and
+        # fail later with an opaque FastAPI 422.
+        if isinstance(value, str):
+            trimmed = value.strip()
+            if not trimmed:
+                return None
+            if "/" in trimmed:
+                try:
+                    return datetime.strptime(trimmed, "%m/%d/%Y").date()
+                except ValueError as exc:
+                    raise ValueError("Invalid signature date; use YYYY-MM-DD or MM/DD/YYYY") from exc
+        return value
 
 
 class SchoolAuthorizationBatch(BaseModel):
