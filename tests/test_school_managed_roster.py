@@ -26,10 +26,11 @@ class SchoolManagedRosterContracts(unittest.TestCase):
     def test_global_handle_claim_respects_staged_school_reservations(self):
         from trust_voice_identity import _school_managed_handle_reserved
         cur = MagicMock()
-        cur.fetchone.side_effect = [{"managed_table": "verifyd_safety_managed_students"}, {"reserved": 1}]
+        cur.fetchone.side_effect = [{"managed_table": "verifyd_safety_managed_roster_settings"}, {"reserved": 1}]
         self.assertTrue(_school_managed_handle_reserved(cur, "wmhs_johnsmith"))
         statements = [c.args[0] for c in cur.execute.call_args_list]
-        self.assertTrue(any("verifyd_safety_managed_students" in q for q in statements))
+        self.assertTrue(any("verifyd_safety_managed_roster_settings" in q for q in statements))
+        self.assertTrue(any("split_part" in q for q in statements))
         cur = MagicMock()
         cur.fetchone.return_value = {"managed_table": None}
         self.assertFalse(_school_managed_handle_reserved(cur, "anything"))
