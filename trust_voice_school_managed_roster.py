@@ -488,3 +488,36 @@ def approve_managed_school_enrollment(
             "guardian_private_message_access_granted":False,
             "student_reporting_unlocked":False,
             "emergency_dispatch_enabled":False}
+
+
+@router.delete("/schools/{school_id}/managed-roster/students/{local_ref}")
+def discard_unapproved_managed_student(school_id: str, local_ref: str,
+                                       authorization: Optional[str] = Header(default=None)):
+    """Allow correcting a mistaken *staged* upload, never erase approved identity.
+
+    Approved students must be deactivated using ordinary school-roster
+    administration, which retains audit/history and prevents silent deletion.
+    """
+    _require_enrollment_enabled(school_id)
+    actor = _actor(authorization)
+    ref = local_ref.strip().upper()
+    if not _REF.fullmatch(ref):
+        raise HTTPException(422, detail={"error": "invalid_school_local_reference"})
+    _schema()
+    with get_db() as conn:
+        cur = conn.cursor()
+        _school_admin(cur, school_id, str(actor["id"]))
+        cur.execute("""SELECT student_identity_id,enrollment_status
+            FROM verifyd_safety_managed_students
+            WHERE school_id=%s AND local_ref=%s FOR UPDATE""", (school_id, ref))
+        record = cur.fetchone()
+        if not record:
+            raise HTTPException(404, detail={"error": "staged_student_not_found"})
+        if record["student_identity_id"] or record["enrollment_status"] != "staged":
+            raise HTTPException(409, detail={"error": "approved_student_use_authorized_roster_deactivation"})
+        cur.execute("""DELETE FROM verifyd_safety_managed_students
+            WHERE school_id=%s AND local_ref=%s""", (school_id, ref))
+        _audit(cur, school_id, str(actor["id"]), "managed_staged_student_discarded", ref)
+    return {"ok": True, "staged_record_removed": True,
+            "global_verifyd_account_deleted": False,
+            "school_managed_enrollment": True}
