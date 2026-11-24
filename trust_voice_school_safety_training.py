@@ -391,12 +391,12 @@ def save_verified_school_contact_routing(
     authorization: Optional[str] = Header(default=None),
 ):
     actor = _actor(authorization)
+    if student_id in (payload.primary_id,payload.backup_id) or payload.primary_id == payload.backup_id:
+        raise HTTPException(422,detail={"error":"two_distinct_contacts_required"})
     _schema()
     from trust_voice_school_safety_consents import _consent_schema
     from trust_voice_school_safety_registration import _school_admin
     _consent_schema()
-    if student_id in (payload.primary_id,payload.backup_id) or payload.primary_id == payload.backup_id:
-        raise HTTPException(422,detail={"error":"two_distinct_contacts_required"})
     with get_db() as conn:
         cur = conn.cursor()
         _school_admin(cur,school_id,str(actor["id"]))
