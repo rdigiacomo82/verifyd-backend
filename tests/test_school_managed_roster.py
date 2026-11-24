@@ -23,6 +23,17 @@ class SchoolManagedRosterContracts(unittest.TestCase):
             with self.assertRaises(HTTPException):
                 roster._require_enrollment_enabled("different-school")
 
+    def test_global_handle_claim_respects_staged_school_reservations(self):
+        from trust_voice_identity import _school_managed_handle_reserved
+        cur = MagicMock()
+        cur.fetchone.side_effect = [{"managed_table": "verifyd_safety_managed_students"}, {"reserved": 1}]
+        self.assertTrue(_school_managed_handle_reserved(cur, "wmhs_johnsmith"))
+        statements = [c.args[0] for c in cur.execute.call_args_list]
+        self.assertTrue(any("verifyd_safety_managed_students" in q for q in statements))
+        cur = MagicMock()
+        cur.fetchone.return_value = {"managed_table": None}
+        self.assertFalse(_school_managed_handle_reserved(cur, "anything"))
+
     def test_handle_format_respects_24_character_global_limit(self):
         cursor = MagicMock()
         cursor.fetchone.return_value = None
