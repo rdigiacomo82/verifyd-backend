@@ -256,7 +256,7 @@ def activate_device(payload: ActivateCode):
 
 
 @router.get("/student-devices/me")
-def student_device_me(x_safety_device_session: Optional[str] = Header(default=None)):
+def student_device_me(x_safety_device_session: Optional[str] = Header(default=None, alias="X-VeriFYD-Safety-Session")):
     ctx = _session(x_safety_device_session)
     with get_db() as conn:
         cur = conn.cursor()
@@ -284,7 +284,7 @@ def student_device_me(x_safety_device_session: Optional[str] = Header(default=No
 
 
 @router.get("/student-devices/choices")
-def device_school_choices(x_safety_device_session: Optional[str] = Header(default=None)):
+def device_school_choices(x_safety_device_session: Optional[str] = Header(default=None, alias="X-VeriFYD-Safety-Session")):
     ctx = _session(x_safety_device_session)
     from trust_voice_school_choice_catalog import _catalog_schema, _read_catalog
     _catalog_schema()
@@ -295,7 +295,7 @@ def device_school_choices(x_safety_device_session: Optional[str] = Header(defaul
 
 @router.post("/student-devices/acknowledgment")
 def device_student_acknowledgment(payload: StudentAcknowledgment,
-                                  x_safety_device_session: Optional[str] = Header(default=None)):
+                                  x_safety_device_session: Optional[str] = Header(default=None, alias="X-VeriFYD-Safety-Session")):
     ctx = _session(x_safety_device_session)
     if payload.accepted is not True or payload.understood_test_only is not True or payload.policy_version != POLICY_VERSION:
         raise HTTPException(422, detail={"error": "student_training_acknowledgment_required"})
@@ -313,7 +313,7 @@ def device_student_acknowledgment(payload: StudentAcknowledgment,
 
 
 @router.post("/student-devices/reports")
-def device_send_report(payload: SessionReport, x_safety_device_session: Optional[str] = Header(default=None)):
+def device_send_report(payload: SessionReport, x_safety_device_session: Optional[str] = Header(default=None, alias="X-VeriFYD-Safety-Session")):
     ctx = _session(x_safety_device_session)
     if payload.school_id != ctx["school_id"] or not payload.choice_id:
         raise HTTPException(403, detail={"error": "restricted_student_school_or_choice_mismatch"})
@@ -321,7 +321,7 @@ def device_send_report(payload: SessionReport, x_safety_device_session: Optional
 
 
 @router.get("/student-devices/reports")
-def device_my_reports(x_safety_device_session: Optional[str] = Header(default=None)):
+def device_my_reports(x_safety_device_session: Optional[str] = Header(default=None, alias="X-VeriFYD-Safety-Session")):
     ctx = _session(x_safety_device_session)
     with get_db() as conn:
         cur = conn.cursor()
@@ -336,7 +336,7 @@ def device_my_reports(x_safety_device_session: Optional[str] = Header(default=No
 
 
 @router.get("/student-devices/reports/{report_id}/conversation")
-def device_conversation(report_id: str, x_safety_device_session: Optional[str] = Header(default=None)):
+def device_conversation(report_id: str, x_safety_device_session: Optional[str] = Header(default=None, alias="X-VeriFYD-Safety-Session")):
     ctx = _session(x_safety_device_session)
     from trust_voice_school_incident_chat import _schema as _chat_schema, _family_chat_authorize
     _chat_schema()
@@ -355,7 +355,7 @@ def device_conversation(report_id: str, x_safety_device_session: Optional[str] =
 
 @router.post("/student-devices/reports/{report_id}/conversation")
 def device_conversation_reply(report_id: str, payload: Reply,
-                              x_safety_device_session: Optional[str] = Header(default=None)):
+                              x_safety_device_session: Optional[str] = Header(default=None, alias="X-VeriFYD-Safety-Session")):
     # Reply schema is loaded at module import below to preserve FastAPI validation.
     ctx = _session(x_safety_device_session)
     from trust_voice_school_incident_chat import (
@@ -404,7 +404,7 @@ def device_conversation_reply(report_id: str, payload: Reply,
 
 
 @router.post("/student-devices/logout")
-def logout_device(x_safety_device_session: Optional[str] = Header(default=None)):
+def logout_device(x_safety_device_session: Optional[str] = Header(default=None, alias="X-VeriFYD-Safety-Session")):
     ctx = _session(x_safety_device_session)
     with get_db() as conn:
         cur = conn.cursor()
