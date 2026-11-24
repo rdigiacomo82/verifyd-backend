@@ -135,17 +135,19 @@ def _validate_handle(value: str) -> tuple[str, str]:
 
 
 def _school_managed_handle_reserved(cur, handle_lower: str) -> bool:
-    """Prevent global identity claims from taking staged school-managed handles.
+    """Reserve WHOLE school namespaces without exposing student existence.
 
-    The managed roster table is optional until the School Enrollment Center
-    has initialized; ordinary /voice registration must continue before then.
+    Do not reveal whether a particular student handle is staged. All handles
+    under a configured school prefix appear unavailable to public registration.
+    The table is optional until a school has configured its Enrollment Center.
     """
-    cur.execute("SELECT to_regclass('public.verifyd_safety_managed_students') AS managed_table")
+    cur.execute("SELECT to_regclass('public.verifyd_safety_managed_roster_settings') AS managed_table")
     found = cur.fetchone()
-    if not found or not found.get("managed_table"):
+    if not found or not found["managed_table"]:
         return False
-    cur.execute("SELECT 1 FROM verifyd_safety_managed_students WHERE handle_lower=%s LIMIT 1",
-                (handle_lower,))
+    cur.execute("""SELECT 1 FROM verifyd_safety_managed_roster_settings
+       WHERE lower(school_code)=split_part(%s,'_',1) LIMIT 1""",
+       (handle_lower,))
     return bool(cur.fetchone())
 
 
