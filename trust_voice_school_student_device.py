@@ -113,7 +113,7 @@ def _session(x_safety_device_session: Optional[str]):
     _schema()
     with get_db() as conn:
         cur = conn.cursor()
-        cur.execute("""SELECT school_id,student_id,expires_at FROM verifyd_safety_student_device_sessions
+        cur.execute("""SELECT school_id,student_id,code_issued_by,expires_at FROM verifyd_safety_student_device_sessions
           WHERE session_hash=%s AND revoked_at IS NULL AND expires_at>NOW()""",
                     (_digest(x_safety_device_session),))
         row = cur.fetchone()
@@ -122,6 +122,9 @@ def _session(x_safety_device_session: Optional[str]):
         school_id = str(row["school_id"])
         student_id = str(row["student_id"])
         _school_allowed(school_id)
+        # An owner-revoked backup or removed Principal cannot continue authorizing
+        # a child's device merely because its 45-minute token has not expired.
+        _school_admin(cur, school_id, str(row["code_issued_by"]))
         student = _supervised(cur, school_id, student_id)
         _guardian_ready(cur, school_id, student_id)
         return {"school_id": school_id, "student_id": student_id,
@@ -234,6 +237,7 @@ def activate_device(payload: ActivateCode):
         sid = str(row["school_id"])
         student_id = str(row["student_id"])
         _school_allowed(sid)
+        _school_admin(cur, sid, str(row["issued_by"]))
         if row["used_at"] or row["expires_at"] <= datetime.now(timezone.utc) or row["attempts"] >= 5:
             raise invalid
         _supervised(cur, sid, student_id)
