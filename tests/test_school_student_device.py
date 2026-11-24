@@ -119,6 +119,22 @@ class SupervisedDeviceTests(unittest.TestCase):
             self.assertIn('ctx["school_id"]', src)
         self.assertNotIn("_school_admin", inspect.getsource(device.device_conversation))
 
+    def test_token_issuer_revalidated_and_header_isolated(self):
+        from fastapi.params import Header as FastAPIHeader
+        # Restricted session header is not the normal Authorization header.
+        for route in device.router.routes:
+            if "/student-devices/" not in route.path:
+                continue
+            params = inspect.signature(route.endpoint).parameters
+            if "x_safety_device_session" not in params:
+                continue
+            field = params["x_safety_device_session"].default
+            self.assertEqual(field.alias, "X-VeriFYD-Safety-Session")
+        src = inspect.getsource(device._session)
+        self.assertIn('_school_admin(cur, school_id, str(row["code_issued_by"]))', src)
+        src = inspect.getsource(device.activate_device)
+        self.assertIn('_school_admin(cur, sid, str(row["issued_by"]))', src)
+
     def test_device_token_not_accepted_as_normal_bearer(self):
         src = inspect.getsource(device._session)
         self.assertIn("session_hash=%s", src)
