@@ -110,6 +110,15 @@ class SchoolFamilyInvitationsTests(unittest.TestCase):
         self.assertNotIn("911",inspect.getsource(invite._send_invitation))
         self.assertIn("live_emergency_dispatch_enabled",inspect.getsource(invite.approve_family_invitation_batch))
 
+    def test_primary_backup_addresses_must_be_distinct_across_edits(self):
+        send_source = inspect.getsource(invite.send_invitation_batch)
+        self.assertIn("primary_and_backup_need_distinct_emails",send_source)
+        self.assertIn("by_slot",send_source)
+        save_source = inspect.getsource(invite.save_school_family_contact_drafts)
+        self.assertIn("SELECT local_ref,slot,guardian_email",save_source)
+        self.assertIn("pg_advisory_xact_lock",save_source)
+        self.assertIn("primary_and_backup_need_distinct_emails",save_source)
+
     def test_guardian_contacts_only_saved_by_authorized_school_staff(self):
         src = inspect.getsource(invite.save_school_family_contact_drafts)
         self.assertIn("_school_admin(cur,school_id,str(actor[\"id\"]))",src)
