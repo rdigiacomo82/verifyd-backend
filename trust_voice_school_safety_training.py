@@ -180,6 +180,7 @@ class ReportInput(BaseModel):
     school_id: str = Field(min_length=3, max_length=80)
     idempotency_key: str = Field(min_length=16, max_length=100)
     category: Literal["active_threat", "fire", "medical", "violence", "hazard", "other"]
+    choice_id: str = Field(default="", max_length=40, pattern=r"^(?:[a-z][a-z0-9_]{2,39})?$")
     description: str = Field(default="", max_length=700)
 
 
@@ -428,13 +429,24 @@ def create_training_report(payload: ReportInput, authorization: Optional[str] = 
     student_id = str(actor["id"])
     _schema()
     from trust_voice_school_incident_chat import _schema as _incident_schema,queue_report,dispatch_report
+    from trust_voice_school_choice_catalog import _catalog_schema, resolve_report_choice
     _incident_schema()
+    _catalog_schema()
     from trust_voice_school_safety_consents import _consent_schema, require_training_signoffs
     _consent_schema()  # DDL before report transaction, never while holding row locks
     with get_db() as conn:
         cur = conn.cursor()
         _membership(cur, payload.school_id, student_id, {"student"})
         require_training_signoffs(cur, payload.school_id, student_id)
+        initial_description = payload.description.strip()
+        if payload.choice_id:
+            # A customized choice is validated using the server copy, not the client label.
+            selected_choice = resolve_report_choice(cur, payload.school_id, payload.choice_id)
+            if selected_choice["category"] != payload.category:
+                raise HTTPException(409, detail={"error": "school_safety_choice_changed"})
+            if selected_choice["id"] == "other" and not initial_description:
+                raise HTTPException(422, detail={"error": "school_safety_details_required"})
+            initial_description = ("TEST choice: " + selected_choice["label"] + "\n" + initial_description)[:700]
         cur.execute("""SELECT primary_id, backup_id FROM verifyd_safety_training_contacts
             WHERE school_id=%s AND student_id=%s""", (payload.school_id, student_id))
         contacts = cur.fetchone()
@@ -484,7 +496,7 @@ def create_training_report(payload: ReportInput, authorization: Optional[str] = 
         cur.execute("""INSERT INTO verifyd_safety_training_reports
            (report_id,incident_id,school_id,student_id,client_key,category,description)
            VALUES (%s,%s,%s,%s,%s,%s,%s)""", (report_id,incident_id,payload.school_id,
-           student_id,payload.idempotency_key,payload.category,payload.description.strip()))
+           student_id,payload.idempotency_key,payload.category,initial_description))
         recipients = set(school_team) | {str(contacts["primary_id"]), str(contacts["backup_id"])}
         for recipient in recipients:
             cur.execute("""INSERT INTO verifyd_safety_training_recipients
