@@ -76,7 +76,7 @@ class GuardianResponseSplit(unittest.TestCase):
         self.assertNotIn("trust_voice_session_token",code)
 
     def test_response_team_rejects_duplicate_ids(self):
-        with patch.object(school, "_actor",return_value={"id":"principal-1"}), patch.object(school,"_schema"):
+        with patch.object(school, "_actor",return_value={"id":"principal-1"}), patch.object(school,"_schema"), patch("trust_voice_school_safety_consents._consent_schema"):
             with self.assertRaises(HTTPException) as exc:
                 school.update_verified_school_response_team("test-school",
                     school.SchoolResponseTeamSelection(responder_ids=["responder-1","responder-1"],independently_verified=True))
