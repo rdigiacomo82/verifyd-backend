@@ -269,11 +269,14 @@ def student_device_me(x_safety_device_session: Optional[str] = Header(default=No
             WHERE school_id=%s AND student_id=%s""", (ctx["school_id"], ctx["student_id"]))
         contacts = cur.fetchone()
         recipients_ready = False
-        if contacts and contacts["primary_id"] != contacts["backup_id"]:
+        if contacts and contacts["primary_id"] and (
+            not contacts["backup_id"] or contacts["primary_id"] != contacts["backup_id"]
+        ):
             try:
-                if _verified_training_contact(cur,ctx["school_id"],ctx["student_id"],str(contacts["primary_id"])) == "guardian":
+                _verified_training_contact(cur,ctx["school_id"],ctx["student_id"],str(contacts["primary_id"]))
+                if contacts["backup_id"]:
                     _verified_training_contact(cur,ctx["school_id"],ctx["student_id"],str(contacts["backup_id"]))
-                    recipients_ready = True
+                recipients_ready = True
             except HTTPException:
                 pass
         cur.execute("SELECT school_name FROM verifyd_safety_training_schools WHERE school_id=%s", (ctx["school_id"],))
