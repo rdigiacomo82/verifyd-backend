@@ -214,6 +214,8 @@ def health():
 def enrollment(authorization: Optional[str] = Header(default=None)):
     identity = _actor(authorization)
     _schema()
+    from trust_voice_school_safety_consents import _consent_schema
+    _consent_schema()
     identity_id = str(identity["id"])
     with get_db() as conn:
         cur = conn.cursor()
@@ -232,9 +234,12 @@ def enrollment(authorization: Optional[str] = Header(default=None)):
             school["eligible_contacts"] = []
             for row in cur.fetchall():
                 adult_id = str(row["identity_id"])
-                if not identities_blocked(identity_id, adult_id) and trust_circle_contains(identity_id, adult_id):
-                    school["eligible_contacts"].append({"identity_id": adult_id, "handle": row["handle"],
-                        "display_name": row["display_name"], "role": row["role"]})
+                try:
+                    _verified_training_contact(cur,school["school_id"],identity_id,adult_id)
+                except HTTPException:
+                    continue
+                school["eligible_contacts"].append({"identity_id": adult_id, "handle": row["handle"],
+                    "display_name": row["display_name"], "role": row["role"]})
             cur.execute("""SELECT primary_id,backup_id FROM verifyd_safety_training_contacts
                 WHERE school_id=%s AND student_id=%s""", (school["school_id"], identity_id))
             school["contacts"] = dict(cur.fetchone() or {})
@@ -298,25 +303,116 @@ def add_training_guardian(school_id: str, payload: GuardianLink, authorization: 
 
 @router.put("/schools/{school_id}/contacts")
 def set_training_contacts(school_id: str, payload: ContactInput, authorization: Optional[str] = Header(default=None)):
+    # Old student-side route cannot grant school alert recipients.
+    _actor(authorization)
+    raise HTTPException(403, detail={"error": "school_contact_routing_managed_by_principal"})
+
+
+def _verified_training_contact(cur, school_id, student_id, adult_id):
+    """Only the child's acknowledged guardian or a verified school administrator."""
+    if student_id == adult_id or identities_blocked(student_id, adult_id):
+        raise HTTPException(403, detail={"error": "contact_not_authorized_for_student"})
+    role = _membership(cur, school_id, adult_id, {"guardian", "principal", "responder"})
+    if role == "guardian":
+        from trust_voice_school_safety_consents import POLICY_VERSION
+        cur.execute("""SELECT 1 FROM verifyd_safety_training_guardians g
+          JOIN verifyd_safety_training_signoffs x
+            ON x.school_id=g.school_id AND x.actor_id=g.guardian_id
+            AND x.subject_id=g.child_id AND x.kind='guardian'
+            AND x.policy_version=%s AND x.revoked_at IS NULL
+          WHERE g.school_id=%s AND g.child_id=%s AND g.guardian_id=%s""",
+          (POLICY_VERSION,school_id,student_id,adult_id))
+        if not cur.fetchone():
+            raise HTTPException(403, detail={"error": "verified_guardian_training_acknowledgment_required"})
+    else:
+        from trust_voice_school_safety_registration import _school_admin
+        _school_admin(cur, school_id, adult_id)
+    return role
+
+
+class SchoolVerifiedContactRoute(BaseModel):
+    primary_id: str = Field(min_length=3, max_length=100)
+    backup_id: str = Field(min_length=3, max_length=100)
+    independently_verified: Literal[True]
+
+
+@router.get("/schools/{school_id}/contact-routing")
+def get_verified_school_contact_routing(school_id: str, authorization: Optional[str] = Header(default=None)):
     actor = _actor(authorization)
-    student_id = str(actor["id"])
-    if payload.primary_id == payload.backup_id or student_id in (payload.primary_id, payload.backup_id):
-        raise HTTPException(422, detail={"error": "two_distinct_contacts_required"})
     _schema()
+    from trust_voice_school_safety_consents import _consent_schema
+    from trust_voice_school_safety_registration import _school_admin
+    _consent_schema()
     with get_db() as conn:
         cur = conn.cursor()
-        _membership(cur, school_id, student_id, {"student"})
-        for adult_id in (payload.primary_id, payload.backup_id):
-            _membership(cur, school_id, adult_id, {"guardian", "principal", "responder"})
-            if identities_blocked(student_id, adult_id) or not trust_circle_contains(student_id, adult_id):
-                raise HTTPException(403, detail={"error": "contact_must_be_verified_trust_circle_adult"})
+        _school_admin(cur, school_id, str(actor["id"]))
+        cur.execute("""SELECT m.identity_id AS student_id,i.handle,i.display_name
+          FROM verifyd_safety_training_members m JOIN verifyd_identities i ON i.id=m.identity_id
+          WHERE m.school_id=%s AND m.role='student' ORDER BY i.handle""", (school_id,))
+        students = [dict(x) for x in cur.fetchall()]
+        result = []
+        for student in students:
+            sid = str(student["student_id"])
+            cur.execute("""SELECT m.identity_id,i.handle,i.display_name,m.role
+              FROM verifyd_safety_training_guardians g
+              JOIN verifyd_safety_training_members m
+                ON m.school_id=g.school_id AND m.identity_id=g.guardian_id AND m.role='guardian'
+              JOIN verifyd_identities i ON i.id=m.identity_id
+              WHERE g.school_id=%s AND g.child_id=%s ORDER BY i.handle""", (school_id,sid))
+            primary = []
+            for row in cur.fetchall():
+                person = dict(row)
+                person["identity_id"] = str(person["identity_id"])
+                try: _verified_training_contact(cur,school_id,sid,person["identity_id"])
+                except HTTPException: continue
+                primary.append(person)
+            cur.execute("""SELECT m.identity_id,i.handle,i.display_name,m.role
+              FROM verifyd_safety_training_members m JOIN verifyd_identities i ON i.id=m.identity_id
+              WHERE m.school_id=%s AND m.role IN ('principal','responder') ORDER BY i.handle""",
+              (school_id,))
+            backup = list(primary)
+            for row in cur.fetchall():
+                person = dict(row)
+                person["identity_id"] = str(person["identity_id"])
+                try: _verified_training_contact(cur,school_id,sid,person["identity_id"])
+                except HTTPException: continue
+                backup.append(person)
+            cur.execute("""SELECT primary_id,backup_id FROM verifyd_safety_training_contacts
+              WHERE school_id=%s AND student_id=%s""", (school_id,sid))
+            result.append({"student_id":sid,"handle":student["handle"],
+              "display_name":student["display_name"],"primary_guardians":primary,
+              "backup_contacts":backup,"current_contacts":dict(cur.fetchone() or {})})
+    return {"ok":True,"mode":"TRAINING ONLY","students":result}
+
+
+@router.put("/schools/{school_id}/contact-routing/{student_id}")
+def save_verified_school_contact_routing(
+    school_id: str, student_id: str, payload: SchoolVerifiedContactRoute,
+    authorization: Optional[str] = Header(default=None),
+):
+    actor = _actor(authorization)
+    _schema()
+    from trust_voice_school_safety_consents import _consent_schema
+    from trust_voice_school_safety_registration import _school_admin
+    _consent_schema()
+    if student_id in (payload.primary_id,payload.backup_id) or payload.primary_id == payload.backup_id:
+        raise HTTPException(422,detail={"error":"two_distinct_contacts_required"})
+    with get_db() as conn:
+        cur = conn.cursor()
+        _school_admin(cur,school_id,str(actor["id"]))
+        _membership(cur,school_id,student_id,{"student"})
+        primary_role = _verified_training_contact(cur,school_id,student_id,payload.primary_id)
+        _verified_training_contact(cur,school_id,student_id,payload.backup_id)
+        if primary_role != "guardian":
+            raise HTTPException(403,detail={"error":"primary_must_be_verified_guardian"})
         cur.execute("""INSERT INTO verifyd_safety_training_contacts
-          (school_id,student_id,primary_id,backup_id)
-          VALUES(%s,%s,%s,%s) ON CONFLICT(school_id,student_id) DO UPDATE SET
-          primary_id=EXCLUDED.primary_id, backup_id=EXCLUDED.backup_id, updated_at=NOW()""",
+          (school_id,student_id,primary_id,backup_id) VALUES (%s,%s,%s,%s)
+          ON CONFLICT(school_id,student_id) DO UPDATE SET
+          primary_id=EXCLUDED.primary_id,backup_id=EXCLUDED.backup_id,updated_at=NOW()""",
           (school_id,student_id,payload.primary_id,payload.backup_id))
-        _audit(cur, school_id, student_id, "training_contacts_selected", student_id)
-    return {"ok": True, "mode": "TRAINING ONLY"}
+        _audit(cur,school_id,str(actor["id"]),"verified_training_contact_route_saved",student_id)
+    return {"ok":True,"mode":"TRAINING ONLY","saved":True,
+            "notifications_sent":False,"emergency_services_notified":False}
 
 
 def _report_receipt(row, count):
@@ -352,8 +448,9 @@ def create_training_report(payload: ReportInput, authorization: Optional[str] = 
         if not cur.fetchone():
             raise HTTPException(409, detail={"error": "verified_school_principal_required"})
         for adult_id in (contacts["primary_id"], contacts["backup_id"]):
-            _membership(cur, payload.school_id, adult_id, {"guardian","principal","responder"})
-            if identities_blocked(student_id, adult_id) or not trust_circle_contains(student_id, adult_id):
+            try:
+                _verified_training_contact(cur,payload.school_id,student_id,str(adult_id))
+            except HTTPException:
                 raise HTTPException(409, detail={"error": "selected_contact_no_longer_eligible"})
         # Serialize attempts with the same per-student idempotency key, even if
         # clients retry with different categories at the same time.
