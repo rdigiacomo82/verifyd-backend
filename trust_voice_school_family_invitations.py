@@ -232,6 +232,14 @@ def send_invitation_batch(school_id: str, payload: InvitationBatch,
             raise HTTPException(422, detail={"error":"duplicate_student_guardian_slot"})
         seen.add((ref,child.slot))
         prepared.append((ref,child.slot,child.guardian_name.strip(),mail,child.relationship))
+    # A single adult may not be invited as both Primary and Backup for one
+    # child, even when both slots appear in the SAME bulk submission.
+    grouped={}
+    for ref,slot,_,mail,_ in prepared:
+        by_slot=grouped.setdefault(ref,{})
+        if mail in by_slot.values():
+            raise HTTPException(422,detail={"error":"primary_and_backup_need_distinct_emails"})
+        by_slot[slot]=mail
     sends = []
     with get_db() as conn:
         cur = conn.cursor()
@@ -619,6 +627,8 @@ def save_school_family_contact_drafts(school_id: str,payload: SavedFamilyContact
     with get_db() as conn:
         cur=conn.cursor()
         _school_admin(cur,school_id,str(actor["id"]))
+        cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))",
+                    ("family_contact_drafts:"+school_id,))
         refs=sorted({x[0] for x in cleaned})
         cur.execute("""SELECT local_ref FROM verifyd_safety_managed_students
             WHERE school_id=%s AND local_ref=ANY(%s)""",(school_id,refs))
@@ -632,7 +642,13 @@ def save_school_family_contact_drafts(school_id: str,payload: SavedFamilyContact
                 LIMIT 1""",(school_id,ref,slot))
             if cur.fetchone():
                 raise HTTPException(409,detail={"error":"revoke_prior_invitation_before_changing_guardian_contact"})
+        cur.execute("""SELECT local_ref,slot,guardian_email
+            FROM verifyd_safety_family_contact_drafts
+            WHERE school_id=%s AND local_ref=ANY(%s) FOR UPDATE""",
+            (school_id,refs))
         group={}
+        for saved in cur.fetchall():
+            group.setdefault(str(saved["local_ref"]),{})[int(saved["slot"])]=saved["guardian_email"]
         for ref,slot,name,email,relationship in cleaned:
             group.setdefault(ref,{})[slot]=email
         for ref,slots in group.items():
