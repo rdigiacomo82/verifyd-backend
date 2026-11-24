@@ -134,6 +134,21 @@ def _validate_handle(value: str) -> tuple[str, str]:
     return handle, handle_lower
 
 
+def _school_managed_handle_reserved(cur, handle_lower: str) -> bool:
+    """Prevent global identity claims from taking staged school-managed handles.
+
+    The managed roster table is optional until the School Enrollment Center
+    has initialized; ordinary /voice registration must continue before then.
+    """
+    cur.execute("SELECT to_regclass('public.verifyd_safety_managed_students') AS managed_table")
+    found = cur.fetchone()
+    if not found or not found.get("managed_table"):
+        return False
+    cur.execute("SELECT 1 FROM verifyd_safety_managed_students WHERE handle_lower=%s LIMIT 1",
+                (handle_lower,))
+    return bool(cur.fetchone())
+
+
 def _validate_display_name(value: str) -> str:
     cleaned = " ".join((value or "").strip().split())
     if not cleaned:
@@ -322,7 +337,7 @@ def handle_availability(handle: str):
             "SELECT 1 FROM verifyd_identities WHERE handle_lower = %s LIMIT 1",
             (handle_lower,),
         )
-        exists = bool(cur.fetchone())
+        exists = bool(cur.fetchone()) or _school_managed_handle_reserved(cur, handle_lower)
 
     return {
         "handle": f"@{display_handle}",
@@ -406,10 +421,10 @@ def claim_identity(payload: ClaimIdentityRequest):
             "SELECT 1 FROM verifyd_identities WHERE handle_lower = %s LIMIT 1",
             (handle_lower,),
         )
-        if cur.fetchone():
+        if cur.fetchone() or _school_managed_handle_reserved(cur, handle_lower):
             raise HTTPException(
                 status_code=409,
-                detail={"error": "handle_taken", "message": "That handle is already in use."},
+                detail={"error": "handle_taken", "message": "That handle is already in use or reserved by an approved school."},
             )
 
         identity_id = "vfyd_usr_" + uuid.uuid4().hex
