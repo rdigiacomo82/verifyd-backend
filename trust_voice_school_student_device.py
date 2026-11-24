@@ -23,6 +23,7 @@ from trust_voice_school_safety_training import (
     _verified_training_contact,
 )
 from trust_voice_school_safety_registration import _school_admin
+from trust_voice_school_incident_chat import Reply
 from trust_voice_school_safety_consents import (
     _consent_schema, _guardian_count, _school_accepted, _student_accepted,
     POLICY_VERSION,
@@ -353,7 +354,7 @@ def device_conversation(report_id: str, x_safety_device_session: Optional[str] =
 
 
 @router.post("/student-devices/reports/{report_id}/conversation")
-def device_conversation_reply(report_id: str, payload: "Reply",
+def device_conversation_reply(report_id: str, payload: Reply,
                               x_safety_device_session: Optional[str] = Header(default=None)):
     # Reply schema is loaded at module import below to preserve FastAPI validation.
     ctx = _session(x_safety_device_session)
@@ -432,7 +433,3 @@ def revoke_student_sessions(school_id: str, payload: IssueCode,
         _audit(cur,school_id,str(actor["id"]),"supervised_student_device_access_revoked",payload.student_id)
     return {"ok": True, "test_only": True, "revoked": True}
 
-
-# Use the exact already-validated private family message schema.
-from trust_voice_school_incident_chat import Reply
-device_conversation_reply.__annotations__["payload"] = Reply
