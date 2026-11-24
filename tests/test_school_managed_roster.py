@@ -56,6 +56,23 @@ class SchoolManagedRosterContracts(unittest.TestCase):
         self.assertEqual(roster._new_handle(cursor,"WMHS","name","John","Smith",used),
                          "WMHS_JohnSmith2")
 
+    def test_legacy_spreadsheet_date_formats_normalize_safely(self):
+        item = roster.SchoolAuthorizationItem(
+            local_ref="DEMO001", method="signed_paper",
+            evidence_ref="PAPER-DEMO001-2026", guardian_name="Pat Smith",
+            signed_date="11/20/2026", individually_verified=True)
+        self.assertEqual(item.signed_date.isoformat(),"2026-11-20")
+        item2 = roster.SchoolAuthorizationItem(
+            local_ref="DEMO001", method="signed_paper",
+            evidence_ref="PAPER-DEMO001-2026", guardian_name="Pat Smith",
+            signed_date="2026-11-20", individually_verified=True)
+        self.assertEqual(item2.signed_date,item.signed_date)
+        with self.assertRaises(ValidationError):
+            roster.SchoolAuthorizationItem(
+                local_ref="DEMO001", method="signed_paper",
+                evidence_ref="PAPER-DEMO001-2026", guardian_name="Pat Smith",
+                signed_date="02/31/2026", individually_verified=True)
+
     def test_missing_paper_signature_evidence_is_rejected(self):
         with self.assertRaises(HTTPException) as exc:
             roster._check_evidence(roster.SchoolAuthorizationItem(
