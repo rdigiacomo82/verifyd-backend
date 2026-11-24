@@ -267,10 +267,13 @@ def preview_managed_roster(school_id: str, payload: ManagedRosterPreview,
     with get_db() as conn:
         cur = conn.cursor()
         _school_admin(cur, school_id, str(actor["id"]))
+        # Discard outdated uncommitted roster previews containing student PII.
+        cur.execute("""DELETE FROM verifyd_safety_managed_roster_previews
+            WHERE school_id=%s AND expires_at<NOW()-INTERVAL '1 day'""",(school_id,))
         config = _config_row(cur, school_id)
         rows, refs, used = [], set(), set()
         for student in payload.students:
-            ref = student.local_ref.strip()
+            ref = student.local_ref.strip().upper()
             if not _REF.fullmatch(ref):
                 raise HTTPException(422, detail={"error": "invalid_school_local_reference"})
             if ref.lower() in refs:
@@ -395,6 +398,12 @@ def approve_managed_school_enrollment(
         raise HTTPException(422, detail={"error": "duplicate_student_in_approval_batch"})
     for item in payload.approvals:
         _check_evidence(item)
+    # Each claimed paper consent must have its own auditable reference; a
+    # district policy can be shared, but a single paper signature cannot.
+    paper_refs = [item.evidence_ref.strip().lower() for item in payload.approvals
+                  if item.method == "signed_paper"]
+    if len(paper_refs) != len(set(paper_refs)):
+        raise HTTPException(422, detail={"error": "paper_evidence_reference_must_identify_each_student"})
     _schema()
     from trust_voice_school_safety_training import _schema as _school_schema
     _school_schema()
