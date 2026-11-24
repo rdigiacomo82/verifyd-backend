@@ -48,8 +48,8 @@ class SchoolSafetyTrainingTests(unittest.TestCase):
         with patch.object(safety, "_actor", return_value={"id": "principal-1"}), \
              patch.object(safety, "_schema"), \
              patch.object(safety, "get_db", return_value=conn), \
-             patch("trust_voice_school_safety_registration._school_admin") as admin, \\
-             patch.object(safety, "_membership") as membership, \\
+             patch("trust_voice_school_safety_registration._school_admin") as admin, \
+             patch.object(safety, "_membership") as membership, \
              patch.object(safety, "_audit") as audit:
             result = safety.disable_verified_school_contact_routing(
                 "test-school", "student-1", authorization="test-session"
