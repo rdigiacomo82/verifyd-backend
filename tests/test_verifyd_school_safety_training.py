@@ -1,7 +1,7 @@
 """Safe, non-network unit checks for school safety TRAINING ONLY backend."""
 import os
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 from fastapi import HTTPException
 
 import trust_voice_school_safety_training as safety
@@ -39,6 +39,63 @@ class SchoolSafetyTrainingTests(unittest.TestCase):
             with self.assertRaises(HTTPException) as error:
                 safety._operator({"id": "not-authorized"})
             self.assertEqual(error.exception.status_code, 403)
+
+    def test_test_route_removal_is_explicitly_scoped_to_verified_admin(self):
+        from trust_voice_school_safety_registration import _school_admin
+        conn = MagicMock()
+        cursor = conn.__enter__.return_value.cursor.return_value
+        cursor.fetchone.return_value = {"primary_id": "guardian-1", "backup_id": "principal-1"}
+        with patch.object(safety, "_actor", return_value={"id": "principal-1"}), \
+             patch.object(safety, "_schema"), \
+             patch.object(safety, "get_db", return_value=conn), \
+             patch("trust_voice_school_safety_registration._school_admin") as admin, \\
+             patch.object(safety, "_membership") as membership, \\
+             patch.object(safety, "_audit") as audit:
+            result = safety.disable_verified_school_contact_routing(
+                "test-school", "student-1", authorization="test-session"
+            )
+        self.assertTrue(result["removed"])
+        self.assertTrue(result["test_reporting_disabled_until_new_route"])
+        self.assertFalse(result["accounts_deleted"])
+        self.assertFalse(result["prior_reports_deleted"])
+        self.assertFalse(result["notifications_sent"])
+        admin.assert_called_once_with(cursor, "test-school", "principal-1")
+        membership.assert_called_once_with(cursor, "test-school", "student-1", {"student"})
+        sql, args = cursor.execute.call_args.args
+        self.assertIn("DELETE FROM verifyd_safety_training_contacts", sql)
+        self.assertIn("RETURNING primary_id, backup_id", sql)
+        self.assertEqual(args, ("test-school", "student-1"))
+        self.assertIn("verified_training_contact_route_disabled", str(audit.call_args))
+
+    def test_nonadmin_cannot_clear_school_contact_route(self):
+        conn = MagicMock()
+        cursor = conn.__enter__.return_value.cursor.return_value
+        with patch.object(safety, "_actor", return_value={"id": "guardian-1"}), \
+             patch.object(safety, "_schema"), \
+             patch.object(safety, "get_db", return_value=conn), \
+             patch("trust_voice_school_safety_registration._school_admin", side_effect=HTTPException(403, detail="school_roster_admin_required")):
+            with self.assertRaises(HTTPException) as exc:
+                safety.disable_verified_school_contact_routing(
+                    "test-school", "student-1", authorization="guardian-session"
+                )
+        self.assertEqual(exc.exception.status_code, 403)
+        cursor.execute.assert_not_called()
+
+    def test_test_route_removal_is_idempotent_without_claiming_deletion(self):
+        conn = MagicMock()
+        cursor = conn.__enter__.return_value.cursor.return_value
+        cursor.fetchone.return_value = None
+        with patch.object(safety, "_actor", return_value={"id": "principal-1"}), \
+             patch.object(safety, "_schema"), \
+             patch.object(safety, "get_db", return_value=conn), \
+             patch("trust_voice_school_safety_registration._school_admin"), \
+             patch.object(safety, "_membership"), \
+             patch.object(safety, "_audit") as audit:
+            result = safety.disable_verified_school_contact_routing(
+                "test-school", "student-1", authorization="test-session"
+            )
+        self.assertFalse(result["removed"])
+        audit.assert_not_called()
 
     def test_same_contact_is_rejected_before_database_use(self):
         with patch.object(safety, "_actor", return_value={"id": "principal-1"}):
