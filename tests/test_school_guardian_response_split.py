@@ -90,6 +90,16 @@ class GuardianResponseSplit(unittest.TestCase):
         self.assertIn("school_staff_removed_from_guardian_backup",code)
         self.assertNotIn("SET primary_id=NULL",code)
 
+    def test_removed_staff_cannot_inherit_stale_response_team_designation(self):
+        from trust_voice_school_safety_registration import (
+            change_school_roster_member, deactivate_school_roster_member,
+        )
+        for fn in (change_school_roster_member, deactivate_school_roster_member):
+            source = inspect.getsource(fn)
+            self.assertIn("DELETE FROM verifyd_safety_school_response_team", source)
+            self.assertIn("responder_id=%s", source)
+            self.assertIn("school_id=%s", source)
+
     def test_school_incident_reads_require_designation(self):
         for action in (school.training_school_incidents,school.incident_training_reports,school.resolve_training_incident):
             self.assertIn("_school_response_authorized",inspect.getsource(action))
