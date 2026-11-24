@@ -76,6 +76,7 @@ def _schema():
                 created_by TEXT NOT NULL REFERENCES verifyd_identities(id),
                 delivery_status TEXT NOT NULL DEFAULT 'queued',
                 otp_requests INTEGER NOT NULL DEFAULT 0,
+                verification_attempts INTEGER NOT NULL DEFAULT 0,
                 claimed_by TEXT REFERENCES verifyd_identities(id),
                 acknowledged_policy TEXT,
                 claimed_at TIMESTAMPTZ,
@@ -279,10 +280,17 @@ def verify_family_invitation(payload: VerifyInvitation):
     with get_db() as conn:
         cur = conn.cursor()
         invite = _invite_locked(cur,payload.invitation_code)
+        if invite["verification_attempts"] >= 5:
+            raise HTTPException(429, detail={"error":"invitation_verification_locked_contact_school"})
         email = invite["recipient_email"]
         invitation_id = invite["invite_id"]
     passed, _ = verify_otp(email,payload.email_code)
     if not passed:
+        # Commit the invalid-attempt count; do not roll it back with HTTP 403.
+        with get_db() as conn:
+            conn.cursor().execute("""UPDATE verifyd_safety_family_invitations
+                SET verification_attempts=verification_attempts+1
+                WHERE invite_id=%s AND claimed_at IS NULL""",(invitation_id,))
         raise HTTPException(403,detail={"error":"email_verification_failed"})
     session = secrets.token_urlsafe(32)
     with get_db() as conn:
@@ -294,7 +302,9 @@ def verify_family_invitation(payload: VerifyInvitation):
             ON r.school_id=i.school_id AND r.local_ref=i.local_ref
            WHERE i.invite_id=%s FOR UPDATE OF i""",(invitation_id,))
         row = cur.fetchone()
-        if not row or row["claimed_at"] or row["revoked_at"] or row["expires_at"]<=datetime.now(timezone.utc):
+        if (not row or row["claimed_at"] or row["revoked_at"]
+            or row["expires_at"]<=datetime.now(timezone.utc)
+            or row["verification_attempts"]>=5):
             raise HTTPException(403,detail={"error":"invalid_or_expired_invitation"})
         cur.execute("""INSERT INTO verifyd_safety_family_invite_claim_sessions
             (session_hash,invite_id) VALUES (%s,%s)""",
@@ -311,6 +321,10 @@ def verify_family_invitation(payload: VerifyInvitation):
 
 
 def _new_guardian_identity(cur, email: str, name: str):
+    # Two guardian invitations for siblings may be claimed concurrently.
+    # Serialize by verified mailbox before creating a globally unique identity.
+    cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))",
+                ("school_guardian_identity:"+email,))
     cur.execute("""SELECT id,status FROM verifyd_identities
        WHERE email_lower=%s FOR UPDATE""", (email,))
     existing = cur.fetchone()
