@@ -53,7 +53,10 @@ class SchoolIncidentAlerts(unittest.TestCase):
         self.assertNotIn("notify_identity_push(",write_src)
 
     def test_report_transaction_queues_before_commit(self):
-        source=inspect.getsource(school.create_training_report)
+        route_source=inspect.getsource(school.create_training_report)
+        # Both ordinary and restricted student sessions reuse the same writer.
+        self.assertIn("_create_training_report_for_student",route_source)
+        source=inspect.getsource(school._create_training_report_for_student)
         self.assertIn("queue_report(cur, report_id",source)
         self.assertIn("dispatch_report(report_id)",source)
         self.assertIn("TRAINING_RECORD_ONLY",inspect.getsource(school._report_receipt))
