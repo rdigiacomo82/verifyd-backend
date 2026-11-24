@@ -32,7 +32,7 @@ _CODE = re.compile(r"^[A-Z][A-Z0-9]{1,9}$")
 _REF = re.compile(r"^[A-Za-z0-9_-]{3,64}$")
 
 
-def _require_pilot(school_id):
+def _require_enrollment_enabled(school_id):
     active = os.getenv("VERIFYD_SAFETY_MANAGED_ROSTER_ENABLED", "").lower() in ("1", "true", "yes", "on")
     scopes = {x.strip() for x in os.getenv("VERIFYD_SAFETY_MANAGED_ROSTER_SCHOOL_IDS", "").split(",") if x.strip()}
     if not active or school_id not in scopes:
@@ -104,7 +104,7 @@ def _schema():
 class SchoolHandleSettings(BaseModel):
     school_code: str = Field(min_length=2, max_length=10)
     handle_style: Literal["name", "code"]
-    confirmed_test_only: Literal[True]
+    confirmed_school_naming_convention: Literal[True]
 
 
 class ManagedStudentRow(BaseModel):
@@ -209,7 +209,7 @@ def _config_row(cur, school_id):
 
 @router.get("/schools/{school_id}/managed-roster/settings")
 def get_managed_roster_settings(school_id: str, authorization: Optional[str] = Header(default=None)):
-    _require_pilot(school_id)
+    _require_enrollment_enabled(school_id)
     actor = _actor(authorization)
     _schema()
     with get_db() as conn:
@@ -228,7 +228,7 @@ def get_managed_roster_settings(school_id: str, authorization: Optional[str] = H
 @router.put("/schools/{school_id}/managed-roster/settings")
 def save_managed_roster_settings(school_id: str, payload: SchoolHandleSettings,
                                  authorization: Optional[str] = Header(default=None)):
-    _require_pilot(school_id)
+    _require_enrollment_enabled(school_id)
     actor = _actor(authorization)
     code = payload.school_code.strip().upper()
     if not _CODE.fullmatch(code):
@@ -261,7 +261,7 @@ def save_managed_roster_settings(school_id: str, payload: SchoolHandleSettings,
 @router.post("/schools/{school_id}/managed-roster/preview")
 def preview_managed_roster(school_id: str, payload: ManagedRosterPreview,
                            authorization: Optional[str] = Header(default=None)):
-    _require_pilot(school_id)
+    _require_enrollment_enabled(school_id)
     actor = _actor(authorization)
     _schema()
     with get_db() as conn:
@@ -306,7 +306,7 @@ def preview_managed_roster(school_id: str, payload: ManagedRosterPreview,
 @router.post("/schools/{school_id}/managed-roster/commit")
 def commit_managed_roster(school_id: str, payload: ManagedRosterCommit,
                           authorization: Optional[str] = Header(default=None)):
-    _require_pilot(school_id)
+    _require_enrollment_enabled(school_id)
     actor = _actor(authorization)
     _schema()
     with get_db() as conn:
@@ -342,9 +342,12 @@ def commit_managed_roster(school_id: str, payload: ManagedRosterCommit,
                     raise HTTPException(409, detail={"error": "roster_changed_since_preview_repreview"})
                 skipped += 1
                 continue
-            cur.execute("SELECT 1 FROM verifyd_identities WHERE handle_lower=%s", (row["proposed_handle"].lower(),))
+            cur.execute("""SELECT 1 FROM verifyd_identities WHERE handle_lower=%s
+                    UNION SELECT 1 FROM verifyd_safety_managed_students
+                    WHERE handle_lower=%s LIMIT 1""",
+                    (row["proposed_handle"].lower(), row["proposed_handle"].lower()))
             if cur.fetchone():
-                raise HTTPException(409, detail={"error": "handle_just_claimed_repreview"})
+                raise HTTPException(409, detail={"error": "handle_unavailable_repreview"})
             cur.execute("""INSERT INTO verifyd_safety_managed_students
                 (school_id,local_ref,first_name,last_name,proposed_handle,handle_lower,imported_by)
                 VALUES (%s,%s,%s,%s,%s,%s,%s)""",
@@ -359,7 +362,7 @@ def commit_managed_roster(school_id: str, payload: ManagedRosterCommit,
 
 @router.get("/schools/{school_id}/managed-roster/students")
 def list_managed_roster(school_id: str, authorization: Optional[str] = Header(default=None)):
-    _require_pilot(school_id)
+    _require_enrollment_enabled(school_id)
     actor = _actor(authorization)
     _schema()
     with get_db() as conn:
@@ -391,7 +394,7 @@ def approve_managed_school_enrollment(
     *enrollment* attestations. Neither implies a guardian signed digitally,
     nor do they authorize unrestricted messaging or emergency service dispatch.
     """
-    _require_pilot(school_id)
+    _require_enrollment_enabled(school_id)
     actor = _actor(authorization)
     refs = [item.local_ref.strip().lower() for item in payload.approvals]
     if len(refs) != len(set(refs)):
