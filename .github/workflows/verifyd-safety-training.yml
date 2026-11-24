@@ -33,6 +33,7 @@ on:
       - 'trust_voice_school_student_device.py'
       - 'tests/test_school_safety_choice_catalog.py'
       - 'tests/test_school_student_device.py'
+      - 'tests/test_school_guardian_response_split.py'
       - '.github/workflows/verifyd-safety-training.yml'
       - 'main.py'
   push:
@@ -70,6 +71,7 @@ on:
       - 'trust_voice_school_student_device.py'
       - 'tests/test_school_safety_choice_catalog.py'
       - 'tests/test_school_student_device.py'
+      - 'tests/test_school_guardian_response_split.py'
       - '.github/workflows/verifyd-safety-training.yml'
 jobs:
   training-contract:
@@ -100,3 +102,4 @@ jobs:
       - run: python -m unittest discover -s tests -p 'test_school_safety_family_text_private.py' -v
       - run: python -m unittest discover -s tests -p 'test_school_safety_choice_catalog.py' -v
       - run: python -m unittest discover -s tests -p 'test_school_student_device.py' -v
+      - run: python -m unittest discover -s tests -p 'test_school_guardian_response_split.py' -v
