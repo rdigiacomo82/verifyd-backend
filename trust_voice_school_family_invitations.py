@@ -347,13 +347,14 @@ def confirm_family_claim(payload: ConfirmFamily):
         optional_backup = (payload.backup_name.strip(),payload.backup_email.strip().lower())
     with get_db() as conn:
         cur = conn.cursor()
-        cur.execute("""SELECT s.invite_id,s.expires_at,i.*
+        cur.execute("""SELECT s.expires_at AS session_expires_at,i.*
           FROM verifyd_safety_family_invite_claim_sessions s
           JOIN verifyd_safety_family_invitations i ON i.invite_id=s.invite_id
-          WHERE s.session_hash=%s AND s.used_at IS NULL FOR UPDATE OF s,i""",
+          WHERE s.session_hash=%s AND s.consumed_at IS NULL FOR UPDATE OF s,i""",
           (_hash(payload.claim_session),))
         invite = cur.fetchone()
-        if (not invite or invite["expires_at"]<=datetime.now(timezone.utc)
+        if (not invite or invite["session_expires_at"]<=datetime.now(timezone.utc)
+            or invite["expires_at"]<=datetime.now(timezone.utc)
             or invite["claimed_at"] or invite["revoked_at"]):
             raise HTTPException(403,detail={"error":"family_claim_session_invalid_or_expired"})
         _enabled(invite["school_id"])
@@ -377,7 +378,7 @@ def confirm_family_claim(payload: ConfirmFamily):
                 approval_status='pending_principal'
             WHERE invite_id=%s""",(gid,POLICY_VERSION,invite["invite_id"]))
         cur.execute("""UPDATE verifyd_safety_family_invite_claim_sessions
-            SET used_at=NOW() WHERE session_hash=%s""",(_hash(payload.claim_session),))
+            SET consumed_at=NOW() WHERE session_hash=%s""",(_hash(payload.claim_session),))
         _audit(cur,invite["school_id"],gid,"guardian_self_acknowledged_school_safety_invitation",
                invite["invite_id"])
         new_backup = None
@@ -409,7 +410,7 @@ def confirm_family_claim(payload: ConfirmFamily):
                 SET delivery_status=%s WHERE invite_id=%s""",
                 ("sent" if backup_sent else "failed",backup_id))
     return {"ok":True,"school_id":school_id,"status":"pending_final_school_authorization",
-            "guardian_account_created":created,"guardian_account_handle_auto_generated":True,
+            "guardian_account_created":created,"guardian_account_handle_auto_generated":created,
             "guardian_acknowledgment_recorded":True,
             "guardian_family_access_granted":False,
             "backup_invitation_sent":backup_sent,"backup_requires_own_verification":True,
