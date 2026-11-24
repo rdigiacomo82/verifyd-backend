@@ -78,6 +78,18 @@ class SchoolSafetyTrainingTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             safety.EndInput(confirmation=False)
 
+    def test_staff_initial_report_api_never_exposes_student_followup_status(self):
+        import inspect
+        incidents = inspect.getsource(safety.training_school_incidents)
+        reports = inspect.getsource(safety.incident_training_reports)
+        # Principals and approved responders see the original description/category,
+        # not the child's later 'need_help' status, update history or closure.
+        self.assertIn("COUNT(r.report_id) AS report_count", incidents)
+        self.assertNotIn("r.student_status", incidents)
+        self.assertNotIn("r.student_status", reports)
+        self.assertNotIn("r.closed_at", reports)
+        self.assertIn("r.description", reports)
+
     def test_live_calling_functions_are_not_registered_in_training_router(self):
         paths = {r.path for r in safety.router.routes}
         self.assertIn("/trust-voice/school-safety/reports", paths)
