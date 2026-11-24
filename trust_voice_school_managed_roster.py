@@ -115,6 +115,7 @@ class ManagedStudentRow(BaseModel):
 
 class ManagedRosterPreview(BaseModel):
     students: list[ManagedStudentRow] = Field(min_length=1, max_length=250)
+    reserved_handles: list[str] = Field(default_factory=list, max_length=5000)
 
 
 class ManagedRosterCommit(BaseModel):
@@ -271,7 +272,15 @@ def preview_managed_roster(school_id: str, payload: ManagedRosterPreview,
         cur.execute("""DELETE FROM verifyd_safety_managed_roster_previews
             WHERE school_id=%s AND expires_at<NOW()-INTERVAL '1 day'""",(school_id,))
         config = _config_row(cur, school_id)
-        rows, refs, used = [], set(), set()
+        # When a large CSV is previewed in multiple chunks, exclude handles
+        # proposed by preceding chunks even before those previews are committed.
+        used = set()
+        for candidate in payload.reserved_handles:
+            _, lower = _validate_handle(candidate)
+            if not lower.startswith(config["school_code"].lower() + "_"):
+                raise HTTPException(422, detail={"error":"reserved_handle_outside_school_prefix"})
+            used.add(lower)
+        rows, refs = [], set()
         for student in payload.students:
             ref = student.local_ref.strip().upper()
             if not _REF.fullmatch(ref):
