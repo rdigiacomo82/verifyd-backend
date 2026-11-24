@@ -416,6 +416,43 @@ def save_verified_school_contact_routing(
             "notifications_sent":False,"emergency_services_notified":False}
 
 
+
+@router.delete("/schools/{school_id}/contact-routing/{student_id}")
+def disable_verified_school_contact_routing(
+    school_id: str, student_id: str,
+    authorization: Optional[str] = Header(default=None),
+):
+    """Disable future TEST incident submissions without deleting identities.
+
+    A route always contains both a Primary verified guardian and a distinct
+    Backup. Removing just one would leave an incomplete route, so this clears
+    both and requires new independent approval for any replacement.
+
+    Historical report recipients and audit logs are deliberately retained;
+    withdrawal of a person's school authorization is a separate roster or
+    guardian-consent action.
+    """
+    actor = _actor(authorization)
+    _schema()
+    from trust_voice_school_safety_registration import _school_admin
+    with get_db() as conn:
+        cur = conn.cursor()
+        _school_admin(cur, school_id, str(actor["id"]))
+        _membership(cur, school_id, student_id, {"student"})
+        cur.execute("""DELETE FROM verifyd_safety_training_contacts
+            WHERE school_id=%s AND student_id=%s
+            RETURNING primary_id, backup_id""", (school_id, student_id))
+        removed = cur.fetchone() is not None
+        if removed:
+            _audit(cur, school_id, str(actor["id"]),
+                   "verified_training_contact_route_disabled", student_id)
+    return {
+        "ok": True, "mode": "TRAINING ONLY", "removed": removed,
+        "test_reporting_disabled_until_new_route": True,
+        "accounts_deleted": False, "prior_reports_deleted": False,
+        "notifications_sent": False, "emergency_services_notified": False,
+    }
+
 def _report_receipt(row, count):
     return {"ok": True, "mode": "TRAINING ONLY", "report_id": row["report_id"],
         "incident_id": row["incident_id"], "incident_reports": count,
