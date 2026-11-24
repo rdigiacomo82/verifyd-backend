@@ -85,6 +85,7 @@ from trust_voice_school_multi_admin import router as school_multi_admin_router
 from trust_voice_school_guardian_contacts import router as school_guardian_contacts_router
 from trust_voice_school_incident_chat import router as school_incident_chat_router
 from trust_voice_school_choice_catalog import router as school_choice_catalog_router
+from trust_voice_school_student_device import router as school_student_device_router
 from trust_voice_homework import router as trust_voice_homework_router
 from trust_voice_classrooms import router as trust_voice_classrooms_router
 from trust_voice_classroom_library import router as trust_voice_classroom_library_router
@@ -387,6 +388,7 @@ app.include_router(school_multi_admin_router)
 app.include_router(school_guardian_contacts_router)
 app.include_router(school_incident_chat_router)
 app.include_router(school_choice_catalog_router)
+app.include_router(school_student_device_router)
 # VERIFYD_CIRCLE_HOMEWORK_V1 -- off until the server pilot is enabled
 app.include_router(trust_voice_homework_router)
 # Isolated Classroom pilot (all endpoints disabled by default)

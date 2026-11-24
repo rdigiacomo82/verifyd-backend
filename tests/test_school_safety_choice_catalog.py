@@ -106,7 +106,9 @@ class SchoolSafetyChoiceContractTests(unittest.TestCase):
         self.assertEqual(ctx.exception.status_code, 409)
 
     def test_report_uses_authoritative_choice_not_client_label(self):
-        src = inspect.getsource(safety.create_training_report)
+        route_src = inspect.getsource(safety.create_training_report)
+        self.assertIn("_create_training_report_for_student", route_src)
+        src = inspect.getsource(safety._create_training_report_for_student)
         self.assertIn("resolve_report_choice(cur, payload.school_id, payload.choice_id)", src)
         self.assertIn('selected_choice["category"] != payload.category', src)
         self.assertIn('selected_choice["id"] == "other"', src)
