@@ -90,10 +90,21 @@ def _schema():
                 school_id TEXT NOT NULL REFERENCES verifyd_safety_training_schools(school_id) ON DELETE CASCADE,
                 student_id TEXT NOT NULL REFERENCES verifyd_identities(id) ON DELETE CASCADE,
                 primary_id TEXT NOT NULL REFERENCES verifyd_identities(id),
-                backup_id TEXT NOT NULL REFERENCES verifyd_identities(id),
+                backup_id TEXT REFERENCES verifyd_identities(id),
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 PRIMARY KEY(school_id,student_id),
                 CHECK(primary_id<>backup_id), CHECK(student_id<>primary_id), CHECK(student_id<>backup_id)
+            )""")
+            # Old TEST routes sometimes stored the Principal as a family Backup.
+            # A school response recipient is not a guardian. Preserve Primary,
+            # move staff to its separate recipient role, and keep report history.
+            cur.execute("ALTER TABLE verifyd_safety_training_contacts ALTER COLUMN backup_id DROP NOT NULL")
+            cur.execute("""CREATE TABLE IF NOT EXISTS verifyd_safety_school_response_team (
+                school_id TEXT NOT NULL REFERENCES verifyd_safety_training_schools(school_id) ON DELETE CASCADE,
+                responder_id TEXT NOT NULL REFERENCES verifyd_identities(id),
+                assigned_by TEXT NOT NULL REFERENCES verifyd_identities(id),
+                assigned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                PRIMARY KEY(school_id,responder_id)
             )""")
             cur.execute("""CREATE TABLE IF NOT EXISTS verifyd_safety_training_incidents (
                 incident_id TEXT PRIMARY KEY,
@@ -139,6 +150,21 @@ def _schema():
                 object_id TEXT,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )""")
+            # One-time conversion of legacy "Principal as backup guardian"
+            # assignments. Principal stays in school response, not family.
+            cur.execute("""UPDATE verifyd_safety_training_contacts c
+                 SET backup_id=NULL,updated_at=NOW()
+                 WHERE c.backup_id IS NOT NULL AND EXISTS (
+                   SELECT 1 FROM verifyd_safety_training_members m
+                   WHERE m.school_id=c.school_id AND m.identity_id=c.backup_id
+                     AND m.role IN ('principal','responder'))
+                 RETURNING school_id,student_id""")
+            for moved in cur.fetchall():
+                cur.execute("""INSERT INTO verifyd_safety_training_audit
+                  (audit_id,school_id,actor_id,action,object_id)
+                  VALUES(%s,%s,%s,%s,%s)""",
+                  ("ssa_" + uuid.uuid4().hex, moved["school_id"], "system-migration",
+                   "school_staff_removed_from_guardian_backup", moved["student_id"]))
         _ready = True
 
 
@@ -230,7 +256,7 @@ def enrollment(authorization: Optional[str] = Header(default=None)):
                 continue
             cur.execute("""SELECT m.identity_id,i.handle,i.display_name,m.role FROM verifyd_safety_training_members m
               JOIN verifyd_identities i ON i.id=m.identity_id
-              WHERE m.school_id=%s AND m.role IN ('guardian','principal','responder') ORDER BY i.handle""",
+              WHERE m.school_id=%s AND m.role='guardian' ORDER BY i.handle""",
               (school["school_id"],))
             school["eligible_contacts"] = []
             for row in cur.fetchall():
@@ -310,31 +336,125 @@ def set_training_contacts(school_id: str, payload: ContactInput, authorization: 
 
 
 def _verified_training_contact(cur, school_id, student_id, adult_id):
-    """Only the child's acknowledged guardian or a verified school administrator."""
-    if student_id == adult_id or identities_blocked(student_id, adult_id):
-        raise HTTPException(403, detail={"error": "contact_not_authorized_for_student"})
-    role = _membership(cur, school_id, adult_id, {"guardian", "principal", "responder"})
-    if role == "guardian":
-        from trust_voice_school_safety_consents import POLICY_VERSION
-        cur.execute("""SELECT 1 FROM verifyd_safety_training_guardians g
-          JOIN verifyd_safety_training_signoffs x
-            ON x.school_id=g.school_id AND x.actor_id=g.guardian_id
-            AND x.subject_id=g.child_id AND x.kind='guardian'
-            AND x.policy_version=%s AND x.revoked_at IS NULL
-          WHERE g.school_id=%s AND g.child_id=%s AND g.guardian_id=%s""",
-          (POLICY_VERSION,school_id,student_id,adult_id))
-        if not cur.fetchone():
-            raise HTTPException(403, detail={"error": "verified_guardian_training_acknowledgment_required"})
-    else:
-        from trust_voice_school_safety_registration import _school_admin
-        _school_admin(cur, school_id, adult_id)
+    """Only an independently linked, acknowledged guardian; NEVER school staff."""
+    if not adult_id or student_id == adult_id or identities_blocked(student_id, adult_id):
+        raise HTTPException(403, detail={"error": "guardian_not_authorized_for_student"})
+    _membership(cur, school_id, adult_id, {"guardian"})
+    from trust_voice_school_safety_consents import POLICY_VERSION
+    cur.execute("""SELECT 1 FROM verifyd_safety_training_guardians g
+      JOIN verifyd_safety_training_signoffs x
+        ON x.school_id=g.school_id AND x.actor_id=g.guardian_id
+        AND x.subject_id=g.child_id AND x.kind='guardian'
+        AND x.policy_version=%s AND x.revoked_at IS NULL
+      JOIN verifyd_identities i ON i.id=g.guardian_id AND i.status='active'
+      WHERE g.school_id=%s AND g.child_id=%s AND g.guardian_id=%s""",
+      (POLICY_VERSION,school_id,student_id,adult_id))
+    if not cur.fetchone():
+        raise HTTPException(403, detail={"error": "verified_guardian_training_acknowledgment_required"})
+    return "guardian"
+
+
+def _school_response_authorized(cur, school_id, staff_id):
+    """Access to INITIAL TEST incident only, not school roster administration."""
+    from trust_voice_school_safety_registration import _school_admin
+    role = _membership(cur, school_id, staff_id, {"principal", "responder"})
+    cur.execute("SELECT status FROM verifyd_identities WHERE id=%s", (staff_id,))
+    person = cur.fetchone()
+    if not person or person["status"] != "active":
+        raise HTTPException(403, detail={"error": "school_response_staff_inactive"})
+    if role == "principal":
+        _school_admin(cur, school_id, staff_id)
+        return role
+    cur.execute("""SELECT 1 FROM verifyd_safety_school_response_team
+      WHERE school_id=%s AND responder_id=%s""", (school_id, staff_id))
+    if not cur.fetchone():
+        raise HTTPException(403, detail={"error": "school_response_staff_not_designated"})
     return role
+
+
+def _school_response_recipients(cur, school_id):
+    cur.execute("""SELECT identity_id FROM verifyd_safety_training_members
+        WHERE school_id=%s AND role='principal'
+        UNION SELECT responder_id FROM verifyd_safety_school_response_team
+        WHERE school_id=%s""", (school_id, school_id))
+    candidates = [str(row["identity_id"]) for row in cur.fetchall()]
+    approved = []
+    for adult_id in candidates:
+        try: _school_response_authorized(cur, school_id, adult_id)
+        except HTTPException: continue
+        approved.append(adult_id)
+    if not approved:
+        raise HTTPException(409, detail={"error": "verified_school_principal_required"})
+    return approved
 
 
 class SchoolVerifiedContactRoute(BaseModel):
     primary_id: str = Field(min_length=3, max_length=100)
-    backup_id: str = Field(min_length=3, max_length=100)
+    backup_id: Optional[str] = Field(default=None, min_length=3, max_length=100)
     independently_verified: Literal[True]
+
+
+class SchoolResponseTeamSelection(BaseModel):
+    responder_ids: list[str] = Field(default_factory=list, max_length=20)
+    independently_verified: Literal[True]
+
+
+@router.get("/schools/{school_id}/response-team")
+def get_verified_school_response_team(school_id: str, authorization: Optional[str] = Header(default=None)):
+    actor = _actor(authorization)
+    _schema()
+    from trust_voice_school_safety_registration import _school_admin
+    from trust_voice_school_safety_consents import _consent_schema
+    _consent_schema()
+    with get_db() as conn:
+        cur = conn.cursor()
+        _school_admin(cur, school_id, str(actor["id"]))
+        cur.execute("""SELECT m.identity_id,i.handle,i.display_name,m.role
+            FROM verifyd_safety_training_members m JOIN verifyd_identities i ON i.id=m.identity_id
+            WHERE m.school_id=%s AND m.role IN ('principal','responder') AND i.status='active'
+            ORDER BY CASE WHEN m.role='principal' THEN 0 ELSE 1 END,i.handle""", (school_id,))
+        members = [dict(x) for x in cur.fetchall()]
+        cur.execute("""SELECT responder_id FROM verifyd_safety_school_response_team WHERE school_id=%s""", (school_id,))
+        designated = {str(r["responder_id"]) for r in cur.fetchall()}
+    for item in members:
+        item["identity_id"] = str(item["identity_id"])
+        item["selected"] = item["role"] == "principal" or item["identity_id"] in designated
+        item["fixed_principal"] = item["role"] == "principal"
+    return {"ok": True, "mode": "TRAINING ONLY", "school_id": school_id, "members": members,
+            "staff_receive_initial_incident_only": True, "private_family_texts_visible": False}
+
+
+@router.put("/schools/{school_id}/response-team")
+def update_verified_school_response_team(school_id: str, payload: SchoolResponseTeamSelection,
+                                        authorization: Optional[str] = Header(default=None)):
+    actor = _actor(authorization)
+    _schema()
+    from trust_voice_school_safety_registration import _school_admin
+    from trust_voice_school_safety_consents import _consent_schema
+    _consent_schema()
+    selected = [str(v) for v in payload.responder_ids]
+    if len(set(selected)) != len(selected):
+        raise HTTPException(422, detail={"error": "duplicate_school_response_staff"})
+    with get_db() as conn:
+        cur = conn.cursor()
+        _school_admin(cur, school_id, str(actor["id"]))
+        if selected:
+            cur.execute("""SELECT m.identity_id FROM verifyd_safety_training_members m
+                 JOIN verifyd_identities i ON i.id=m.identity_id AND i.status='active'
+                 WHERE m.school_id=%s AND m.role='responder' AND m.identity_id=ANY(%s)""", (school_id, selected))
+            eligible = {str(r["identity_id"]) for r in cur.fetchall()}
+            if eligible != set(selected):
+                raise HTTPException(403, detail={"error": "school_response_staff_must_be_verified_responder"})
+        cur.execute("DELETE FROM verifyd_safety_school_response_team WHERE school_id=%s", (school_id,))
+        for adult_id in selected:
+            cur.execute("""INSERT INTO verifyd_safety_school_response_team
+                 (school_id,responder_id,assigned_by) VALUES(%s,%s,%s)""",
+                 (school_id, adult_id, str(actor["id"])))
+        _audit(cur, school_id, str(actor["id"]), "school_response_team_designated",
+               "responders:" + str(len(selected)))
+    return {"ok": True, "mode": "TRAINING ONLY", "designated_responders": len(selected),
+            "principal_always_included": True, "new_notifications_sent": False,
+            "private_family_texts_visible": False}
 
 
 @router.get("/schools/{school_id}/contact-routing")
@@ -367,22 +487,15 @@ def get_verified_school_contact_routing(school_id: str, authorization: Optional[
                 try: _verified_training_contact(cur,school_id,sid,person["identity_id"])
                 except HTTPException: continue
                 primary.append(person)
-            cur.execute("""SELECT m.identity_id,i.handle,i.display_name,m.role
-              FROM verifyd_safety_training_members m JOIN verifyd_identities i ON i.id=m.identity_id
-              WHERE m.school_id=%s AND m.role IN ('principal','responder') ORDER BY i.handle""",
-              (school_id,))
+            # Family recipients can only be verified guardians, never school staff.
             backup = list(primary)
-            for row in cur.fetchall():
-                person = dict(row)
-                person["identity_id"] = str(person["identity_id"])
-                try: _verified_training_contact(cur,school_id,sid,person["identity_id"])
-                except HTTPException: continue
-                backup.append(person)
             cur.execute("""SELECT primary_id,backup_id FROM verifyd_safety_training_contacts
               WHERE school_id=%s AND student_id=%s""", (school_id,sid))
+            current = dict(cur.fetchone() or {})
             result.append({"student_id":sid,"handle":student["handle"],
               "display_name":student["display_name"],"primary_guardians":primary,
-              "backup_contacts":backup,"current_contacts":dict(cur.fetchone() or {})})
+              "backup_guardians":backup,"backup_contacts":backup,
+              "current_contacts":current})
     return {"ok":True,"mode":"TRAINING ONLY","students":result}
 
 
@@ -392,8 +505,9 @@ def save_verified_school_contact_routing(
     authorization: Optional[str] = Header(default=None),
 ):
     actor = _actor(authorization)
-    if student_id in (payload.primary_id,payload.backup_id) or payload.primary_id == payload.backup_id:
-        raise HTTPException(422,detail={"error":"two_distinct_contacts_required"})
+    if student_id == payload.primary_id or (payload.backup_id and
+        (student_id == payload.backup_id or payload.primary_id == payload.backup_id)):
+        raise HTTPException(422,detail={"error":"guardians_must_be_distinct_from_student_and_each_other"})
     _schema()
     from trust_voice_school_safety_consents import _consent_schema
     from trust_voice_school_safety_registration import _school_admin
@@ -402,10 +516,9 @@ def save_verified_school_contact_routing(
         cur = conn.cursor()
         _school_admin(cur,school_id,str(actor["id"]))
         _membership(cur,school_id,student_id,{"student"})
-        primary_role = _verified_training_contact(cur,school_id,student_id,payload.primary_id)
-        _verified_training_contact(cur,school_id,student_id,payload.backup_id)
-        if primary_role != "guardian":
-            raise HTTPException(403,detail={"error":"primary_must_be_verified_guardian"})
+        _verified_training_contact(cur,school_id,student_id,payload.primary_id)
+        if payload.backup_id:
+            _verified_training_contact(cur,school_id,student_id,payload.backup_id)
         cur.execute("""INSERT INTO verifyd_safety_training_contacts
           (school_id,student_id,primary_id,backup_id) VALUES (%s,%s,%s,%s)
           ON CONFLICT(school_id,student_id) DO UPDATE SET
@@ -422,15 +535,12 @@ def disable_verified_school_contact_routing(
     school_id: str, student_id: str,
     authorization: Optional[str] = Header(default=None),
 ):
-    """Disable future TEST incident submissions without deleting identities.
+    """Clear the family guardian route for future TEST incidents only.
 
-    A route always contains both a Primary verified guardian and a distinct
-    Backup. Removing just one would leave an incomplete route, so this clears
-    both and requires new independent approval for any replacement.
-
-    Historical report recipients and audit logs are deliberately retained;
-    withdrawal of a person's school authorization is a separate roster or
-    guardian-consent action.
+    Primary guardian is required; Backup is optional but MUST also be a
+    verified guardian. Removing the route blocks NEW training reports.
+    It does not change the separate Principal/designated staff response team,
+    historical incident records, or school membership.
     """
     actor = _actor(authorization)
     _schema()
@@ -498,18 +608,15 @@ def _create_training_report_for_student(payload: ReportInput, student_id: str):
         contacts = cur.fetchone()
         if not contacts:
             raise HTTPException(409, detail={"error": "configure_primary_and_backup_first"})
-        cur.execute("""SELECT identity_id FROM verifyd_safety_training_members WHERE school_id=%s
-            AND role IN ('principal','responder')""", (payload.school_id,))
-        school_team = [str(r["identity_id"]) for r in cur.fetchall()]
-        cur.execute("""SELECT identity_id FROM verifyd_safety_training_members WHERE school_id=%s
-            AND role='principal' LIMIT 1""", (payload.school_id,))
-        if not cur.fetchone():
-            raise HTTPException(409, detail={"error": "verified_school_principal_required"})
-        for adult_id in (contacts["primary_id"], contacts["backup_id"]):
-            try:
-                _verified_training_contact(cur,payload.school_id,student_id,str(adult_id))
-            except HTTPException:
-                raise HTTPException(409, detail={"error": "selected_contact_no_longer_eligible"})
+        # Recipient domains are disjoint: guardians vs Principal/designated staff.
+        # This also handles old staff-as-Backup rows safely during migration.
+        try:
+            _verified_training_contact(cur,payload.school_id,student_id,str(contacts["primary_id"]))
+            if contacts["backup_id"]:
+                _verified_training_contact(cur,payload.school_id,student_id,str(contacts["backup_id"]))
+        except HTTPException:
+            raise HTTPException(409, detail={"error": "selected_guardian_no_longer_eligible"})
+        school_team = _school_response_recipients(cur, payload.school_id)
         # Serialize attempts with the same per-student idempotency key, even if
         # clients retry with different categories at the same time.
         replay_lock_hash = hashlib.sha256(
@@ -543,7 +650,9 @@ def _create_training_report_for_student(payload: ReportInput, student_id: str):
            (report_id,incident_id,school_id,student_id,client_key,category,description)
            VALUES (%s,%s,%s,%s,%s,%s,%s)""", (report_id,incident_id,payload.school_id,
            student_id,payload.idempotency_key,payload.category,initial_description))
-        recipients = set(school_team) | {str(contacts["primary_id"]), str(contacts["backup_id"])}
+        recipients = set(school_team) | {str(contacts["primary_id"])}
+        if contacts["backup_id"]:
+            recipients.add(str(contacts["backup_id"]))
         for recipient in recipients:
             cur.execute("""INSERT INTO verifyd_safety_training_recipients
                 (report_id,recipient_id,reason) VALUES(%s,%s,%s) ON CONFLICT DO NOTHING""",
@@ -629,7 +738,7 @@ def training_school_incidents(school_id: str, authorization: Optional[str] = Hea
     _schema()
     with get_db() as conn:
         cur = conn.cursor()
-        _membership(cur, school_id, str(actor["id"]), {"principal","responder"})
+        _school_response_authorized(cur, school_id, str(actor["id"]))
         # Staff see incident grouping and initial reports, never student follow-up status.
         cur.execute("""SELECT i.incident_id,i.category,i.status,i.created_at,i.resolved_at,
             COUNT(r.report_id) AS report_count
@@ -651,7 +760,7 @@ def incident_training_reports(incident_id: str, authorization: Optional[str] = H
         incident = cur.fetchone()
         if not incident:
             raise HTTPException(404, detail={"error": "incident_not_found"})
-        _membership(cur, incident["school_id"], str(actor["id"]), {"principal","responder"})
+        _school_response_authorized(cur, incident["school_id"], str(actor["id"]))
         # Initial submission metadata only: no ongoing student updates or closure state.
         cur.execute("""SELECT r.report_id,r.student_id,r.category,r.description,
             r.created_at FROM verifyd_safety_training_reports r
@@ -671,7 +780,7 @@ def resolve_training_incident(incident_id: str, payload: ResolveInput, authoriza
         record = cur.fetchone()
         if not record:
             raise HTTPException(404, detail={"error": "incident_not_found"})
-        _membership(cur, record["school_id"], str(actor["id"]), {"principal","responder"})
+        _school_response_authorized(cur, record["school_id"], str(actor["id"]))
         if record["status"] != "active":
             raise HTTPException(409, detail={"error": "already_resolved"})
         cur.execute("""UPDATE verifyd_safety_training_incidents SET status='resolved',
