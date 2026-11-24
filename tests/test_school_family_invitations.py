@@ -64,6 +64,18 @@ class SchoolFamilyInvitationsTests(unittest.TestCase):
         self.assertIn("principal_attests_individual_review" if False else "independently_verified_family_relationships",
                       inspect.getsource(invite.FinalBatchApproval))
 
+    def test_invalid_email_attempts_lock_invitation(self):
+        source = inspect.getsource(invite.verify_family_invitation)
+        self.assertIn('verification_attempts"] >= 5',source)
+        self.assertIn("verification_attempts=verification_attempts+1",source)
+        self.assertIn("invitation_verification_locked_contact_school",source)
+        self.assertIn("session_expires_at",inspect.getsource(invite.confirm_family_claim))
+
+    def test_school_guardian_identity_is_not_created_twice_for_siblings(self):
+        source = inspect.getsource(invite._new_guardian_identity)
+        self.assertIn("pg_advisory_xact_lock", source)
+        self.assertIn("email_lower", source)
+
     def test_principal_final_batch_only_verified_claims(self):
         src = inspect.getsource(invite.approve_family_invitation_batch)
         self.assertIn("_school_admin(cur,school_id,str(actor[\"id\"]))",src)
