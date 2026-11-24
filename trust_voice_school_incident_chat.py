@@ -10,7 +10,7 @@ from typing import Optional
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
 from database import get_db
-from trust_voice_school_safety_training import _actor,_schema as _school_schema,_audit,_membership
+from trust_voice_school_safety_training import _actor,_schema as _school_schema,_audit,_membership,_school_response_authorized
 from trust_voice_school_safety_registration import _school_admin
 from trust_voice_school_safety_consents import POLICY_VERSION
 from trust_voice_push import notify_identity_push, _enabled as _web_push_enabled, _configured as _web_push_configured, _active_subscriptions
@@ -66,7 +66,9 @@ def _authorize(cur,report_id,actor_id):
         WHERE report_id=%s AND recipient_id=%s""",(report_id,actor_id))
     if not cur.fetchone():raise HTTPException(403,detail={"error":"not_incident_recipient"})
     if role in ("principal","responder"):
-        _school_admin(cur,report["school_id"],actor_id)
+        # Designated responders may access INITIAL reports only, not the
+        # private student–guardian conversation or school administration.
+        _school_response_authorized(cur,report["school_id"],actor_id)
     elif role=="guardian":
         cur.execute("""SELECT 1 FROM verifyd_safety_training_guardians g
           JOIN verifyd_safety_training_signoffs x ON x.school_id=g.school_id
