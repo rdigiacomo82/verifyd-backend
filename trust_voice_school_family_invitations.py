@@ -91,6 +91,24 @@ def _schema():
                 FOREIGN KEY(school_id,local_ref)
                   REFERENCES verifyd_safety_managed_students(school_id,local_ref)
             )""")
+            cur.execute("""ALTER TABLE verifyd_safety_family_invitations
+                ADD COLUMN IF NOT EXISTS send_attempts INTEGER NOT NULL DEFAULT 0""")
+            cur.execute("""ALTER TABLE verifyd_safety_family_invitations
+                ADD COLUMN IF NOT EXISTS last_sent_at TIMESTAMPTZ""")
+            cur.execute("""CREATE TABLE IF NOT EXISTS verifyd_safety_family_contact_drafts (
+                school_id TEXT NOT NULL,
+                local_ref TEXT NOT NULL,
+                slot INTEGER NOT NULL CHECK(slot IN (1,2)),
+                guardian_name TEXT NOT NULL,
+                guardian_email TEXT NOT NULL,
+                relationship TEXT NOT NULL CHECK(relationship IN
+                    ('parent','legal_guardian','authorized_caregiver')),
+                verified_by TEXT NOT NULL REFERENCES verifyd_identities(id),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                PRIMARY KEY(school_id,local_ref,slot),
+                FOREIGN KEY(school_id,local_ref) REFERENCES
+                    verifyd_safety_managed_students(school_id,local_ref)
+            )""")
             cur.execute("""CREATE INDEX IF NOT EXISTS safety_family_invite_school_status
                  ON verifyd_safety_family_invitations(school_id,approval_status,issued_at DESC)""")
             cur.execute("""CREATE TABLE IF NOT EXISTS verifyd_safety_family_invite_claim_sessions (
@@ -114,6 +132,20 @@ class InvitationBatch(BaseModel):
     guardians: list[InvitationTarget] = Field(min_length=1, max_length=_MAX_SEND)
     principal_verified_contact_addresses: Literal[True]
     send_individual_invites: Literal[True]
+
+
+class SavedFamilyContacts(BaseModel):
+    contacts: list[InvitationTarget] = Field(min_length=1, max_length=250)
+    school_verified_emails_and_relationships: Literal[True]
+
+
+class SendSavedInvitations(BaseModel):
+    local_refs: list[str] = Field(min_length=1, max_length=15)
+    principal_confirms_recipient_list: Literal[True]
+
+
+class ResendInvitation(BaseModel):
+    principal_confirms_address: Literal[True]
 
 
 class InvitationCode(BaseModel):
@@ -247,7 +279,8 @@ def send_invitation_batch(school_id: str, payload: InvitationBatch,
         sent = _send_invitation(email,school_name,token)
         with get_db() as conn:
             conn.cursor().execute("""UPDATE verifyd_safety_family_invitations
-                SET delivery_status=%s WHERE invite_id=%s""",
+                SET delivery_status=%s,last_sent_at=NOW(),send_attempts=send_attempts+1
+                WHERE invite_id=%s""",
                 ("sent" if sent else "failed",invite_id))
         results.append({"invitation_id":invite_id,"recipient":_mask(email),"email_accepted":sent})
     return {"ok":True,"invitations":results,"individual_email_only":True,
@@ -542,3 +575,193 @@ def revoke_school_family_invitation(school_id: str,invite_id: str,
             WHERE invite_id=%s""",(str(actor["id"]),invite_id))
         _audit(cur,school_id,str(actor["id"]),"family_invitation_revoked",invite_id)
     return {"ok":True,"revoked":True,"guardian_access_changed":False}
+
+
+
+@router.get("/schools/{school_id}/family-invitations/contact-drafts")
+def get_school_family_contact_drafts(school_id: str, authorization: Optional[str]=Header(default=None)):
+    """School-admin-only record of guardian invitations ready for sending."""
+    _enabled(school_id)
+    actor=_actor(authorization)
+    _schema()
+    with get_db() as conn:
+        cur=conn.cursor()
+        _school_admin(cur,school_id,str(actor["id"]))
+        cur.execute("""SELECT local_ref,slot,guardian_name,guardian_email,relationship,updated_at
+            FROM verifyd_safety_family_contact_drafts WHERE school_id=%s
+            ORDER BY local_ref,slot LIMIT 6000""",(school_id,))
+        contacts=[dict(x) for x in cur.fetchall()]
+    return {"ok":True,"contacts":contacts,"school_only":True}
+
+
+@router.put("/schools/{school_id}/family-invitations/contact-drafts")
+def save_school_family_contact_drafts(school_id: str,payload: SavedFamilyContacts,
+                                      authorization: Optional[str]=Header(default=None)):
+    """Persist staff-verified invite recipients without sending an email.
+
+    Never assume parental authority just because email exists in a school CSV.
+    """
+    _enabled(school_id)
+    actor=_actor(authorization)
+    seen=set()
+    cleaned=[]
+    for item in payload.contacts:
+        ref=item.local_ref.strip().upper()
+        email=item.guardian_email.strip().lower()
+        name=item.guardian_name.strip()
+        if not is_valid_email(email):
+            raise HTTPException(422,detail={"error":"invalid_guardian_email"})
+        if (ref,item.slot) in seen:
+            raise HTTPException(422,detail={"error":"duplicate_guardian_slot_in_contact_drafts"})
+        seen.add((ref,item.slot))
+        cleaned.append((ref,item.slot,name,email,item.relationship))
+    _schema()
+    with get_db() as conn:
+        cur=conn.cursor()
+        _school_admin(cur,school_id,str(actor["id"]))
+        refs=sorted({x[0] for x in cleaned})
+        cur.execute("""SELECT local_ref FROM verifyd_safety_managed_students
+            WHERE school_id=%s AND local_ref=ANY(%s)""",(school_id,refs))
+        matches={str(x["local_ref"]) for x in cur.fetchall()}
+        if matches!=set(refs):
+            raise HTTPException(404,detail={"error":"guardian_contact_student_not_in_school_roster"})
+        for ref,slot,name,email,relationship in cleaned:
+            cur.execute("""SELECT 1 FROM verifyd_safety_family_invitations
+                WHERE school_id=%s AND local_ref=%s AND slot=%s
+                  AND revoked_at IS NULL AND (claimed_at IS NOT NULL OR expires_at>NOW())
+                LIMIT 1""",(school_id,ref,slot))
+            if cur.fetchone():
+                raise HTTPException(409,detail={"error":"revoke_prior_invitation_before_changing_guardian_contact"})
+        group={}
+        for ref,slot,name,email,relationship in cleaned:
+            group.setdefault(ref,{})[slot]=email
+        for ref,slots in group.items():
+            if 1 in slots and 2 in slots and slots[1]==slots[2]:
+                raise HTTPException(422,detail={"error":"primary_and_backup_need_distinct_emails"})
+        for ref,slot,name,email,relationship in cleaned:
+            cur.execute("""INSERT INTO verifyd_safety_family_contact_drafts
+                (school_id,local_ref,slot,guardian_name,guardian_email,relationship,verified_by)
+                VALUES(%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT(school_id,local_ref,slot) DO UPDATE
+                SET guardian_name=EXCLUDED.guardian_name,
+                    guardian_email=EXCLUDED.guardian_email,
+                    relationship=EXCLUDED.relationship,
+                    verified_by=EXCLUDED.verified_by,updated_at=NOW()""",
+                (school_id,ref,slot,name,email,relationship,str(actor["id"])))
+        _audit(cur,school_id,str(actor["id"]),"family_invitation_contacts_saved",str(len(cleaned)))
+    return {"ok":True,"contacts_saved":len(cleaned),"sent":0,
+            "family_access_granted":False}
+
+
+@router.post("/schools/{school_id}/family-invitations/send-saved")
+def send_saved_family_invitations(school_id: str,payload: SendSavedInvitations,
+                                  authorization: Optional[str]=Header(default=None)):
+    """One action sends prepared individual emails after school approval.
+
+    Repeated clicks never create duplicate pending invitations. The dedicated
+    Resend action rotates the one-use secret after a reasonable interval.
+    """
+    _enabled(school_id)
+    actor=_actor(authorization)
+    refs=[x.strip().upper() for x in payload.local_refs]
+    if len(refs)!=len(set(refs)):
+        raise HTTPException(422,detail={"error":"duplicate_student_reference"})
+    _schema()
+    with get_db() as conn:
+        cur=conn.cursor()
+        _school_admin(cur,school_id,str(actor["id"]))
+        cur.execute("""SELECT local_ref FROM verifyd_safety_managed_students
+            WHERE school_id=%s AND local_ref=ANY(%s)
+              AND enrollment_status='school_approved' AND student_identity_id IS NOT NULL""",
+            (school_id,refs))
+        found={str(r["local_ref"]) for r in cur.fetchall()}
+        if found!=set(refs):
+            raise HTTPException(409,detail={"error":"student_not_yet_approved_for_family_invitation"})
+        cur.execute("""SELECT local_ref,slot,guardian_name,guardian_email,relationship
+            FROM verifyd_safety_family_contact_drafts
+            WHERE school_id=%s AND local_ref=ANY(%s)
+            ORDER BY local_ref,slot""",(school_id,refs))
+        contacts=[dict(x) for x in cur.fetchall()]
+        cur.execute("""SELECT local_ref,slot,approval_status,revoked_at,expires_at,claimed_at
+            FROM verifyd_safety_family_invitations
+            WHERE school_id=%s AND local_ref=ANY(%s)
+              AND revoked_at IS NULL AND (claimed_at IS NOT NULL OR expires_at>NOW())""",
+            (school_id,refs))
+        occupied={(str(x["local_ref"]),int(x["slot"])) for x in cur.fetchall()}
+    prepared=[InvitationTarget(**x) for x in contacts
+              if (str(x["local_ref"]),int(x["slot"])) not in occupied]
+    skipped=len(contacts)-len(prepared)
+    if not prepared:
+        return {"ok":True,"sent":0,"existing_invitations":skipped,
+                "missing_contact_records":len(refs)-len({r["local_ref"] for r in contacts}),
+                "message":"No new invitations needed. Use Resend for an unclaimed email."}
+    # Send in the existing size-bounded batches, with the usual school-admin
+    # gate and contact list validation on every batch.
+    deliveries=[]
+    for start in range(0,len(prepared),_MAX_SEND):
+        outcome=send_invitation_batch(school_id,InvitationBatch(
+            guardians=prepared[start:start+_MAX_SEND],
+            principal_verified_contact_addresses=True,
+            send_individual_invites=True,
+        ),authorization)
+        deliveries.extend(outcome["invitations"])
+    return {"ok":True,"sent":sum(1 for d in deliveries if d["email_accepted"]),
+            "failed":sum(1 for d in deliveries if not d["email_accepted"]),
+            "existing_invitations":skipped,
+            "missing_contact_records":len(refs)-len({r["local_ref"] for r in contacts}),
+            "invitations":deliveries,
+            "guardian_access_granted":False}
+
+
+@router.post("/schools/{school_id}/family-invitations/{invite_id}/resend")
+def resend_school_family_invitation(school_id: str,invite_id: str,payload: ResendInvitation,
+                                    authorization: Optional[str]=Header(default=None)):
+    """Rotate an unused invitation code and send another private email.
+
+    Never resend already claimed/approved/revoked invitations. Old codes are
+    invalidated immediately; new code is never returned to the browser.
+    """
+    _enabled(school_id)
+    actor=_actor(authorization)
+    _schema()
+    code=secrets.token_urlsafe(32)
+    with get_db() as conn:
+        cur=conn.cursor()
+        _school_admin(cur,school_id,str(actor["id"]))
+        cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))",("family_invites:"+school_id,))
+        cur.execute("""SELECT i.recipient_email,i.approval_status,i.claimed_at,
+                   i.revoked_at,i.send_attempts,i.last_sent_at,s.school_name
+            FROM verifyd_safety_family_invitations i
+            JOIN verifyd_safety_training_schools s ON s.school_id=i.school_id
+            WHERE i.school_id=%s AND i.invite_id=%s FOR UPDATE OF i""",
+            (school_id,invite_id))
+        row=cur.fetchone()
+        if not row:
+            raise HTTPException(404,detail={"error":"invitation_not_found"})
+        if row["approval_status"]!="awaiting_claim" or row["claimed_at"] or row["revoked_at"]:
+            raise HTTPException(409,detail={"error":"only_unclaimed_invitations_can_be_resent"})
+        if int(row["send_attempts"])>=5:
+            raise HTTPException(429,detail={"error":"invitation_resend_limit_contact_school"})
+        cur.execute("""UPDATE verifyd_safety_family_invitations
+            SET token_hash=%s,expires_at=NOW()+INTERVAL '7 days',
+                delivery_status='queued',
+                otp_requests=0,verification_attempts=0,
+                last_sent_at=NOW(),send_attempts=send_attempts+1
+            WHERE school_id=%s AND invite_id=%s
+              AND (last_sent_at IS NULL OR last_sent_at<NOW()-INTERVAL '2 minutes')
+            RETURNING recipient_email""",
+            (_hash(code),school_id,invite_id))
+        changed=cur.fetchone()
+        if not changed:
+            raise HTTPException(429,detail={"error":"wait_two_minutes_before_resending_invitation"})
+        school_name=row["school_name"]
+        email=row["recipient_email"]
+        _audit(cur,school_id,str(actor["id"]),"school_family_invitation_resent",invite_id)
+    delivered=_send_invitation(email,school_name,code)
+    with get_db() as conn:
+        conn.cursor().execute("""UPDATE verifyd_safety_family_invitations
+            SET delivery_status=%s WHERE school_id=%s AND invite_id=%s""",
+            ("sent" if delivered else "failed",school_id,invite_id))
+    return {"ok":True,"email_accepted":delivered,"recipient":_mask(email),
+            "prior_invitation_link_revoked":True,"new_code_emailed_not_displayed":True,
+            "guardian_access_granted":False}
