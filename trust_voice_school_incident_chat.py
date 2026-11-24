@@ -78,6 +78,19 @@ def _authorize(cur,report_id,actor_id):
     else:raise HTTPException(403,detail={"error":"not_authorized_for_incident"})
     return report
 
+def _family_chat_authorize(cur, report_id: str, actor_id: str):
+    """Limit incident text access to the reporting student and signed guardian(s)."""
+    report = _authorize(cur, report_id, actor_id)
+    if str(report["student_id"]) == actor_id:
+        _membership(cur, report["school_id"], actor_id, {"student"})
+        return report
+    if _membership(cur, report["school_id"], actor_id) != "guardian":
+        raise HTTPException(403, detail={"error": "private_family_conversation_only"})
+    # _authorize already verifies report recipient, active guardian-school link,
+    # and current guardian acknowledgment. Staff have no access.
+    return report
+
+
 def queue_report(cur,report_id,school_id,student_id,recipients):
     """Called inside report creation transaction; never enables real dispatch."""
     if not _allowed(school_id):return
@@ -104,7 +117,11 @@ def _dispatch(report_id, event_key):
     for job in jobs:
         if not _allowed(job["school_id"]):continue
         with get_db() as conn:
-            try:_authorize(conn.cursor(),report_id,str(job["recipient_id"]))
+            try:
+                if str(event_key).startswith("reply:"):
+                    _family_chat_authorize(conn.cursor(),report_id,str(job["recipient_id"]))
+                else:
+                    _authorize(conn.cursor(),report_id,str(job["recipient_id"]))
             except HTTPException:continue
         recipient=str(job["recipient_id"])
         # Keep unsent notification queued until a device has opted into push.
@@ -120,11 +137,12 @@ def _dispatch(report_id, event_key):
             claimed=bool(cur.fetchone())
         if not claimed:continue
         try:
+            private_reply = str(event_key).startswith("reply:")
             result=notify_identity_push(recipient,
-                notification_type="school_safety_test_alert",
-                title="VeriFYD Safety — Test School notification",
-                body="A test incident needs your attention. Open VeriFYD Safety.",
-                url="/Safety",tag="verifyd-school-"+report_id,ttl=600)
+                notification_type="school_safety_family_reply_test" if private_reply else "school_safety_test_alert",
+                title="VeriFYD Safety — private family text" if private_reply else "VeriFYD Safety — Test School notification",
+                body="A private TEST family text is ready in VeriFYD Safety." if private_reply else "An initial test school incident needs your attention.",
+                url="/Safety",tag="verifyd-school-"+report_id+("-family" if private_reply else ""),ttl=600)
         except Exception:
             result={"sent":0}
         n=int(result.get("sent") or 0)
@@ -189,7 +207,7 @@ def inbox(authorization:Optional[str]=Header(default=None)):
     actor=_actor(authorization);_schema();aid=str(actor["id"])
     with get_db() as conn:
         cur=conn.cursor()
-        cur.execute("""SELECT r.report_id,r.school_id,r.category,r.student_status,r.created_at,
+        cur.execute("""SELECT r.report_id,r.school_id,r.category,r.description,r.student_status,r.created_at,
           i.status AS incident_status,
           EXISTS(SELECT 1 FROM verifyd_safety_incident_acknowledgments a
              WHERE a.report_id=r.report_id AND a.recipient_id=%s) AS acknowledged,
@@ -205,8 +223,13 @@ def inbox(authorization:Optional[str]=Header(default=None)):
         rows=[]
         for row in cur.fetchall():
             try:
-                _authorize(cur,row["report_id"],aid)
-                rows.append(dict(row))
+                report = _authorize(cur,row["report_id"],aid)
+                item = dict(row)
+                if str(report["student_id"]) != aid:
+                    role = _membership(cur,report["school_id"],aid)
+                    if role in ("principal","responder"):
+                        item.pop("student_status",None)
+                rows.append(item)
             except HTTPException:continue
     return {"ok":True,"reports":rows,"test_only":True,
             "automatic_911_delivery":False}
@@ -226,7 +249,7 @@ def acknowledge_alert(report_id:str,authorization:Optional[str]=Header(default=N
 def conversation(report_id:str,authorization:Optional[str]=Header(default=None)):
     actor=_actor(authorization);_schema();aid=str(actor["id"])
     with get_db() as conn:
-        cur=conn.cursor();_authorize(cur,report_id,aid)
+        cur=conn.cursor();_family_chat_authorize(cur,report_id,aid)
         cur.execute("""SELECT m.message_id,m.sender_id,i.handle AS sender_handle,
           m.body,m.created_at FROM verifyd_safety_incident_messages m
           JOIN verifyd_identities i ON i.id=m.sender_id
@@ -238,7 +261,7 @@ def conversation(report_id:str,authorization:Optional[str]=Header(default=None))
 def send_reply(report_id:str,payload:Reply,authorization:Optional[str]=Header(default=None)):
     actor=_actor(authorization);_schema();aid=str(actor["id"])
     with get_db() as conn:
-        cur=conn.cursor();r=_authorize(cur,report_id,aid)
+        cur=conn.cursor();r=_family_chat_authorize(cur,report_id,aid)
         if r["closed_at"] or r["incident_status"]!="active":
             raise HTTPException(409,detail={"error":"incident_closed"})
         mid="ssmsg_"+uuid.uuid4().hex
@@ -254,7 +277,7 @@ def send_reply(report_id:str,payload:Reply,authorization:Optional[str]=Header(de
             for who in cur.fetchall():
                 rid=str(who["recipient_id"])
                 if rid!=aid:
-                    try:_authorize(cur,report_id,rid)
+                    try:_family_chat_authorize(cur,report_id,rid)
                     except HTTPException:continue
                     cur.execute("""INSERT INTO verifyd_safety_incident_outbox
                        (report_id,recipient_id,event_key) VALUES(%s,%s,%s)
