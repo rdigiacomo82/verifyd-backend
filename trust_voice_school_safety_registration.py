@@ -671,6 +671,10 @@ def change_school_roster_member(school_id:str,member_id:str,payload:RosterRoleEd
            (payload.role,str(actor["id"]),school_id,member_id))
         # Old role-bound school/guardian acknowledgments and links no longer
         # automatically authorize a changed identity.
+        # A removed/changed responder must not regain prior TEST alert access
+        # if the same @handle is subsequently re-added to this school's roster.
+        cur.execute("""DELETE FROM verifyd_safety_school_response_team
+           WHERE school_id=%s AND responder_id=%s""",(school_id,member_id))
         cur.execute("""DELETE FROM verifyd_safety_training_guardians
            WHERE school_id=%s AND (child_id=%s OR guardian_id=%s)""",(school_id,member_id,member_id))
         cur.execute("""DELETE FROM verifyd_safety_training_contacts
@@ -693,6 +697,8 @@ def deactivate_school_roster_member(school_id:str,member_id:str,
         cur=conn.cursor()
         _school_admin(cur,school_id,str(actor["id"]))
         _reject_protected_member(cur,school_id,member_id)
+        cur.execute("""DELETE FROM verifyd_safety_school_response_team
+            WHERE school_id=%s AND responder_id=%s""",(school_id,member_id))
         cur.execute("""DELETE FROM verifyd_safety_training_guardians
             WHERE school_id=%s AND (child_id=%s OR guardian_id=%s)""",(school_id,member_id,member_id))
         cur.execute("""DELETE FROM verifyd_safety_training_contacts

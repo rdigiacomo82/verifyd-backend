@@ -17,7 +17,7 @@ class SchoolIncidentAlerts(unittest.TestCase):
     def test_only_authorized_recipients_get_incident_messages(self):
         src=inspect.getsource(chat._authorize)
         self.assertIn("_membership(cur,report[",src)
-        self.assertIn("_school_admin(cur,report[",src)
+        self.assertIn("_school_response_authorized(cur,report[",src)
         self.assertIn("guardian_relationship_not_active",src)
         self.assertIn("POLICY_VERSION",src)
         self.assertIn("not_incident_recipient",src)
