@@ -572,9 +572,9 @@ def training_school_incidents(school_id: str, authorization: Optional[str] = Hea
     with get_db() as conn:
         cur = conn.cursor()
         _membership(cur, school_id, str(actor["id"]), {"principal","responder"})
+        # Staff see incident grouping and initial reports, never student follow-up status.
         cur.execute("""SELECT i.incident_id,i.category,i.status,i.created_at,i.resolved_at,
-            COUNT(r.report_id) AS report_count,
-            COUNT(r.report_id) FILTER (WHERE r.student_status='need_help' AND r.closed_at IS NULL) AS need_help
+            COUNT(r.report_id) AS report_count
             FROM verifyd_safety_training_incidents i LEFT JOIN verifyd_safety_training_reports r
             ON r.incident_id=i.incident_id WHERE i.school_id=%s
             GROUP BY i.incident_id ORDER BY i.created_at DESC LIMIT 60""", (school_id,))
@@ -594,8 +594,9 @@ def incident_training_reports(incident_id: str, authorization: Optional[str] = H
         if not incident:
             raise HTTPException(404, detail={"error": "incident_not_found"})
         _membership(cur, incident["school_id"], str(actor["id"]), {"principal","responder"})
+        # Initial submission metadata only: no ongoing student updates or closure state.
         cur.execute("""SELECT r.report_id,r.student_id,r.category,r.description,
-            r.student_status,r.closed_at,r.created_at FROM verifyd_safety_training_reports r
+            r.created_at FROM verifyd_safety_training_reports r
             WHERE r.incident_id=%s ORDER BY r.created_at DESC LIMIT 1000""", (incident_id,))
         reports = [dict(v) for v in cur.fetchall()]
         _audit(cur, incident["school_id"], str(actor["id"]), "training_reports_viewed", incident_id)
