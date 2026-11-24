@@ -15,13 +15,13 @@ class SchoolManagedRosterContracts(unittest.TestCase):
         with patch.dict(os.environ, {"VERIFYD_SAFETY_MANAGED_ROSTER_ENABLED": "0",
                                      "VERIFYD_SAFETY_MANAGED_ROSTER_SCHOOL_IDS": "school-1"}):
             with self.assertRaises(HTTPException) as error:
-                roster._require_pilot("school-1")
+                roster._require_enrollment_enabled("school-1")
             self.assertEqual(error.exception.status_code, 404)
         with patch.dict(os.environ, {"VERIFYD_SAFETY_MANAGED_ROSTER_ENABLED": "1",
                                      "VERIFYD_SAFETY_MANAGED_ROSTER_SCHOOL_IDS": "school-1"}):
-            roster._require_pilot("school-1")
+            roster._require_enrollment_enabled("school-1")
             with self.assertRaises(HTTPException):
-                roster._require_pilot("different-school")
+                roster._require_enrollment_enabled("different-school")
 
     def test_handle_format_respects_24_character_global_limit(self):
         cursor = MagicMock()
@@ -95,7 +95,7 @@ class SchoolManagedRosterContracts(unittest.TestCase):
             individually_verified=True)
         payload = roster.SchoolAuthorizationBatch(
             approvals=[item,item],principal_confirms_evidence_on_file=True,school_use_only=True)
-        with patch.object(roster, "_require_pilot", return_value=None), \
+        with patch.object(roster, "_require_enrollment_enabled", return_value=None), \
              patch.object(roster, "_actor",return_value={"id":"principal-1"}), \
              patch.object(roster,"_schema",side_effect=AssertionError("db must not be reached")):
             with self.assertRaises(HTTPException) as exc:
