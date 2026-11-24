@@ -73,6 +73,9 @@ class Review(BaseModel):
     decision: Literal['reviewed','cancelled']
 
 def _availability(cur,lower):
+    from trust_voice_identity import _school_managed_handle_reserved
+    if _school_managed_handle_reserved(cur, lower): return False
+
     cur.execute("SELECT 1 FROM verifyd_identities WHERE handle_lower=%s",(lower,))
     if cur.fetchone(): return False
     cur.execute("SELECT 1 FROM verifyd_safety_family_intake WHERE handle_lower=%s AND status IN ('pending','reviewed')",(lower,))

@@ -134,6 +134,23 @@ def _validate_handle(value: str) -> tuple[str, str]:
     return handle, handle_lower
 
 
+def _school_managed_handle_reserved(cur, handle_lower: str) -> bool:
+    """Reserve WHOLE school namespaces without exposing student existence.
+
+    Do not reveal whether a particular student handle is staged. All handles
+    under a configured school prefix appear unavailable to public registration.
+    The table is optional until a school has configured its Enrollment Center.
+    """
+    cur.execute("SELECT to_regclass('public.verifyd_safety_managed_roster_settings') AS managed_table")
+    found = cur.fetchone()
+    if not found or not found["managed_table"]:
+        return False
+    cur.execute("""SELECT 1 FROM verifyd_safety_managed_roster_settings
+       WHERE lower(school_code)=split_part(%s,'_',1) LIMIT 1""",
+       (handle_lower,))
+    return bool(cur.fetchone())
+
+
 def _validate_display_name(value: str) -> str:
     cleaned = " ".join((value or "").strip().split())
     if not cleaned:
@@ -322,7 +339,7 @@ def handle_availability(handle: str):
             "SELECT 1 FROM verifyd_identities WHERE handle_lower = %s LIMIT 1",
             (handle_lower,),
         )
-        exists = bool(cur.fetchone())
+        exists = bool(cur.fetchone()) or _school_managed_handle_reserved(cur, handle_lower)
 
     return {
         "handle": f"@{display_handle}",
@@ -406,10 +423,10 @@ def claim_identity(payload: ClaimIdentityRequest):
             "SELECT 1 FROM verifyd_identities WHERE handle_lower = %s LIMIT 1",
             (handle_lower,),
         )
-        if cur.fetchone():
+        if cur.fetchone() or _school_managed_handle_reserved(cur, handle_lower):
             raise HTTPException(
                 status_code=409,
-                detail={"error": "handle_taken", "message": "That handle is already in use."},
+                detail={"error": "handle_taken", "message": "That handle is already in use or reserved by an approved school."},
             )
 
         identity_id = "vfyd_usr_" + uuid.uuid4().hex
