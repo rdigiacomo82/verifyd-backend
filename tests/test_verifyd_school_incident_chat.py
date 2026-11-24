@@ -36,11 +36,21 @@ class SchoolIncidentAlerts(unittest.TestCase):
 
     def test_durable_reply_idempotency_and_closed_report(self):
         src=inspect.getsource(chat.send_reply)
-        self.assertIn("_authorize(cur,report_id,aid)",src)
+        self.assertIn("_family_chat_authorize(cur,report_id,aid)",src)
         self.assertIn("incident_closed",src)
         self.assertIn("ON CONFLICT(report_id,sender_id,client_id)",src)
         with self.assertRaises(ValidationError):
             chat.Reply(client_id="short",body="hey")
+
+    def test_family_messages_do_not_expose_staff_or_send_staff_reply_push(self):
+        read_src=inspect.getsource(chat.conversation)
+        write_src=inspect.getsource(chat.send_reply)
+        dispatch_src=inspect.getsource(chat._dispatch)
+        self.assertIn("_family_chat_authorize(cur,report_id,aid)",read_src)
+        self.assertIn("_family_chat_authorize(cur,report_id,aid)",write_src)
+        self.assertIn("_family_chat_authorize(conn.cursor(),report_id,str(job",dispatch_src)
+        self.assertIn("school_safety_family_reply_test",dispatch_src)
+        self.assertNotIn("notify_identity_push(",write_src)
 
     def test_report_transaction_queues_before_commit(self):
         source=inspect.getsource(school.create_training_report)
