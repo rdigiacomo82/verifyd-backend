@@ -41,11 +41,22 @@ class SchoolSafetyTrainingTests(unittest.TestCase):
             self.assertEqual(error.exception.status_code, 403)
 
     def test_same_contact_is_rejected_before_database_use(self):
+        with patch.object(safety, "_actor", return_value={"id": "principal-1"}):
+            with patch.object(safety, "_schema", side_effect=AssertionError("DB should not be touched")):
+                with self.assertRaises(HTTPException) as error:
+                    safety.save_verified_school_contact_routing(
+                        "training-school", "student-1",
+                        safety.SchoolVerifiedContactRoute(
+                            primary_id="guardian-1", backup_id="guardian-1",
+                            independently_verified=True))
+                self.assertEqual(error.exception.status_code, 422)
+
+    def test_student_contact_self_assignment_is_denied(self):
         with patch.object(safety, "_actor", return_value={"id": "student-1"}):
             with self.assertRaises(HTTPException) as error:
                 safety.set_training_contacts("training-school", safety.ContactInput(
-                    primary_id="guardian-1", backup_id="guardian-1"))
-            self.assertEqual(error.exception.status_code, 422)
+                    primary_id="guardian-1", backup_id="admin-1"))
+            self.assertEqual(error.exception.status_code, 403)
 
     def test_create_requires_authenticated_session_even_if_training_enabled(self):
         with patch.dict(os.environ, {"VERIFYD_SAFETY_TRAINING_ENABLED": "0"}):
