@@ -426,7 +426,16 @@ def _report_receipt(row, count):
 @router.post("/reports")
 def create_training_report(payload: ReportInput, authorization: Optional[str] = Header(default=None)):
     actor = _actor(authorization)
-    student_id = str(actor["id"])
+    return _create_training_report_for_student(payload, str(actor["id"]))
+
+
+def _create_training_report_for_student(payload: ReportInput, student_id: str):
+    """Shared TEST record path. Caller MUST authenticate the current student.
+
+    The standard endpoint uses /voice bearer auth; the supervised device route
+    uses only its own narrow, expiring school-device token. Neither route skips
+    role, consent, guardian, recipient or school membership checks below.
+    """
     _schema()
     from trust_voice_school_incident_chat import _schema as _incident_schema,queue_report,dispatch_report
     from trust_voice_school_choice_catalog import _catalog_schema, resolve_report_choice
