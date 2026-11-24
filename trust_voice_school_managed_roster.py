@@ -1,13 +1,17 @@
-"""TEST-only, school-scoped, managed student handle reservations.
+"""School-managed enrollment: handle generation, roster staging and evidence-based
+bulk enrollment. This is an enduring school product capability, not a TEST
+enrollment path. It never enables emergency dispatch or broad /voice access.
 
-Staged rosters DO NOT provision /voice identities, activate school Safety, or
-create a guardian-child relationship. This deliberately leaves guardian claim,
-independent staff review, and student acknowledgments on their existing gates.
-Only an owner-approved Principal or accepted backup administrator may use it.
+School officials may attest to *individual* paper signatures or documented
+school authority and approve many verified rows in one transaction. Upload alone
+cannot authorize students or guardians. Adult account claim and family messaging
+remain independently verified, and district authorization cannot masquerade as
+an individual's guardian signature.
 """
 from __future__ import annotations
 import json
 import os
+from datetime import date
 import re
 import secrets
 import threading
@@ -60,11 +64,30 @@ def _schema():
                 proposed_handle TEXT NOT NULL,
                 handle_lower TEXT NOT NULL UNIQUE,
                 imported_by TEXT NOT NULL REFERENCES verifyd_identities(id),
+                student_identity_id TEXT UNIQUE REFERENCES verifyd_identities(id),
+                enrollment_status TEXT NOT NULL DEFAULT 'staged'
+                  CHECK(enrollment_status IN ('staged','school_approved')),
+                approved_at TIMESTAMPTZ,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 PRIMARY KEY(school_id,local_ref)
             )""")
             cur.execute("""CREATE INDEX IF NOT EXISTS verifyd_safety_managed_student_school
                 ON verifyd_safety_managed_students(school_id,last_name,first_name)""")
+            cur.execute("""CREATE TABLE IF NOT EXISTS verifyd_safety_managed_enrollment_evidence (
+                school_id TEXT NOT NULL,
+                local_ref TEXT NOT NULL,
+                method TEXT NOT NULL CHECK(method IN ('signed_paper','school_authority')),
+                evidence_ref TEXT NOT NULL,
+                guardian_name TEXT,
+                signed_date DATE,
+                authority_reference TEXT,
+                declaration TEXT NOT NULL,
+                verified_by TEXT NOT NULL REFERENCES verifyd_identities(id),
+                verified_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                PRIMARY KEY(school_id,local_ref),
+                FOREIGN KEY(school_id,local_ref) REFERENCES
+                  verifyd_safety_managed_students(school_id,local_ref)
+            )""")
             cur.execute("""CREATE TABLE IF NOT EXISTS verifyd_safety_managed_roster_previews (
                 preview_id TEXT PRIMARY KEY,
                 school_id TEXT NOT NULL REFERENCES verifyd_safety_training_schools(school_id),
@@ -97,6 +120,38 @@ class ManagedRosterPreview(BaseModel):
 class ManagedRosterCommit(BaseModel):
     preview_id: str = Field(min_length=8, max_length=100)
     confirm_pending_only: Literal[True]
+
+
+class SchoolAuthorizationItem(BaseModel):
+    local_ref: str = Field(min_length=3, max_length=64)
+    method: Literal["signed_paper", "school_authority"]
+    evidence_ref: str = Field(min_length=8, max_length=180)
+    guardian_name: Optional[str] = Field(default=None, max_length=100)
+    signed_date: Optional[date] = None
+    authority_reference: Optional[str] = Field(default=None, max_length=180)
+    individually_verified: Literal[True]
+
+
+class SchoolAuthorizationBatch(BaseModel):
+    approvals: list[SchoolAuthorizationItem] = Field(min_length=1, max_length=250)
+    principal_confirms_evidence_on_file: Literal[True]
+    school_use_only: Literal[True]
+
+
+def _check_evidence(item):
+    if not _REF.fullmatch(item.local_ref):
+        raise HTTPException(422, detail={"error": "invalid_local_reference"})
+    evidence = item.evidence_ref.strip()
+    if len(evidence) < 8:
+        raise HTTPException(422, detail={"error": "individual_evidence_reference_required"})
+    if item.method == "signed_paper":
+        if not item.guardian_name or len(item.guardian_name.strip()) < 3 or not item.signed_date:
+            raise HTTPException(422, detail={"error": "paper_requires_guardian_name_and_signed_date"})
+        if item.signed_date > date.today():
+            raise HTTPException(422, detail={"error": "paper_signature_date_in_future"})
+    elif not item.authority_reference or len(item.authority_reference.strip()) < 8:
+        raise HTTPException(422, detail={"error": "school_authority_reference_required"})
+
 
 
 def _clean_name(value):
@@ -165,7 +220,7 @@ def get_managed_roster_settings(school_id: str, authorization: Optional[str] = H
         config = cur.fetchone()
         cur.execute("SELECT COUNT(*) AS n FROM verifyd_safety_managed_students WHERE school_id=%s", (school_id,))
         count = int(cur.fetchone()["n"])
-    return {"ok": True, "test_only": True, "configured": bool(config),
+    return {"ok": True, "school_managed_enrollment": True, "configured": bool(config),
             "config": dict(config) if config else None, "staged_count": count,
             "identities_created": 0, "guardian_access_granted": False}
 
@@ -199,7 +254,7 @@ def save_managed_roster_settings(school_id: str, payload: SchoolHandleSettings,
            handle_style=EXCLUDED.handle_style,configured_by=EXCLUDED.configured_by,updated_at=NOW()""",
            (school_id,code,payload.handle_style,str(actor["id"])))
         _audit(cur, school_id, str(actor["id"]), "managed_roster_school_style_configured", code+":"+payload.handle_style)
-    return {"ok": True, "test_only": True, "config": {"school_code": code,
+    return {"ok": True, "school_managed_enrollment": True, "config": {"school_code": code,
             "handle_style": payload.handle_style}, "student_accounts_activated": 0}
 
 
@@ -240,7 +295,7 @@ def preview_managed_roster(school_id: str, payload: ManagedRosterPreview,
            VALUES (%s,%s,%s,%s,%s,%s::jsonb)""",
            (preview_id,school_id,str(actor["id"]),config["school_code"],
             config["handle_style"],json.dumps(rows)))
-    return {"ok": True, "test_only": True, "preview_id": preview_id,
+    return {"ok": True, "school_managed_enrollment": True, "preview_id": preview_id,
             "expires_in_minutes": 30, "students": rows,
             "accounts_created": 0, "guardian_access_granted": False}
 
@@ -264,7 +319,7 @@ def commit_managed_roster(school_id: str, payload: ManagedRosterCommit,
         if not preview or str(preview["admin_id"]) != str(actor["id"]):
             raise HTTPException(404, detail={"error": "roster_preview_not_found_for_administrator"})
         if preview["consumed_at"]:
-            return {"ok": True, "test_only": True, "already_committed": True,
+            return {"ok": True, "school_managed_enrollment": True, "already_committed": True,
                     "accounts_created": 0, "guardian_access_granted": False}
         if not preview["valid"]:
             raise HTTPException(409, detail={"error": "roster_preview_expired_start_over"})
@@ -295,7 +350,7 @@ def commit_managed_roster(school_id: str, payload: ManagedRosterCommit,
             added += 1
         cur.execute("UPDATE verifyd_safety_managed_roster_previews SET consumed_at=NOW() WHERE preview_id=%s", (payload.preview_id,))
         _audit(cur,school_id,str(actor["id"]),"managed_roster_pending_handles_staged",str(added))
-    return {"ok": True, "test_only": True, "staged": added, "already_staged": skipped,
+    return {"ok": True, "school_managed_enrollment": True, "staged": added, "already_staged": skipped,
             "accounts_created": 0, "guardian_access_granted": False, "reports_enabled": False}
 
 
@@ -307,11 +362,108 @@ def list_managed_roster(school_id: str, authorization: Optional[str] = Header(de
     with get_db() as conn:
         cur = conn.cursor()
         _school_admin(cur, school_id, str(actor["id"]))
-        cur.execute("""SELECT local_ref,first_name,last_name,proposed_handle,
-            'awaiting_guardian_claim' AS status,created_at
-            FROM verifyd_safety_managed_students
-            WHERE school_id=%s ORDER BY lower(last_name),lower(first_name),local_ref LIMIT 3000""",
+        cur.execute("""SELECT s.local_ref,s.first_name,s.last_name,s.proposed_handle,
+            s.student_identity_id,s.enrollment_status AS status,s.created_at,
+            e.method AS acknowledgment_method,e.evidence_ref,e.signed_date,
+            e.verified_at,e.authority_reference
+            FROM verifyd_safety_managed_students s
+            LEFT JOIN verifyd_safety_managed_enrollment_evidence e
+                ON e.school_id=s.school_id AND e.local_ref=s.local_ref
+            WHERE s.school_id=%s
+            ORDER BY lower(s.last_name),lower(s.first_name),s.local_ref LIMIT 3000""",
             (school_id,))
         records = [dict(row) for row in cur.fetchall()]
-    return {"ok": True, "test_only": True, "students": records,
-            "accounts_created": 0, "notifications_sent": False}
+    return {"ok": True, "school_managed_enrollment": True, "students": records,
+            "automatic_parent_approval": False, "emergency_dispatch_enabled": False}
+
+
+@router.post("/schools/{school_id}/managed-roster/approve-batch")
+def approve_managed_school_enrollment(
+    school_id: str, payload: SchoolAuthorizationBatch,
+    authorization: Optional[str] = Header(default=None),
+):
+    """Approve a school roster in bulk, preserving independently reviewed evidence.
+
+    Paper forms and legally established school authorization are alternative
+    *enrollment* attestations. Neither implies a guardian signed digitally,
+    nor do they authorize unrestricted messaging or emergency service dispatch.
+    """
+    _require_pilot(school_id)
+    actor = _actor(authorization)
+    refs = [item.local_ref.strip().lower() for item in payload.approvals]
+    if len(refs) != len(set(refs)):
+        raise HTTPException(422, detail={"error": "duplicate_student_in_approval_batch"})
+    for item in payload.approvals:
+        _check_evidence(item)
+    _schema()
+    from trust_voice_school_safety_training import _schema as _school_schema
+    _school_schema()
+    with get_db() as conn:
+        cur = conn.cursor()
+        _school_admin(cur, school_id, str(actor["id"]))
+        cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("safety_managed_roster_commit",))
+        cur.execute("""SELECT local_ref,first_name,last_name,proposed_handle,
+            student_identity_id,enrollment_status
+            FROM verifyd_safety_managed_students
+            WHERE school_id=%s AND lower(local_ref)=ANY(%s)
+            ORDER BY local_ref FOR UPDATE""", (school_id, refs))
+        pending = {row["local_ref"].lower(): dict(row) for row in cur.fetchall()}
+        if len(pending) != len(refs):
+            raise HTTPException(404, detail={"error": "one_or_more_students_not_staged"})
+        for item in payload.approvals:
+            row = pending[item.local_ref.strip().lower()]
+            if row["student_identity_id"] or row["enrollment_status"] != "staged":
+                raise HTTPException(409, detail={"error": "student_already_approved"})
+            cur.execute("SELECT 1 FROM verifyd_identities WHERE handle_lower=%s",
+                        (row["proposed_handle"].lower(),))
+            if cur.fetchone():
+                raise HTTPException(409, detail={"error": "handle_taken_repreview_and_correct"})
+        created = []
+        for item in payload.approvals:
+            row = pending[item.local_ref.strip().lower()]
+            student_id = "vfyd_usr_" + uuid.uuid4().hex
+            # Existing supervised-child identity architecture uses a random,
+            # non-routable internal email sentinel; it is not a guardian email.
+            internal_email = "school-supervised-" + uuid.uuid4().hex + "@child.verifyd.invalid"
+            cur.execute("""INSERT INTO verifyd_identities (
+                id,email_lower,handle,handle_lower,display_name,display_emoji,
+                email_verified,identity_verified,organization_verified,
+                verification_level,can_receive_calls,call_privacy,status,created_at,updated_at)
+                VALUES (%s,%s,%s,%s,%s,'',FALSE,FALSE,FALSE,
+                'school_supervised',FALSE,'nobody','supervised_child',
+                NOW()::text,NOW()::text)""",
+                (student_id,internal_email,row["proposed_handle"],
+                 row["proposed_handle"].lower(),
+                 (row["first_name"]+" "+row["last_name"])[:80]))
+            cur.execute("""INSERT INTO verifyd_safety_training_members
+                 (school_id,identity_id,role,verified_by)
+                 VALUES (%s,%s,'student',%s)""",
+                 (school_id,student_id,str(actor["id"])))
+            statement = ("Individual guardian-signed paper record verified by authorized school staff"
+                if item.method == "signed_paper" else
+                "School/district authority documented for school-only education services; not guardian consent")
+            cur.execute("""INSERT INTO verifyd_safety_managed_enrollment_evidence
+                (school_id,local_ref,method,evidence_ref,guardian_name,signed_date,
+                 authority_reference,declaration,verified_by)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                (school_id,row["local_ref"],item.method,item.evidence_ref.strip(),
+                 item.guardian_name.strip() if item.guardian_name else None,
+                 item.signed_date,item.authority_reference.strip()
+                 if item.authority_reference else None,statement,str(actor["id"])))
+            cur.execute("""UPDATE verifyd_safety_managed_students
+                SET student_identity_id=%s,enrollment_status='school_approved',
+                    approved_at=NOW() WHERE school_id=%s AND local_ref=%s""",
+                (student_id,school_id,row["local_ref"]))
+            _audit(cur,school_id,str(actor["id"]),"managed_student_enrollment_approved",
+                   row["local_ref"]+":"+item.method)
+            created.append({"local_ref":row["local_ref"],
+                            "proposed_handle":row["proposed_handle"],
+                            "status":"school_approved"})
+        _audit(cur,school_id,str(actor["id"]),
+               "managed_school_roster_group_approved",str(len(created)))
+    return {"ok":True,"school_managed_enrollment":True,"approved":len(created),
+            "students":created,"ordinary_voice_login_enabled":False,
+            "guardian_accounts_created":0,
+            "guardian_private_message_access_granted":False,
+            "student_reporting_unlocked":False,
+            "emergency_dispatch_enabled":False}
