@@ -110,6 +110,37 @@ class SchoolFamilyInvitationsTests(unittest.TestCase):
         self.assertNotIn("911",inspect.getsource(invite._send_invitation))
         self.assertIn("live_emergency_dispatch_enabled",inspect.getsource(invite.approve_family_invitation_batch))
 
+    def test_guardian_contacts_only_saved_by_authorized_school_staff(self):
+        src = inspect.getsource(invite.save_school_family_contact_drafts)
+        self.assertIn("_school_admin(cur,school_id,str(actor[\"id\"]))",src)
+        self.assertIn("school_verified_emails_and_relationships",inspect.getsource(invite.SavedFamilyContacts))
+        self.assertIn("guardian_contact_student_not_in_school_roster",src)
+        self.assertIn("revoke_prior_invitation_before_changing_guardian_contact",src)
+
+    def test_auto_send_after_approval_only_and_skip_duplicate_codes(self):
+        src = inspect.getsource(invite.send_saved_family_invitations)
+        self.assertIn("enrollment_status='school_approved'",src)
+        self.assertIn("not in occupied",src)
+        self.assertIn("send_invitation_batch",src)
+        self.assertIn("missing_contact_records",src)
+        self.assertIn("No new invitations needed",src)
+
+    def test_resend_invalidates_old_code_and_limits_rate(self):
+        src = inspect.getsource(invite.resend_school_family_invitation)
+        self.assertIn("_school_admin(cur,school_id,str(actor[\"id\"]))",src)
+        self.assertIn("only_unclaimed_invitations_can_be_resent",src)
+        self.assertIn("send_attempts",src)
+        self.assertIn("2 minutes",src)
+        self.assertIn("token_hash=%s",src)
+        self.assertIn("prior_invitation_link_revoked",src)
+        self.assertIn("new_code_emailed_not_displayed",src)
+        self.assertNotIn("student_handle",src)
+        with self.assertRaises(ValidationError):
+            invite.ResendInvitation(principal_confirms_address=False)
+        with self.assertRaises(ValidationError):
+            invite.SendSavedInvitations(local_refs=["STU001"],
+                principal_confirms_recipient_list=False)
+
     def test_school_only_can_revoke_pending_invitation(self):
         src = inspect.getsource(invite.revoke_school_family_invitation)
         self.assertIn("_school_admin",src)
