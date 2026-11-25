@@ -235,6 +235,8 @@ def review_family_request(school_id: str,request_id: str,payload: FamilyReview,
 def family_portal(authorization: Optional[str] = Header(default=None)):
     actor = _actor(authorization)
     _family_schema()
+    from trust_voice_school_electronic_ack import _schema as _electronic_schema
+    _electronic_schema()
     guardian_id = str(actor["id"])
     with get_db() as conn:
         cur = conn.cursor()
@@ -262,7 +264,6 @@ def family_portal(authorization: Optional[str] = Header(default=None)):
             "handle":str(identity["handle"]),
             "display_name":str(identity["display_name"] or ""),
             "email_verified":bool(identity["email_verified"]),
-            "handle_was_reused":True,
         } if identity else None)
         registration_progress=[]
         if identity and identity["email_verified"]:
@@ -270,7 +271,7 @@ def family_portal(authorization: Optional[str] = Header(default=None)):
             # e-acknowledgment and the Principal's approval status. This
             # cannot reveal unrelated students or activate guardian access.
             cur.execute("""SELECT a.local_ref,a.school_id,s.school_name,
-                a.status,a.acknowledged_at,a.approved_at,
+                a.status,a.acknowledged_at,a.approved_at,a.guardian_identity_id,
                 st.first_name,st.last_name,st.enrollment_status
                 FROM verifyd_safety_electronic_guardian_ack a
                 JOIN verifyd_safety_training_schools s
@@ -287,6 +288,7 @@ def family_portal(authorization: Optional[str] = Header(default=None)):
                 "local_ref":row["local_ref"],
                 "child_name":row["first_name"]+" "+row["last_name"],
                 "status":("approved" if row["status"]=="approved" and
+                          str(row["guardian_identity_id"])==guardian_id and
                           row["enrollment_status"]=="school_approved"
                           else "awaiting_school_approval"),
                 "acknowledged_at":row["acknowledged_at"],
