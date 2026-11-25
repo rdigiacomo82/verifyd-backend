@@ -286,8 +286,6 @@ def acknowledge_schoolwide(payload:ElectronicAccept):
                            "evidence_ref":created["evidence_ref"] if created else "previously_recorded"})
         cur.execute("""UPDATE verifyd_safety_family_email_sessions SET consumed_at=NOW()
             WHERE session_hash=%s""",(_hash(payload.claim_session),))
-        _audit(cur,school_id,email if False else "system","family_electronic_guardian_acknowledgment",
-               str(len(result))) if False else None
     return {"ok":True,"acknowledgments":result,"policy_version":POLICY_VERSION,
             "family_access_granted":False,"student_identity_activated":False,
             "requires_independent_school_review":True}
@@ -332,6 +330,7 @@ def send_schoolwide_campaign(school_id:str,payload:Campaign,
              JOIN verifyd_safety_family_contact_drafts c
                ON c.school_id=s.school_id AND c.local_ref=s.local_ref
              WHERE s.school_id=%s AND s.local_ref=ANY(%s)
+               AND s.enrollment_status='staged'
              ORDER BY c.guardian_email""",(school_id,refs))
         records=[dict(row) for row in cur.fetchall()]
         emails=sorted({r["guardian_email"].lower() for r in records
