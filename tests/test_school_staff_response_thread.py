@@ -100,8 +100,8 @@ class SchoolResponseContractTests(unittest.TestCase):
             self.assertIn('school_id=ctx["school_id"]',src)
         for route in device.router.routes:
             if "student-devices/reports/{report_id}/school-response" in route.path:
-                self.assertIn("X-VeriFYD-Safety-Session",
-                              str(inspect.signature(route.endpoint)))
+                field = inspect.signature(route.endpoint).parameters["x_safety_device_session"].default
+                self.assertEqual(field.alias, "X-VeriFYD-Safety-Session")
 
     def test_staff_routes_use_signed_in_identity(self):
         for fn in (staff.read_school_response,staff.send_school_response):
