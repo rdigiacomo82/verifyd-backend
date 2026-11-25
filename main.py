@@ -80,6 +80,8 @@ from trust_voice_school_managed_roster import router as school_managed_roster_ro
 from trust_voice_school_family_invitations import router as school_family_invitations_router
 from trust_voice_school_roster_documents import router as school_roster_documents_router
 from trust_voice_school_family_link import router as school_family_link_router
+from trust_voice_school_staff_invites import router as school_staff_invites_router
+from trust_voice_school_family_interest import router as school_family_interest_router
 from trust_voice_school_communications import router as school_communications_router
 from trust_voice_school_family_onboarding import router as school_family_onboarding_router
 from trust_voice_school_child_activation import router as school_child_activation_router
@@ -387,6 +389,8 @@ app.include_router(school_managed_roster_router)
 app.include_router(school_family_invitations_router)
 app.include_router(school_roster_documents_router)
 app.include_router(school_family_link_router)
+app.include_router(school_staff_invites_router)
+app.include_router(school_family_interest_router)
 app.include_router(school_communications_router)
 app.include_router(school_family_onboarding_router)
 app.include_router(school_child_activation_router)

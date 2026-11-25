@@ -20,7 +20,7 @@ import uuid
 from typing import Literal, Optional
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field, field_validator
-from database import get_db
+from database import get_db, is_valid_email
 from trust_voice_identity import _validate_handle
 from trust_voice_school_safety_training import _actor, _audit
 from trust_voice_school_safety_registration import _application_schema, _school_admin
@@ -81,6 +81,21 @@ def _schema():
                 WHERE tracking_reference IS NULL""")
             cur.execute("""CREATE UNIQUE INDEX IF NOT EXISTS safety_managed_school_tracking_unique
                 ON verifyd_safety_managed_students(school_id, lower(tracking_reference))""")
+            cur.execute("""CREATE TABLE IF NOT EXISTS verifyd_safety_managed_student_contacts(
+                school_id TEXT NOT NULL,
+                local_ref TEXT NOT NULL,
+                student_email TEXT NOT NULL DEFAULT '',
+                student_phone TEXT NOT NULL DEFAULT '',
+                primary_guardian_email TEXT NOT NULL DEFAULT '',
+                primary_guardian_phone TEXT NOT NULL DEFAULT '',
+                backup_guardian_email TEXT NOT NULL DEFAULT '',
+                backup_guardian_phone TEXT NOT NULL DEFAULT '',
+                last_recorded_by TEXT NOT NULL REFERENCES verifyd_identities(id),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                PRIMARY KEY(school_id,local_ref),
+                FOREIGN KEY(school_id,local_ref) REFERENCES
+                    verifyd_safety_managed_students(school_id,local_ref)
+            )""")
             cur.execute("""CREATE INDEX IF NOT EXISTS verifyd_safety_managed_student_school
                 ON verifyd_safety_managed_students(school_id,last_name,first_name)""")
             cur.execute("""CREATE TABLE IF NOT EXISTS verifyd_safety_managed_enrollment_evidence (
@@ -119,7 +134,36 @@ class SchoolHandleSettings(BaseModel):
     confirmed_school_naming_convention: Literal[True]
 
 
-class ManagedStudentRow(BaseModel):
+class SchoolStudentContacts(BaseModel):
+    student_email:str = Field(default='',max_length=254)
+    student_phone:str = Field(default='',max_length=32)
+    primary_guardian_email:str = Field(default='',max_length=254)
+    primary_guardian_phone:str = Field(default='',max_length=32)
+    backup_guardian_email:str = Field(default='',max_length=254)
+    backup_guardian_phone:str = Field(default='',max_length=32)
+
+    @field_validator('student_email','primary_guardian_email','backup_guardian_email')
+    @classmethod
+    def validate_contact_email(cls,value):
+        email=value.strip().lower()
+        if email and not is_valid_email(email):
+            raise ValueError('invalid_roster_contact_email')
+        return email
+
+    @field_validator('student_phone','primary_guardian_phone','backup_guardian_phone')
+    @classmethod
+    def validate_contact_phone(cls,value):
+        phone=value.strip()
+        if phone:
+            if not re.fullmatch(r'\+?[0-9 ()-]{10,32}',phone):
+                raise ValueError('invalid_roster_contact_phone')
+            digits=re.sub(r'\D','',phone)
+            if len(digits)<10 or len(digits)>15:
+                raise ValueError('invalid_roster_contact_phone_length')
+        return phone
+
+
+class ManagedStudentRow(SchoolStudentContacts):
     local_ref: str = Field(min_length=3, max_length=64)
     first_name: str = Field(min_length=1, max_length=60)
     last_name: str = Field(min_length=1, max_length=60)
@@ -352,9 +396,10 @@ def preview_managed_roster(school_id: str, payload: ManagedRosterPreview,
                      + ". Check reference and date of birth in the school system; "
                      + "distinct students may keep distinct assigned handles."
                      if duplicate_refs else "")
+            contact_fields=student.model_dump(include=set(SchoolStudentContacts.model_fields))
             rows.append({"local_ref": ref, "first_name": first, "last_name": last,
                          "proposed_handle": handle, "action": action,
-                         "possible_same_name_warning":warning})
+                         "possible_same_name_warning":warning,**contact_fields})
             incoming_names.setdefault((first.lower(),last.lower()),set()).add(ref)
         preview_id = "srprev_" + secrets.token_hex(18)
         cur.execute("""INSERT INTO verifyd_safety_managed_roster_previews
@@ -419,6 +464,14 @@ def commit_managed_roster(school_id: str, payload: ManagedRosterCommit,
                 (school_id,row["local_ref"],row["first_name"],row["last_name"],
                  row["proposed_handle"],row["proposed_handle"].lower(),str(actor["id"]),
                  "ENROLL-"+row["local_ref"].upper()))
+            contact_values=[str(row.get(k) or '') for k in SchoolStudentContacts.model_fields]
+            if any(contact_values):
+                cur.execute("""INSERT INTO verifyd_safety_managed_student_contacts
+                    (school_id,local_ref,student_email,student_phone,
+                     primary_guardian_email,primary_guardian_phone,
+                     backup_guardian_email,backup_guardian_phone,last_recorded_by)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                    (school_id,row["local_ref"],*contact_values,str(actor["id"])))
             added += 1
         cur.execute("UPDATE verifyd_safety_managed_roster_previews SET consumed_at=NOW() WHERE preview_id=%s", (payload.preview_id,))
         _audit(cur,school_id,str(actor["id"]),"managed_roster_pending_handles_staged",str(added))
@@ -438,8 +491,12 @@ def list_managed_roster(school_id: str, authorization: Optional[str] = Header(de
             s.student_identity_id,s.enrollment_status AS status,s.created_at,
             s.tracking_reference,s.approved_at,
             e.method AS acknowledgment_method,e.evidence_ref,e.signed_date,
-            e.verified_at,e.review_date,e.authority_reference
+            e.verified_at,e.review_date,e.authority_reference,
+            c.student_email,c.student_phone,c.primary_guardian_email,
+            c.primary_guardian_phone,c.backup_guardian_email,c.backup_guardian_phone
             FROM verifyd_safety_managed_students s
+            LEFT JOIN verifyd_safety_managed_student_contacts c
+                ON c.school_id=s.school_id AND c.local_ref=s.local_ref
             LEFT JOIN verifyd_safety_managed_enrollment_evidence e
                 ON e.school_id=s.school_id AND e.local_ref=s.local_ref
             WHERE s.school_id=%s
@@ -618,3 +675,42 @@ def update_managed_student_tracking_reference(school_id: str, local_ref: str,
     return {"ok":True,"local_ref":row["local_ref"],
             "tracking_reference":row["tracking_reference"],
             "guardian_consent_verified":False,"enrollment_approval_changed":False}
+
+
+@router.patch("/schools/{school_id}/managed-roster/students/{local_ref}/contact-info")
+def update_school_student_contact_fields(school_id:str,local_ref:str,
+    payload:SchoolStudentContacts,authorization:Optional[str]=Header(default=None)):
+    """School-admin-only PII storage. Contact import does NOT verify guardianship,
+    activate communications or authorize any phone/SMS messages.
+    """
+    _require_enrollment_enabled(school_id)
+    actor=_actor(authorization);_schema()
+    ref=local_ref.strip().upper()
+    if not _REF.fullmatch(ref):
+        raise HTTPException(422,detail={"error":"invalid_school_local_reference"})
+    with get_db() as conn:
+        cur=conn.cursor()
+        _school_admin(cur,school_id,str(actor["id"]))
+        cur.execute("""SELECT 1 FROM verifyd_safety_managed_students
+            WHERE school_id=%s AND local_ref=%s""",(school_id,ref))
+        if not cur.fetchone():
+            raise HTTPException(404,detail={"error":"school_student_not_found"})
+        values=[getattr(payload,k) for k in SchoolStudentContacts.model_fields]
+        cur.execute("""INSERT INTO verifyd_safety_managed_student_contacts
+           (school_id,local_ref,student_email,student_phone,
+            primary_guardian_email,primary_guardian_phone,
+            backup_guardian_email,backup_guardian_phone,last_recorded_by)
+           VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)
+           ON CONFLICT(school_id,local_ref) DO UPDATE SET
+            student_email=EXCLUDED.student_email,
+            student_phone=EXCLUDED.student_phone,
+            primary_guardian_email=EXCLUDED.primary_guardian_email,
+            primary_guardian_phone=EXCLUDED.primary_guardian_phone,
+            backup_guardian_email=EXCLUDED.backup_guardian_email,
+            backup_guardian_phone=EXCLUDED.backup_guardian_phone,
+            last_recorded_by=EXCLUDED.last_recorded_by,updated_at=NOW()""",
+           (school_id,ref,*values,str(actor["id"])))
+        _audit(cur,school_id,str(actor["id"]),"school_contact_details_recorded",ref)
+    return {"ok":True,"local_ref":ref,"contact_details_saved":True,
+       "verified_guardian_relationship":False,
+       "email_or_sms_sent":False}
