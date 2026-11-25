@@ -34,6 +34,22 @@ def sync_approved_guardian_route(cur, school_id: str, student_id: str,
     student=cur.fetchone()
     if not student or student["enrollment_status"]!="school_approved":
         return {"enabled":True,"updated":False,"reason":"not_school_approved_student"}
+    # Preserve the Principal's intentional TEST-route disable across refreshes.
+    # Only a later explicit manual SAVE (not an approval or auto-sync) can
+    # restore routing. Existing audit actions supply the durable tombstone.
+    cur.execute("""SELECT EXISTS(
+        SELECT 1 FROM verifyd_safety_training_audit d
+        WHERE d.school_id=%s AND d.object_id=%s
+          AND d.action='verified_training_contact_route_disabled'
+          AND NOT EXISTS (
+            SELECT 1 FROM verifyd_safety_training_audit m
+             WHERE m.school_id=d.school_id AND m.object_id=d.object_id
+               AND m.action='verified_training_contact_route_saved'
+               AND m.created_at>d.created_at
+          )
+        ) AS principal_disabled""",(school_id,student_id))
+    if cur.fetchone()["principal_disabled"]:
+        return {"enabled":True,"updated":False,"reason":"principal_intentionally_disabled"}
     cur.execute("""SELECT primary_id,backup_id,route_source
        FROM verifyd_safety_training_contacts
        WHERE school_id=%s AND student_id=%s FOR UPDATE""",(school_id,student_id))
