@@ -15,7 +15,7 @@ from database import get_db
 from trust_voice_school_safety_training import _actor, _schema as _training_schema, _membership, _audit
 from trust_voice_school_safety_registration import _school_admin
 
-router=APIRouter(prefix="/trust-voice/school-safety",tags=["TEST Student Acceptable Use"])
+router=APIRouter(tags=["TEST Student Acceptable Use"])
 CONDUCT_POLICY_VERSION="2026-11-25.student-conduct-v1"
 CONDUCT_RULES=[
     "I will use VeriFYD Safety only to report a real concern or an approved school practice activity. I will not send fake, prank, threatening, or intentionally misleading reports.",
