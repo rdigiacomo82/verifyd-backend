@@ -64,6 +64,27 @@ class ElectronicGuardianConsentContracts(unittest.TestCase):
         self.assertTrue(any(r.path.endswith("/send-schoolwide") for r in e.router.routes))
         self.assertEqual(e._limit("NOT_SET_TEST_LIMIT",40,250),40)
 
+    def test_electronic_school_feature_is_off_without_explicit_allowlist(self):
+        import os
+        from fastapi import HTTPException
+        from unittest.mock import patch
+        with patch.object(e,"_invites_enabled",return_value=None):
+            with patch.dict(os.environ,{},clear=True):
+                with self.assertRaises(HTTPException) as ctx:
+                    e._require_electronic_enabled("test-school")
+                self.assertEqual(ctx.exception.status_code,404)
+            with patch.dict(os.environ,{
+                "VERIFYD_SAFETY_ELECTRONIC_ACK_ENABLED":"1",
+                "VERIFYD_SAFETY_ELECTRONIC_ACK_SCHOOL_IDS":"other-school"
+            },clear=True):
+                with self.assertRaises(HTTPException):
+                    e._require_electronic_enabled("test-school")
+            with patch.dict(os.environ,{
+                "VERIFYD_SAFETY_ELECTRONIC_ACK_ENABLED":"1",
+                "VERIFYD_SAFETY_ELECTRONIC_ACK_SCHOOL_IDS":"test-school"
+            },clear=True):
+                self.assertIsNone(e._require_electronic_enabled("test-school"))
+
     def test_paper_and_authority_still_required(self):
         from fastapi import HTTPException
         for kwargs in [
