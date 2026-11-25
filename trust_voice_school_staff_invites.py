@@ -9,6 +9,7 @@ school-scoped administrator responsibility. Never email login passwords.
 from __future__ import annotations
 import hashlib
 import html
+import re
 import secrets
 import threading
 import uuid
@@ -61,6 +62,44 @@ def _schema():
                 ON verifyd_safety_staff_invites(lower(proposed_handle))
                 WHERE accepted_at IS NULL AND revoked_at IS NULL""")
         _ready=True
+
+
+def _ensure_school_naming(cur, school_id: str, principal_id: str):
+    """Initialize a collision-safe prefix for a certified Principal on first staff invite.
+
+    Preserve manually configured naming exactly. No enrollment, identity,
+    policy acknowledgment, or emergency notification is created here.
+    The global advisory lock is shared with save_managed_roster_settings.
+    """
+    cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("safety_school_code_settings",))
+    cur.execute("""SELECT school_code FROM verifyd_safety_managed_roster_settings
+        WHERE school_id=%s""", (school_id,))
+    existing = cur.fetchone()
+    if existing:
+        return str(existing["school_code"]).upper(), False
+    cur.execute("""SELECT school_name FROM verifyd_safety_training_schools
+        WHERE school_id=%s""", (school_id,))
+    school = cur.fetchone()
+    if not school:
+        raise HTTPException(404, detail={"error": "school_not_found"})
+    name = re.findall(r"[A-Za-z0-9]+", str(school["school_name"]))
+    initials = "".join(part[0] for part in name if part and part[0].isalpha()).upper()
+    if len(initials) < 2:
+        initials = "".join(ch for ch in str(school["school_name"]).upper() if ch.isalpha())[:5]
+    base = initials[:8] if len(initials) >= 2 else "VS"
+    digest = hashlib.sha256(school_id.encode("utf-8")).hexdigest().upper()
+    candidates = [base] + [base[:5] + digest[i:i+4] for i in range(0, 28, 4)]
+    for candidate in candidates:
+        cur.execute("""SELECT 1 FROM verifyd_safety_managed_roster_settings
+            WHERE school_code=%s""", (candidate,))
+        if cur.fetchone():
+            continue
+        cur.execute("""INSERT INTO verifyd_safety_managed_roster_settings
+            (school_id,school_code,handle_style,configured_by)
+            VALUES(%s,%s,'name',%s)""", (school_id,candidate,principal_id))
+        _audit(cur,school_id,principal_id,"school_naming_auto_initialized_for_staff",candidate)
+        return candidate, True
+    raise HTTPException(409, detail={"error": "school_prefix_unavailable_contact_operator"})
 
 
 class StaffInvite(BaseModel):
@@ -123,12 +162,12 @@ def create_staff_invite(school_id:str,payload:StaffInvite,
         if _school_admin(cur,school_id,str(actor["id"]))!="principal":
             raise HTTPException(403,detail={"error":"principal_required"})
         cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))",("safety_staff_registration:"+school_id,))
-        cur.execute("""SELECT school_code FROM verifyd_safety_managed_roster_settings
-            WHERE school_id=%s""",(school_id,))
-        settings=cur.fetchone()
-        if not settings:
-            raise HTTPException(409,detail={"error":"save_school_naming_convention_first"})
-        prefix=str(settings["school_code"]).upper()
+        prefix, prefix_created = _ensure_school_naming(cur,school_id,str(actor["id"]))
+        # Expired, unused invitations should not permanently block a staff email.
+        cur.execute("""UPDATE verifyd_safety_staff_invites
+            SET revoked_at=NOW(),delivery_status='expired'
+            WHERE school_id=%s AND accepted_at IS NULL AND revoked_at IS NULL
+              AND expires_at<=NOW()""",(school_id,))
         cur.execute("""SELECT count(*) AS n FROM verifyd_safety_school_admin_delegations
             WHERE school_id=%s AND revoked_at IS NULL""",(school_id,))
         assigned=int(cur.fetchone()["n"])
@@ -188,6 +227,7 @@ def create_staff_invite(school_id:str,payload:StaffInvite,
             SET delivery_status=%s WHERE invite_id=%s""",
             ("accepted_by_provider" if delivered else "failed",invite_id))
     return {"ok":True,"invite_id":invite_id,"proposed_handle":"@"+proposed,
+            "school_prefix":prefix,"school_prefix_auto_initialized":prefix_created,
             "delivery_status":"accepted_by_provider" if delivered else "failed",
             "new_account_active":False,"pending_staff_email_verification":True,
             "administrator_access_granted":False}
