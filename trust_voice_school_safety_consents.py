@@ -259,6 +259,9 @@ def accept_signoff(school_id: str, payload: SignoffInput, authorization: Optiona
             DO UPDATE SET policy_version=EXCLUDED.policy_version,
                 accepted_at=NOW(),revoked_at=NULL""",
             ("sssig_"+uuid.uuid4().hex,school_id,actor_id,payload.kind,subject,POLICY_VERSION))
+        if payload.kind=="guardian":
+            from trust_voice_school_auto_routing import sync_approved_guardian_route
+            sync_approved_guardian_route(cur,school_id,subject,actor_id)
         _audit(cur, school_id, actor_id, "training_acknowledged_"+payload.kind, subject or school_id)
     return {"ok": True, "mode": "TRAINING ONLY", "policy_version": POLICY_VERSION,
             "recorded": True, "live_emergency_delivery": False}
