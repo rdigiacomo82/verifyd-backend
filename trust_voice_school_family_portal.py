@@ -219,6 +219,8 @@ def review_family_request(school_id: str,request_id: str,payload: FamilyReview,
                 (school_id,child_id,guardian_id,verified_by) VALUES(%s,%s,%s,%s)
                 ON CONFLICT DO NOTHING""",
                 (school_id,str(r["student_id"]),str(r["guardian_id"]),actor_id))
+            from trust_voice_school_auto_routing import sync_approved_guardian_route
+            sync_approved_guardian_route(cur,school_id,str(r["student_id"]),actor_id)
             _audit(cur,school_id,actor_id,"family_link_approved",request_id)
         else:
             _audit(cur,school_id,actor_id,"family_link_rejected",request_id)
