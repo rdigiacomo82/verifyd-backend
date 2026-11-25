@@ -42,13 +42,19 @@ FIELDS={
  "primaryguardianemail":"primary_guardian_email","primaryparentemail":"primary_guardian_email",
  "backupguardianname":"backup_guardian_name","secondguardianname":"backup_guardian_name",
  "backupguardianemail":"backup_guardian_email","secondguardianemail":"backup_guardian_email",
+ "studentemail":"student_email","schoolstudentemail":"student_email",
+ "studentphone":"student_phone","studentmobile":"student_phone",
+ "primaryguardianphone":"primary_guardian_phone","primaryparentphone":"primary_guardian_phone",
+ "backupguardianphone":"backup_guardian_phone","secondguardianphone":"backup_guardian_phone",
 }
 REQUIRED={"local_ref","first_name","last_name"}
 SAFE_REF=re.compile(r"^[A-Za-z0-9_-]{3,64}$")
 COLUMNS=[
  "local_ref","first_name","last_name","ack_method","guardian_name",
  "signed_date","evidence_ref","authority_reference","primary_guardian_name",
- "primary_guardian_email","backup_guardian_name","backup_guardian_email",
+ "primary_guardian_email","primary_guardian_phone",
+ "backup_guardian_name","backup_guardian_email","backup_guardian_phone",
+ "student_email","student_phone",
 ]
 
 
