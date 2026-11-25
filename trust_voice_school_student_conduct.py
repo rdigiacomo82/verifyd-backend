@@ -13,7 +13,7 @@ from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
 from database import get_db
 from trust_voice_school_safety_training import _actor, _schema as _training_schema, _membership, _audit
-from trust_voice_school_safety_registration import _school_admin
+# Import Principal authorization lazily in handlers to avoid a training/registration import cycle.
 
 router=APIRouter(tags=["TEST Student Acceptable Use"])
 CONDUCT_POLICY_VERSION="2026-11-25.student-conduct-v1"
@@ -108,6 +108,7 @@ class StaffConductDecision(BaseModel):
 def admin_student_conduct_status(school_id:str,authorization:Optional[str]=Header(default=None)):
     if not _enabled(school_id):
         raise HTTPException(404,detail={"error":"student_conduct_pilot_not_enabled"})
+    from trust_voice_school_safety_registration import _school_admin
     actor=_actor(authorization);_schema()
     with get_db() as conn:
         cur=conn.cursor();_school_admin(cur,school_id,str(actor["id"]))
@@ -127,6 +128,7 @@ def admin_student_conduct_decision(school_id:str,student_id:str,payload:StaffCon
     authorization:Optional[str]=Header(default=None)):
     if not _enabled(school_id):
         raise HTTPException(404,detail={"error":"student_conduct_pilot_not_enabled"})
+    from trust_voice_school_safety_registration import _school_admin
     actor=_actor(authorization);_schema()
     with get_db() as conn:
         cur=conn.cursor()
