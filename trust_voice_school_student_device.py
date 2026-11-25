@@ -81,6 +81,8 @@ def _schema():
                 expires_at TIMESTAMPTZ NOT NULL,
                 revoked_at TIMESTAMPTZ
             )""")
+            cur.execute("ALTER TABLE verifyd_safety_student_device_sessions ADD COLUMN IF NOT EXISTS auth_method TEXT NOT NULL DEFAULT 'principal_code'")
+            cur.execute("ALTER TABLE verifyd_safety_student_device_sessions ADD COLUMN IF NOT EXISTS bound_email TEXT")
             cur.execute("""CREATE INDEX IF NOT EXISTS safety_student_device_live_session_idx
                 ON verifyd_safety_student_device_sessions(school_id,student_id,expires_at)
                 WHERE revoked_at IS NULL""")
@@ -114,7 +116,7 @@ def _session(x_safety_device_session: Optional[str]):
     _schema()
     with get_db() as conn:
         cur = conn.cursor()
-        cur.execute("""SELECT school_id,student_id,code_issued_by,expires_at FROM verifyd_safety_student_device_sessions
+        cur.execute("""SELECT school_id,student_id,code_issued_by,expires_at,auth_method,bound_email FROM verifyd_safety_student_device_sessions
           WHERE session_hash=%s AND revoked_at IS NULL AND expires_at>NOW()""",
                     (_digest(x_safety_device_session),))
         row = cur.fetchone()
@@ -126,6 +128,20 @@ def _session(x_safety_device_session: Optional[str]):
         # An owner-revoked backup or removed Principal cannot continue authorizing
         # a child's device merely because its 45-minute token has not expired.
         _school_admin(cur, school_id, str(row["code_issued_by"]))
+        if row["auth_method"] == "student_email":
+            # A changed school contact address or Principal revocation invalidates
+            # an email-authenticated TEST session even before its 45-minute expiry.
+            cur.execute("""SELECT 1 FROM verifyd_safety_student_email_bindings b
+                JOIN verifyd_safety_managed_students s
+                  ON s.school_id=b.school_id AND s.student_identity_id=b.student_id
+                JOIN verifyd_safety_managed_student_contacts c
+                  ON c.school_id=s.school_id AND c.local_ref=s.local_ref
+                WHERE b.school_id=%s AND b.student_id=%s AND b.email_lower=%s
+                  AND b.revoked_at IS NULL AND s.enrollment_status='school_approved'
+                  AND lower(c.student_email)=%s LIMIT 1""",
+                (school_id,student_id,row["bound_email"],row["bound_email"]))
+            if not cur.fetchone():
+                raise HTTPException(401, detail={"error":"restricted_student_email_session_revoked"})
         student = _supervised(cur, school_id, student_id)
         _guardian_ready(cur, school_id, student_id)
         return {"school_id": school_id, "student_id": student_id,
