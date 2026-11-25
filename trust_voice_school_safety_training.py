@@ -95,6 +95,8 @@ def _schema():
                 PRIMARY KEY(school_id,student_id),
                 CHECK(primary_id<>backup_id), CHECK(student_id<>primary_id), CHECK(student_id<>backup_id)
             )""")
+            cur.execute("""ALTER TABLE verifyd_safety_training_contacts
+                ADD COLUMN IF NOT EXISTS route_source TEXT NOT NULL DEFAULT 'manual'""")
             # Old TEST routes sometimes stored the Principal as a family Backup.
             # A school response recipient is not a guardian. Preserve Primary,
             # move staff to its separate recipient role, and keep report history.
@@ -467,6 +469,14 @@ def get_verified_school_contact_routing(school_id: str, authorization: Optional[
     with get_db() as conn:
         cur = conn.cursor()
         _school_admin(cur, school_id, str(actor["id"]))
+        from trust_voice_school_auto_routing import _enabled as _auto_enabled, sync_approved_guardian_route
+        if _auto_enabled(school_id):
+            cur.execute("""SELECT student_identity_id FROM verifyd_safety_managed_students
+                WHERE school_id=%s AND enrollment_status='school_approved'
+                  AND student_identity_id IS NOT NULL ORDER BY local_ref LIMIT 2000""",(school_id,))
+            student_ids=[str(row["student_identity_id"]) for row in cur.fetchall()]
+            for sid in student_ids:
+                sync_approved_guardian_route(cur,school_id,sid,str(actor["id"]))
         cur.execute("""SELECT m.identity_id AS student_id,i.handle,i.display_name
           FROM verifyd_safety_training_members m JOIN verifyd_identities i ON i.id=m.identity_id
           WHERE m.school_id=%s AND m.role='student' ORDER BY i.handle""", (school_id,))
@@ -489,7 +499,7 @@ def get_verified_school_contact_routing(school_id: str, authorization: Optional[
                 primary.append(person)
             # Family recipients can only be verified guardians, never school staff.
             backup = list(primary)
-            cur.execute("""SELECT primary_id,backup_id FROM verifyd_safety_training_contacts
+            cur.execute("""SELECT primary_id,backup_id,route_source FROM verifyd_safety_training_contacts
               WHERE school_id=%s AND student_id=%s""", (school_id,sid))
             current = dict(cur.fetchone() or {})
             result.append({"student_id":sid,"handle":student["handle"],
@@ -520,9 +530,10 @@ def save_verified_school_contact_routing(
         if payload.backup_id:
             _verified_training_contact(cur,school_id,student_id,payload.backup_id)
         cur.execute("""INSERT INTO verifyd_safety_training_contacts
-          (school_id,student_id,primary_id,backup_id) VALUES (%s,%s,%s,%s)
+          (school_id,student_id,primary_id,backup_id,route_source) VALUES (%s,%s,%s,%s,'manual')
           ON CONFLICT(school_id,student_id) DO UPDATE SET
-          primary_id=EXCLUDED.primary_id,backup_id=EXCLUDED.backup_id,updated_at=NOW()""",
+          primary_id=EXCLUDED.primary_id,backup_id=EXCLUDED.backup_id,
+          route_source='manual',updated_at=NOW()""",
           (school_id,student_id,payload.primary_id,payload.backup_id))
         _audit(cur,school_id,str(actor["id"]),"verified_training_contact_route_saved",student_id)
     return {"ok":True,"mode":"TRAINING ONLY","saved":True,
