@@ -91,6 +91,7 @@ from trust_voice_school_unified_signup import router as school_unified_signup_ro
 from trust_voice_school_multi_admin import router as school_multi_admin_router
 from trust_voice_school_guardian_contacts import router as school_guardian_contacts_router
 from trust_voice_school_incident_chat import router as school_incident_chat_router
+from trust_voice_school_staff_responses import router as school_staff_responses_router
 from trust_voice_school_choice_catalog import router as school_choice_catalog_router
 from trust_voice_school_student_device import router as school_student_device_router
 from trust_voice_school_student_email import router as school_student_email_router
@@ -402,6 +403,7 @@ app.include_router(school_unified_signup_router)
 app.include_router(school_multi_admin_router)
 app.include_router(school_guardian_contacts_router)
 app.include_router(school_incident_chat_router)
+app.include_router(school_staff_responses_router)
 app.include_router(school_choice_catalog_router)
 app.include_router(school_student_device_router)
 app.include_router(school_student_email_router)

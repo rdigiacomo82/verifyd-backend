@@ -1,0 +1,36 @@
+name: Circle16 Safety principal response privacy
+on:
+  pull_request:
+    paths:
+      - 'trust_voice_school_staff_responses.py'
+      - 'trust_voice_school_student_device.py'
+      - 'trust_voice_school_incident_chat.py'
+      - 'tests/test_school_staff_response_thread.py'
+      - 'main.py'
+      - '.github/workflows/circle16-school-responses.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'trust_voice_school_staff_responses.py'
+      - 'trust_voice_school_student_device.py'
+      - 'trust_voice_school_incident_chat.py'
+      - 'tests/test_school_staff_response_thread.py'
+  workflow_dispatch:
+jobs:
+  school-response-privacy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install TEST school API dependencies
+        run: |
+          python -m pip install --disable-pip-version-check 'fastapi>=0.109,<1' 'pydantic>=2,<3' 'psycopg2-binary>=2.9,<3' 'python-multipart>=0.0.9' 'python-docx>=1.1,<2' 'pypdf>=4,<7' 'reportlab>=4,<5'
+      - name: Compile TEST school staff response and student session
+        run: |
+          python -m py_compile trust_voice_school_staff_responses.py trust_voice_school_student_device.py trust_voice_school_incident_chat.py tests/test_school_staff_response_thread.py main.py
+      - name: Check school response role isolation and existing supervised session
+        run: |
+          python -m unittest discover -s tests -p 'test_school_staff_response_thread.py' -v
+          python -m unittest discover -s tests -p 'test_school_student_device.py' -v

@@ -122,6 +122,9 @@ def _dispatch(report_id, event_key):
             try:
                 if str(event_key).startswith("reply:"):
                     _family_chat_authorize(conn.cursor(),report_id,str(job["recipient_id"]))
+                elif str(event_key).startswith("schoolreply:"):
+                    from trust_voice_school_staff_responses import _school_chat_authorize
+                    _school_chat_authorize(conn.cursor(),report_id,str(job["recipient_id"]))
                 else:
                     _authorize(conn.cursor(),report_id,str(job["recipient_id"]))
             except HTTPException:continue
@@ -140,11 +143,19 @@ def _dispatch(report_id, event_key):
         if not claimed:continue
         try:
             private_reply = str(event_key).startswith("reply:")
+            school_reply = str(event_key).startswith("schoolreply:")
             result=notify_identity_push(recipient,
-                notification_type="school_safety_family_reply_test" if private_reply else "school_safety_test_alert",
-                title="VeriFYD Safety — private family text" if private_reply else "VeriFYD Safety — Test School notification",
-                body="A private TEST family text is ready in VeriFYD Safety." if private_reply else "An initial test school incident needs your attention.",
-                url="/Safety",tag="verifyd-school-"+report_id+("-family" if private_reply else ""),ttl=600)
+                notification_type=("school_safety_family_reply_test" if private_reply
+                                   else "school_safety_test_alert"),
+                title=("VeriFYD Safety — private family text" if private_reply
+                       else "VeriFYD Safety — school TEST response" if school_reply
+                       else "VeriFYD Safety — Test School notification"),
+                body=("A private TEST family text is ready in VeriFYD Safety." if private_reply
+                      else "A school TEST response is ready. Open your verified Safety app." if school_reply
+                      else "An initial test school incident needs your attention."),
+                url="/Safety",
+                tag="verifyd-school-"+report_id+("-family" if private_reply else "-school" if school_reply else ""),
+                ttl=600)
         except Exception:
             result={"sent":0}
         n=int(result.get("sent") or 0)
