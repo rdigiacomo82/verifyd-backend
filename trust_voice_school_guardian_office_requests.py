@@ -20,7 +20,7 @@ from trust_voice_school_safety_training import (
 )
 from trust_voice_school_safety_consents import _consent_schema
 
-router = APIRouter(prefix="/trust-voice/school-safety", tags=["TEST Guardian Office Requests"])
+router = APIRouter(tags=["TEST Guardian Office Requests"])
 _lock=threading.Lock()
 _ready=False
 
