@@ -272,7 +272,14 @@ def enrollment(authorization: Optional[str] = Header(default=None)):
             cur.execute("""SELECT primary_id,backup_id FROM verifyd_safety_training_contacts
                 WHERE school_id=%s AND student_id=%s""", (school["school_id"], identity_id))
             school["contacts"] = dict(cur.fetchone() or {})
+    # Current signed-in identity; never accept a client-supplied role or email.
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT handle FROM verifyd_identities WHERE id=%s AND status='active'", (identity_id,))
+        row = cur.fetchone()
+        current_user_handle = str(row["handle"]) if row else ""
     return {"ok": True, "mode": "TRAINING ONLY", "schools": schools,
+            "current_user_handle": current_user_handle,
             "is_operator": identity_id in _operators(), "live_emergency_delivery": False}
 
 

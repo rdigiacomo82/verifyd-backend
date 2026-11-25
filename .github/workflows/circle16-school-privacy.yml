@@ -1,0 +1,30 @@
+name: Circle16 School Safety identity and privacy
+on:
+  pull_request:
+    paths:
+      - 'trust_voice_school_directory.py'
+      - 'trust_voice_school_safety_training.py'
+      - 'tests/test_school_circle16_header_directory.py'
+      - '.github/workflows/circle16-school-privacy.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'trust_voice_school_directory.py'
+      - 'trust_voice_school_safety_training.py'
+      - 'tests/test_school_circle16_header_directory.py'
+  workflow_dispatch:
+jobs:
+  school-address-and-role-privacy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install school API test dependencies
+        run: |
+          python -m pip install --disable-pip-version-check 'fastapi>=0.109,<1' 'pydantic>=2,<3' 'psycopg2-binary>=2.9,<3' 'python-multipart>=0.0.9' 'python-docx>=1.1,<2' 'pypdf>=4,<7' 'reportlab>=4,<5'
+      - name: Compile and run privacy tests
+        run: |
+          python -m py_compile trust_voice_school_directory.py trust_voice_school_safety_training.py tests/test_school_circle16_header_directory.py
+          python -m unittest discover -s tests -p 'test_school_circle16_header_directory.py' -v

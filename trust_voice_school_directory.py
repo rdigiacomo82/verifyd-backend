@@ -68,7 +68,7 @@ def _details(cur,school_id:str)->dict:
     school=cur.fetchone()
     if not school:
         raise HTTPException(404,detail={"error":"school_not_found"})
-    cur.execute("""SELECT district_name,school_address,school_website,principal_name
+    cur.execute("""SELECT district_name,school_website,principal_name
         FROM verifyd_safety_school_applications
         WHERE school_id=%s AND status='approved'
         ORDER BY reviewed_at DESC LIMIT 1""",(school_id,))
@@ -96,7 +96,7 @@ def _details(cur,school_id:str)->dict:
         "school_id":school_id,
         "school_name":str(school["school_name"]),
         "district_name":str(app["district_name"] or "") if app else "",
-        "school_address":str(app["school_address"] or "") if app else "",
+        # A school's enrollment address is private and excluded from shared directories.
         "school_website":str(app["school_website"] or "") if app else "",
         "principal_name":str(app["principal_name"] or "") if app else "",
         "principal_handle":str(principal["handle"]) if principal else "",
