@@ -211,3 +211,7 @@ def review_family_interest(school_id:str,request_id:str,
         _audit(cur,school_id,str(actor["id"]),"school_family_contact_reviewed",request_id)
     return {"ok":True,"status":payload.status,"guardian_verified":False,
             "family_access_granted":False,"student_record_modified":False}
+
+# School-mediated guardian office check-in routes (TEST-only and gated).
+from trust_voice_school_guardian_office_requests import router as _school_office_router
+router.include_router(_school_office_router)
