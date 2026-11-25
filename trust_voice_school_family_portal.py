@@ -365,3 +365,8 @@ def publish_school_update(school_id: str,payload: SchoolUpdate,
         _audit(cur,school_id,str(actor["id"]),"school_general_update_published",update_id)
     return {"ok":True,"update_id":update_id,"in_app_only":True,
             "emergency_alerts_active":False}
+
+
+# Verified school contact directory: authenticated family and school staff only.
+from trust_voice_school_directory import router as _school_directory_router
+router.include_router(_school_directory_router)
