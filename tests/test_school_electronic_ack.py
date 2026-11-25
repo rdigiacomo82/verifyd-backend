@@ -61,7 +61,6 @@ class ElectronicGuardianConsentContracts(unittest.TestCase):
         self.assertIn("school_confirmed_guardian_recipient_assignments",inspect.getsource(e.Campaign))
         self.assertIn("_reserve_mail",send)
         self.assertNotIn("s.first_name",send)
-        self.assertIn("send_schoolwide",*[r.path for r in e.router.routes][0:]) if False else None
         self.assertTrue(any(r.path.endswith("/send-schoolwide") for r in e.router.routes))
         self.assertEqual(e._limit("NOT_SET_TEST_LIMIT",40,250),40)
 
