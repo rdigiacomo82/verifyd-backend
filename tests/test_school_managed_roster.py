@@ -171,7 +171,13 @@ class SchoolManagedRosterContracts(unittest.TestCase):
         self.assertIn("'nobody'",src)
         self.assertIn("guardian_private_message_access_granted",src)
         self.assertIn("emergency_dispatch_enabled",src)
-        self.assertNotIn("verifyd_safety_training_guardians",src)
+        # Paper and district authority remain enrollment-only. Only the
+        # independently verified electronic route may approve a guardian link.
+        self.assertIn('if item.method == "electronic":',src)
+        self.assertIn("verified_electronic_guardian_acknowledgment_required",src)
+        self.assertIn("administrator_cannot_approve_own_guardian_acknowledgment",src)
+        self.assertIn("school_staff_cannot_claim_guardian_role",src)
+        self.assertIn("verifyd_safety_training_guardians",src)
 
     def test_existing_consent_and_student_reporting_gates_are_unchanged(self):
         import trust_voice_school_safety_training as training
