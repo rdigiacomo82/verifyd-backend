@@ -118,6 +118,7 @@ def _matches(cur, school_id: str, email: str):
         JOIN verifyd_safety_managed_students s
           ON s.school_id=c.school_id AND s.local_ref=c.local_ref
         WHERE c.school_id=%s AND c.guardian_email=%s
+          AND s.enrollment_status='staged'
         ORDER BY s.last_name,s.first_name,c.slot LIMIT 13""",
         (school_id,email))
     rows = [dict(r) for r in cur.fetchall()]
