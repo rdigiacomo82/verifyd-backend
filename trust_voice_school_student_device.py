@@ -24,6 +24,7 @@ from trust_voice_school_safety_training import (
 )
 from trust_voice_school_safety_registration import _school_admin
 from trust_voice_school_incident_chat import Reply
+from trust_voice_school_student_conduct import _status as _student_conduct_status
 from trust_voice_school_safety_consents import (
     _consent_schema, _guardian_count, _school_accepted, _student_accepted,
     POLICY_VERSION,
@@ -145,6 +146,9 @@ class StudentAcknowledgment(BaseModel):
     policy_version: str
     accepted: bool
     understood_test_only: bool
+    conduct_policy_version: Optional[str] = None
+    understands_acceptable_use: bool = False
+    understands_school_review_consequences: bool = False
 
 
 class SessionReport(ReportInput):
@@ -172,6 +176,7 @@ def device_student_roster(school_id: str, authorization: Optional[str] = Header(
                 "display_name": row["display_name"],
                 "guardian_acknowledged": bool(_guardian_count(cur, school_id, student_id)),
                 "student_acknowledged": bool(_student_accepted(cur, school_id, student_id)),
+                "student_conduct": _student_conduct_status(cur,school_id,student_id),
             })
     return {"ok": True, "test_only": True, "school_id": school_id, "students": students}
 
@@ -281,12 +286,15 @@ def student_device_me(x_safety_device_session: Optional[str] = Header(default=No
                 pass
         cur.execute("SELECT school_name FROM verifyd_safety_training_schools WHERE school_id=%s", (ctx["school_id"],))
         school = cur.fetchone()
+    conduct=_student_conduct_status(cur,ctx["school_id"],ctx["student_id"])
     return {"ok": True, "test_only": True, "school_id": ctx["school_id"],
             "school_name": school["school_name"] if school else "TEST School",
             "student_handle": ctx["student_handle"], "expires_at": ctx["expires_at"],
             "policy_version": POLICY_VERSION, "student_acknowledged": bool(signed),
+            "student_conduct":conduct,
             "recipients_ready": bool(recipients_ready),
-            "can_submit_test_report": bool(signed and recipients_ready),
+            "can_submit_test_report": bool(signed and recipients_ready
+                       and conduct["acknowledged"] and not conduct["restricted"]),
             "emergency_dispatch": False}
 
 
@@ -308,6 +316,13 @@ def device_student_acknowledgment(payload: StudentAcknowledgment,
         raise HTTPException(422, detail={"error": "student_training_acknowledgment_required"})
     with get_db() as conn:
         cur = conn.cursor()
+        from trust_voice_school_student_conduct import _enabled as conduct_enabled, _record as record_conduct, CONDUCT_POLICY_VERSION
+        if conduct_enabled(ctx["school_id"]):
+            if (payload.conduct_policy_version != CONDUCT_POLICY_VERSION
+                 or not payload.understands_acceptable_use
+                 or not payload.understands_school_review_consequences):
+                raise HTTPException(422,detail={"error":"student_conduct_acknowledgment_required"})
+            record_conduct(cur,ctx["school_id"],ctx["student_id"],payload.conduct_policy_version)
         cur.execute("""INSERT INTO verifyd_safety_training_signoffs
             (signoff_id,school_id,actor_id,kind,subject_id,policy_version)
             VALUES(%s,%s,%s,'student',%s,%s)
