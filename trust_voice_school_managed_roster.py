@@ -71,6 +71,16 @@ def _schema():
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 PRIMARY KEY(school_id,local_ref)
             )""")
+            cur.execute("""ALTER TABLE verifyd_safety_managed_students
+                ADD COLUMN IF NOT EXISTS tracking_reference TEXT""")
+            # A school-local, permanent reference for tracking the enrollment
+            # record. It does NOT itself constitute guardian consent or
+            # legal authorization evidence.
+            cur.execute("""UPDATE verifyd_safety_managed_students
+                SET tracking_reference='ENR-' || upper(local_ref)
+                WHERE tracking_reference IS NULL""")
+            cur.execute("""CREATE UNIQUE INDEX IF NOT EXISTS safety_managed_school_tracking_unique
+                ON verifyd_safety_managed_students(school_id, lower(tracking_reference))""")
             cur.execute("""CREATE INDEX IF NOT EXISTS verifyd_safety_managed_student_school
                 ON verifyd_safety_managed_students(school_id,last_name,first_name)""")
             cur.execute("""CREATE TABLE IF NOT EXISTS verifyd_safety_managed_enrollment_evidence (
@@ -88,6 +98,8 @@ def _schema():
                 FOREIGN KEY(school_id,local_ref) REFERENCES
                   verifyd_safety_managed_students(school_id,local_ref)
             )""")
+            cur.execute("""ALTER TABLE verifyd_safety_managed_enrollment_evidence
+                ADD COLUMN IF NOT EXISTS review_date DATE""")
             cur.execute("""CREATE TABLE IF NOT EXISTS verifyd_safety_managed_roster_previews (
                 preview_id TEXT PRIMARY KEY,
                 school_id TEXT NOT NULL REFERENCES verifyd_safety_training_schools(school_id),
@@ -154,6 +166,14 @@ class SchoolAuthorizationBatch(BaseModel):
     approvals: list[SchoolAuthorizationItem] = Field(min_length=1, max_length=250)
     principal_confirms_evidence_on_file: Literal[True]
     school_use_only: Literal[True]
+    # One declared administrator review date for the entire approval batch.
+    # This is NOT the paper signature date of any guardian.
+    review_date: date = Field(default_factory=date.today)
+
+
+class SchoolTrackingReferenceUpdate(BaseModel):
+    tracking_reference: str = Field(min_length=6, max_length=80,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{5,79}$")
 
 
 def _check_evidence(item):
@@ -375,10 +395,12 @@ def commit_managed_roster(school_id: str, payload: ManagedRosterCommit,
             if cur.fetchone():
                 raise HTTPException(409, detail={"error": "handle_unavailable_repreview"})
             cur.execute("""INSERT INTO verifyd_safety_managed_students
-                (school_id,local_ref,first_name,last_name,proposed_handle,handle_lower,imported_by)
-                VALUES (%s,%s,%s,%s,%s,%s,%s)""",
+                (school_id,local_ref,first_name,last_name,proposed_handle,handle_lower,
+                 imported_by,tracking_reference)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
                 (school_id,row["local_ref"],row["first_name"],row["last_name"],
-                 row["proposed_handle"],row["proposed_handle"].lower(),str(actor["id"])))
+                 row["proposed_handle"],row["proposed_handle"].lower(),str(actor["id"]),
+                 "ENR-"+row["local_ref"].upper()))
             added += 1
         cur.execute("UPDATE verifyd_safety_managed_roster_previews SET consumed_at=NOW() WHERE preview_id=%s", (payload.preview_id,))
         _audit(cur,school_id,str(actor["id"]),"managed_roster_pending_handles_staged",str(added))
@@ -396,8 +418,9 @@ def list_managed_roster(school_id: str, authorization: Optional[str] = Header(de
         _school_admin(cur, school_id, str(actor["id"]))
         cur.execute("""SELECT s.local_ref,s.first_name,s.last_name,s.proposed_handle,
             s.student_identity_id,s.enrollment_status AS status,s.created_at,
+            s.tracking_reference,s.approved_at,
             e.method AS acknowledgment_method,e.evidence_ref,e.signed_date,
-            e.verified_at,e.authority_reference
+            e.verified_at,e.review_date,e.authority_reference
             FROM verifyd_safety_managed_students s
             LEFT JOIN verifyd_safety_managed_enrollment_evidence e
                 ON e.school_id=s.school_id AND e.local_ref=s.local_ref
@@ -422,6 +445,8 @@ def approve_managed_school_enrollment(
     """
     _require_enrollment_enabled(school_id)
     actor = _actor(authorization)
+    if payload.review_date > date.today():
+        raise HTTPException(422,detail={"error":"approval_review_date_cannot_be_in_future"})
     refs = [item.local_ref.strip().lower() for item in payload.approvals]
     if len(refs) != len(set(refs)):
         raise HTTPException(422, detail={"error": "duplicate_student_in_approval_batch"})
@@ -482,12 +507,13 @@ def approve_managed_school_enrollment(
                 "School/district authority documented for school-only education services; not guardian consent")
             cur.execute("""INSERT INTO verifyd_safety_managed_enrollment_evidence
                 (school_id,local_ref,method,evidence_ref,guardian_name,signed_date,
-                 authority_reference,declaration,verified_by)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                 authority_reference,declaration,verified_by,review_date)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
                 (school_id,row["local_ref"],item.method,item.evidence_ref.strip(),
                  item.guardian_name.strip() if item.guardian_name else None,
                  item.signed_date,item.authority_reference.strip()
-                 if item.authority_reference else None,statement,str(actor["id"])))
+                 if item.authority_reference else None,statement,str(actor["id"]),
+                 payload.review_date))
             cur.execute("""UPDATE verifyd_safety_managed_students
                 SET student_identity_id=%s,enrollment_status='school_approved',
                     approved_at=NOW() WHERE school_id=%s AND local_ref=%s""",
@@ -538,3 +564,39 @@ def discard_unapproved_managed_student(school_id: str, local_ref: str,
     return {"ok": True, "staged_record_removed": True,
             "global_verifyd_account_deleted": False,
             "school_managed_enrollment": True}
+
+
+@router.patch("/schools/{school_id}/managed-roster/students/{local_ref}/tracking-reference")
+def update_managed_student_tracking_reference(school_id: str, local_ref: str,
+                                              payload: SchoolTrackingReferenceUpdate,
+                                              authorization: Optional[str] = Header(default=None)):
+    """Change a school record tracking code without altering authorization evidence."""
+    _require_enrollment_enabled(school_id)
+    actor=_actor(authorization)
+    ref=local_ref.strip().upper()
+    if not _REF.fullmatch(ref):
+        raise HTTPException(422,detail={"error":"invalid_school_local_reference"})
+    tracking=payload.tracking_reference.strip().upper()
+    if not tracking:
+        raise HTTPException(422,detail={"error":"tracking_reference_required"})
+    _schema()
+    with get_db() as conn:
+        cur=conn.cursor()
+        _school_admin(cur,school_id,str(actor["id"]))
+        cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))",
+                    ("school_tracking_reference:"+school_id,))
+        cur.execute("""SELECT 1 FROM verifyd_safety_managed_students
+            WHERE school_id=%s AND lower(tracking_reference)=lower(%s) AND local_ref<>%s""",
+            (school_id,tracking,ref))
+        if cur.fetchone():
+            raise HTTPException(409,detail={"error":"tracking_reference_already_in_use"})
+        cur.execute("""UPDATE verifyd_safety_managed_students
+            SET tracking_reference=%s WHERE school_id=%s AND local_ref=%s
+            RETURNING local_ref,tracking_reference""",(tracking,school_id,ref))
+        row=cur.fetchone()
+        if not row:
+            raise HTTPException(404,detail={"error":"school_student_not_found"})
+        _audit(cur,school_id,str(actor["id"]),"school_tracking_reference_updated",ref)
+    return {"ok":True,"local_ref":row["local_ref"],
+            "tracking_reference":row["tracking_reference"],
+            "guardian_consent_verified":False,"enrollment_approval_changed":False}
