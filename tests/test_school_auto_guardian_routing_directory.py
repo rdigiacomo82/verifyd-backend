@@ -48,17 +48,18 @@ class RoutePolicyContracts(unittest.TestCase):
         self.audit.stop();self.check.stop();self.gate.stop()
 
     def test_off_by_default_and_test_school_allowlist(self):
-        with patch.object(routing,"_enabled",wraps=routing._enabled):
-            pass
-        self.assertFalse(routing._enabled("sschool_random") if False else False)
-        with patch.dict(os.environ,{},clear=True):
-            self.assertFalse(routing._enabled("sschool_test_real"))
-        with patch.dict(os.environ,{
-            "VERIFYD_SAFETY_AUTO_ROUTING_ENABLED":"1",
-            "VERIFYD_SAFETY_AUTO_ROUTING_SCHOOL_IDS":"sschool_allowed",
-        },clear=True):
-            self.assertTrue(routing._enabled("sschool_allowed"))
-            self.assertFalse(routing._enabled("sschool_other"))
+        self.gate.stop()
+        try:
+            with patch.dict(os.environ,{},clear=True):
+                self.assertFalse(routing._enabled("sschool_test_real"))
+            with patch.dict(os.environ,{
+                "VERIFYD_SAFETY_AUTO_ROUTING_ENABLED":"1",
+                "VERIFYD_SAFETY_AUTO_ROUTING_SCHOOL_IDS":"sschool_allowed",
+            },clear=True):
+                self.assertTrue(routing._enabled("sschool_allowed"))
+                self.assertFalse(routing._enabled("sschool_other"))
+        finally:
+            self.gate.start()
 
     def test_approved_single_guardian_auto_primary(self):
         cur=FakeCursor()
