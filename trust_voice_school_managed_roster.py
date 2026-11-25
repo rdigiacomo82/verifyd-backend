@@ -592,6 +592,7 @@ def approve_managed_school_enrollment(
                     raise HTTPException(403,detail={"error":"administrator_cannot_approve_own_guardian_acknowledgment"})
                 electronic_claims[row["local_ref"]] = dict(ack)
         created = []
+        guardian_accounts_created = 0
         for item in payload.approvals:
             row = pending[item.local_ref.strip().lower()]
             student_id = "vfyd_usr_" + uuid.uuid4().hex
@@ -635,7 +636,8 @@ def approve_managed_school_enrollment(
                 # when a guardian simply enters an email or presses Acknowledge.
                 from trust_voice_school_family_invitations import _new_guardian_identity
                 ack=electronic_claims[row["local_ref"]]
-                guardian_id,_=_new_guardian_identity(cur,ack["guardian_email"],ack["guardian_name"])
+                guardian_id,guardian_created=_new_guardian_identity(cur,ack["guardian_email"],ack["guardian_name"])
+                guardian_accounts_created += int(guardian_created)
                 cur.execute("""SELECT role FROM verifyd_safety_training_members
                     WHERE school_id=%s AND identity_id=%s""",(school_id,guardian_id))
                 existing_member=cur.fetchone()
@@ -671,7 +673,8 @@ def approve_managed_school_enrollment(
                "managed_school_roster_group_approved",str(len(created)))
     return {"ok":True,"school_managed_enrollment":True,"approved":len(created),
             "students":created,"ordinary_voice_login_enabled":False,
-            "guardian_accounts_created":0,
+            "guardian_accounts_created":guardian_accounts_created,
+            "electronically_verified_guardian_links_approved":len(electronic_claims),
             "guardian_private_message_access_granted":False,
             "student_reporting_unlocked":False,
             "emergency_dispatch_enabled":False}
