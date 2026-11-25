@@ -361,7 +361,7 @@ def verify_family_invitation(payload: VerifyInvitation):
         "school_only":True}
 
 
-def _new_guardian_identity(cur, email: str, name: str):
+def _new_guardian_identity(cur, email: str, name: str, school_id: str | None = None):
     # Two guardian invitations for siblings may be claimed concurrently.
     # Serialize by verified mailbox before creating a globally unique identity.
     cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))",
@@ -374,8 +374,17 @@ def _new_guardian_identity(cur, email: str, name: str):
             raise HTTPException(409,detail={"error":"guardian_account_requires_manual_review"})
         return str(existing["id"]),False
     guardian_id = "vfyd_usr_"+uuid.uuid4().hex
-    for attempt in range(6):
-        handle = "Guardian_" + secrets.token_hex(6).upper()
+    # New guardian identities use the existing school's prefix, matching the
+    # staged student pattern. Existing VeriFYD account handles remain intact.
+    prefix="Guardian"
+    if school_id:
+        cur.execute("""SELECT school_code FROM verifyd_safety_managed_roster_settings
+            WHERE school_id=%s""",(school_id,))
+        settings=cur.fetchone()
+        if settings and settings["school_code"]:
+            prefix=str(settings["school_code"]).upper()[:16]
+    for attempt in range(8):
+        handle = (prefix + "_G" + secrets.token_hex(5).upper())
         cur.execute("SELECT 1 FROM verifyd_identities WHERE handle_lower=%s", (handle.lower(),))
         if cur.fetchone():
             continue
@@ -416,7 +425,7 @@ def confirm_family_claim(payload: ConfirmFamily):
         email = invite["recipient_email"]
         if optional_backup and optional_backup[1]==email:
             raise HTTPException(422,detail={"error":"backup_guardian_requires_different_email"})
-        gid, created = _new_guardian_identity(cur,email,invite["guardian_name"])
+        gid, created = _new_guardian_identity(cur,email,invite["guardian_name"],invite["school_id"])
         _membership(cur,invite["school_id"],invite["student_id"],{"student"})
         cur.execute("""SELECT role FROM verifyd_safety_training_members
             WHERE school_id=%s AND identity_id=%s""",(invite["school_id"],gid))
