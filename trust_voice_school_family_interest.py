@@ -54,6 +54,8 @@ def _schema():
                 ADD COLUMN IF NOT EXISTS data_notice_version TEXT NOT NULL DEFAULT ''""")
             conn.cursor().execute("""ALTER TABLE verifyd_safety_school_family_interests
                 ADD COLUMN IF NOT EXISTS data_notice_acknowledged_at TIMESTAMPTZ""")
+            conn.cursor().execute("""ALTER TABLE verifyd_safety_school_family_interests
+                ADD COLUMN IF NOT EXISTS app_use_notice_acknowledged_at TIMESTAMPTZ""")
             conn.cursor().execute("""CREATE INDEX IF NOT EXISTS school_family_interest_recent
                 ON verifyd_safety_school_family_interests
                 (school_id,contact_fingerprint,created_at)""")
@@ -70,6 +72,7 @@ class FamilyInterest(BaseModel):
     permission_for_school_follow_up:Literal[True]
     data_notice_version:Optional[str]=Field(default=None,max_length=100)
     acknowledge_registration_data_use:bool=False
+    acknowledge_app_use_instructions:bool=False
 
     @field_validator("guardian_name")
     @classmethod
@@ -118,7 +121,9 @@ def submit_family_contact_request(payload:FamilyInterest):
              "verified_guardian":False,"student_information_disclosed":False,
              "student_account_created":False,"family_access_granted":False}
     if (bool(payload.data_notice_version) != bool(payload.acknowledge_registration_data_use)
-        or (payload.data_notice_version and payload.data_notice_version != DATA_NOTICE_VERSION)):
+        or (payload.data_notice_version and payload.data_notice_version != DATA_NOTICE_VERSION)
+        or (payload.data_notice_version and not payload.acknowledge_app_use_instructions)
+        or (payload.acknowledge_app_use_instructions and not payload.data_notice_version)):
         raise HTTPException(409,detail={"error":"school_data_notice_version_changed_reload_registration"})
     _schema()
     contact=_contact(payload.contact_method,payload.contact_value)
@@ -153,13 +158,16 @@ def submit_family_contact_request(payload:FamilyInterest):
         cur.execute("""INSERT INTO verifyd_safety_school_family_interests
           (request_id,school_id,guardian_name,relationship,child_names,
            contact_method,contact_value,contact_fingerprint,
-           data_notice_version,data_notice_acknowledged_at)
+           data_notice_version,data_notice_acknowledged_at,
+           app_use_notice_acknowledged_at)
           VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,
+                 CASE WHEN %s THEN NOW() ELSE NULL END,
                  CASE WHEN %s THEN NOW() ELSE NULL END)""",
           ("ssfinterest_"+uuid.uuid4().hex,school_id,payload.guardian_name,
            payload.relationship,payload.children,payload.contact_method,
            contact,fingerprint,payload.data_notice_version or "",
-           bool(payload.acknowledge_registration_data_use)))
+           bool(payload.acknowledge_registration_data_use),
+           bool(payload.acknowledge_app_use_instructions)))
     return generic
 
 
@@ -172,7 +180,8 @@ def list_school_family_interests(school_id:str,
         _school_admin(cur,school_id,str(actor["id"]))
         cur.execute("""SELECT request_id,guardian_name,relationship,child_names,
             contact_method,contact_value,status,created_at,reviewed_at,review_note,
-            data_notice_version,data_notice_acknowledged_at
+            data_notice_version,data_notice_acknowledged_at,
+            app_use_notice_acknowledged_at
             FROM verifyd_safety_school_family_interests WHERE school_id=%s
             ORDER BY created_at DESC LIMIT 150""",(school_id,))
         rows=[dict(r) for r in cur.fetchall()]
