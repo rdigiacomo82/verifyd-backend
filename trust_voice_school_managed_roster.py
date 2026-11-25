@@ -181,7 +181,7 @@ class ManagedRosterCommit(BaseModel):
 
 class SchoolAuthorizationItem(BaseModel):
     local_ref: str = Field(min_length=3, max_length=64)
-    method: Literal["signed_paper", "school_authority"]
+    method: Literal["signed_paper", "school_authority", "electronic"]
     evidence_ref: str = Field(min_length=8, max_length=180)
     guardian_name: Optional[str] = Field(default=None, max_length=100)
     signed_date: Optional[date] = None
@@ -231,6 +231,9 @@ def _check_evidence(item):
             raise HTTPException(422, detail={"error": "paper_requires_guardian_name_and_signed_date"})
         if item.signed_date > date.today():
             raise HTTPException(422, detail={"error": "paper_signature_date_in_future"})
+    elif item.method == "electronic":
+        if not evidence.startswith("EACK-") or item.guardian_name or item.signed_date or item.authority_reference:
+            raise HTTPException(422, detail={"error":"electronic_acknowledgment_must_use_system_evidence"})
     elif not item.authority_reference or len(item.authority_reference.strip()) < 8:
         raise HTTPException(422, detail={"error": "school_authority_reference_required"})
 
@@ -535,7 +538,10 @@ def approve_managed_school_enrollment(
         raise HTTPException(422, detail={"error": "paper_evidence_reference_must_identify_each_student"})
     _schema()
     from trust_voice_school_safety_training import _schema as _school_schema
+    from trust_voice_school_electronic_ack import _schema as _electronic_schema
+    from trust_voice_school_safety_consents import POLICY_VERSION
     _school_schema()
+    _electronic_schema()
     with get_db() as conn:
         cur = conn.cursor()
         _school_admin(cur, school_id, str(actor["id"]))
@@ -548,6 +554,7 @@ def approve_managed_school_enrollment(
         pending = {row["local_ref"].lower(): dict(row) for row in cur.fetchall()}
         if len(pending) != len(refs):
             raise HTTPException(404, detail={"error": "one_or_more_students_not_staged"})
+        electronic_claims = {}
         for item in payload.approvals:
             row = pending[item.local_ref.strip().lower()]
             if row["student_identity_id"] or row["enrollment_status"] != "staged":
@@ -556,6 +563,28 @@ def approve_managed_school_enrollment(
                         (row["proposed_handle"].lower(),))
             if cur.fetchone():
                 raise HTTPException(409, detail={"error": "handle_taken_repreview_and_correct"})
+            if item.method == "electronic":
+                cur.execute("""SELECT a.*, c.guardian_email AS verified_email,
+                    c.guardian_name AS verified_name
+                    FROM verifyd_safety_electronic_guardian_ack a
+                    JOIN verifyd_safety_family_contact_drafts c
+                      ON c.school_id=a.school_id AND c.local_ref=a.local_ref
+                     AND c.slot=a.slot
+                    WHERE a.school_id=%s AND a.local_ref=%s AND a.slot=1
+                      AND a.evidence_ref=%s AND a.status='pending_school_review'
+                    FOR UPDATE OF a""",
+                    (school_id,row["local_ref"],item.evidence_ref.strip()))
+                ack=cur.fetchone()
+                if (not ack or ack["policy_version"] != POLICY_VERSION
+                    or ack["guardian_email"] != ack["verified_email"]
+                    or ack["guardian_name"] != ack["verified_name"]):
+                    raise HTTPException(409,detail={"error":"verified_electronic_guardian_acknowledgment_required"})
+                cur.execute("""SELECT 1 FROM verifyd_identities
+                    WHERE id=%s AND email_lower=%s""",
+                    (str(actor["id"]),ack["guardian_email"]))
+                if cur.fetchone():
+                    raise HTTPException(403,detail={"error":"administrator_cannot_approve_own_guardian_acknowledgment"})
+                electronic_claims[row["local_ref"]] = dict(ack)
         created = []
         for item in payload.approvals:
             row = pending[item.local_ref.strip().lower()]
@@ -579,6 +608,8 @@ def approve_managed_school_enrollment(
                  (school_id,student_id,str(actor["id"])))
             statement = ("Individual guardian-signed paper record verified by authorized school staff"
                 if item.method == "signed_paper" else
+                "Guardian electronically acknowledged after mailbox OTP; school admin independently verified the relationship"
+                if item.method == "electronic" else
                 "School/district authority documented for school-only education services; not guardian consent")
             cur.execute("""INSERT INTO verifyd_safety_managed_enrollment_evidence
                 (school_id,local_ref,method,evidence_ref,guardian_name,signed_date,
@@ -593,6 +624,38 @@ def approve_managed_school_enrollment(
                 SET student_identity_id=%s,enrollment_status='school_approved',
                     approved_at=NOW() WHERE school_id=%s AND local_ref=%s""",
                 (student_id,school_id,row["local_ref"]))
+            if item.method == "electronic":
+                # Link and sign off ONLY after independent school approval, never
+                # when a guardian simply enters an email or presses Acknowledge.
+                from trust_voice_school_family_invitations import _new_guardian_identity
+                ack=electronic_claims[row["local_ref"]]
+                guardian_id,_=_new_guardian_identity(cur,ack["guardian_email"],ack["guardian_name"])
+                cur.execute("""SELECT role FROM verifyd_safety_training_members
+                    WHERE school_id=%s AND identity_id=%s""",(school_id,guardian_id))
+                existing_member=cur.fetchone()
+                if existing_member and existing_member["role"]!="guardian":
+                    raise HTTPException(403,detail={"error":"school_staff_cannot_claim_guardian_role"})
+                cur.execute("""INSERT INTO verifyd_safety_training_members
+                    (school_id,identity_id,role,verified_by)
+                    VALUES(%s,%s,'guardian',%s) ON CONFLICT DO NOTHING""",
+                    (school_id,guardian_id,str(actor["id"])))
+                cur.execute("""INSERT INTO verifyd_safety_training_guardians
+                    (school_id,child_id,guardian_id,verified_by)
+                    VALUES(%s,%s,%s,%s) ON CONFLICT DO NOTHING""",
+                    (school_id,student_id,guardian_id,str(actor["id"])))
+                cur.execute("""INSERT INTO verifyd_safety_training_signoffs
+                    (signoff_id,school_id,actor_id,kind,subject_id,policy_version,accepted_at)
+                    VALUES(%s,%s,%s,'guardian',%s,%s,%s)
+                    ON CONFLICT(school_id,actor_id,kind,subject_id)
+                    DO UPDATE SET policy_version=EXCLUDED.policy_version,
+                        accepted_at=EXCLUDED.accepted_at,revoked_at=NULL""",
+                    ("sssig_"+uuid.uuid4().hex,school_id,guardian_id,student_id,
+                     POLICY_VERSION,ack["acknowledged_at"]))
+                cur.execute("""UPDATE verifyd_safety_electronic_guardian_ack
+                    SET status='approved',approved_at=NOW(),approved_by=%s,
+                        guardian_identity_id=%s WHERE school_id=%s AND local_ref=%s AND slot=1""",
+                    (str(actor["id"]),guardian_id,school_id,row["local_ref"]))
+                _audit(cur,school_id,str(actor["id"]),"electronic_guardian_school_approved",row["local_ref"])
             _audit(cur,school_id,str(actor["id"]),"managed_student_enrollment_approved",
                    row["local_ref"]+":"+item.method)
             created.append({"local_ref":row["local_ref"],
