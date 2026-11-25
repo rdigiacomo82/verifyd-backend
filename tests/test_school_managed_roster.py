@@ -56,6 +56,35 @@ class SchoolManagedRosterContracts(unittest.TestCase):
         self.assertEqual(roster._new_handle(cursor,"WMHS","name","John","Smith",used),
                          "WMHS_JohnSmith2")
 
+    def test_batch_review_date_is_administrator_date_not_paper_signature(self):
+        payload=roster.SchoolAuthorizationBatch(
+            approvals=[roster.SchoolAuthorizationItem(
+                local_ref="DEMO9871",method="school_authority",
+                evidence_ref="ENROLL-DEMO9871",authority_reference="REAL-BOARD-POLICY",
+                individually_verified=True)],
+            principal_confirms_evidence_on_file=True,school_use_only=True,
+            review_date="2026-11-24")
+        self.assertEqual(payload.review_date.isoformat(),"2026-11-24")
+        self.assertIsNone(payload.approvals[0].signed_date)
+        approval_source=inspect.getsource(roster.approve_managed_school_enrollment)
+        self.assertIn("payload.review_date",approval_source)
+        self.assertIn("approval_review_date_cannot_be_in_future",approval_source)
+        self.assertIn("item.signed_date",approval_source)
+
+    def test_auto_tracking_reference_is_unique_per_school_and_editable(self):
+        schema_src=inspect.getsource(roster._schema)
+        self.assertIn("tracking_reference",schema_src)
+        self.assertIn("school_tracking_unique",schema_src)
+        source=inspect.getsource(roster.commit_managed_roster)
+        self.assertIn('"ENROLL-"+row["local_ref"].upper()',source)
+        setter=inspect.getsource(roster.update_managed_student_tracking_reference)
+        self.assertIn("_school_admin",setter)
+        self.assertIn("tracking_reference_already_in_use",setter)
+        self.assertIn("school_tracking_reference_updated",setter)
+        self.assertIn("guardian_consent_verified",setter)
+        with self.assertRaises(ValidationError):
+            roster.SchoolTrackingReferenceUpdate(tracking_reference="short")
+
     def test_legacy_spreadsheet_date_formats_normalize_safely(self):
         item = roster.SchoolAuthorizationItem(
             local_ref="DEMO001", method="signed_paper",
