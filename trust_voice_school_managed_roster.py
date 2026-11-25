@@ -77,7 +77,7 @@ def _schema():
             # record. It does NOT itself constitute guardian consent or
             # legal authorization evidence.
             cur.execute("""UPDATE verifyd_safety_managed_students
-                SET tracking_reference='ENR-' || upper(local_ref)
+                SET tracking_reference='ENROLL-' || upper(local_ref)
                 WHERE tracking_reference IS NULL""")
             cur.execute("""CREATE UNIQUE INDEX IF NOT EXISTS safety_managed_school_tracking_unique
                 ON verifyd_safety_managed_students(school_id, lower(tracking_reference))""")
@@ -400,7 +400,7 @@ def commit_managed_roster(school_id: str, payload: ManagedRosterCommit,
                 VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
                 (school_id,row["local_ref"],row["first_name"],row["last_name"],
                  row["proposed_handle"],row["proposed_handle"].lower(),str(actor["id"]),
-                 "ENR-"+row["local_ref"].upper()))
+                 "ENROLL-"+row["local_ref"].upper()))
             added += 1
         cur.execute("UPDATE verifyd_safety_managed_roster_previews SET consumed_at=NOW() WHERE preview_id=%s", (payload.preview_id,))
         _audit(cur,school_id,str(actor["id"]),"managed_roster_pending_handles_staged",str(added))
