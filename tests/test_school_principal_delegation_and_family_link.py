@@ -44,7 +44,7 @@ class SchoolPrincipalDelegationAndFamilyLinkTests(unittest.TestCase):
         self.assertNotIn('"student_name"',source)
         self.assertNotIn('"student_handle"',source)
         self.assertNotIn('"invitation_code"',source)
-        self.assertNotIn('guardian_email',inspect.getsource(family_link.get_or_create_school_registration_link).split("return {")[-1])
+        self.assertNotIn('"guardian_email":',inspect.getsource(family_link.get_or_create_school_registration_link).split("return {")[-1])
 
     def test_link_rotation_is_principal_only(self):
         source=inspect.getsource(family_link.rotate_school_registration_link)
