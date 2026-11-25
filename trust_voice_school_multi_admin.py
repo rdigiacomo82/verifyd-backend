@@ -114,6 +114,100 @@ def nominate_administrator(school_id:str,payload:Nominate,authorization:Optional
     return {"ok":True,"nomination_id":nom_id,"status":"pending_owner_review",
             "administrator_access_granted":False,"emergency_delivery_active":False}
 
+
+class PrincipalDelegate(BaseModel):
+    candidate_handle: str=Field(min_length=3,max_length=40)
+    principal_verified_staff_role: Literal[True]
+    reason: str=Field(min_length=12,max_length=500)
+
+class PrincipalRevoke(BaseModel):
+    reason: str=Field(min_length=12,max_length=500)
+    principal_confirms_revocation: Literal[True]
+
+
+@router.post("/schools/{school_id}/administrators/authorize")
+def principal_authorize_school_administrator(
+    school_id:str,payload:PrincipalDelegate,authorization:Optional[str]=Header(default=None)):
+    """Principal at OWNER-CERTIFIED school delegates to verified staff.
+
+    No second VeriFYD owner review; staff must independently sign in and accept
+    before the existing _school_admin authorization gate will recognize them.
+    """
+    actor=_actor(authorization);_schema()
+    principal_id=str(actor["id"])
+    candidate_id=_id_for_handle(payload.candidate_handle)
+    if candidate_id==principal_id:
+        raise HTTPException(403,detail={"error":"principal_cannot_delegate_self"})
+    with get_db() as conn:
+        cur=conn.cursor()
+        if _school_admin(cur,school_id,principal_id)!="principal":
+            raise HTTPException(403,detail={"error":"only_school_principal_may_delegate"})
+        cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))",
+                    ("principal_school_admin:"+school_id,))
+        cur.execute("""SELECT status,email_verified FROM verifyd_identities
+             WHERE id=%s FOR UPDATE""",(candidate_id,))
+        person=cur.fetchone()
+        if not person or person["status"]!="active" or not person["email_verified"]:
+            raise HTTPException(403,detail={"error":"candidate_needs_active_verified_identity"})
+        cur.execute("""SELECT role FROM verifyd_safety_training_members
+            WHERE school_id=%s AND identity_id=%s FOR UPDATE""",(school_id,candidate_id))
+        member=cur.fetchone()
+        if member and member["role"]!="responder":
+            raise HTTPException(409,detail={"error":"existing_student_or_guardian_role_cannot_be_promoted"})
+        cur.execute("""SELECT 1 FROM verifyd_safety_school_admin_delegations
+             WHERE school_id=%s AND identity_id=%s AND revoked_at IS NULL""",
+            (school_id,candidate_id))
+        if cur.fetchone():
+            raise HTTPException(409,detail={"error":"staff_already_delegated"})
+        cur.execute("""SELECT count(*) AS n FROM verifyd_safety_school_admin_delegations
+            WHERE school_id=%s AND revoked_at IS NULL""",(school_id,))
+        if int(cur.fetchone()["n"])>=10:
+            raise HTTPException(409,detail={"error":"school_admin_limit_reached"})
+        if not member:
+            cur.execute("""INSERT INTO verifyd_safety_training_members
+                (school_id,identity_id,role,verified_by)
+                VALUES(%s,%s,'responder',%s)""",(school_id,candidate_id,principal_id))
+        cur.execute("""INSERT INTO verifyd_safety_school_admin_delegations
+            (school_id,identity_id,approved_by,approved_at,accepted_at,revoked_at)
+            VALUES(%s,%s,%s,NOW(),NULL,NULL)
+            ON CONFLICT(school_id,identity_id) DO UPDATE
+               SET approved_by=EXCLUDED.approved_by,approved_at=NOW(),
+                   accepted_at=NULL,revoked_at=NULL""",
+            (school_id,candidate_id,principal_id))
+        cur.execute("""UPDATE verifyd_safety_school_admin_nominations
+            SET status='cancelled',reviewed_at=NOW(),reviewed_by=%s
+            WHERE school_id=%s AND candidate_id=%s AND status='pending'""",
+            (principal_id,school_id,candidate_id))
+        _audit(cur,school_id,principal_id,"principal_authorized_school_administrator",candidate_id)
+    return {"ok":True,"status":"awaiting_staff_acceptance",
+            "owner_second_review_required":False,
+            "administrator_access_granted":False,
+            "emergency_delivery_active":False}
+
+
+@router.post("/schools/{school_id}/administrators/{identity_id}/principal-revoke")
+def principal_revoke_school_administrator(
+    school_id:str,identity_id:str,payload:PrincipalRevoke,
+    authorization:Optional[str]=Header(default=None)):
+    actor=_actor(authorization);_schema()
+    principal_id=str(actor["id"])
+    if identity_id==principal_id:
+        raise HTTPException(403,detail={"error":"cannot_revoke_self"})
+    with get_db() as conn:
+        cur=conn.cursor()
+        if _school_admin(cur,school_id,principal_id)!="principal":
+            raise HTTPException(403,detail={"error":"only_school_principal_may_revoke"})
+        cur.execute("""UPDATE verifyd_safety_school_admin_delegations
+          SET revoked_at=NOW(),accepted_at=NULL
+          WHERE school_id=%s AND identity_id=%s AND revoked_at IS NULL
+          RETURNING identity_id""",(school_id,identity_id))
+        if not cur.fetchone():
+            raise HTTPException(404,detail={"error":"active_delegation_not_found"})
+        _audit(cur,school_id,principal_id,"principal_revoked_school_administrator",identity_id)
+    return {"ok":True,"revoked":True,"global_account_deleted":False,
+            "school_role_preserved":True,"emergency_delivery_active":False}
+
+
 @router.get("/owner/administrator-nominations")
 def operator_admin_nominations(authorization:Optional[str]=Header(default=None)):
     owner=_actor(authorization);_owner(owner);_schema()
