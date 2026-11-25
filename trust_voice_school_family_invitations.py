@@ -567,6 +567,8 @@ def approve_family_invitation_batch(school_id: str, payload: FinalBatchApproval,
                      reviewed_by=%s,review_note=%s
                  WHERE invite_id=%s""",
                 (str(actor["id"]),payload.review_note.strip(),invite_id))
+            from trust_voice_school_auto_routing import sync_approved_guardian_route
+            sync_approved_guardian_route(cur,school_id,sid,str(actor["id"]))
             _audit(cur,school_id,str(actor["id"]),"guardian_invitation_final_approved",invite_id)
         _audit(cur,school_id,str(actor["id"]),
                "family_group_final_authorization",str(len(ids)))

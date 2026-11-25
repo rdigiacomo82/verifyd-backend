@@ -219,6 +219,8 @@ def review_family_request(school_id: str,request_id: str,payload: FamilyReview,
                 (school_id,child_id,guardian_id,verified_by) VALUES(%s,%s,%s,%s)
                 ON CONFLICT DO NOTHING""",
                 (school_id,str(r["student_id"]),str(r["guardian_id"]),actor_id))
+            from trust_voice_school_auto_routing import sync_approved_guardian_route
+            sync_approved_guardian_route(cur,school_id,str(r["student_id"]),actor_id)
             _audit(cur,school_id,actor_id,"family_link_approved",request_id)
         else:
             _audit(cur,school_id,actor_id,"family_link_rejected",request_id)
@@ -237,6 +239,8 @@ def family_portal(authorization: Optional[str] = Header(default=None)):
     _family_schema()
     from trust_voice_school_electronic_ack import _schema as _electronic_schema
     _electronic_schema()
+    from trust_voice_school_directory import _schema as _directory_schema, _details as _directory_details
+    _directory_schema()
     guardian_id = str(actor["id"])
     with get_db() as conn:
         cur = conn.cursor()
@@ -295,6 +299,21 @@ def family_portal(authorization: Optional[str] = Header(default=None)):
                 "approved_at":row["approved_at"],
             } for row in cur.fetchall()]
         school_ids=sorted({c["school_id"] for c in children})
+        school_directories=[_directory_details(cur,school_id) for school_id in school_ids]
+        for child in children:
+            cur.execute("""SELECT r.route_source,p.handle AS primary_handle,
+                      b.handle AS backup_handle FROM verifyd_safety_training_contacts r
+                  LEFT JOIN verifyd_identities p ON p.id=r.primary_id
+                  LEFT JOIN verifyd_identities b ON b.id=r.backup_id
+                  WHERE r.school_id=%s AND r.student_id=%s""",
+                  (child["school_id"],child["child_id"]))
+            route=cur.fetchone()
+            child["safety_route"]=({
+                "source":route["route_source"],
+                "primary_handle":route["primary_handle"],
+                "backup_handle":route["backup_handle"],
+                "primary_assigned":bool(route["primary_handle"]),
+            } if route else {"primary_assigned":False,"source":"awaiting_guardian_approval"})
         updates=[]
         if school_ids:
             cur.execute("""SELECT u.update_id,u.school_id,u.title,u.body,u.created_at,
@@ -307,6 +326,7 @@ def family_portal(authorization: Optional[str] = Header(default=None)):
     return {"ok":True,"children":children,"updates":updates,
             "guardian_account":guardian_account,
             "registration_progress":registration_progress,
+            "school_directories":school_directories,
             "registration_and_installed_app_share_school_identity":True,
             "student_device_requires_separate_supervised_school_session":True,
             "training_only":True,"live_emergency_delivery":False}
@@ -345,3 +365,8 @@ def publish_school_update(school_id: str,payload: SchoolUpdate,
         _audit(cur,school_id,str(actor["id"]),"school_general_update_published",update_id)
     return {"ok":True,"update_id":update_id,"in_app_only":True,
             "emergency_alerts_active":False}
+
+
+# Verified school contact directory: authenticated family and school staff only.
+from trust_voice_school_directory import router as _school_directory_router
+router.include_router(_school_directory_router)

@@ -267,6 +267,8 @@ def activate_device(payload: ActivateCode):
 @router.get("/student-devices/me")
 def student_device_me(x_safety_device_session: Optional[str] = Header(default=None, alias="X-VeriFYD-Safety-Session")):
     ctx = _session(x_safety_device_session)
+    from trust_voice_school_directory import _schema as _directory_schema, _details as _directory_details
+    _directory_schema()
     with get_db() as conn:
         cur = conn.cursor()
         signed = _student_accepted(cur, ctx["school_id"], ctx["student_id"])
@@ -287,11 +289,24 @@ def student_device_me(x_safety_device_session: Optional[str] = Header(default=No
         cur.execute("SELECT school_name FROM verifyd_safety_training_schools WHERE school_id=%s", (ctx["school_id"],))
         school = cur.fetchone()
         conduct=_student_conduct_status(cur,ctx["school_id"],ctx["student_id"])
+        directory=_directory_details(cur,ctx["school_id"])
+        cur.execute("""SELECT p.handle AS primary_handle,b.handle AS backup_handle
+             FROM verifyd_safety_training_contacts c
+             LEFT JOIN verifyd_identities p ON p.id=c.primary_id
+             LEFT JOIN verifyd_identities b ON b.id=c.backup_id
+             WHERE c.school_id=%s AND c.student_id=%s""",
+             (ctx["school_id"],ctx["student_id"]))
+        guardian_contacts=cur.fetchone()
+        family_handles={"primary":guardian_contacts["primary_handle"],
+                        "backup":guardian_contacts["backup_handle"]} if guardian_contacts else {
+                            "primary":None,"backup":None}
     return {"ok": True, "test_only": True, "school_id": ctx["school_id"],
             "school_name": school["school_name"] if school else "TEST School",
             "student_handle": ctx["student_handle"], "expires_at": ctx["expires_at"],
             "policy_version": POLICY_VERSION, "student_acknowledged": bool(signed),
             "student_conduct":conduct,
+            "school_directory":directory,
+            "guardian_handles":family_handles,
             "recipients_ready": bool(recipients_ready),
             "can_submit_test_report": bool(signed and recipients_ready
                        and conduct["acknowledged"] and not conduct["restricted"]),

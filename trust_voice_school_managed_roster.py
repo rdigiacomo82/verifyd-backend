@@ -666,6 +666,8 @@ def approve_managed_school_enrollment(
                     SET status='approved',approved_at=NOW(),approved_by=%s,
                         guardian_identity_id=%s WHERE school_id=%s AND local_ref=%s AND slot=1""",
                     (str(actor["id"]),guardian_id,school_id,row["local_ref"]))
+                from trust_voice_school_auto_routing import sync_approved_guardian_route
+                sync_approved_guardian_route(cur,school_id,student_id,str(actor["id"]))
                 _audit(cur,school_id,str(actor["id"]),"electronic_guardian_school_approved",row["local_ref"])
             _audit(cur,school_id,str(actor["id"]),"managed_student_enrollment_approved",
                    row["local_ref"]+":"+item.method)
