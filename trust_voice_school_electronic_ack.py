@@ -363,6 +363,63 @@ def electronic_school_queue(school_id:str,authorization:Optional[str]=Header(def
     return {"ok":True,"records":rows,"guardian_relationship_school_approved":False}
 
 
+@router.get("/schools/{school_id}/family-invitations/schoolwide-history")
+def schoolwide_invitation_history(school_id:str,authorization:Optional[str]=Header(default=None)):
+    """School-admin-only history; provider acceptance is not inbox delivery."""
+    _require_electronic_enabled(school_id)
+    actor=_actor(authorization)
+    _schema()
+    with get_db() as conn:
+        cur=conn.cursor()
+        _school_admin(cur,school_id,str(actor["id"]))
+        cur.execute("""SELECT recipient_hash,MAX(created_at) AS accepted_at
+            FROM verifyd_safety_family_mail_ledger
+            WHERE school_id=%s AND purpose='schoolwide_invite'
+              AND accepted_by_provider IS TRUE
+            GROUP BY recipient_hash""",(school_id,))
+        accepted_by_hash={str(x["recipient_hash"]):x["accepted_at"] for x in cur.fetchall()}
+        cur.execute("""SELECT id,recipient_hash,created_at,accepted_by_provider,
+               campaign_id,student_refs
+            FROM verifyd_safety_family_mail_ledger
+            WHERE school_id=%s AND purpose='schoolwide_invite'
+            ORDER BY created_at DESC LIMIT 100""",(school_id,))
+        recent=[dict(x) for x in cur.fetchall()]
+        cur.execute("""SELECT s.local_ref,s.first_name,s.last_name,c.guardian_email
+            FROM verifyd_safety_managed_students s
+            JOIN verifyd_safety_family_contact_drafts c
+              ON c.school_id=s.school_id AND c.local_ref=s.local_ref
+            WHERE s.school_id=%s AND s.enrollment_status='staged'""",(school_id,))
+        matches=[dict(x) for x in cur.fetchall()]
+    grouped={}
+    for item in matches:
+        ref=str(item["local_ref"])
+        email=str(item["guardian_email"]).strip().lower()
+        if not is_valid_email(email):
+            continue
+        if ref not in grouped:
+            grouped[ref]={"local_ref":ref,"first_name":item["first_name"],
+                          "last_name":item["last_name"],"recipients":{}}
+        key=_hash(school_id+":schoolwide_invite:"+email)
+        grouped[ref]["recipients"][email]=accepted_by_hash.get(key)
+    students=[]
+    for item in grouped.values():
+        recipient_states=item.pop("recipients")
+        accepted=[email for email,at in recipient_states.items() if at is not None]
+        students.append({**item,"total_guardian_emails":len(recipient_states),
+            "accepted_guardian_emails":len(accepted),
+            "pending_guardian_emails":len(recipient_states)-len(accepted),
+            "accepted_recipient_emails":accepted,
+            "last_accepted_at":max((at for at in recipient_states.values() if at is not None),default=None)})
+    deliveries=[{"delivery_id":r["id"],"campaign_id":r["campaign_id"],
+          "student_refs":r["student_refs"] or [],"attempted_at":r["created_at"],
+          "status":("accepted_by_sender" if r["accepted_by_provider"] is True
+                    else "sender_rejected" if r["accepted_by_provider"] is False
+                    else "awaiting_sender_response")}
+          for r in recent]
+    return {"ok":True,"students":students,"recent_delivery_attempts":deliveries,
+            "provider_acceptance_is_not_inbox_delivery":True,"school_only":True}
+
+
 @router.post("/schools/{school_id}/family-invitations/send-schoolwide")
 def send_schoolwide_campaign(school_id:str,payload:Campaign,
     authorization:Optional[str]=Header(default=None)):
@@ -404,8 +461,13 @@ def send_schoolwide_campaign(school_id:str,payload:Campaign,
             WHERE school_id=%s""",(school_id,))
         school_name=str(cur.fetchone()["school_name"])
         planned=[]
+        campaign_id="sfmailbatch_"+uuid.uuid4().hex
         for email in emails:
-            mail_id=_reserve_mail(cur,school_id,email,"schoolwide_invite")
+            refs_for_email=sorted({str(r["local_ref"]) for r in records
+                                   if str(r["guardian_email"]).strip().lower()==email})
+            mail_id=_reserve_mail(cur,school_id,email,"schoolwide_invite",
+                  campaign_id=campaign_id,student_refs=refs_for_email,
+                  sent_by=str(actor["id"]))
             if mail_id:
                 planned.append((email,mail_id))
     url="https://vfvid.com/Safety#school-family="+code
@@ -427,7 +489,7 @@ def send_schoolwide_campaign(school_id:str,payload:Campaign,
         accepted+=int(success)
         failed+=int(not success)
     return {"ok":True,"unique_verified_recipients":len(emails),
-            "provider_accepted":accepted,"provider_failed":failed,
+            "campaign_id":campaign_id,"provider_accepted":accepted,"provider_failed":failed,
             "skipped_due_to_quota_or_recent_send":len(emails)-len(planned),
             "mail_service":"Resend","daily_school_limit":_limit("VERIFYD_SAFETY_FAMILY_MAIL_SCHOOL_DAILY",_DEFAULT_DAILY,10000),
             "guardian_access_granted":False,"schoolwide_link":url}
