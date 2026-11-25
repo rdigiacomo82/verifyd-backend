@@ -536,6 +536,9 @@ def approve_managed_school_enrollment(
         raise HTTPException(422, detail={"error": "duplicate_student_in_approval_batch"})
     for item in payload.approvals:
         _check_evidence(item)
+    if any(item.method == "electronic" for item in payload.approvals):
+        from trust_voice_school_electronic_ack import _require_electronic_enabled
+        _require_electronic_enabled(school_id)
     # Each claimed paper consent must have its own auditable reference; a
     # district policy can be shared, but a single paper signature cannot.
     paper_refs = [item.evidence_ref.strip().lower() for item in payload.approvals
