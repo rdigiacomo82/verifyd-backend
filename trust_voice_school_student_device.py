@@ -456,6 +456,23 @@ def device_conversation_reply(report_id: str, payload: Reply,
             "notification": notification, "emergency_dispatch": False}
 
 
+@router.get("/student-devices/reports/{report_id}/school-response")
+def device_school_response(report_id: str,
+        x_safety_device_session: Optional[str] = Header(default=None, alias="X-VeriFYD-Safety-Session")):
+    ctx = _session(x_safety_device_session)
+    from trust_voice_school_staff_responses import _read_school_response
+    return _read_school_response(report_id, ctx["student_id"], school_id=ctx["school_id"])
+
+
+@router.post("/student-devices/reports/{report_id}/school-response")
+def device_school_response_reply(report_id: str, payload: Reply,
+        x_safety_device_session: Optional[str] = Header(default=None, alias="X-VeriFYD-Safety-Session")):
+    ctx = _session(x_safety_device_session)
+    from trust_voice_school_staff_responses import _send_school_response
+    return _send_school_response(report_id, ctx["student_id"], payload,
+                                 school_id=ctx["school_id"])
+
+
 @router.post("/student-devices/logout")
 def logout_device(x_safety_device_session: Optional[str] = Header(default=None, alias="X-VeriFYD-Safety-Session")):
     ctx = _session(x_safety_device_session)
