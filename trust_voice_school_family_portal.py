@@ -235,6 +235,8 @@ def review_family_request(school_id: str,request_id: str,payload: FamilyReview,
 def family_portal(authorization: Optional[str] = Header(default=None)):
     actor = _actor(authorization)
     _family_schema()
+    from trust_voice_school_electronic_ack import _schema as _electronic_schema
+    _electronic_schema()
     guardian_id = str(actor["id"])
     with get_db() as conn:
         cur = conn.cursor()
@@ -253,6 +255,45 @@ def family_portal(authorization: Optional[str] = Header(default=None)):
             WHERE g.guardian_id=%s ORDER BY s.school_name,child.handle""",
             (POLICY_VERSION,guardian_id))
         children=[dict(r) for r in cur.fetchall()]
+        # A guardian's existing VeriFYD @handle must not be overwritten. Newly
+        # approved guardians get a generated handle through identity onboarding.
+        cur.execute("""SELECT handle,display_name,email_verified
+            FROM verifyd_identities WHERE id=%s""",(guardian_id,))
+        identity=cur.fetchone()
+        guardian_account=({
+            "handle":str(identity["handle"]),
+            "display_name":str(identity["display_name"] or ""),
+            "email_verified":bool(identity["email_verified"]),
+        } if identity else None)
+        registration_progress=[]
+        if identity and identity["email_verified"]:
+            # The signed-in verified mailbox may see its OWN submitted
+            # e-acknowledgment and the Principal's approval status. This
+            # cannot reveal unrelated students or activate guardian access.
+            cur.execute("""SELECT a.local_ref,a.school_id,s.school_name,
+                a.status,a.acknowledged_at,a.approved_at,a.guardian_identity_id,
+                st.first_name,st.last_name,st.enrollment_status
+                FROM verifyd_safety_electronic_guardian_ack a
+                JOIN verifyd_safety_training_schools s
+                  ON s.school_id=a.school_id
+                JOIN verifyd_safety_managed_students st
+                  ON st.school_id=a.school_id AND st.local_ref=a.local_ref
+                WHERE a.guardian_email=(
+                    SELECT email_lower FROM verifyd_identities WHERE id=%s)
+                  AND a.verified_at IS NOT NULL
+                ORDER BY a.acknowledged_at DESC LIMIT 50""",(guardian_id,))
+            registration_progress=[{
+                "school_id":row["school_id"],
+                "school_name":row["school_name"],
+                "local_ref":row["local_ref"],
+                "child_name":row["first_name"]+" "+row["last_name"],
+                "status":("approved" if row["status"]=="approved" and
+                          str(row["guardian_identity_id"])==guardian_id and
+                          row["enrollment_status"]=="school_approved"
+                          else "awaiting_school_approval"),
+                "acknowledged_at":row["acknowledged_at"],
+                "approved_at":row["approved_at"],
+            } for row in cur.fetchall()]
         school_ids=sorted({c["school_id"] for c in children})
         updates=[]
         if school_ids:
@@ -264,6 +305,10 @@ def family_portal(authorization: Optional[str] = Header(default=None)):
                 ORDER BY u.created_at DESC LIMIT 40""",(school_ids,))
             updates=[dict(r) for r in cur.fetchall()]
     return {"ok":True,"children":children,"updates":updates,
+            "guardian_account":guardian_account,
+            "registration_progress":registration_progress,
+            "registration_and_installed_app_share_school_identity":True,
+            "student_device_requires_separate_supervised_school_session":True,
             "training_only":True,"live_emergency_delivery":False}
 
 

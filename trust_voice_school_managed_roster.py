@@ -639,7 +639,7 @@ def approve_managed_school_enrollment(
                 # when a guardian simply enters an email or presses Acknowledge.
                 from trust_voice_school_family_invitations import _new_guardian_identity
                 ack=electronic_claims[row["local_ref"]]
-                guardian_id,guardian_created=_new_guardian_identity(cur,ack["guardian_email"],ack["guardian_name"])
+                guardian_id,guardian_created=_new_guardian_identity(cur,ack["guardian_email"],ack["guardian_name"],school_id)
                 guardian_accounts_created += int(guardian_created)
                 cur.execute("""SELECT role FROM verifyd_safety_training_members
                     WHERE school_id=%s AND identity_id=%s""",(school_id,guardian_id))
