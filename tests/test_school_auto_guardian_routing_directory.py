@@ -12,7 +12,8 @@ from trust_voice_school_student_device import student_device_me
 
 
 class FakeCursor:
-    def __init__(self,student=True,saved=None,eligible=None,slots=None):
+    def __init__(self,student=True,saved=None,eligible=None,slots=None,principal_disabled=False):
+        self.principal_disabled=principal_disabled
         self.student=student
         self.saved=saved
         self.eligible=eligible if eligible is not None else ["g1"]
@@ -27,6 +28,8 @@ class FakeCursor:
         sql=self.last
         if "SELECT s.local_ref,s.enrollment_status" in sql:
             return {"local_ref":"TEST-STUDENT-1","enrollment_status":"school_approved"} if self.student else None
+        if "AS principal_disabled" in sql:
+            return {"principal_disabled":self.principal_disabled}
         if "SELECT primary_id,backup_id,route_source" in sql:
             return self.saved
         return None
@@ -81,6 +84,12 @@ class RoutePolicyContracts(unittest.TestCase):
         cur=FakeCursor(student=False)
         result=routing.sync_approved_guardian_route(cur,"school","student","principal")
         self.assertFalse(result["updated"])
+        self.assertEqual(cur.writes,[])
+
+    def test_principal_disabled_route_is_not_auto_recreated(self):
+        cur=FakeCursor(saved=None,principal_disabled=True)
+        result=routing.sync_approved_guardian_route(cur,"school","student","principal")
+        self.assertEqual(result["reason"],"principal_intentionally_disabled")
         self.assertEqual(cur.writes,[])
 
     def test_manual_override_is_never_replaced(self):
