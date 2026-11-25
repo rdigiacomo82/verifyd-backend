@@ -279,3 +279,8 @@ def revoke_signoff(school_id: str, payload: RevokeInput, authorization: Optional
         _audit(cur, school_id, actor_id, "training_revoked_"+payload.kind, subject or school_id)
     return {"ok": True, "mode": "TRAINING ONLY", "revoked": True,
             "live_emergency_delivery": False}
+
+
+# School-admin review of TEST student acceptable-use privileges is gated per school.
+from trust_voice_school_student_conduct import router as _student_conduct_router
+router.include_router(_student_conduct_router)
