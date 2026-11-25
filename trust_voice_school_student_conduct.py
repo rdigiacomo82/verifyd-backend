@@ -60,6 +60,7 @@ def _record(cur,school_id:str,student_id:str,version:str):
         return False
     if version != CONDUCT_POLICY_VERSION:
         raise HTTPException(409,detail={"error":"student_conduct_policy_outdated"})
+    _schema()
     _membership(cur,school_id,student_id,{"student"})
     # A suspended student cannot self-reinstate by signing again.
     cur.execute("""SELECT restricted_at FROM verifyd_safety_student_conduct_signoffs
