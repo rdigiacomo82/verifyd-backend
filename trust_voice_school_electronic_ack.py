@@ -25,6 +25,7 @@ from trust_voice_school_safety_registration import _school_admin
 from trust_voice_school_family_link import _schema as _link_schema
 from trust_voice_school_family_invitations import _enabled as _invites_enabled
 from trust_voice_school_safety_consents import POLICY_VERSION
+from trust_voice_school_data_notice import DATA_NOTICE_VERSION, DATA_NOTICE_STATEMENTS, APP_USE_STATEMENTS
 
 router = APIRouter(prefix="/trust-voice/school-safety", tags=["School Electronic Guardian Authorization"])
 _lock = threading.Lock()
@@ -85,6 +86,10 @@ def _schema():
                 FOREIGN KEY(school_id,local_ref) REFERENCES
                     verifyd_safety_managed_students(school_id,local_ref)
             )""")
+            cur.execute("""ALTER TABLE verifyd_safety_electronic_guardian_ack
+                ADD COLUMN IF NOT EXISTS data_notice_version TEXT NOT NULL DEFAULT ''""")
+            cur.execute("""ALTER TABLE verifyd_safety_electronic_guardian_ack
+                ADD COLUMN IF NOT EXISTS app_use_acknowledged_at TIMESTAMPTZ""")
             cur.execute("""CREATE TABLE IF NOT EXISTS verifyd_safety_family_email_sessions (
                 session_hash TEXT PRIMARY KEY,
                 school_id TEXT NOT NULL,
@@ -101,6 +106,12 @@ def _schema():
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 accepted_by_provider BOOLEAN
             )""")
+            cur.execute("""ALTER TABLE verifyd_safety_family_mail_ledger
+                ADD COLUMN IF NOT EXISTS campaign_id TEXT""")
+            cur.execute("""ALTER TABLE verifyd_safety_family_mail_ledger
+                ADD COLUMN IF NOT EXISTS student_refs TEXT[] NOT NULL DEFAULT '{}'""")
+            cur.execute("""ALTER TABLE verifyd_safety_family_mail_ledger
+                ADD COLUMN IF NOT EXISTS sent_by TEXT""")
             cur.execute("""CREATE INDEX IF NOT EXISTS safety_family_mail_limit
                 ON verifyd_safety_family_mail_ledger(school_id,created_at)""")
         _ready = True
@@ -136,7 +147,7 @@ def _matches(cur, school_id: str, email: str):
     return rows
 
 
-def _reserve_mail(cur, school_id: str, email: str, purpose: str):
+def _reserve_mail(cur, school_id: str, email: str, purpose: str, *, campaign_id=None, student_refs=None, sent_by=None):
     cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))",
                 ("school_family_mail_global",))
     cur.execute("""SELECT count(*) AS n FROM verifyd_safety_family_mail_ledger
@@ -148,6 +159,15 @@ def _reserve_mail(cur, school_id: str, email: str, purpose: str):
     if int(cur.fetchone()["n"]) >= _limit("VERIFYD_SAFETY_FAMILY_MAIL_SCHOOL_DAILY",_DEFAULT_DAILY, 10000):
         return None
     fingerprint=_hash(school_id+":"+purpose+":"+email)
+    if purpose == "schoolwide_invite":
+        # Successful sends remain in the Principal's history, not the active
+        # queue. Never resend from a duplicate click or a page refresh.
+        cur.execute("""SELECT 1 FROM verifyd_safety_family_mail_ledger
+            WHERE school_id=%s AND purpose='schoolwide_invite'
+              AND recipient_hash=%s AND accepted_by_provider IS TRUE LIMIT 1""",
+            (school_id,fingerprint))
+        if cur.fetchone():
+            return None
     cur.execute("""SELECT count(*) AS n FROM verifyd_safety_family_mail_ledger
          WHERE school_id=%s AND purpose=%s AND recipient_hash=%s
            AND created_at>NOW()-INTERVAL '24 hours'""",(school_id,purpose,fingerprint))
@@ -155,8 +175,9 @@ def _reserve_mail(cur, school_id: str, email: str, purpose: str):
         return None
     id="sfmail_"+uuid.uuid4().hex
     cur.execute("""INSERT INTO verifyd_safety_family_mail_ledger
-        (id,school_id,recipient_hash,purpose) VALUES(%s,%s,%s,%s)""",
-        (id,school_id,fingerprint,purpose))
+        (id,school_id,recipient_hash,purpose,campaign_id,student_refs,sent_by)
+        VALUES(%s,%s,%s,%s,%s,%s,%s)""",
+        (id,school_id,fingerprint,purpose,campaign_id,student_refs or [],sent_by))
     return id
 
 
@@ -180,6 +201,9 @@ class ElectronicAccept(BaseModel):
     children: list[str] = Field(min_length=1,max_length=_MAX_CHILDREN)
     relationship_confirmed: Literal[True]
     acknowledge_school_safety_policy: Literal[True]
+    acknowledge_school_data_use_notice: Literal[True]
+    acknowledge_app_use_instructions: Literal[True]
+    data_notice_version: str = Field(min_length=8,max_length=100)
     policy_version: str = Field(min_length=5,max_length=100)
 
 
@@ -187,6 +211,16 @@ class Campaign(BaseModel):
     local_refs: list[str] = Field(min_length=1,max_length=250)
     school_confirmed_guardian_recipient_assignments: Literal[True]
     principal_confirms_send: Literal[True]
+
+
+@router.get("/family-invitations/data-use-notice")
+def family_data_use_notice():
+    """Versioned public notice with no guardian or roster information."""
+    return {"ok":True,"data_notice_version":DATA_NOTICE_VERSION,
+            "data_use_statements":DATA_NOTICE_STATEMENTS,
+            "app_use_statements":APP_USE_STATEMENTS,
+            "training_only":True,"district_notice_required_for_real_students":True,
+            "live_emergency_dispatch":False}
 
 
 @router.post("/family-invitations/electronic/request-code")
@@ -241,6 +275,7 @@ def verify_schoolwide_otp(payload:PublicVerify):
             (session_hash,school_id,guardian_email) VALUES(%s,%s,%s)""",
             (_hash(session),school_id,email))
     return {"ok":True,"claim_session":session,"policy_version":POLICY_VERSION,
+        "data_notice_version":DATA_NOTICE_VERSION,
         "children":[{"local_ref":c["local_ref"],"student_name":c["first_name"]+" "+c["last_name"],
                      "guardian_name":c["guardian_name"],"relationship":c["relationship"],
                      "slot":c["slot"],"enrollment_status":c["enrollment_status"]}
@@ -253,6 +288,8 @@ def acknowledge_schoolwide(payload:ElectronicAccept):
     """Record an individual electronic acknowledgment; NOT a family permission."""
     if payload.policy_version!=POLICY_VERSION:
         raise HTTPException(409,detail={"error":"guardian_policy_changed_reload"})
+    if payload.data_notice_version!=DATA_NOTICE_VERSION:
+        raise HTTPException(409,detail={"error":"school_data_notice_version_changed_reload_registration"})
     refs=[str(s).strip().upper() for s in payload.children]
     if len(refs)!=len(set(refs)):
         raise HTTPException(422,detail={"error":"duplicate_child_in_acknowledgment"})
@@ -286,18 +323,20 @@ def acknowledge_schoolwide(payload:ElectronicAccept):
             evidence_ref="EACK-"+uuid.uuid4().hex[:20].upper()
             cur.execute("""INSERT INTO verifyd_safety_electronic_guardian_ack
               (school_id,local_ref,slot,guardian_email,guardian_name,relationship,
-               evidence_ref,policy_version,verified_at)
-              VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)
+               evidence_ref,policy_version,verified_at,data_notice_version,app_use_acknowledged_at)
+              VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
               ON CONFLICT(school_id,local_ref,slot) DO NOTHING
               RETURNING evidence_ref""",
               (school_id,row["local_ref"],row["slot"],email,row["guardian_name"],
-               row["relationship"],evidence_ref,POLICY_VERSION,session["verified_at"]))
+               row["relationship"],evidence_ref,POLICY_VERSION,session["verified_at"],
+               DATA_NOTICE_VERSION))
             created=cur.fetchone()
             result.append({"local_ref":row["local_ref"],"status":"pending_school_review",
                            "evidence_ref":created["evidence_ref"] if created else "previously_recorded"})
         cur.execute("""UPDATE verifyd_safety_family_email_sessions SET consumed_at=NOW()
             WHERE session_hash=%s""",(_hash(payload.claim_session),))
     return {"ok":True,"acknowledgments":result,"policy_version":POLICY_VERSION,
+            "data_notice_version":DATA_NOTICE_VERSION,
             "family_access_granted":False,"student_identity_activated":False,
             "requires_independent_school_review":True}
 
@@ -311,7 +350,8 @@ def electronic_school_queue(school_id:str,authorization:Optional[str]=Header(def
         cur=conn.cursor()
         _school_admin(cur,school_id,str(actor["id"]))
         cur.execute("""SELECT a.local_ref,a.slot,a.guardian_name,a.guardian_email,
-             a.relationship,a.policy_version,a.evidence_ref,a.verified_at,
+             a.relationship,a.policy_version,a.data_notice_version,
+             a.app_use_acknowledged_at,a.evidence_ref,a.verified_at,
              a.acknowledged_at,a.status,a.approved_at,
              s.first_name,s.last_name,s.enrollment_status
              FROM verifyd_safety_electronic_guardian_ack a
@@ -321,6 +361,63 @@ def electronic_school_queue(school_id:str,authorization:Optional[str]=Header(def
              (school_id,))
         rows=[dict(r) for r in cur.fetchall()]
     return {"ok":True,"records":rows,"guardian_relationship_school_approved":False}
+
+
+@router.get("/schools/{school_id}/family-invitations/schoolwide-history")
+def schoolwide_invitation_history(school_id:str,authorization:Optional[str]=Header(default=None)):
+    """School-admin-only history; provider acceptance is not inbox delivery."""
+    _require_electronic_enabled(school_id)
+    actor=_actor(authorization)
+    _schema()
+    with get_db() as conn:
+        cur=conn.cursor()
+        _school_admin(cur,school_id,str(actor["id"]))
+        cur.execute("""SELECT recipient_hash,MAX(created_at) AS accepted_at
+            FROM verifyd_safety_family_mail_ledger
+            WHERE school_id=%s AND purpose='schoolwide_invite'
+              AND accepted_by_provider IS TRUE
+            GROUP BY recipient_hash""",(school_id,))
+        accepted_by_hash={str(x["recipient_hash"]):x["accepted_at"] for x in cur.fetchall()}
+        cur.execute("""SELECT id,recipient_hash,created_at,accepted_by_provider,
+               campaign_id,student_refs
+            FROM verifyd_safety_family_mail_ledger
+            WHERE school_id=%s AND purpose='schoolwide_invite'
+            ORDER BY created_at DESC LIMIT 100""",(school_id,))
+        recent=[dict(x) for x in cur.fetchall()]
+        cur.execute("""SELECT s.local_ref,s.first_name,s.last_name,c.guardian_email
+            FROM verifyd_safety_managed_students s
+            JOIN verifyd_safety_family_contact_drafts c
+              ON c.school_id=s.school_id AND c.local_ref=s.local_ref
+            WHERE s.school_id=%s AND s.enrollment_status='staged'""",(school_id,))
+        matches=[dict(x) for x in cur.fetchall()]
+    grouped={}
+    for item in matches:
+        ref=str(item["local_ref"])
+        email=str(item["guardian_email"]).strip().lower()
+        if not is_valid_email(email):
+            continue
+        if ref not in grouped:
+            grouped[ref]={"local_ref":ref,"first_name":item["first_name"],
+                          "last_name":item["last_name"],"recipients":{}}
+        key=_hash(school_id+":schoolwide_invite:"+email)
+        grouped[ref]["recipients"][email]=accepted_by_hash.get(key)
+    students=[]
+    for item in grouped.values():
+        recipient_states=item.pop("recipients")
+        accepted=[email for email,at in recipient_states.items() if at is not None]
+        students.append({**item,"total_guardian_emails":len(recipient_states),
+            "accepted_guardian_emails":len(accepted),
+            "pending_guardian_emails":len(recipient_states)-len(accepted),
+            "accepted_recipient_emails":accepted,
+            "last_accepted_at":max((at for at in recipient_states.values() if at is not None),default=None)})
+    deliveries=[{"delivery_id":r["id"],"campaign_id":r["campaign_id"],
+          "student_refs":r["student_refs"] or [],"attempted_at":r["created_at"],
+          "status":("accepted_by_sender" if r["accepted_by_provider"] is True
+                    else "sender_rejected" if r["accepted_by_provider"] is False
+                    else "awaiting_sender_response")}
+          for r in recent]
+    return {"ok":True,"students":students,"recent_delivery_attempts":deliveries,
+            "provider_acceptance_is_not_inbox_delivery":True,"school_only":True}
 
 
 @router.post("/schools/{school_id}/family-invitations/send-schoolwide")
@@ -364,8 +461,13 @@ def send_schoolwide_campaign(school_id:str,payload:Campaign,
             WHERE school_id=%s""",(school_id,))
         school_name=str(cur.fetchone()["school_name"])
         planned=[]
+        campaign_id="sfmailbatch_"+uuid.uuid4().hex
         for email in emails:
-            mail_id=_reserve_mail(cur,school_id,email,"schoolwide_invite")
+            refs_for_email=sorted({str(r["local_ref"]) for r in records
+                                   if str(r["guardian_email"]).strip().lower()==email})
+            mail_id=_reserve_mail(cur,school_id,email,"schoolwide_invite",
+                  campaign_id=campaign_id,student_refs=refs_for_email,
+                  sent_by=str(actor["id"]))
             if mail_id:
                 planned.append((email,mail_id))
     url="https://vfvid.com/Safety#school-family="+code
@@ -387,7 +489,7 @@ def send_schoolwide_campaign(school_id:str,payload:Campaign,
         accepted+=int(success)
         failed+=int(not success)
     return {"ok":True,"unique_verified_recipients":len(emails),
-            "provider_accepted":accepted,"provider_failed":failed,
+            "campaign_id":campaign_id,"provider_accepted":accepted,"provider_failed":failed,
             "skipped_due_to_quota_or_recent_send":len(emails)-len(planned),
             "mail_service":"Resend","daily_school_limit":_limit("VERIFYD_SAFETY_FAMILY_MAIL_SCHOOL_DAILY",_DEFAULT_DAILY,10000),
             "guardian_access_granted":False,"schoolwide_link":url}
