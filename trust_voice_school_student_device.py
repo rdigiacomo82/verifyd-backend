@@ -286,7 +286,7 @@ def student_device_me(x_safety_device_session: Optional[str] = Header(default=No
                 pass
         cur.execute("SELECT school_name FROM verifyd_safety_training_schools WHERE school_id=%s", (ctx["school_id"],))
         school = cur.fetchone()
-    conduct=_student_conduct_status(cur,ctx["school_id"],ctx["student_id"])
+        conduct=_student_conduct_status(cur,ctx["school_id"],ctx["student_id"])
     return {"ok": True, "test_only": True, "school_id": ctx["school_id"],
             "school_name": school["school_name"] if school else "TEST School",
             "student_handle": ctx["student_handle"], "expires_at": ctx["expires_at"],
