@@ -115,6 +115,12 @@ def _schema():
             )""")
             cur.execute("""ALTER TABLE verifyd_safety_managed_enrollment_evidence
                 ADD COLUMN IF NOT EXISTS review_date DATE""")
+            # Retain paper and documented authority, add audited electronic OTP.
+            cur.execute("""ALTER TABLE verifyd_safety_managed_enrollment_evidence
+                DROP CONSTRAINT IF EXISTS verifyd_safety_managed_enrollment_evidence_method_check""")
+            cur.execute("""ALTER TABLE verifyd_safety_managed_enrollment_evidence
+                ADD CONSTRAINT verifyd_safety_managed_enrollment_evidence_method_check
+                CHECK(method IN ('signed_paper','school_authority','electronic'))""")
             cur.execute("""CREATE TABLE IF NOT EXISTS verifyd_safety_managed_roster_previews (
                 preview_id TEXT PRIMARY KEY,
                 school_id TEXT NOT NULL REFERENCES verifyd_safety_training_schools(school_id),
