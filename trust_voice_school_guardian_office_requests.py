@@ -79,7 +79,8 @@ def _guardian_children(cur,guardian_id):
          i.display_name AS child_name,i.handle AS child_handle
        FROM verifyd_safety_training_guardians g
        JOIN verifyd_safety_training_schools s ON s.school_id=g.school_id
-       JOIN verifyd_identities i ON i.id=g.child_id AND i.status='active'
+       JOIN verifyd_identities i ON i.id=g.child_id
+          AND i.status IN ('active','supervised_child')
        WHERE g.guardian_id=%s ORDER BY s.school_name,i.display_name""",(guardian_id,))
     eligible=[]
     for row in cur.fetchall():
@@ -241,3 +242,56 @@ def student_seen_office_notice(request_id:str,authorization:Optional[str]=Header
             raise HTTPException(403,detail={"error":"student_office_notice_not_authorized"})
         _audit(cur,str(found["school_id"]),student_id,"student_office_notice_seen",request_id)
     return {"ok":True,"student_viewed":True,"staff_confirmation_still_required":True}
+
+
+@router.get("/student-devices/office-notices")
+def supervised_student_office_notices(
+    x_safety_device_session:Optional[str]=Header(default=None,alias="X-VeriFYD-Safety-Session")
+):
+    """The same short-lived, school-scoped session as the TEST Safety Button.
+
+    A student sees only a neutral instruction AFTER verified school staff
+    accepted the guardian request. No adult identity, message or contact data.
+    This is an online status poll, NOT a guaranteed push delivery.
+    """
+    from trust_voice_school_student_device import _session
+    ctx=_session(x_safety_device_session)
+    _gate(ctx["school_id"])
+    _schema()
+    with get_db() as conn:
+        cur=conn.cursor()
+        cur.execute("""SELECT q.request_id,q.reviewed_at,q.student_viewed_at
+            FROM verifyd_safety_guardian_office_requests q
+            WHERE q.school_id=%s AND q.student_id=%s
+              AND q.status='approved_to_notify'
+              AND q.reviewed_at>NOW()-INTERVAL '1 day'
+            ORDER BY q.reviewed_at DESC LIMIT 10""",
+            (ctx["school_id"],ctx["student_id"]))
+        notices=[dict(row) for row in cur.fetchall()]
+    return {"ok":True,"notices":notices,
+            "message":"Please report to the school office and follow staff instructions.",
+            "staff_approved_only":True,"student_device_delivery_guaranteed":False,
+            "test_only":True,"emergency_dispatch":False}
+
+
+@router.post("/student-devices/office-notices/{request_id}/seen")
+def supervised_student_office_seen(request_id:str,
+    x_safety_device_session:Optional[str]=Header(default=None,alias="X-VeriFYD-Safety-Session")):
+    from trust_voice_school_student_device import _session
+    ctx=_session(x_safety_device_session)
+    _gate(ctx["school_id"])
+    _schema()
+    with get_db() as conn:
+        cur=conn.cursor()
+        cur.execute("""UPDATE verifyd_safety_guardian_office_requests
+            SET student_viewed_at=COALESCE(student_viewed_at,NOW())
+            WHERE request_id=%s AND school_id=%s AND student_id=%s
+              AND status='approved_to_notify'
+            RETURNING request_id""",
+            (request_id,ctx["school_id"],ctx["student_id"]))
+        if not cur.fetchone():
+            raise HTTPException(404,detail={"error":"student_office_notice_not_authorized"})
+        _audit(cur,ctx["school_id"],ctx["student_id"],
+               "supervised_student_office_notice_seen",request_id)
+    return {"ok":True,"student_viewed":True,
+            "school_follow_up_required":True,"test_only":True}
