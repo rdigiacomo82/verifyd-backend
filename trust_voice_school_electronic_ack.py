@@ -46,6 +46,15 @@ def _limit(name: str, default: int, ceiling: int) -> int:
         return default
 
 
+def _require_electronic_enabled(school_id: str):
+    """Independent, default-off and school-allowlisted rollout gate."""
+    _invites_enabled(school_id)
+    on=os.getenv("VERIFYD_SAFETY_ELECTRONIC_ACK_ENABLED","0").lower() in ("1","true","yes","on")
+    allowed={x.strip() for x in os.getenv("VERIFYD_SAFETY_ELECTRONIC_ACK_SCHOOL_IDS","").split(",") if x.strip()}
+    if not on or school_id not in allowed:
+        raise HTTPException(404,detail={"error":"electronic_school_enrollment_not_enabled_for_school"})
+
+
 def _schema():
     global _ready
     _link_schema()
@@ -104,7 +113,7 @@ def _school_for_code(cur, code: str):
     if not school:
         return None
     try:
-        _invites_enabled(str(school["school_id"]))
+        _require_electronic_enabled(str(school["school_id"]))
     except HTTPException:
         return None
     return str(school["school_id"])
@@ -258,6 +267,7 @@ def acknowledge_schoolwide(payload:ElectronicAccept):
         if not session or not session["active"]:
             raise HTTPException(403,detail={"error":"guardian_email_session_expired"})
         school_id=str(session["school_id"])
+        _require_electronic_enabled(school_id)
         email=str(session["guardian_email"])
         matches=_matches(cur,school_id,email)
         chosen=[row for row in matches if row["local_ref"] in refs]
@@ -294,7 +304,7 @@ def acknowledge_schoolwide(payload:ElectronicAccept):
 
 @router.get("/schools/{school_id}/family-invitations/electronic-queue")
 def electronic_school_queue(school_id:str,authorization:Optional[str]=Header(default=None)):
-    _invites_enabled(school_id)
+    _require_electronic_enabled(school_id)
     actor=_actor(authorization)
     _schema()
     with get_db() as conn:
@@ -317,7 +327,7 @@ def electronic_school_queue(school_id:str,authorization:Optional[str]=Header(def
 def send_schoolwide_campaign(school_id:str,payload:Campaign,
     authorization:Optional[str]=Header(default=None)):
     """Admin-reviewed, quota bounded. NO student data in messages. No bulk BCC."""
-    _invites_enabled(school_id)
+    _require_electronic_enabled(school_id)
     actor=_actor(authorization)
     _schema()
     refs=[r.strip().upper() for r in payload.local_refs]
