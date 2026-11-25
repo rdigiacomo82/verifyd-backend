@@ -318,6 +318,16 @@ def preview_managed_roster(school_id: str, payload: ManagedRosterPreview,
                 raise HTTPException(422, detail={"error":"reserved_handle_outside_school_prefix"})
             used.add(lower)
         rows, refs = [], set()
+        # Soft warnings for identical names, never block legitimate twins/
+        # namesakes; hard uniqueness remains school reference + global handle.
+        cur.execute("""SELECT lower(first_name) AS first_lower,
+            lower(last_name) AS last_lower,local_ref
+            FROM verifyd_safety_managed_students WHERE school_id=%s""",(school_id,))
+        roster_names = {}
+        for existing in cur.fetchall():
+            key=(existing["first_lower"].strip(),existing["last_lower"].strip())
+            roster_names.setdefault(key,set()).add(str(existing["local_ref"]).upper())
+        incoming_names = {}
         for student in payload.students:
             ref = student.local_ref.strip().upper()
             if not _REF.fullmatch(ref):
@@ -336,8 +346,16 @@ def preview_managed_roster(school_id: str, payload: ManagedRosterPreview,
             else:
                 handle = _new_handle(cur, config["school_code"], config["handle_style"], first, last, used)
                 action = "stage_pending"
+            duplicate_refs=sorted((roster_names.get((first.lower(),last.lower()),set())
+              | incoming_names.get((first.lower(),last.lower()),set()))-{ref})
+            warning=("Same student name as school record(s) " + ", ".join(duplicate_refs[:3])
+                     + ". Check reference and date of birth in the school system; "
+                     + "distinct students may keep distinct assigned handles."
+                     if duplicate_refs else "")
             rows.append({"local_ref": ref, "first_name": first, "last_name": last,
-                         "proposed_handle": handle, "action": action})
+                         "proposed_handle": handle, "action": action,
+                         "possible_same_name_warning":warning})
+            incoming_names.setdefault((first.lower(),last.lower()),set()).add(ref)
         preview_id = "srprev_" + secrets.token_hex(18)
         cur.execute("""INSERT INTO verifyd_safety_managed_roster_previews
            (preview_id,school_id,admin_id,school_code,handle_style,rows_json)
