@@ -378,11 +378,15 @@ def _new_guardian_identity(cur, email: str, name: str, school_id: str | None = N
     # staged student pattern. Existing VeriFYD account handles remain intact.
     prefix="Guardian"
     if school_id:
-        cur.execute("""SELECT school_code FROM verifyd_safety_managed_roster_settings
-            WHERE school_id=%s""",(school_id,))
-        settings=cur.fetchone()
-        if settings and settings["school_code"]:
-            prefix=str(settings["school_code"]).upper()[:16]
+        # Older TEST schools may not have ever opened the managed-roster
+        # module. Do not fail family account creation for missing settings.
+        cur.execute("SELECT to_regclass('verifyd_safety_managed_roster_settings') AS name")
+        if cur.fetchone()["name"] is not None:
+            cur.execute("""SELECT school_code FROM verifyd_safety_managed_roster_settings
+                WHERE school_id=%s""",(school_id,))
+            settings=cur.fetchone()
+            if settings and settings["school_code"]:
+                prefix=str(settings["school_code"]).upper()[:16]
     for attempt in range(8):
         handle = (prefix + "_G" + secrets.token_hex(5).upper())
         cur.execute("SELECT 1 FROM verifyd_identities WHERE handle_lower=%s", (handle.lower(),))
