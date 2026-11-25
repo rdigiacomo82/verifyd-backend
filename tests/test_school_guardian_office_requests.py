@@ -62,7 +62,7 @@ class GuardianOfficePilotSafetyContracts(unittest.TestCase):
         self.assertIn("/family/office-requests",paths)
         self.assertIn("/student/office-notices",paths)
         self.assertIn("/schools/{school_id}/guardian-office-requests",paths)
-        self.assertTrue(any(hasattr(r,"router") for r in registration.router.routes))
+        self.assertTrue(hasattr(registration, "_school_office_router"))
 
 
 if __name__ == "__main__":
