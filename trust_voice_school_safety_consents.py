@@ -126,6 +126,8 @@ def require_training_signoffs(cur, school_id: str, student_id: str):
         raise HTTPException(409, detail={"error": "school_training_signoff_required"})
     if not _student_accepted(cur, school_id, student_id):
         raise HTTPException(409, detail={"error": "student_training_acknowledgment_required"})
+    from trust_voice_school_student_conduct import _require_accepted
+    _require_accepted(cur,school_id,student_id)
     if not _guardian_count(cur, school_id, student_id):
         raise HTTPException(409, detail={"error": "verified_guardian_training_acknowledgment_required"})
 
@@ -135,6 +137,9 @@ class SignoffInput(BaseModel):
     child_id: Optional[str] = Field(default=None, max_length=100)
     policy_version: Literal["2026-11-22.training.v1"]
     accepted: Literal[True]
+    conduct_policy_version: Optional[str] = None
+    understands_acceptable_use: bool = False
+    understands_school_review_consequences: bool = False
 
 
 class RevokeInput(BaseModel):
@@ -144,8 +149,16 @@ class RevokeInput(BaseModel):
 
 @router.get("/policy")
 def training_signoff_policy():
+    from trust_voice_school_student_conduct import CONDUCT_POLICY_VERSION, CONDUCT_RULES
     return {
         "policy_version": POLICY_VERSION,
+        "student_conduct": {
+            "version": CONDUCT_POLICY_VERSION,
+            "title": "Student Safety acceptable-use agreement",
+            "statements": CONDUCT_RULES,
+            "student_signs_separately": True,
+            "school_review_required_for_restriction": True,
+        },
         "mode": "TRAINING ONLY",
         "live_emergency_delivery": False,
         "location_tracking": False,
@@ -193,9 +206,12 @@ def signoffs_for_my_role(school_id: str, authorization: Optional[str] = Header(d
         if role == "student":
             student_approved = _student_accepted(cur, school_id, actor_id)
             guardian_count = _guardian_count(cur, school_id, actor_id)
-            result.update(student_acknowledged=student_approved,
+            from trust_voice_school_student_conduct import _status as conduct_status
+            conduct=conduct_status(cur,school_id,actor_id)
+            result.update(student_conduct=conduct,student_acknowledged=student_approved,
                           guardian_approved=guardian_count > 0,
-                          can_submit_training_report=bool(school_approved and student_approved and guardian_count))
+                          can_submit_training_report=bool(school_approved and student_approved
+                              and guardian_count and conduct["acknowledged"] and not conduct["restricted"]))
         elif role == "guardian":
             cur.execute("""SELECT g.child_id,i.handle,i.display_name
               FROM verifyd_safety_training_guardians g
@@ -228,6 +244,14 @@ def accept_signoff(school_id: str, payload: SignoffInput, authorization: Optiona
     with get_db() as conn:
         cur = conn.cursor()
         subject = _scope(cur, school_id, actor_id, payload.kind, payload.child_id)
+        if payload.kind == "student":
+            from trust_voice_school_student_conduct import _enabled as conduct_enabled, _record as record_conduct, CONDUCT_POLICY_VERSION
+            if conduct_enabled(school_id):
+                if (payload.conduct_policy_version != CONDUCT_POLICY_VERSION
+                    or not payload.understands_acceptable_use
+                    or not payload.understands_school_review_consequences):
+                    raise HTTPException(422,detail={"error":"student_conduct_acknowledgment_required"})
+                record_conduct(cur,school_id,actor_id,payload.conduct_policy_version)
         cur.execute("""INSERT INTO verifyd_safety_training_signoffs
             (signoff_id,school_id,actor_id,kind,subject_id,policy_version)
             VALUES (%s,%s,%s,%s,%s,%s)
