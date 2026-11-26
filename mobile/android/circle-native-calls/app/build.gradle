@@ -1,0 +1,76 @@
+plugins {
+    id 'com.android.application'
+}
+
+// A source-only unsigned CI compile can skip resource generation. This does
+// NOT enable device push or yield a deployable application. Normal builds
+// require Circle's actual Firebase config, never the Detector pilot's.
+def unsignedCi = providers.gradleProperty('circleUnsignedSourceCheck')
+        .map { it.toBoolean() }.orElse(false).get()
+if (!unsignedCi) {
+    apply plugin: 'com.google.gms.google-services'
+    if (!file('google-services.json').exists()) {
+        throw new GradleException(
+            'Missing PRIVATE app/google-services.json for com.verifyd.circle. ' +
+            'Do not copy the Detector pilot configuration.')
+    }
+}
+
+def playProject = providers.gradleProperty('CIRCLE_PLAY_INTEGRITY_CLOUD_PROJECT_NUMBER')
+        .orElse('UNCONFIGURED').get().trim()
+def releaseVersionCode = providers.gradleProperty('CIRCLE_VERSION_CODE')
+        .orElse('1').get().toInteger()
+
+android {
+    namespace 'com.verifyd.circle'
+    compileSdk 36
+
+    defaultConfig {
+        applicationId 'com.verifyd.circle'
+        minSdk 24
+        targetSdk 36
+        versionCode releaseVersionCode
+        versionName '1.0'
+        resValue 'string', 'circle_play_integrity_cloud_project_number', playProject
+    }
+    buildFeatures {
+        buildConfig true
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    sourceSets {
+        main {
+            manifest.srcFile '../AndroidManifest.merge.xml'
+            java.srcDirs = ['../src/main/java']
+        }
+    }
+    buildTypes {
+        debug {
+            // Development builds CANNOT enroll in the Play-attested production
+            // native bridge; they fail closed at runtime.
+        }
+        release {
+            minifyEnabled false
+            // Signing is supplied from the original Circle app keystore via
+            // Android Studio or your private CI. Do not create a new app identity.
+        }
+    }
+    packaging {
+        resources {
+            excludes += ['META-INF/DEPENDENCIES', 'META-INF/LICENSE*', 'META-INF/NOTICE*']
+        }
+    }
+}
+
+dependencies {
+    implementation 'androidx.browser:browser:1.10.0'
+    implementation 'com.google.androidbrowserhelper:androidbrowserhelper:2.7.4'
+    implementation platform('com.google.firebase:firebase-bom:35.2.0')
+    implementation 'com.google.firebase:firebase-messaging'
+    implementation 'com.google.android.play:integrity:1.6.0'
+    implementation 'com.google.android.gms:play-services-tasks:18.2.0'
+    implementation 'io.github.webrtc-sdk:android:150.7871.04'
+    implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+}

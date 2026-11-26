@@ -1,0 +1,13 @@
+/.gradle/
+/build/
+/app/build/
+/app/google-services.json
+/local.properties
+/.idea/
+/*.iml
+/*.jks
+/*.keystore
+/*.p8
+/*.p12
+/*.mobileprovision
+/.env*
