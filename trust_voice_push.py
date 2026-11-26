@@ -1213,6 +1213,11 @@ def register_push_subscription(
                 failure_count = 0,
                 disabled_at = NULL,
                 disabled_reason = NULL
+            -- A push provider's 404/410 means this exact endpoint no longer
+            -- exists. Background session-rebinding must NEVER reactivate it.
+            -- The user must rotate the browser subscription via Repair alerts.
+            WHERE verifyd_voice_push_subscriptions.disabled_reason
+                IS DISTINCT FROM 'expired_or_gone'
             RETURNING subscription_id
             """,
             (
@@ -1227,7 +1232,18 @@ def register_push_subscription(
                 now,
             ),
         )
-        row = cur.fetchone() or {}
+        row = cur.fetchone()
+
+    if not row:
+        # ON CONFLICT declined to revive a permanently invalidated endpoint.
+        # Do not report a fictitious new subscription_id or success.
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "push_subscription_expired",
+                "message": "This browser's push endpoint expired. Use Repair alerts to create a new subscription.",
+            },
+        )
 
     return {
         "ok": True,
