@@ -368,6 +368,14 @@ app.include_router(trust_voice_devices_router)
 app.include_router(trust_voice_native_calls_router)
 app.include_router(trust_voice_android_calls_router)
 
+# CIRCLE16_NATIVE_BRIDGE_STAGING_V1
+# Keep existing browser/Android calling routes untouched. These enrollment
+# endpoints do not exist unless explicitly enabled on this Render service;
+# production redemption also requires the separate signed app integrity gate.
+if os.getenv("VERIFYD_ANDROID_NATIVE_BRIDGE_ENABLED", "0").strip().lower() in {"1", "true", "on", "yes"}:
+    from trust_voice_android_bridge import router as trust_voice_android_bridge_router
+    app.include_router(trust_voice_android_bridge_router)
+
 # VERIFYD_TRUST_VOICE_CALENDAR_V1
 app.include_router(trust_voice_calendar_router)
 
