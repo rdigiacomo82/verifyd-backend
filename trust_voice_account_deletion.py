@@ -157,13 +157,18 @@ def account_deletion_status(authorization: Optional[str] = Header(default=None))
             "message":"No account deletion request is on file."}
 
 
-@router.get("/account-deletion/operator/queue")
-def list_account_deletion_queue(authorization: Optional[str] = Header(default=None)):
+def _operator(authorization: Optional[str]) -> dict:
     actor = _actor(authorization)
     allowed = {s.strip() for s in os.getenv(
         "VERIFYD_ACCOUNT_DELETION_OPERATOR_IDS","").split(",") if s.strip()}
     if not allowed or str(actor["id"]) not in allowed:
         raise HTTPException(403,detail={"error":"account_deletion_operator_required"})
+    return actor
+
+
+@router.get("/account-deletion/operator/queue")
+def list_account_deletion_queue(authorization: Optional[str] = Header(default=None)):
+    _operator(authorization)
     _schema()
     with get_db() as conn:
         cur = conn.cursor()
@@ -175,3 +180,35 @@ def list_account_deletion_queue(authorization: Optional[str] = Header(default=No
     return {"ok":True,"pending_requests":queue,
             "manual_data_deletion_required":True,
             "do_not_mark_complete_before_erasure":True}
+
+
+class ConfirmErasure(BaseModel):
+    request_id: str = Field(pattern=r"^tvdel_[0-9a-f]{32}$")
+    data_erasure_completed: Literal[True]
+    dependent_records_reviewed: Literal[True]
+    legally_required_retention_reviewed: Literal[True]
+    customer_completion_confirmation_sent: Literal[True]
+    note: str = Field(min_length=20,max_length=1000)
+
+
+@router.post("/account-deletion/operator/confirm-completion")
+def confirm_manual_erasure(payload:ConfirmErasure,
+                           authorization:Optional[str]=Header(default=None)):
+    """Attest to COMPLETED off-platform erasure. Never performs deletion itself.
+
+    An authorized operator must actually erase account and associated data,
+    notify the user, and handle legal/school retention before this call.
+    """
+    _operator(authorization)
+    _schema()
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("""UPDATE verifyd_voice_account_deletion_requests
+            SET status='completed',completed_at=NOW(),operator_note=%s
+            WHERE request_id=%s AND status='pending'
+            RETURNING request_id""",(payload.note,payload.request_id))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(404,detail={"error":"pending_deletion_request_not_found"})
+    return {"ok":True,"request_id":row["request_id"],
+            "status":"completed","deletion_complete":True}
