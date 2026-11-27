@@ -1,0 +1,29 @@
+name: Apple App Review account deletion intake
+on:
+  pull_request:
+    paths:
+      - 'trust_voice_account_deletion.py'
+      - 'tests/test_circle_apple_deletion_intake.py'
+      - 'main.py'
+      - '.github/workflows/apple-deletion-intake.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'trust_voice_account_deletion.py'
+      - 'tests/test_circle_apple_deletion_intake.py'
+  workflow_dispatch:
+jobs:
+  verified-deletion-intake:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install route test dependencies
+        run: |
+          python -m pip install --disable-pip-version-check 'fastapi>=0.109,<1' 'pydantic>=2,<3' 'psycopg2-binary>=2.9,<3' 'python-multipart>=0.0.9' 'python-docx>=1.1,<2' 'pypdf>=4,<7' 'reportlab>=4,<5'
+      - name: Compile and test Apple account deletion intake
+        run: |
+          python -m py_compile trust_voice_account_deletion.py main.py tests/test_circle_apple_deletion_intake.py
+          python -m unittest discover -s tests -p 'test_circle_apple_deletion_intake.py' -v
