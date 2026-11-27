@@ -4999,38 +4999,26 @@ def admin_user_certs(key: str = "", email: str = ""):
 
 
 @app.get("/debug-db/")
-def debug_db():
-    """Show all tables in the database."""
+def debug_db(request: Request):
+    """Admin-only, read-only inspection of the legacy SQLite database."""
+    if not _is_admin(request.headers.get("x-admin-key", "")):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
     import sqlite3
     db_path = "/data/verifyd.db" if os.path.isdir("/data") else "verifyd.db"
+    if not os.path.isfile(db_path):
+        return JSONResponse({"error": "legacy database not found"}, status_code=404)
+
     try:
-        conn = sqlite3.connect(db_path)
-        cur = conn.cursor()
-        cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
-        tables = [row[0] for row in cur.fetchall()]
-        # Try to create users table directly
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                id            INTEGER PRIMARY KEY AUTOINCREMENT,
-                email         TEXT    UNIQUE NOT NULL,
-                email_lower   TEXT    UNIQUE NOT NULL,
-                plan          TEXT    NOT NULL DEFAULT 'free',
-                total_uses    INTEGER NOT NULL DEFAULT 0,
-                period_uses   INTEGER NOT NULL DEFAULT 0,
-                period_start  TEXT    NOT NULL,
-                created_at    TEXT    NOT NULL,
-                last_seen     TEXT    NOT NULL,
-                paypal_sub_id TEXT,
-                notes         TEXT
-            )
-        """)
-        conn.commit()
-        cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
-        tables_after = [row[0] for row in cur.fetchall()]
-        conn.close()
-        return {"tables_before": tables, "tables_after": tables_after, "db_path": db_path}
+        db_uri = f"file:{db_path}?mode=ro"
+        with sqlite3.connect(db_uri, uri=True) as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+            tables = [row[0] for row in cur.fetchall()]
+        return {"tables": tables, "read_only": True}
     except Exception as e:
-        return {"error": str(e)}
+        log.error("Read-only legacy DB inspection failed: %s", e)
+        return JSONResponse({"error": "database inspection failed"}, status_code=500)
 
 
 @app.get("/admin-list-apikeys/")
