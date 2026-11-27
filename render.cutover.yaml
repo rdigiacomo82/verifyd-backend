@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: verifyd-backend
+    runtime: python
+    region: ohio
+    plan: standard
+    branch: main
+    rootDir: ""
+    buildCommand: ./build.sh
+    startCommand: uvicorn main:app --host 0.0.0.0 --port 10000
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: DATA_ROOT
+        value: /tmp/verifyd-data
