@@ -2,40 +2,18 @@ services:
   - type: web
     name: verifyd-backend
     runtime: python
-    buildCommand: bash build.sh
-    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT --timeout-keep-alive 120
+    region: ohio
+    plan: standard
+    branch: main
+    buildCommand: ./build.sh
+    startCommand: uvicorn main:app --host 0.0.0.0 --port 10000
+    healthCheckPath: /health
+    autoDeploy: true
     envVars:
       - key: BASE_URL
         value: https://verifyd-backend.onrender.com
-      - key: FFMPEG_BIN
-        value: /opt/render/project/.render/ffmpeg/ffmpeg
-      - key: FFPROBE_BIN
-        value: /opt/render/project/.render/ffmpeg/ffprobe
-      - key: MAX_UPLOAD_MB
-        value: "0"   # 0 = no limit — backend streams to disk in 1MB chunks
-      - key: PATH
-        value: /opt/render/project/.render/ffmpeg:/usr/local/bin:/usr/bin:/bin
-      - key: DB_PATH
-        value: /var/data/certificates.db
       - key: DATA_ROOT
-        value: /var/data
-      # Residential proxy for TikTok/Instagram downloads.
-      # Format: http://user:password@gate.smartproxy.com:10000
-      # Get one at: smartproxy.com or decodo.com (pay-per-GB, ~$4-8/GB)
-      # Leave empty to skip proxy (TikTok will fail from Render's datacenter IP).
-      - key: RESIDENTIAL_PROXY_URL
-        value: ""   # <-- fill this in after signing up
-      # HuggingFace model cache — stored on persistent disk so models
-      # (DINOv2 ~350MB + ViT Deepfake ~330MB) download once and never again.
-      # Without this, models re-download on every deploy from the ephemeral
-      # container filesystem which only has ~1GB total space.
-      - key: HF_HOME
-        value: /var/data/huggingface
-
-    # Persistent disk — prevents videos/, certified/, and the
-    # SQLite database from being wiped on every deploy/restart.
-    # Requires Render Standard plan or above.
-    disk:
-      name: verifyd-data
-      mountPath: /var/data
-      sizeGB: 10
+        value: /tmp/verifyd-data
+      # Keep all secrets and remaining runtime configuration in the Render dashboard.
+      # The application database is the managed Postgres DATABASE_URL.
+      # User uploads are stored in R2 when R2 is configured.
