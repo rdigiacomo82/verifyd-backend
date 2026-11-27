@@ -26,7 +26,29 @@ class SchoolIncidentAlerts(unittest.TestCase):
         src=inspect.getsource(chat.queue_report)
         self.assertIn("_authorize(cur,report_id,str(ident))",src)
         self.assertIn("ON CONFLICT DO NOTHING",src)
-        self.assertIn("if not _allowed(school_id):return",src)
+        self.assertIn("report_mode",src)
+        self.assertIn("_live_allowed_in_cursor",src)
+
+    def test_live_delivery_is_separately_gated_and_never_reclassifies_test_reports(self):
+        from unittest.mock import patch
+        with patch.dict("os.environ", {
+            "VERIFYD_SAFETY_LIVE_ALERTS_ENABLED":"1",
+            "VERIFYD_SAFETY_INCIDENT_DELIVERY_WORKER_ENABLED":"1",
+            "VERIFYD_SAFETY_LIVE_ALERT_FRONTEND_READY":"0",
+            "VERIFYD_SAFETY_LIVE_ALERT_SCHOOL_IDS":"sschool_test",
+        }, clear=True):
+            self.assertFalse(school._live_rollout_allowed("sschool_test"))
+        with patch.dict("os.environ", {
+            "VERIFYD_SAFETY_LIVE_ALERTS_ENABLED":"1",
+            "VERIFYD_SAFETY_INCIDENT_DELIVERY_WORKER_ENABLED":"1",
+            "VERIFYD_SAFETY_LIVE_ALERT_FRONTEND_READY":"1",
+            "VERIFYD_SAFETY_LIVE_ALERT_SCHOOL_IDS":"sschool_test",
+        }, clear=True):
+            self.assertTrue(school._live_rollout_allowed("sschool_test"))
+            self.assertFalse(school._live_rollout_allowed("other_school"))
+        source=inspect.getsource(chat._notifications_allowed)
+        self.assertIn("report_mode==\"live\"",source)
+        self.assertIn("return _allowed(school_id)",source)
 
     def test_responders_send_no_911(self):
         source=inspect.getsource(chat._dispatch)
@@ -66,5 +88,15 @@ class SchoolIncidentAlerts(unittest.TestCase):
         self.assertIn("_authorize(cur,report_id,aid)",source)
         self.assertIn("school_test_alert_acknowledged",source)
         self.assertIn("device_notification_delivery_confirmed",source)
+        self.assertIn("recipient_acknowledged",source)
+
+    def test_delivery_status_and_opened_events_are_authorized_and_auditable(self):
+        opened=inspect.getsource(chat.mark_alert_opened)
+        status=inspect.getsource(chat.incident_delivery_status)
+        self.assertIn("_authorize(cur,report_id,aid)",opened)
+        self.assertIn("recipient_app_opened",opened)
+        self.assertIn("_authorize(cur,report_id,aid)",status)
+        self.assertIn("provider_acceptance_is_not_device_delivery",status)
+        self.assertIn("emergency_services_contacted\":False",status)
 
 if __name__=="__main__":unittest.main()

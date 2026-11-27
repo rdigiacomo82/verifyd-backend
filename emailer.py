@@ -17,20 +17,33 @@ SITE_URL       = "https://vfvid.com"
 BACKEND_URL    = "https://verifyd-backend.onrender.com"
 
 
-def _send(payload: dict) -> bool:
-    """Internal helper — sends email via Resend SDK."""
+def _send_with_status(payload: dict) -> dict:
+    """Send through Resend and return only safe delivery metadata."""
     if not RESEND_API_KEY:
         log.error("RESEND_API_KEY not set — cannot send email")
-        return False
+        return {"accepted": False, "provider_message_id": None,
+                "error_code": "provider_not_configured"}
     try:
         import resend
         resend.api_key = RESEND_API_KEY
         result = resend.Emails.send(payload)
-        log.info("Email sent to %s — id: %s", payload.get("to"), result.get("id"))
-        return True
-    except Exception as e:
-        log.error("Failed to send email: %s", e)
-        return False
+        message_id = result.get("id") if isinstance(result, dict) else getattr(result, "id", None)
+        log.info("Transactional email accepted by provider; message_id=%s", message_id)
+        return {"accepted": bool(message_id), "provider_message_id": message_id,
+                "error_code": None if message_id else "provider_missing_message_id"}
+    except Exception as exc:
+        # Provider exceptions can include recipients or request data. Keep only
+        # stable, non-PII fields in application logs and durable status records.
+        status = getattr(exc, "status_code", None)
+        log.error("Transactional email provider failure; exception=%s status=%s",
+                  type(exc).__name__, status)
+        return {"accepted": False, "provider_message_id": None,
+                "error_code": f"provider_error_{status}" if status else "provider_error"}
+
+
+def _send(payload: dict) -> bool:
+    """Compatibility wrapper used by existing email flows."""
+    return bool(_send_with_status(payload).get("accepted"))
 
 
 def _header_html() -> str:
@@ -65,8 +78,8 @@ def _footer_html() -> str:
       </tr>"""
 
 
-def send_otp_email(to_email: str, code: str) -> bool:
-    """Send OTP verification email via Resend."""
+def send_otp_email_with_status(to_email: str, code: str) -> dict:
+    """Send one OTP email and expose safe provider status for the audit ledger."""
     html = f"""
 <!DOCTYPE html>
 <html>
@@ -110,12 +123,17 @@ def send_otp_email(to_email: str, code: str) -> bool:
 </body>
 </html>"""
 
-    return _send({
+    return _send_with_status({
         "from":    f"{FROM_NAME} <{FROM_ADDRESS}>",
         "to":      [to_email],
         "subject": f"{code} is your VeriFYD verification code",
         "html":    html,
     })
+
+
+def send_otp_email(to_email: str, code: str) -> bool:
+    """Compatibility wrapper used by existing OTP flows."""
+    return bool(send_otp_email_with_status(to_email, code).get("accepted"))
 
 
 def send_certification_email(

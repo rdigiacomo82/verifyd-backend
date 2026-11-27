@@ -131,6 +131,7 @@ def _schema():
                 UNIQUE(student_id,client_key)
             )""")
             cur.execute("CREATE INDEX IF NOT EXISTS safety_training_report_lookup ON verifyd_safety_training_reports(incident_id,created_at)")
+            cur.execute("ALTER TABLE verifyd_safety_training_reports ADD COLUMN IF NOT EXISTS report_mode TEXT NOT NULL DEFAULT 'test'")
             cur.execute("""CREATE TABLE IF NOT EXISTS verifyd_safety_training_updates (
                 update_id TEXT PRIMARY KEY, report_id TEXT NOT NULL REFERENCES verifyd_safety_training_reports(report_id),
                 actor_id TEXT NOT NULL REFERENCES verifyd_identities(id),
@@ -151,6 +152,23 @@ def _schema():
                 action TEXT NOT NULL,
                 object_id TEXT,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )""")
+            cur.execute("""CREATE TABLE IF NOT EXISTS verifyd_safety_live_school_activation (
+                school_id TEXT PRIMARY KEY REFERENCES verifyd_safety_training_schools(school_id) ON DELETE CASCADE,
+                active BOOLEAN NOT NULL DEFAULT FALSE,
+                activated_by TEXT REFERENCES verifyd_identities(id),
+                activated_at TIMESTAMPTZ,
+                deactivated_by TEXT REFERENCES verifyd_identities(id),
+                deactivated_at TIMESTAMPTZ,
+                activation_note TEXT NOT NULL DEFAULT ''
+            )""")
+            cur.execute("""CREATE TABLE IF NOT EXISTS verifyd_safety_incident_escalation_policies(
+                school_id TEXT PRIMARY KEY REFERENCES verifyd_safety_training_schools(school_id) ON DELETE CASCADE,
+                enabled BOOLEAN NOT NULL DEFAULT FALSE,
+                delay_seconds INTEGER NOT NULL DEFAULT 300 CHECK(delay_seconds BETWEEN 60 AND 3600),
+                backup_responder_ids TEXT[] NOT NULL DEFAULT '{}',
+                updated_by TEXT REFERENCES verifyd_identities(id),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )""")
             # One-time conversion of legacy "Principal as backup guardian"
             # assignments. Principal stays in school response, not family.
@@ -408,6 +426,120 @@ class SchoolResponseTeamSelection(BaseModel):
     independently_verified: Literal[True]
 
 
+class SchoolAlertEscalationPolicy(BaseModel):
+    enabled: bool
+    delay_seconds: int = Field(ge=60,le=3600)
+    backup_responder_ids: list[str] = Field(min_length=1,max_length=20)
+    independently_verified: Literal[True]
+
+
+class LiveAlertActivation(BaseModel):
+    activate: bool
+    confirmation: Literal[True]
+    activation_note: str = Field(default="",max_length=500)
+
+
+def _live_rollout_allowed(school_id: str) -> bool:
+    enabled=os.getenv("VERIFYD_SAFETY_LIVE_ALERTS_ENABLED","0").lower() in ("1","true","yes","on")
+    delivery_worker=os.getenv("VERIFYD_SAFETY_INCIDENT_DELIVERY_WORKER_ENABLED","0").lower() in ("1","true","yes","on")
+    frontend_ready=os.getenv("VERIFYD_SAFETY_LIVE_ALERT_FRONTEND_READY","0").lower() in ("1","true","yes","on")
+    ids={x.strip() for x in os.getenv("VERIFYD_SAFETY_LIVE_ALERT_SCHOOL_IDS","").split(",") if x.strip()}
+    return enabled and delivery_worker and frontend_ready and school_id in ids
+
+
+@router.get("/schools/{school_id}/operational-alerts/status")
+def operational_alert_status(school_id:str,authorization:Optional[str]=Header(default=None)):
+    actor=_actor(authorization);_schema()
+    from trust_voice_school_safety_registration import _school_admin
+    with get_db() as conn:
+        cur=conn.cursor();_school_admin(cur,school_id,str(actor["id"]))
+        cur.execute("SELECT active,activated_at FROM verifyd_safety_live_school_activation WHERE school_id=%s",(school_id,))
+        activation=cur.fetchone()
+        cur.execute("""SELECT enabled,delay_seconds,cardinality(backup_responder_ids) AS backup_count
+            FROM verifyd_safety_incident_escalation_policies WHERE school_id=%s""",(school_id,))
+        policy=cur.fetchone()
+    gate=_live_rollout_allowed(school_id)
+    return {"ok":True,"mode":"TEST_ONLY" if not (gate and activation and activation["active"]) else "LIVE_SCHOOL_ALERTS",
+        "live_environment_gate_enabled":gate,
+        "live_frontend_readiness_gate_enabled":os.getenv("VERIFYD_SAFETY_LIVE_ALERT_FRONTEND_READY","0").lower() in ("1","true","yes","on"),
+        "school_live_activation_enabled":bool(activation and activation["active"]),
+        "live_alerts_active":bool(gate and activation and activation["active"]),
+        "escalation_policy_configured":bool(policy and policy["enabled"] and policy["backup_count"]>0),
+        "escalation_delay_seconds":int(policy["delay_seconds"]) if policy else None,
+        "emergency_services_connected":False}
+
+
+@router.put("/schools/{school_id}/alert-escalation-policy")
+def update_alert_escalation_policy(school_id:str,payload:SchoolAlertEscalationPolicy,
+    authorization:Optional[str]=Header(default=None)):
+    actor=_actor(authorization);_schema()
+    from trust_voice_school_safety_registration import _school_admin
+    ids=[str(x) for x in payload.backup_responder_ids]
+    if len(set(ids))!=len(ids):
+        raise HTTPException(422,detail={"error":"duplicate_escalation_responder"})
+    with get_db() as conn:
+        cur=conn.cursor();_school_admin(cur,school_id,str(actor["id"]))
+        cur.execute("""SELECT m.identity_id FROM verifyd_safety_training_members m
+            JOIN verifyd_safety_school_response_team t ON t.school_id=m.school_id
+              AND t.responder_id=m.identity_id
+            JOIN verifyd_identities i ON i.id=m.identity_id AND i.status='active'
+            WHERE m.school_id=%s AND m.role='responder' AND m.identity_id=ANY(%s)""",
+            (school_id,ids))
+        eligible={str(r["identity_id"]) for r in cur.fetchall()}
+        if eligible!=set(ids):
+            raise HTTPException(403,detail={"error":"escalation_targets_must_be_active_designated_responders"})
+        cur.execute("""INSERT INTO verifyd_safety_incident_escalation_policies
+            (school_id,enabled,delay_seconds,backup_responder_ids,updated_by,updated_at)
+            VALUES(%s,%s,%s,%s,%s,NOW()) ON CONFLICT(school_id) DO UPDATE SET
+            enabled=EXCLUDED.enabled,delay_seconds=EXCLUDED.delay_seconds,
+            backup_responder_ids=EXCLUDED.backup_responder_ids,
+            updated_by=EXCLUDED.updated_by,updated_at=NOW()""",
+            (school_id,payload.enabled,payload.delay_seconds,ids,str(actor["id"]))
+        )
+        _audit(cur,school_id,str(actor["id"]),"incident_escalation_policy_updated",
+               f"enabled:{payload.enabled};delay:{payload.delay_seconds};targets:{len(ids)}")
+    return {"ok":True,"enabled":payload.enabled,"delay_seconds":payload.delay_seconds,
+        "backup_responder_count":len(ids),"test_and_live_modes_remain_separately_gated":True}
+
+
+@router.post("/owner/schools/{school_id}/operational-alerts/activation")
+def set_live_alert_activation(school_id:str,payload:LiveAlertActivation,
+    authorization:Optional[str]=Header(default=None)):
+    actor=_actor(authorization);_operator(actor);_schema()
+    if payload.activate and not _live_rollout_allowed(school_id):
+        raise HTTPException(409,detail={"error":"live_alert_global_and_school_gate_must_be_enabled_first"})
+    with get_db() as conn:
+        cur=conn.cursor()
+        cur.execute("SELECT 1 FROM verifyd_safety_training_schools WHERE school_id=%s",(school_id,))
+        if not cur.fetchone():raise HTTPException(404,detail={"error":"school_not_found"})
+        if payload.activate:
+            cur.execute("""SELECT enabled,cardinality(backup_responder_ids) AS n
+                FROM verifyd_safety_incident_escalation_policies WHERE school_id=%s""",(school_id,))
+            policy=cur.fetchone()
+            if not policy or not policy["enabled"] or int(policy["n"] or 0)<1:
+                raise HTTPException(409,detail={"error":"active_escalation_policy_with_designated_backup_required"})
+            cur.execute("""SELECT 1 FROM verifyd_safety_training_members
+                WHERE school_id=%s AND role='principal' LIMIT 1""",(school_id,))
+            if not cur.fetchone():raise HTTPException(409,detail={"error":"verified_principal_required"})
+            cur.execute("""INSERT INTO verifyd_safety_live_school_activation
+                (school_id,active,activated_by,activated_at,activation_note)
+                VALUES(%s,TRUE,%s,NOW(),%s) ON CONFLICT(school_id) DO UPDATE SET
+                active=TRUE,activated_by=EXCLUDED.activated_by,activated_at=NOW(),
+                deactivated_by=NULL,deactivated_at=NULL,activation_note=EXCLUDED.activation_note""",
+                (school_id,str(actor["id"]),payload.activation_note.strip()))
+            _audit(cur,school_id,str(actor["id"]),"live_school_alerts_activated",payload.activation_note.strip()[:200])
+        else:
+            cur.execute("""INSERT INTO verifyd_safety_live_school_activation
+                (school_id,active,deactivated_by,deactivated_at,activation_note)
+                VALUES(%s,FALSE,%s,NOW(),%s) ON CONFLICT(school_id) DO UPDATE SET
+                active=FALSE,deactivated_by=EXCLUDED.deactivated_by,deactivated_at=NOW(),
+                activation_note=EXCLUDED.activation_note""",
+                (school_id,str(actor["id"]),payload.activation_note.strip()))
+            _audit(cur,school_id,str(actor["id"]),"live_school_alerts_deactivated",payload.activation_note.strip()[:200])
+    return {"ok":True,"live_alerts_active":payload.activate,
+        "test_notifications_gate_unchanged":True,"emergency_services_connected":False}
+
+
 @router.get("/schools/{school_id}/response-team")
 def get_verified_school_response_team(school_id: str, authorization: Optional[str] = Header(default=None)):
     actor = _actor(authorization)
@@ -581,11 +713,19 @@ def disable_verified_school_contact_routing(
         "notifications_sent": False, "emergency_services_notified": False,
     }
 
-def _report_receipt(row, count):
-    return {"ok": True, "mode": "TRAINING ONLY", "report_id": row["report_id"],
-        "incident_id": row["incident_id"], "incident_reports": count,
-        "stored_on_server": True, "staff_notified": False, "parents_notified": False,
-        "emergency_services_notified": False, "delivery_status": "TRAINING_RECORD_ONLY"}
+def _report_receipt(row, count, mode="test", queued_recipients=0, push=None):
+    live=mode=="live"
+    return {"ok": True, "mode": "LIVE_SCHOOL_ALERT" if live else "TEST_ONLY",
+        "report_id": row["report_id"],"incident_id": row["incident_id"],
+        "incident_reports": count,"stored_on_server": True,
+        "staff_notified": False,"parents_notified": False,
+        "emergency_services_notified": False,
+        "delivery_status": ("QUEUED_FOR_PROVIDER" if live and queued_recipients else
+                            "NO_TEST_PUSH_GATE" if not live and not queued_recipients else
+                            "TRAINING_RECORD_ONLY" if not live else "NO_RECIPIENTS_QUEUED"),
+        "queued_recipients":queued_recipients,
+        "push_provider_accepted":int((push or {}).get("push_provider_accepted",0)),
+        "device_delivery_confirmed":False}
 
 
 @router.post("/reports")
@@ -642,13 +782,13 @@ def _create_training_report_for_student(payload: ReportInput, student_id: str):
         ).digest()
         replay_lock = int.from_bytes(replay_lock_hash[:8], "big") % (2**63 - 1)
         cur.execute("SELECT pg_advisory_xact_lock(%s)", (replay_lock,))
-        cur.execute("""SELECT report_id,incident_id FROM verifyd_safety_training_reports
+        cur.execute("""SELECT report_id,incident_id,report_mode FROM verifyd_safety_training_reports
              WHERE student_id=%s AND client_key=%s""", (student_id, payload.idempotency_key))
         previous = cur.fetchone()
         if previous:
             cur.execute("""SELECT COUNT(*) AS count FROM verifyd_safety_training_reports
                 WHERE incident_id=%s""", (previous["incident_id"],))
-            return _report_receipt(previous, cur.fetchone()["count"])
+            return _report_receipt(previous, cur.fetchone()["count"],previous.get("report_mode","test"))
         # Per-school/per-category transactional lock guarantees one group under concurrent reports.
         raw_lock = hashlib.sha256((payload.school_id + ":" + payload.category).encode()).digest()
         lock = int.from_bytes(raw_lock[:8], "big") % (2**63 - 1)
@@ -664,19 +804,27 @@ def _create_training_report_for_student(payload: ReportInput, student_id: str):
                 (incident_id,school_id,category) VALUES(%s,%s,%s)""",
                 (incident_id,payload.school_id,payload.category))
         report_id = "ssrep_" + uuid.uuid4().hex
+        from trust_voice_school_incident_chat import _allowed as _test_push_allowed,_live_allowed_in_cursor,_record_event
+        report_mode="live" if _live_allowed_in_cursor(cur,payload.school_id) else "test"
+        queued_recipients=0
         cur.execute("""INSERT INTO verifyd_safety_training_reports
-           (report_id,incident_id,school_id,student_id,client_key,category,description)
-           VALUES (%s,%s,%s,%s,%s,%s,%s)""", (report_id,incident_id,payload.school_id,
-           student_id,payload.idempotency_key,payload.category,initial_description))
+           (report_id,incident_id,school_id,student_id,client_key,category,description,report_mode)
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""", (report_id,incident_id,payload.school_id,
+           student_id,payload.idempotency_key,payload.category,initial_description,report_mode))
         recipients = set(school_team) | {str(contacts["primary_id"])}
         if contacts["backup_id"]:
             recipients.add(str(contacts["backup_id"]))
         for recipient in recipients:
             cur.execute("""INSERT INTO verifyd_safety_training_recipients
                 (report_id,recipient_id,reason) VALUES(%s,%s,%s) ON CONFLICT DO NOTHING""",
-                (report_id,recipient,"TRAINING_ONLY_NEVER_SENT"))
-        queue_report(cur, report_id, payload.school_id, student_id, recipients)
-        _audit(cur, payload.school_id, student_id, "training_report_created", report_id)
+                (report_id,recipient,"SCHOOL_ALERT_RECIPIENT" if report_mode=="live" else "TRAINING_ONLY_NEVER_SENT"))
+        _record_event(cur,report_id,payload.school_id,"report_accepted",student_id,{"mode":report_mode})
+        queued_recipients=queue_report(cur, report_id, payload.school_id, student_id, recipients) or 0
+        if not queued_recipients:
+            _record_event(cur,report_id,payload.school_id,"delivery_not_queued",details={
+                "reason":"mode_gate_disabled" if not (_test_push_allowed(payload.school_id) or report_mode=="live") else "no_authorized_recipients"})
+        _audit(cur, payload.school_id, student_id,
+            "school_alert_created" if report_mode=="live" else "training_report_created", report_id)
         cur.execute("SELECT COUNT(*) AS count FROM verifyd_safety_training_reports WHERE incident_id=%s", (incident_id,))
         count = cur.fetchone()["count"]
     # A database receipt is NOT a device receipt. The test push outbox is
@@ -686,8 +834,8 @@ def _create_training_report_for_student(payload: ReportInput, student_id: str):
         push=dispatch_report(report_id)
     except Exception:
         pass
-    return {**_report_receipt({"report_id":report_id,"incident_id":incident_id}, count),
-            "test_notifications":push}
+    return {**_report_receipt({"report_id":report_id,"incident_id":incident_id},count,
+        report_mode,queued_recipients,push),"test_notifications":push}
 
 
 def _report_access(cur, report_id, actor_id):

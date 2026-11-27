@@ -19,7 +19,7 @@ from typing import Literal, Optional
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
 from database import get_db, create_otp, verify_otp, is_valid_email
-from emailer import _send, FROM_ADDRESS, FROM_NAME, send_otp_email
+from emailer import _send, _send_with_status, FROM_ADDRESS, FROM_NAME, send_otp_email_with_status
 from trust_voice_school_safety_training import _actor, _audit
 from trust_voice_school_safety_registration import _school_admin
 from trust_voice_school_family_link import _schema as _link_schema
@@ -31,8 +31,14 @@ router = APIRouter(prefix="/trust-voice/school-safety", tags=["School Electronic
 _lock = threading.Lock()
 _ready = False
 _MAX_CAMPAIGN = 40
-_DEFAULT_DAILY = 40  # Resend account currently allows 100/day; protect auth OTP capacity.
-_DEFAULT_GLOBAL = 55
+# Keep the historical 55/day family-mail ceiling until provider capacity is
+# confirmed. Split it into independently protected budgets: authentication
+# messages keep 40 slots and schoolwide invitations may use 15. Per-school
+# purpose limits are also separate, so invitations cannot starve OTP traffic.
+_DEFAULT_SCHOOL_INVITE_DAILY = 40
+_DEFAULT_SCHOOL_OTP_DAILY = 40
+_DEFAULT_GLOBAL_INVITE_DAILY = 15
+_DEFAULT_GLOBAL_OTP_DAILY = 40
 _MAX_CHILDREN = 12
 
 
@@ -114,7 +120,59 @@ def _schema():
                 ADD COLUMN IF NOT EXISTS sent_by TEXT""")
             cur.execute("""CREATE INDEX IF NOT EXISTS safety_family_mail_limit
                 ON verifyd_safety_family_mail_ledger(school_id,created_at)""")
+            cur.execute("""CREATE INDEX IF NOT EXISTS safety_family_mail_global_limit
+                ON verifyd_safety_family_mail_ledger(purpose,created_at)
+                WHERE accepted_by_provider IS DISTINCT FROM FALSE""")
+            cur.execute("""CREATE TABLE IF NOT EXISTS verifyd_safety_family_mail_queue (
+                job_id TEXT PRIMARY KEY,
+                school_id TEXT NOT NULL,
+                campaign_id TEXT NOT NULL,
+                recipient_hash TEXT NOT NULL,
+                recipient_email TEXT,
+                student_refs TEXT[] NOT NULL DEFAULT '{}',
+                status TEXT NOT NULL DEFAULT 'queued'
+                    CHECK(status IN ('queued','sending','accepted','retry','failed')),
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                available_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                last_attempt_at TIMESTAMPTZ,
+                provider_message_id TEXT,
+                last_error_code TEXT,
+                mail_ledger_id TEXT,
+                created_by TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                UNIQUE(school_id,recipient_hash,campaign_id)
+            )""")
+            cur.execute("""CREATE INDEX IF NOT EXISTS safety_family_mail_queue_due
+                ON verifyd_safety_family_mail_queue(status,available_at,created_at)""")
+            cur.execute("""CREATE TABLE IF NOT EXISTS verifyd_safety_family_mail_events (
+                event_id TEXT PRIMARY KEY,
+                job_id TEXT NOT NULL REFERENCES verifyd_safety_family_mail_queue(job_id) ON DELETE CASCADE,
+                school_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                actor_id TEXT,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                provider_message_id TEXT,
+                error_code TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )""")
+            cur.execute("""CREATE INDEX IF NOT EXISTS safety_family_mail_event_lookup
+                ON verifyd_safety_family_mail_events(school_id,created_at DESC)""")
+            cur.execute("""ALTER TABLE verifyd_safety_family_mail_queue
+                ADD COLUMN IF NOT EXISTS mail_ledger_id TEXT""")
+            cur.execute("""ALTER TABLE verifyd_safety_family_mail_ledger
+                ADD COLUMN IF NOT EXISTS provider_message_id TEXT""")
         _ready = True
+
+
+def _mail_event(cur,job_id,school_id,event_type,actor_id=None,attempt_count=0,
+                provider_message_id=None,error_code=None):
+    cur.execute("""INSERT INTO verifyd_safety_family_mail_events
+        (event_id,job_id,school_id,event_type,actor_id,attempt_count,
+         provider_message_id,error_code)
+        VALUES(%s,%s,%s,%s,%s,%s,%s,%s)""",
+        ("sfme_"+uuid.uuid4().hex,job_id,school_id,event_type,actor_id,
+         int(attempt_count or 0),provider_message_id,error_code))
 
 
 def _school_for_code(cur, code: str):
@@ -148,15 +206,30 @@ def _matches(cur, school_id: str, email: str):
 
 
 def _reserve_mail(cur, school_id: str, email: str, purpose: str, *, campaign_id=None, student_refs=None, sent_by=None):
+    if purpose not in ("schoolwide_invite", "guardian_otp"):
+        raise ValueError("unsupported school family email purpose")
     cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))",
                 ("school_family_mail_global",))
+    prefix = "INVITE" if purpose == "schoolwide_invite" else "OTP"
+    school_limit = _limit(
+        f"VERIFYD_SAFETY_FAMILY_{prefix}_SCHOOL_DAILY",
+        _DEFAULT_SCHOOL_INVITE_DAILY if prefix == "INVITE" else _DEFAULT_SCHOOL_OTP_DAILY,
+        10000,
+    )
+    global_limit = _limit(
+        f"VERIFYD_SAFETY_FAMILY_{prefix}_GLOBAL_DAILY",
+        _DEFAULT_GLOBAL_INVITE_DAILY if prefix == "INVITE" else _DEFAULT_GLOBAL_OTP_DAILY,
+        10000,
+    )
     cur.execute("""SELECT count(*) AS n FROM verifyd_safety_family_mail_ledger
-         WHERE created_at>NOW()-INTERVAL '24 hours'""")
-    if int(cur.fetchone()["n"]) >= _limit("VERIFYD_SAFETY_FAMILY_MAIL_GLOBAL_DAILY", _DEFAULT_GLOBAL, 10000):
+         WHERE purpose=%s AND accepted_by_provider IS DISTINCT FROM FALSE
+           AND created_at>NOW()-INTERVAL '24 hours'""", (purpose,))
+    if int(cur.fetchone()["n"]) >= global_limit:
         return None
     cur.execute("""SELECT count(*) AS n FROM verifyd_safety_family_mail_ledger
-         WHERE school_id=%s AND created_at>NOW()-INTERVAL '24 hours'""",(school_id,))
-    if int(cur.fetchone()["n"]) >= _limit("VERIFYD_SAFETY_FAMILY_MAIL_SCHOOL_DAILY",_DEFAULT_DAILY, 10000):
+         WHERE school_id=%s AND purpose=%s AND accepted_by_provider IS DISTINCT FROM FALSE
+           AND created_at>NOW()-INTERVAL '24 hours'""",(school_id,purpose))
+    if int(cur.fetchone()["n"]) >= school_limit:
         return None
     fingerprint=_hash(school_id+":"+purpose+":"+email)
     if purpose == "schoolwide_invite":
@@ -170,6 +243,7 @@ def _reserve_mail(cur, school_id: str, email: str, purpose: str, *, campaign_id=
             return None
     cur.execute("""SELECT count(*) AS n FROM verifyd_safety_family_mail_ledger
          WHERE school_id=%s AND purpose=%s AND recipient_hash=%s
+           AND (purpose='guardian_otp' OR accepted_by_provider IS DISTINCT FROM FALSE)
            AND created_at>NOW()-INTERVAL '24 hours'""",(school_id,purpose,fingerprint))
     if int(cur.fetchone()["n"]) >= (2 if purpose=="guardian_otp" else 1):
         return None
@@ -181,10 +255,178 @@ def _reserve_mail(cur, school_id: str, email: str, purpose: str, *, campaign_id=
     return id
 
 
-def _delivery_result(id: str, accepted: bool):
+def _delivery_result(id: str, accepted: bool, provider_message_id=None):
     with get_db() as conn:
         conn.cursor().execute("""UPDATE verifyd_safety_family_mail_ledger
-            SET accepted_by_provider=%s WHERE id=%s""",(bool(accepted),id))
+            SET accepted_by_provider=%s,provider_message_id=%s WHERE id=%s""",
+            (bool(accepted),provider_message_id,id))
+
+
+def _school_mail_limit(school_id: str, purpose: str) -> int:
+    prefix = "INVITE" if purpose == "schoolwide_invite" else "OTP"
+    return _limit(
+        f"VERIFYD_SAFETY_FAMILY_{prefix}_SCHOOL_DAILY",
+        _DEFAULT_SCHOOL_INVITE_DAILY if prefix == "INVITE" else _DEFAULT_SCHOOL_OTP_DAILY,
+        10000,
+    )
+
+
+def _global_mail_limit(purpose: str) -> int:
+    prefix = "INVITE" if purpose == "schoolwide_invite" else "OTP"
+    return _limit(
+        f"VERIFYD_SAFETY_FAMILY_{prefix}_GLOBAL_DAILY",
+        _DEFAULT_GLOBAL_INVITE_DAILY if prefix == "INVITE" else _DEFAULT_GLOBAL_OTP_DAILY,
+        10000,
+    )
+
+
+def dispatch_schoolwide_mail_once(school_id: Optional[str] = None, limit: int = 10):
+    """Send a bounded slice of due schoolwide mail jobs; safe for parallel workers."""
+    _schema()
+    batch_limit = max(1, min(20, int(limit)))
+    with get_db() as conn:
+        cur = conn.cursor()
+        # Recover claims left by a process restart. Provider acceptance remains
+        # at-least-once in this failure window; the same generic invitation is
+        # idempotent for registration and never carries student details.
+        cur.execute("""UPDATE verifyd_safety_family_mail_queue
+            SET status=CASE WHEN attempt_count>=4 THEN 'failed' ELSE 'retry' END,
+                available_at=NOW(),last_error_code='worker_claim_expired',updated_at=NOW()
+            WHERE status='sending' AND last_attempt_at<NOW()-INTERVAL '10 minutes'
+              AND (%s::text IS NULL OR school_id=%s)
+            RETURNING job_id,school_id,attempt_count,status""",(school_id,school_id))
+        for stale in cur.fetchall():
+            _mail_event(cur,stale["job_id"],stale["school_id"],"worker_claim_expired",
+                attempt_count=stale["attempt_count"],error_code="worker_claim_expired")
+        cur.execute("""SELECT job_id,school_id,campaign_id,recipient_hash,
+                    recipient_email,student_refs,attempt_count,created_by
+             FROM verifyd_safety_family_mail_queue
+             WHERE status IN ('queued','retry') AND available_at<=NOW()
+               AND (%s::text IS NULL OR school_id=%s)
+             ORDER BY available_at,created_at
+             LIMIT %s FOR UPDATE SKIP LOCKED""", (school_id,school_id,batch_limit))
+        jobs = [dict(row) for row in cur.fetchall()]
+
+    attempted = accepted = deferred = failed = 0
+    for job in jobs:
+        if not job.get("recipient_email"):
+            with get_db() as conn:
+                cur=conn.cursor()
+                cur.execute("""UPDATE verifyd_safety_family_mail_queue
+                    SET status='failed',last_error_code='recipient_unavailable',updated_at=NOW()
+                    WHERE job_id=%s AND status IN ('queued','retry')""",(job["job_id"],))
+                if cur.rowcount:
+                    _mail_event(cur,job["job_id"],job["school_id"],"failed",
+                        attempt_count=job.get("attempt_count"),error_code="recipient_unavailable")
+            failed += 1
+            continue
+        try:
+            _require_electronic_enabled(str(job["school_id"]))
+        except HTTPException:
+            continue
+
+        with get_db() as conn:
+            cur = conn.cursor()
+            # Claim the row and reserve quota atomically; no provider call is made
+            # while holding a database transaction open.
+            cur.execute("""UPDATE verifyd_safety_family_mail_queue
+                SET status='sending',
+                    last_attempt_at=NOW(),updated_at=NOW()
+                WHERE job_id=%s AND status IN ('queued','retry')
+                RETURNING attempt_count""",(job["job_id"],))
+            claimed = cur.fetchone()
+            if not claimed:
+                continue
+            ledger_id = _reserve_mail(cur,str(job["school_id"]),str(job["recipient_email"]),
+                "schoolwide_invite",campaign_id=job["campaign_id"],
+                student_refs=job["student_refs"] or [],sent_by=job["created_by"])
+            if not ledger_id:
+                # A previous provider-accepted invitation is final; do not send
+                # it again. Otherwise wait until a rolling-window quota opens.
+                cur.execute("""SELECT 1 FROM verifyd_safety_family_mail_ledger
+                    WHERE school_id=%s AND purpose='schoolwide_invite'
+                      AND recipient_hash=%s AND accepted_by_provider IS TRUE LIMIT 1""",
+                    (job["school_id"],job["recipient_hash"]))
+                already_accepted = bool(cur.fetchone())
+                cur.execute("""UPDATE verifyd_safety_family_mail_queue
+                    SET status=%s,recipient_email=CASE WHEN %s THEN NULL ELSE recipient_email END,
+                        last_error_code=%s,
+                        available_at=CASE WHEN %s THEN available_at ELSE GREATEST(
+                          NOW()+INTERVAL '1 minute',
+                          COALESCE((SELECT MIN(created_at)+INTERVAL '24 hours'
+                            FROM verifyd_safety_family_mail_ledger
+                            WHERE purpose='schoolwide_invite'),NOW()+INTERVAL '1 minute'),
+                          COALESCE((SELECT MIN(created_at)+INTERVAL '24 hours'
+                            FROM verifyd_safety_family_mail_ledger
+                            WHERE school_id=%s AND purpose='schoolwide_invite'),NOW()+INTERVAL '1 minute')) END,
+                        updated_at=NOW() WHERE job_id=%s""",
+                    ("accepted" if already_accepted else "queued",already_accepted,
+                     "already_accepted" if already_accepted else "quota_wait",
+                     already_accepted,job["school_id"],job["job_id"]))
+                _mail_event(cur,job["job_id"],job["school_id"],
+                    "already_accepted" if already_accepted else "quota_deferred",
+                    actor_id=job.get("created_by"),attempt_count=claimed["attempt_count"],
+                    error_code=None if already_accepted else "quota_wait")
+                deferred += int(not already_accepted)
+                accepted += int(already_accepted)
+                continue
+            cur.execute("""UPDATE verifyd_safety_family_mail_queue
+                SET mail_ledger_id=%s,attempt_count=attempt_count+1
+                WHERE job_id=%s RETURNING attempt_count""",(ledger_id,job["job_id"]))
+            claimed=cur.fetchone()
+            _mail_event(cur,job["job_id"],job["school_id"],"sending",
+                actor_id=job.get("created_by"),attempt_count=claimed["attempt_count"])
+
+        with get_db() as conn:
+            cur=conn.cursor()
+            cur.execute("""SELECT s.school_name,l.public_code
+                FROM verifyd_safety_training_schools s
+                LEFT JOIN verifyd_safety_school_family_links l ON l.school_id=s.school_id
+                WHERE s.school_id=%s""",(job["school_id"],))
+            school=cur.fetchone() or {}
+        school_name=html.escape(str(school.get("school_name") or "Your school"))
+        public_code=str(school.get("public_code") or "")
+        url="https://vfvid.com/Safety#school-family="+public_code
+        result=_send_with_status({
+            "from":f"{FROM_NAME} <{FROM_ADDRESS}>",
+            "to":[job["recipient_email"]],
+            "subject":"VeriFYD Safety — School family registration",
+            "html":("<p>"+school_name+" is inviting families to review their VeriFYD Safety registration.</p>"
+                "<p><a href='"+html.escape(url,quote=True)+"'>Open school family registration</a></p>"
+                "<p>Use your own email address to verify. No student details are contained in this email. "
+                "Ignore the invitation if you are not a guardian at this school.</p>")})
+        attempted += 1
+        if result.get("accepted"):
+            with get_db() as conn:
+                cur=conn.cursor()
+                cur.execute("""UPDATE verifyd_safety_family_mail_ledger
+                    SET accepted_by_provider=TRUE,provider_message_id=%s WHERE id=%s""",
+                    (result.get("provider_message_id"),ledger_id))
+                cur.execute("""UPDATE verifyd_safety_family_mail_queue SET status='accepted',
+                    recipient_email=NULL,provider_message_id=%s,last_error_code=NULL,updated_at=NOW()
+                    WHERE job_id=%s""",(result.get("provider_message_id"),job["job_id"]))
+                _mail_event(cur,job["job_id"],job["school_id"],"provider_accepted",
+                    actor_id=job.get("created_by"),attempt_count=claimed["attempt_count"],
+                    provider_message_id=result.get("provider_message_id"))
+            accepted += 1
+        else:
+            code=str(result.get("error_code") or "provider_error")[:80]
+            attempt_count=int(claimed["attempt_count"])
+            retry=attempt_count<4
+            delay=min(3600,60*(2**max(0,attempt_count-1)))
+            with get_db() as conn:
+                cur=conn.cursor()
+                cur.execute("UPDATE verifyd_safety_family_mail_ledger SET accepted_by_provider=FALSE WHERE id=%s",(ledger_id,))
+                cur.execute("""UPDATE verifyd_safety_family_mail_queue
+                    SET status=%s,last_error_code=%s,
+                        available_at=CASE WHEN %s THEN NOW()+(%s * INTERVAL '1 second') ELSE available_at END,
+                        updated_at=NOW() WHERE job_id=%s""",
+                    ("retry" if retry else "failed",code,retry,delay,job["job_id"]))
+                _mail_event(cur,job["job_id"],job["school_id"],"retry_scheduled" if retry else "failed",
+                    actor_id=job.get("created_by"),attempt_count=attempt_count,error_code=code)
+            failed += 1
+    return {"attempted":attempted,"provider_accepted":accepted,"deferred_by_quota":deferred,
+            "failed_or_retrying":failed,"batch_limit":batch_limit}
 
 
 class PublicCodeRequest(BaseModel):
@@ -238,13 +480,18 @@ def request_schoolwide_otp(payload:PublicCodeRequest):
             return generic
         reserved=_reserve_mail(cur,school_id,email,"guardian_otp")
     if reserved:
-        accepted=False
+        result={"accepted":False,"provider_message_id":None}
         try:
             otp=create_otp(email)
-            accepted=bool(send_otp_email(email,otp))
+            result=send_otp_email_with_status(email,otp)
+            # A retry uses the same short-lived one-time code. This avoids
+            # invalidating a message that a provider may have accepted before
+            # its response was lost. Duplicate email copies carry one code.
+            if not result.get("accepted"):
+                result=send_otp_email_with_status(email,otp)
         except Exception:
-            accepted=False
-        _delivery_result(reserved,accepted)
+            result={"accepted":False,"provider_message_id":None}
+        _delivery_result(reserved,bool(result.get("accepted")),result.get("provider_message_id"))
     return generic
 
 
@@ -423,7 +670,7 @@ def schoolwide_invitation_history(school_id:str,authorization:Optional[str]=Head
 @router.post("/schools/{school_id}/family-invitations/send-schoolwide")
 def send_schoolwide_campaign(school_id:str,payload:Campaign,
     authorization:Optional[str]=Header(default=None)):
-    """Admin-reviewed, quota bounded. NO student data in messages. No bulk BCC."""
+    """Queue a bounded, admin-reviewed campaign. No student data or bulk BCC."""
     _require_electronic_enabled(school_id)
     actor=_actor(authorization)
     _schema()
@@ -460,36 +707,139 @@ def send_schoolwide_campaign(school_id:str,payload:Campaign,
         cur.execute("""SELECT school_name FROM verifyd_safety_training_schools
             WHERE school_id=%s""",(school_id,))
         school_name=str(cur.fetchone()["school_name"])
-        planned=[]
         campaign_id="sfmailbatch_"+uuid.uuid4().hex
+        queued=duplicate=0
         for email in emails:
             refs_for_email=sorted({str(r["local_ref"]) for r in records
                                    if str(r["guardian_email"]).strip().lower()==email})
-            mail_id=_reserve_mail(cur,school_id,email,"schoolwide_invite",
-                  campaign_id=campaign_id,student_refs=refs_for_email,
-                  sent_by=str(actor["id"]))
-            if mail_id:
-                planned.append((email,mail_id))
+            fingerprint=_hash(school_id+":schoolwide_invite:"+email)
+            cur.execute("""SELECT EXISTS(SELECT 1 FROM verifyd_safety_family_mail_ledger
+                WHERE school_id=%s AND purpose='schoolwide_invite'
+                  AND recipient_hash=%s AND accepted_by_provider IS TRUE) AS found""",
+                (school_id,fingerprint))
+            previously_accepted=bool(cur.fetchone()["found"])
+            cur.execute("""SELECT EXISTS(SELECT 1 FROM verifyd_safety_family_mail_queue
+                WHERE school_id=%s AND recipient_hash=%s
+                  AND status IN ('queued','sending','retry')) AS found""",
+                (school_id,fingerprint))
+            already_pending=bool(cur.fetchone()["found"])
+            if previously_accepted or already_pending:
+                duplicate+=1
+                continue
+            job_id="sfmailq_"+uuid.uuid4().hex
+            cur.execute("""INSERT INTO verifyd_safety_family_mail_queue
+                (job_id,school_id,campaign_id,recipient_hash,recipient_email,student_refs,created_by)
+                VALUES(%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING""",
+                (job_id,school_id,campaign_id,fingerprint,email,refs_for_email,str(actor["id"])))
+            if cur.rowcount:
+                queued+=1
+                _mail_event(cur,job_id,school_id,"queued",actor_id=str(actor["id"]))
+            else:
+                duplicate+=1
+    # Start a small first slice immediately; the queue worker drains the rest
+    # and handles exponential retries without holding the browser request open.
+    first_slice=dispatch_schoolwide_mail_once(school_id=school_id,limit=10) if queued else {
+        "attempted":0,"provider_accepted":0,"deferred_by_quota":0,"failed_or_retrying":0}
     url="https://vfvid.com/Safety#school-family="+code
-    accepted=failed=0
-    for email,mail_id in planned:
-        success=False
-        try:
-            success=bool(_send({"from":f"{FROM_NAME} <{FROM_ADDRESS}>",
-                "to":[email],
-                "subject":"VeriFYD Safety — School family registration",
-                "html":("<p>"+html.escape(school_name)+" is inviting families to "
-                        "review their VeriFYD Safety registration.</p>"
-                        "<p><a href='"+html.escape(url,quote=True)+"'>Open school family registration</a></p>"
-                        "<p>Use your own email address to verify. No student details are contained in this email. "
-                        "Ignore the invitation if you are not a guardian at this school.</p>")}))
-        except Exception:
-            success=False
-        _delivery_result(mail_id,success)
-        accepted+=int(success)
-        failed+=int(not success)
-    return {"ok":True,"unique_verified_recipients":len(emails),
-            "campaign_id":campaign_id,"provider_accepted":accepted,"provider_failed":failed,
-            "skipped_due_to_quota_or_recent_send":len(emails)-len(planned),
-            "mail_service":"Resend","daily_school_limit":_limit("VERIFYD_SAFETY_FAMILY_MAIL_SCHOOL_DAILY",_DEFAULT_DAILY,10000),
+    return {"ok":True,"unique_verified_recipients":len(emails),"campaign_id":campaign_id,
+            "queued":queued,"duplicate_or_already_accepted":duplicate,
+            "provider_accepted":first_slice["provider_accepted"],
+            "attempted":first_slice["attempted"],
+            "deferred_by_quota":first_slice["deferred_by_quota"],
+            "failed_or_retrying":first_slice["failed_or_retrying"],
+            "mail_service":"Resend","school_invitation_daily_limit":_school_mail_limit(school_id,"schoolwide_invite"),
+            "provider_acceptance_is_not_inbox_delivery":True,
             "guardian_access_granted":False,"schoolwide_link":url}
+
+
+@router.get("/schools/{school_id}/family-invitations/delivery-status")
+def family_mail_delivery_status(school_id:str,authorization:Optional[str]=Header(default=None)):
+    """School-admin view of its own delivery capacity and queue; never exposes addresses."""
+    _require_electronic_enabled(school_id)
+    actor=_actor(authorization);_schema()
+    with get_db() as conn:
+        cur=conn.cursor();_school_admin(cur,school_id,str(actor["id"]))
+        cur.execute("""SELECT purpose,count(*) AS used FROM verifyd_safety_family_mail_ledger
+            WHERE school_id=%s AND accepted_by_provider IS DISTINCT FROM FALSE
+              AND created_at>NOW()-INTERVAL '24 hours' GROUP BY purpose""",(school_id,))
+        used={str(r["purpose"]):int(r["used"]) for r in cur.fetchall()}
+        cur.execute("""SELECT purpose,count(*) AS used FROM verifyd_safety_family_mail_ledger
+            WHERE accepted_by_provider IS DISTINCT FROM FALSE
+              AND created_at>NOW()-INTERVAL '24 hours' GROUP BY purpose""")
+        global_used={str(r["purpose"]):int(r["used"]) for r in cur.fetchall()}
+        cur.execute("""SELECT status,count(*) AS n,min(available_at) AS next_at
+            FROM verifyd_safety_family_mail_queue WHERE school_id=%s
+              AND status IN ('queued','retry','sending','failed') GROUP BY status""",(school_id,))
+        queue={str(r["status"]):{"count":int(r["n"]),"next_at":r["next_at"]} for r in cur.fetchall()}
+        cur.execute("""SELECT campaign_id,status,count(*) AS n,min(created_at) AS created_at,
+                min(available_at) AS next_at
+            FROM verifyd_safety_family_mail_queue WHERE school_id=%s
+            GROUP BY campaign_id,status ORDER BY min(created_at) DESC LIMIT 80""",(school_id,))
+        campaigns=[dict(r) for r in cur.fetchall()]
+        cur.execute("""SELECT job_id,campaign_id,student_refs,status,
+                available_at,attempt_count,last_error_code,provider_message_id
+            FROM verifyd_safety_family_mail_queue WHERE school_id=%s
+            ORDER BY created_at DESC LIMIT 200""",(school_id,))
+        jobs=[dict(r) for r in cur.fetchall()]
+        cur.execute("""SELECT event_type,attempt_count,provider_message_id,error_code,created_at
+            FROM verifyd_safety_family_mail_events WHERE school_id=%s
+            ORDER BY created_at DESC LIMIT 200""",(school_id,))
+        events=[dict(r) for r in cur.fetchall()]
+    invite_limit=_school_mail_limit(school_id,"schoolwide_invite")
+    otp_limit=_school_mail_limit(school_id,"guardian_otp")
+    return {"ok":True,"school_id":school_id,
+        "quota_window":"rolling_24_hours",
+        "quotas":{"schoolwide_invite":{"daily_limit":invite_limit,
+                    "used":used.get("schoolwide_invite",0),
+                    "remaining":max(0,invite_limit-used.get("schoolwide_invite",0)),
+                    "global_daily_limit":_global_mail_limit("schoolwide_invite"),
+                    "global_used":global_used.get("schoolwide_invite",0),
+                    "global_remaining":max(0,_global_mail_limit("schoolwide_invite")-global_used.get("schoolwide_invite",0))},
+                 "guardian_otp":{"daily_limit":otp_limit,
+                    "used":used.get("guardian_otp",0),
+                    "remaining":max(0,otp_limit-used.get("guardian_otp",0)),
+                    "global_daily_limit":_global_mail_limit("guardian_otp"),
+                    "global_used":global_used.get("guardian_otp",0),
+                    "global_remaining":max(0,_global_mail_limit("guardian_otp")-global_used.get("guardian_otp",0))}},
+        "queue":queue,"campaigns":campaigns,"jobs":jobs,"recent_events":events,
+        "campaign_batch_maximum":_MAX_CAMPAIGN,
+        "provider_acceptance_is_not_inbox_delivery":True}
+
+
+@router.post("/schools/{school_id}/family-invitations/delivery-queue/dispatch")
+def dispatch_school_mail_queue(school_id:str,authorization:Optional[str]=Header(default=None)):
+    _require_electronic_enabled(school_id)
+    actor=_actor(authorization);_schema()
+    with get_db() as conn:
+        _school_admin(conn.cursor(),school_id,str(actor["id"]))
+    result=dispatch_schoolwide_mail_once(school_id=school_id,limit=10)
+    with get_db() as conn:
+        _audit(conn.cursor(),school_id,str(actor["id"]),"family_mail_queue_dispatched",
+               str(result.get("attempted",0)))
+    return {"ok":True,**result,"school_only":True}
+
+
+@router.post("/schools/{school_id}/family-invitations/delivery-queue/retry-failed")
+def retry_failed_school_mail(school_id:str,authorization:Optional[str]=Header(default=None)):
+    _require_electronic_enabled(school_id)
+    actor=_actor(authorization);_schema()
+    with get_db() as conn:
+        cur=conn.cursor();_school_admin(cur,school_id,str(actor["id"]))
+        cur.execute("""WITH retryable AS (
+            SELECT job_id FROM verifyd_safety_family_mail_queue
+            WHERE school_id=%s AND status='failed' AND recipient_email IS NOT NULL
+              AND attempt_count<6
+            ORDER BY updated_at LIMIT 20 FOR UPDATE SKIP LOCKED
+        ) UPDATE verifyd_safety_family_mail_queue q
+            SET status='queued',last_error_code=NULL,
+                available_at=NOW(),updated_at=NOW()
+            FROM retryable r WHERE q.job_id=r.job_id
+            RETURNING q.job_id,q.attempt_count""",(school_id,))
+        count=int(cur.rowcount or 0)
+        for row in cur.fetchall():
+            _mail_event(cur,row["job_id"],school_id,"manual_retry_queued",
+                actor_id=str(actor["id"]),attempt_count=row["attempt_count"])
+        _audit(cur,school_id,str(actor["id"]),"family_mail_failed_jobs_requeued",str(count))
+    result=dispatch_schoolwide_mail_once(school_id=school_id,limit=10) if count else {
+        "attempted":0,"provider_accepted":0,"deferred_by_quota":0,"failed_or_retrying":0}
+    return {"ok":True,"requeued":count,**result,"school_only":True}
