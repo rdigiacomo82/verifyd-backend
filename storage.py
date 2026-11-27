@@ -26,7 +26,12 @@ log = logging.getLogger("verifyd.storage")
 # ── Configuration ─────────────────────────────────────────────
 ACCOUNT_ID  = os.environ.get("R2_ACCOUNT_ID", "")
 ACCESS_KEY  = os.environ.get("R2_ACCESS_KEY_ID", "")
-SECRET_KEY  = os.environ.get("R2_SECRET_KEY", "")
+# Render currently has the existing Trust Voice secret variable name.
+# Accept it as a compatibility alias for the shared R2 storage layer.
+SECRET_KEY  = (
+    os.environ.get("R2_SECRET_KEY", "").strip()
+    or os.environ.get("R2_TRUST_VOICE_SECRET_KEY", "").strip()
+)
 BUCKET      = os.environ.get("R2_BUCKET", "verifyd-videos")
 PUBLIC_URL  = os.environ.get("R2_PUBLIC_URL", "")  # optional CDN URL
 
