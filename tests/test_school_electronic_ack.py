@@ -59,7 +59,8 @@ class ElectronicGuardianConsentContracts(unittest.TestCase):
         self.assertIn("_school_admin",send)
         self.assertIn("family_contact_drafts",send)
         self.assertIn("school_confirmed_guardian_recipient_assignments",inspect.getsource(e.Campaign))
-        self.assertIn("_reserve_mail",send)
+        self.assertIn("dispatch_schoolwide_mail_once",send)
+        self.assertIn("_MAX_CAMPAIGN",send)
         self.assertNotIn("s.first_name",send)
         self.assertTrue(any(r.path.endswith("/send-schoolwide") for r in e.router.routes))
         self.assertEqual(e._limit("NOT_SET_TEST_LIMIT",40,250),40)
@@ -84,6 +85,29 @@ class ElectronicGuardianConsentContracts(unittest.TestCase):
                 "VERIFYD_SAFETY_ELECTRONIC_ACK_SCHOOL_IDS":"test-school"
             },clear=True):
                 self.assertIsNone(e._require_electronic_enabled("test-school"))
+
+    def test_family_mail_quotas_are_separate_and_queue_is_audited(self):
+        source=inspect.getsource(e._reserve_mail)
+        self.assertIn('prefix = "INVITE" if purpose == "schoolwide_invite" else "OTP"',source)
+        self.assertIn("_DEFAULT_GLOBAL_INVITE_DAILY",source)
+        self.assertIn("_DEFAULT_GLOBAL_OTP_DAILY",source)
+        self.assertIn("accepted_by_provider IS DISTINCT FROM FALSE",source)
+        from unittest.mock import patch
+        import os
+        with patch.dict(os.environ, {
+            "VERIFYD_SAFETY_FAMILY_INVITE_GLOBAL_DAILY":"12",
+            "VERIFYD_SAFETY_FAMILY_OTP_GLOBAL_DAILY":"31",
+        }, clear=True):
+            self.assertEqual(e._global_mail_limit("schoolwide_invite"),12)
+            self.assertEqual(e._global_mail_limit("guardian_otp"),31)
+        queue=inspect.getsource(e.dispatch_schoolwide_mail_once)
+        for value in ("FOR UPDATE SKIP LOCKED", "provider_message_id", "attempt_count<4", "worker_claim_expired"):
+            self.assertIn(value,queue)
+        status=inspect.getsource(e.family_mail_delivery_status)
+        self.assertIn("guardian_otp",status)
+        self.assertIn("schoolwide_invite",status)
+        self.assertNotIn("recipient_email",status)
+        self.assertEqual(e._DEFAULT_GLOBAL_INVITE_DAILY + e._DEFAULT_GLOBAL_OTP_DAILY,55)
 
     def test_paper_and_authority_still_required(self):
         from fastapi import HTTPException

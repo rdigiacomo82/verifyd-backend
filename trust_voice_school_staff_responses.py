@@ -14,7 +14,8 @@ from fastapi import APIRouter, Header, HTTPException
 from database import get_db
 from trust_voice_school_safety_training import _actor, _audit, _membership
 from trust_voice_school_incident_chat import (
-    Reply, _authorize, _schema as _incident_schema, _allowed, _dispatch,
+    Reply, _authorize, _schema as _incident_schema, _notifications_allowed,
+    _dispatch, _record_event,
 )
 
 router = APIRouter(prefix="/trust-voice/school-safety",
@@ -90,7 +91,11 @@ def _send_school_response(report_id: str, actor_id: str, payload: Reply,
         if saved:
             _audit(cur,report["school_id"],actor_id,
                    "school_test_response_saved",report_id)
-            if _allowed(report["school_id"]):
+            cur.execute("""SELECT 1 FROM verifyd_safety_incident_lifecycle_events
+                WHERE report_id=%s AND event_type='school_response_initiated' LIMIT 1""",(report_id,))
+            if not cur.fetchone():
+                _record_event(cur,report_id,str(report["school_id"]),"school_response_initiated",actor_id)
+            if _notifications_allowed(str(report["school_id"]),str(report.get("report_mode") or "test")):
                 # School thread recipient selection stays separate from guardians.
                 # Student may not have a push subscription; foreground polling
                 # still receives the stored text through its restricted token.
@@ -114,14 +119,15 @@ def _send_school_response(report_id: str, actor_id: str, payload: Reply,
                         (report_id,recipient,"schoolreply:"+message_id))
     notification = {"attempted_recipients":0,"push_provider_accepted":0,
                     "device_delivery_confirmed":False}
-    if saved and _allowed(report["school_id"]):
+    if saved and _notifications_allowed(str(report["school_id"]),str(report.get("report_mode") or "test")):
         try:
             notification = _dispatch(report_id,"schoolreply:"+message_id)
         except Exception:
             pass  # Saved message remains available and outbox retry is durable.
     return {"ok":True,"saved":True,"duplicate":not bool(saved),
             "school_staff_thread":True,"private_guardian_thread_visible":False,
-            "test_only":True,"notification":notification,"emergency_dispatch":False}
+            "mode":report.get("report_mode","test"),"notification":notification,
+            "emergency_dispatch":False,"device_delivery_confirmed":False}
 
 
 @router.get("/reports/{report_id}/school-response")

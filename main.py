@@ -320,6 +320,42 @@ async def lifespan(app: FastAPI):
     _t.start()
     log.info("Keepalive scheduler started — pinging worker every 8 minutes")
 
+    # School delivery uses a Postgres outbox so campaign requests stay short
+    # and provider failures can be retried with bounded backoff. The mail
+    # worker only sends explicitly queued Principal campaigns. Incident push
+    # processing stays separately gated because it can create real device
+    # notifications; its default is OFF until the operator enables the worker.
+    def _school_safety_delivery_scheduler():
+        _time.sleep(20)
+        while True:
+            if os.getenv("VERIFYD_SAFETY_MAIL_QUEUE_WORKER_ENABLED", "1").lower() in ("1", "true", "yes", "on"):
+                try:
+                    from trust_voice_school_electronic_ack import dispatch_schoolwide_mail_once
+                    result=dispatch_schoolwide_mail_once(limit=10)
+                    if result.get("attempted") or result.get("failed_or_retrying"):
+                        log.info("School mail queue tick: attempted=%d accepted=%d deferred=%d retrying=%d",
+                            result.get("attempted",0),result.get("provider_accepted",0),
+                            result.get("deferred_by_quota",0),result.get("failed_or_retrying",0))
+                except Exception as _mail_exc:
+                    log.warning("School mail queue unavailable (%s)",type(_mail_exc).__name__)
+            if os.getenv("VERIFYD_SAFETY_INCIDENT_DELIVERY_WORKER_ENABLED", "0").lower() in ("1", "true", "yes", "on"):
+                try:
+                    from trust_voice_school_incident_chat import dispatch_school_pending_once,dispatch_escalations_once
+                    escalations=dispatch_escalations_once()
+                    pushes=dispatch_school_pending_once()
+                    if pushes.get("jobs") or escalations.get("escalation_jobs_queued"):
+                        log.info("School incident delivery tick: jobs=%d provider_accepted=%d escalation_jobs=%d",
+                            pushes.get("jobs",0),pushes.get("provider_accepted",0),
+                            escalations.get("escalation_jobs_queued",0))
+                except Exception as _incident_exc:
+                    log.warning("School incident delivery unavailable (%s)",type(_incident_exc).__name__)
+            _time.sleep(30)
+
+    _safety_delivery_thread=_threading.Thread(
+        target=_school_safety_delivery_scheduler,daemon=True,name="school-safety-delivery")
+    _safety_delivery_thread.start()
+    log.info("School Safety delivery scheduler started (incident delivery gated separately)")
+
     yield
     # Shutdown (add cleanup here if needed)
 
