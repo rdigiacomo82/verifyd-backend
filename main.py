@@ -93,6 +93,7 @@ from trust_voice_school_multi_admin import router as school_multi_admin_router
 from trust_voice_school_guardian_contacts import router as school_guardian_contacts_router
 from trust_voice_school_incident_chat import router as school_incident_chat_router
 from trust_voice_school_staff_responses import router as school_staff_responses_router
+from trust_voice_account_deletion import router as trust_voice_account_deletion_router
 from trust_voice_school_choice_catalog import router as school_choice_catalog_router
 from trust_voice_school_student_device import router as school_student_device_router
 from trust_voice_school_student_email import router as school_student_email_router
@@ -339,7 +340,7 @@ app.include_router(trust_voice_trust_circle_router)
 
 # VERIFYD_TRUST_VOICE_MESSAGES_V1
 app.include_router(trust_voice_messages_router)
-# Apple StoreKit receipts; fail closed until verified roots, V2 notifications and enablement.
+# Apple IAP is disabled by default until sandbox readiness and trusted roots are configured.
 app.include_router(trust_voice_circle_apple_iap_router)
 
 # VERIFYD_TRUST_VOICE_GROUPS_V1
@@ -407,6 +408,8 @@ app.include_router(school_multi_admin_router)
 app.include_router(school_guardian_contacts_router)
 app.include_router(school_incident_chat_router)
 app.include_router(school_staff_responses_router)
+# App Store 5.1.1(v): authenticated permanent-account-deletion request intake.
+app.include_router(trust_voice_account_deletion_router)
 app.include_router(school_choice_catalog_router)
 app.include_router(school_student_device_router)
 app.include_router(school_student_email_router)
