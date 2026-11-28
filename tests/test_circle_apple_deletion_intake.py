@@ -22,6 +22,28 @@ class DeleteRequestTests(unittest.TestCase):
             deletion.DeleteRequest.model_validate({"confirm":"yes"})
         self.assertEqual(deletion.DeleteRequest(confirm="DELETE").confirm,"DELETE")
 
+    def test_intake_disabled_until_operator_and_mailbox_are_configured(self):
+        with patch.dict(deletion.os.environ, {}, clear=True):
+            self.assertFalse(deletion._intake_ready())
+            with self.assertRaises(HTTPException) as exc:
+                deletion._require_intake_ready()
+            self.assertEqual(exc.exception.status_code, 503)
+        with patch.dict(deletion.os.environ, {
+            "VERIFYD_ACCOUNT_DELETION_ENABLED": "1",
+            "VERIFYD_ACCOUNT_DELETION_OPERATOR_IDS": "operator-id",
+            "VERIFYD_ACCOUNT_DELETION_NOTIFY_EMAIL": "support@vfvid.com",
+        }, clear=True):
+            self.assertTrue(deletion._intake_ready())
+
+    def test_disabled_intake_never_creates_a_database_row(self):
+        with patch.object(deletion, "_actor", return_value={"id":"id_1","status":"active"}), \
+             patch.object(deletion, "_schema") as schema, \
+             patch.dict(deletion.os.environ, {}, clear=True):
+            with self.assertRaises(HTTPException) as exc:
+                deletion.create_deletion_request(deletion.DeleteRequest(confirm="DELETE"), "Bearer valid")
+            self.assertEqual(exc.exception.status_code, 503)
+            schema.assert_not_called()
+
     def test_request_uses_authenticated_bearer_not_client_identity(self):
         src=inspect.getsource(deletion.create_deletion_request)
         self.assertIn("actor = _actor(authorization)",src)
@@ -35,7 +57,8 @@ class DeleteRequestTests(unittest.TestCase):
         cur.fetchone.return_value={"request_id":"tvdel_existing","status":"pending",
                   "created_at":now,"target_completion_at":now+timedelta(days=30)}
         with patch.object(deletion,"_actor",return_value={"id":"id_1","status":"active"}),patch.object(
-            deletion,"_schema"),patch.object(deletion,"get_db",return_value=db(cur)),patch.object(
+            deletion,"_schema"),patch.object(deletion,"_require_intake_ready"),patch.object(
+            deletion,"get_db",return_value=db(cur)),patch.object(
             deletion,"_notify_operator") as mail:
             response=deletion.create_deletion_request(deletion.DeleteRequest(confirm="DELETE"),"Bearer valid")
         self.assertEqual(response["status"],"pending")
