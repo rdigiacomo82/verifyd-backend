@@ -159,6 +159,17 @@ def _schema():
                 received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 PRIMARY KEY(environment,notification_uuid)
             )""")
+        # Refunds can arrive BEFORE the customer's first /verify request.
+        # Keep the signed, verified revocation even when no Circle owner exists.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS circle_apple_subscription_revocations (
+                environment TEXT NOT NULL CHECK (environment IN ('Production','Sandbox')),
+                transaction_id TEXT NOT NULL,
+                original_transaction_id TEXT NOT NULL,
+                notification_uuid TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                PRIMARY KEY(environment,transaction_id)
+            )""")
 
 def _record(cur, owner: str, tx: dict, revoked_override: bool = False):
     cur.execute("""
@@ -230,6 +241,13 @@ def verify(payload: TransactionClaim, authorization: Optional[str] = Header(None
         cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))",
                     ("apple-iap:"+tx["environment"]+":"+tx["original"],))
         cur.execute("""
+            SELECT 1 FROM circle_apple_subscription_revocations
+            WHERE environment=%s AND transaction_id=%s
+            LIMIT 1
+            """, (tx["environment"], tx["transaction_id"]))
+        if cur.fetchone():
+            raise HTTPException(403, detail={"error": "apple_transaction_refunded_or_revoked"})
+        cur.execute("""
             INSERT INTO circle_apple_subscription_owners
             (environment,original_transaction_id,circle_identity_id)
             VALUES (%s,%s,%s) ON CONFLICT DO NOTHING
@@ -287,6 +305,18 @@ def signed_notification(payload: NotificationRequest):
         if not cur.fetchone():
             return {"accepted": True, "duplicate": True}
         if tx:
+            # Serialize against a concurrent initial claim: no verified old JWS
+            # can slip in after a refund but before an account is known.
+            cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))",
+                        ("apple-iap:"+environment+":"+tx["original"],))
+            if event in ("REFUND", "REVOKE"):
+                cur.execute("""
+                    INSERT INTO circle_apple_subscription_revocations
+                    (environment,transaction_id,original_transaction_id,notification_uuid)
+                    VALUES (%s,%s,%s,%s)
+                    ON CONFLICT DO NOTHING
+                    """, (environment, tx["transaction_id"], tx["original"],
+                          str(matched.notificationUUID)))
             cur.execute("""SELECT circle_identity_id
                 FROM circle_apple_subscription_owners
                 WHERE environment=%s AND original_transaction_id=%s FOR UPDATE
