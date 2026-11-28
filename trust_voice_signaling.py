@@ -19,7 +19,8 @@
 #   - Creates/uses verifyd_voice_sessions for persistent session revocation
 #   - Does NOT transport microphone/audio through the backend
 #   - WebRTC media remains browser-to-browser where network conditions permit
-#   - Presence/call state is in-memory beta state only
+#   - Local state remains the default unless shared Redis state is enabled.
+#   - Shared mode uses Redis leases, Pub/Sub fan-out and atomic call records.
 # ============================================================
 
 from __future__ import annotations
@@ -54,12 +55,14 @@ from fastapi.concurrency import run_in_threadpool
 from database import create_otp, get_db, is_valid_email, verify_otp
 from emailer import send_otp_email
 from trust_voice_permissions import call_permission_decision
+from trust_voice_shared_state import enabled as _shared_state_enabled
+from trust_voice_shared_state import get_voice_shared_state
 
 log = logging.getLogger("verifyd.trust_voice.signaling")
 
 router = APIRouter(prefix="/trust-voice", tags=["Trust Voice Signaling"])
 
-FEATURE_VERSION = "0.7.1"
+FEATURE_VERSION = "0.8.0"
 
 # Trust Voice sessions are persistent and server-revocable.
 # New sessions do not expire based on elapsed time.
@@ -77,6 +80,108 @@ _state_lock = asyncio.Lock()
 _persistent_session_schema_ready = False
 _call_history_schema_ready = False
 _call_expiry_tasks: Dict[str, asyncio.Task] = {}
+
+
+async def _local_send_to_identity(identity_id: str, payload: dict) -> int:
+    """Deliver to sockets owned by this process only."""
+    async with _state_lock:
+        sockets = list(_connections.get(identity_id, set()))
+    sent = 0
+    for ws in sockets:
+        try:
+            await ws.send_json(payload)
+            sent += 1
+        except Exception:
+            pass
+    call_id = str(payload.get("call_id") or "")
+    if call_id and not (payload.get("type") == "call_ended"
+                        and payload.get("reason") == "answered_on_another_device"):
+        native = _active_calls.get(call_id, {}).get("android_media_socket")
+        if native is not None and identity_id == _active_calls.get(call_id, {}).get("callee_id"):
+            try:
+                await native.send_json(payload)
+                sent += 1
+            except Exception:
+                pass
+    return sent
+
+
+async def _shared_state():
+    if not _shared_state_enabled():
+        return None
+    return await get_voice_shared_state(_local_send_to_identity, _shared_call_expired)
+
+
+async def _get_call_state(call_id: str) -> dict:
+    if _shared_state_enabled():
+        state = await _shared_state()
+        call = await state.get_call(call_id)
+        if not call:
+            return {}
+        # WebSocket objects are process-local and are deliberately never put
+        # into Redis. Keep the optional Android media socket on its owner node.
+        local = _active_calls.get(call_id, {})
+        if local.get("android_media_socket") is not None:
+            call["android_media_socket"] = local["android_media_socket"]
+        return call
+    return dict(_active_calls.get(call_id) or {})
+
+
+async def _list_call_states(identity_id: str) -> list[dict]:
+    if _shared_state_enabled():
+        state = await _shared_state()
+        calls = await state.list_calls(identity_id)
+        for call in calls:
+            local = _active_calls.get(str(call.get("call_id") or ""), {})
+            if local.get("android_media_socket") is not None:
+                call["android_media_socket"] = local["android_media_socket"]
+        return calls
+    async with _state_lock:
+        return [
+            dict(call) for call in _active_calls.values()
+            if identity_id in {call.get("caller_id"), call.get("callee_id")}
+        ]
+
+
+async def _put_call_state(call: dict) -> None:
+    if _shared_state_enabled():
+        state = await _shared_state()
+        await state.put_call(call)
+    async with _state_lock:
+        _active_calls[str(call["call_id"])] = dict(call)
+
+
+async def _update_call_state(call_id: str, *, expected_state: Optional[str] = None,
+                             changes: Optional[dict] = None,
+                             remove: bool = False) -> Optional[dict]:
+    if _shared_state_enabled():
+        state = await _shared_state()
+        call = await state.update_call(
+            call_id, expected_state=expected_state, changes=changes, remove=remove,
+        )
+        if call is None:
+            return None
+        async with _state_lock:
+            local = _active_calls.get(call_id, {})
+            if local.get("android_media_socket") is not None:
+                call["android_media_socket"] = local["android_media_socket"]
+            if remove:
+                _active_calls.pop(call_id, None)
+            else:
+                _active_calls[call_id] = dict(call)
+        return call
+    async with _state_lock:
+        call = _active_calls.get(call_id)
+        if not call or (expected_state and call.get("state") != expected_state):
+            return None
+        updated = dict(call)
+        if changes:
+            updated.update(changes)
+        if remove:
+            _active_calls.pop(call_id, None)
+        else:
+            _active_calls[call_id] = updated
+        return updated
 
 
 class SessionCodeRequest(BaseModel):
@@ -435,65 +540,46 @@ def _cancel_call_expiry(call_id: str) -> None:
 async def _expire_unanswered_call(call_id: str) -> None:
     try:
         # Push delivery and database work must not extend the ringing deadline.
-        call = _active_calls.get(call_id, {})
+        call = await _get_call_state(call_id)
         remaining = max(0, float(call.get("created_at") or 0) + INVITE_TTL_SECONDS - time.time())
         await asyncio.sleep(remaining)
     except asyncio.CancelledError:
         return
 
-    async with _state_lock:
-        call = dict(_active_calls.get(call_id, {}))
+    call = await _update_call_state(
+        call_id,
+        expected_state="ringing",
+        changes={"state": "missed"},
+        remove=True,
+    )
+    if call:
+        await _finish_expired_call(call_id, call)
 
-        if not call or call.get("state") != "ringing":
-            return
 
-        _active_calls.pop(call_id, None)
+async def _shared_call_expired(call_id: str, call: dict) -> None:
+    """Finalize an unanswered call claimed by the Redis expiry reaper."""
+    await _finish_expired_call(call_id, call)
 
+
+async def _finish_expired_call(call_id: str, call: dict) -> None:
     caller_id = str(call.get("caller_id") or "")
     callee_id = str(call.get("callee_id") or "")
-    missed_at = _record_call_terminal(
-        call_id,
-        "missed",
-        "no_answer",
-    )
+    missed_at = _record_call_terminal(call_id, "missed", "no_answer")
+    caller_identity = _identity_by_id(caller_id) if caller_id else None
 
-    caller_identity = (
-        _identity_by_id(caller_id)
-        if caller_id
-        else None
-    )
-
-    await _send_to_identity(
-        caller_id,
-        {
-            "type": "call_no_answer",
-            "call_id": call_id,
-            "reason": "no_answer",
-        },
-    )
-
-    await _send_to_identity(
-        callee_id,
-        {
-            "type": "call_missed",
-            "call_id": call_id,
-            "caller": (
-                _public_identity(caller_identity)
-                if caller_identity
-                else None
-            ),
-            "missed_at": missed_at,
-        },
-    )
+    await _send_to_identity(caller_id, {
+        "type": "call_no_answer", "call_id": call_id, "reason": "no_answer",
+    })
+    await _send_to_identity(callee_id, {
+        "type": "call_missed",
+        "call_id": call_id,
+        "caller": _public_identity(caller_identity) if caller_identity else None,
+        "missed_at": missed_at,
+    })
 
     try:
         from trust_voice_push import notify_identity_push
-
-        caller_public = (
-            _public_identity(caller_identity)
-            if caller_identity
-            else None
-        )
+        caller_public = _public_identity(caller_identity) if caller_identity else None
         caller_name = (
             str((caller_public or {}).get("display_name") or "").strip()
             or str((caller_public or {}).get("display_label") or "").strip()
@@ -501,7 +587,6 @@ async def _expire_unanswered_call(call_id: str) -> None:
             or "Someone"
         )
         call_type = str(call.get("call_type") or "audio").strip().lower()
-
         await asyncio.to_thread(
             notify_identity_push,
             callee_id,
@@ -510,17 +595,11 @@ async def _expire_unanswered_call(call_id: str) -> None:
             body=f"Missed {call_type} call from {caller_name}.",
             url="/voice?missed=1",
             tag=f"trust-voice-missed-{call_id}",
-            data={
-                "call_id": call_id,
-                "call_type": call_type,
-            },
+            data={"call_id": call_id, "call_type": call_type},
             ttl=3600,
         )
     except Exception:
-        log.warning(
-            "Trust Voice missed-call Web Push dispatch failed",
-            exc_info=True,
-        )
+        log.warning("Trust Voice missed-call Web Push dispatch failed", exc_info=True)
 
 
 def _schedule_call_expiry(call_id: str) -> None:
@@ -988,27 +1067,10 @@ async def _send_to_identity(
     identity_id: str,
     payload: dict,
 ) -> int:
-    async with _state_lock:
-        sockets = list(
-            _connections.get(
-                identity_id,
-                set(),
-            )
-        )
-
-    sent = 0
-
-    for ws in sockets:
-        try:
-            await ws.send_json(
-                payload
-            )
-
-            sent += 1
-
-        except Exception:
-            pass
-
+    sent = await _local_send_to_identity(identity_id, payload)
+    if _shared_state_enabled():
+        state = await _shared_state()
+        await state.publish_identity_event(identity_id, payload)
     return sent
 
 
@@ -1140,14 +1202,12 @@ async def _send_incoming_call_pilot_push(
 async def _replay_pilot_ringing_calls(identity_id: str, websocket: WebSocket) -> set[str]:
     """Deliver live invitations and return the call IDs sent on this socket."""
     replayed_call_ids = set()
-    async with _state_lock:
-        pending = [
-            dict(call)
-            for call in _active_calls.values()
-            if call.get("state") == "ringing"
-            and (call.get("pilot_incoming_push") or call.get("native_incoming_push") or call.get("android_incoming_push"))
-            and str(call.get("callee_id") or "") == identity_id
-        ]
+    pending = [
+        dict(call) for call in await _list_call_states(identity_id)
+        if call.get("state") == "ringing"
+        and (call.get("pilot_incoming_push") or call.get("native_incoming_push") or call.get("android_incoming_push"))
+        and str(call.get("callee_id") or "") == identity_id
+    ]
     for call in pending:
         call_age = time.time() - float(call.get("created_at") or 0)
         if not (0 <= call_age < INVITE_TTL_SECONDS):
@@ -1183,6 +1243,9 @@ async def _replay_pilot_ringing_calls(identity_id: str, websocket: WebSocket) ->
 async def _presence(
     identity_id: str,
 ) -> bool:
+    if _shared_state_enabled():
+        state = await _shared_state()
+        return await state.is_online(identity_id)
     async with _state_lock:
         return bool(
             _connections.get(
@@ -1196,6 +1259,10 @@ async def _register(
     ws: WebSocket,
     token_payload: dict,
 ) -> None:
+    if _shared_state_enabled():
+        state = await _shared_state()
+        await state.add_connection(identity_id)
+
     async with _state_lock:
         _connections[
             identity_id
@@ -1233,6 +1300,7 @@ async def _register(
         }
 
 
+
 async def _unregister(identity_id: str, ws: WebSocket) -> None:
     async with _state_lock:
         if identity_id in _connections:
@@ -1247,7 +1315,7 @@ async def _unregister(identity_id: str, ws: WebSocket) -> None:
         identity_still_online = bool(_connections.get(identity_id))
         affected = []
 
-        if not identity_still_online:
+        if not identity_still_online and not _shared_state_enabled():
             for call_id, call in list(_active_calls.items()):
                 if identity_id in {
                     call.get("caller_id"),
@@ -1268,6 +1336,34 @@ async def _unregister(identity_id: str, ws: WebSocket) -> None:
                         continue
                     affected.append((call_id, dict(call)))
                     _active_calls.pop(call_id, None)
+
+    if _shared_state_enabled():
+        state = await _shared_state()
+        await state.remove_connection(identity_id)
+        identity_still_online = await _presence(identity_id)
+        if not identity_still_online:
+            for call in await _list_call_states(identity_id):
+                call_id = str(call.get("call_id") or "")
+                if not call_id:
+                    continue
+                if (identity_id == call.get("callee_id") and call.get("state") == "ringing"
+                        and (call.get("pilot_incoming_push") or call.get("native_incoming_push")
+                             or call.get("android_incoming_push"))):
+                    continue
+                if identity_id == call.get("callee_id") and call.get("android_media_socket") is not None:
+                    continue
+                old_state = str(call.get("state") or "")
+                terminal_state = (
+                    "missed" if old_state == "ringing" and identity_id == call.get("callee_id")
+                    else "canceled" if old_state == "ringing" else "ended"
+                )
+                removed = await _update_call_state(
+                    call_id, expected_state=old_state,
+                    changes={"state": terminal_state}, remove=True,
+                )
+                if removed:
+                    removed["state"] = old_state
+                    affected.append((call_id, removed))
 
     for call_id, call in affected:
         _cancel_call_expiry(call_id)
@@ -1408,14 +1504,22 @@ def _recent_otp_request(
 @router.get(
     "/signaling/health"
 )
-def signaling_health():
+async def signaling_health():
     _require_enabled()
     _secret()
     ensure_persistent_session_schema()
     ensure_call_history_schema()
 
+    shared_available = False
+    shared_error = None
+    if _shared_state_enabled():
+        try:
+            shared_available = await (await _shared_state()).health()
+        except Exception as exc:
+            shared_error = type(exc).__name__
+
     return {
-        "status": "ok",
+        "status": "ok" if (not _shared_state_enabled() or shared_available) else "degraded",
         "feature": (
             "trust_voice_signaling"
         ),
@@ -1462,9 +1566,12 @@ def signaling_health():
         "recording_consent": (
             "peer_required_v1"
         ),
-        "presence_store": (
-            "memory_beta"
-        ),
+        "presence_store": "redis_shared_v1" if _shared_state_enabled() else "memory_single_instance",
+        "active_call_store": "redis_shared_v1" if _shared_state_enabled() else "memory_single_instance",
+        "cross_instance_websocket_fanout": "redis_pubsub_v1" if _shared_state_enabled() else "disabled",
+        "shared_state_enabled": _shared_state_enabled(),
+        "shared_state_available": shared_available if _shared_state_enabled() else False,
+        "shared_state_error": shared_error,
     }
 
 
@@ -2082,8 +2189,7 @@ async def get_presence(
 
 
 async def native_call_snapshot(call_id: str, identity_id: str) -> dict:
-    async with _state_lock:
-        call = dict(_active_calls.get(call_id) or {})
+    call = await _get_call_state(call_id)
     if not call or identity_id not in {call.get("caller_id"), call.get("callee_id")}:
         raise HTTPException(404, detail={"error": "call_not_found"})
     if call.get("state") == "ringing" and time.time() >= call["created_at"] + INVITE_TTL_SECONDS:
@@ -2115,8 +2221,7 @@ async def relay_call_media(call_id: str, identity_id: str, message: dict, *,
     if not call_id:
         raise HTTPException(400, detail={"error": "call_id_required"})
 
-    async with _state_lock:
-        call = dict(_active_calls.get(call_id) or {})
+    call = await _get_call_state(call_id)
     if not call:
         raise HTTPException(404, detail={"error": "call_not_found"})
     caller_id, callee_id = call["caller_id"], call["callee_id"]
@@ -2166,53 +2271,76 @@ async def relay_call_media(call_id: str, identity_id: str, message: dict, *,
 async def apply_call_action(call_id: str, identity_id: str, action: str, *,
                             android_socket: Optional[WebSocket] = None,
                             transport: str = "native_http") -> dict:
-    """One atomic transition for native HTTP and existing WebSocket clients."""
+    """Atomically coordinate a call transition across backend instances."""
     if action not in {"call_answer", "call_decline", "call_end"}:
         raise HTTPException(400, detail={"error": "invalid_action"})
     if not call_id:
         raise HTTPException(400, detail={"error": "call_id_required"})
-    async with _state_lock:
-        snapshot = dict(_active_calls.get(call_id) or {})
-    if not snapshot or identity_id not in {snapshot.get("caller_id"), snapshot.get("callee_id")}:
+
+    call = await _get_call_state(call_id)
+    if not call or identity_id not in {call.get("caller_id"), call.get("callee_id")}:
         raise HTTPException(404, detail={"error": "call_not_found"})
+
     if action == "call_answer":
         from trust_voice_blocking import identities_blocked
-        blocked = await asyncio.to_thread(identities_blocked, snapshot["caller_id"], snapshot["callee_id"])
-        caller = await asyncio.to_thread(_identity_by_id, snapshot["caller_id"])
-        callee = await asyncio.to_thread(_identity_by_id, snapshot["callee_id"])
+        blocked = await asyncio.to_thread(identities_blocked, call["caller_id"], call["callee_id"])
+        caller = await asyncio.to_thread(_identity_by_id, call["caller_id"])
+        callee = await asyncio.to_thread(_identity_by_id, call["callee_id"])
         allowed = False
         if caller and callee:
             allowed, _ = await asyncio.to_thread(call_permission_decision, caller=caller, callee=callee)
         if blocked or not allowed:
             raise HTTPException(403, detail={"error": "not_allowed"})
-    async with _state_lock:
-        call = _active_calls.get(call_id)
-        if not call or identity_id not in {call.get("caller_id"), call.get("callee_id")}:
-            raise HTTPException(404, detail={"error": "call_not_found"})
-        if action in {"call_answer", "call_decline"}:
-            if identity_id != call["callee_id"]:
-                raise HTTPException(403, detail={"error": "not_callee"})
-            if call["state"] != "ringing":
-                raise HTTPException(409, detail={"error": "invalid_call_state"})
-            if time.time() >= call["created_at"] + INVITE_TTL_SECONDS:
-                raise HTTPException(410, detail={"error": "call_expired"})
-        native = call.get("android_media_socket")
-        if action == "call_end" and (
-            (android_socket is not None and native is not android_socket)
-            or (native is not None and identity_id == call["callee_id"] and android_socket is None)
-        ):
-            raise HTTPException(409, detail={"error": "call_media_owned_by_another_device"})
-        if android_socket is not None and action == "call_answer":
-            if call["call_type"] != "audio" or not _webrtc_enabled():
-                raise HTTPException(409, detail={"error": "native_audio_unavailable"})
-            if not _connections.get(call["caller_id"]):
-                raise HTTPException(409, detail={"error": "webrtc_peer_unavailable"})
-            call["android_media_socket"] = android_socket
-        call = dict(call)
-        if action == "call_answer":
-            _active_calls[call_id]["state"] = "answered"
-        else:
-            _active_calls.pop(call_id, None)
+
+    if action in {"call_answer", "call_decline"}:
+        if identity_id != call["callee_id"]:
+            raise HTTPException(403, detail={"error": "not_callee"})
+        if call.get("state") != "ringing":
+            raise HTTPException(409, detail={"error": "invalid_call_state"})
+        if time.time() >= float(call["created_at"]) + INVITE_TTL_SECONDS:
+            raise HTTPException(410, detail={"error": "call_expired"})
+
+    native = call.get("android_media_socket")
+    if action == "call_end" and (
+        (android_socket is not None and native is not android_socket)
+        or (native is not None and identity_id == call["callee_id"] and android_socket is None)
+    ):
+        raise HTTPException(409, detail={"error": "call_media_owned_by_another_device"})
+
+    if android_socket is not None and action == "call_answer":
+        if call.get("call_type") != "audio" or not _webrtc_enabled():
+            raise HTTPException(409, detail={"error": "native_audio_unavailable"})
+        if not await _presence(call["caller_id"]):
+            raise HTTPException(409, detail={"error": "webrtc_peer_unavailable"})
+        async with _state_lock:
+            local = dict(_active_calls.get(call_id) or {})
+            local["android_media_socket"] = android_socket
+            _active_calls[call_id] = local
+        native = android_socket
+
+    old_state = str(call.get("state") or "")
+    if action == "call_answer":
+        target_state = "answered"
+        remove = False
+    elif action == "call_decline":
+        target_state = "declined"
+        remove = True
+    else:
+        target_state = "canceled" if old_state == "ringing" else "ended"
+        remove = True
+
+    updated = await _update_call_state(
+        call_id,
+        expected_state=old_state,
+        changes={"state": target_state},
+        remove=remove,
+    )
+    if not updated:
+        raise HTTPException(409, detail={"error": "invalid_call_state"})
+    call["state"] = old_state
+    if native is not None:
+        call["android_media_socket"] = native
+
     _cancel_call_expiry(call_id)
     if action == "call_answer":
         _record_call_answered(call_id)
@@ -2221,30 +2349,25 @@ async def apply_call_action(call_id: str, identity_id: str, action: str, *,
         _record_call_terminal(call_id, "declined", "declined")
         event = {"type": "call_declined", "call_id": call_id}
     else:
-        ringing = call["state"] == "ringing"
-        _record_call_terminal(call_id, "canceled" if ringing else "ended",
-                              "ended_before_answer" if ringing else "ended")
+        _record_call_terminal(
+            call_id,
+            "canceled" if old_state == "ringing" else "ended",
+            "ended_before_answer" if old_state == "ringing" else "ended",
+        )
         event = {"type": "call_ended", "call_id": call_id, "reason": "ended"}
         log.info("call_trace event=end call_id=%s actor=%s transport=%s state=%s",
                  call_id, "caller" if identity_id == call["caller_id"] else "callee",
-                 "android_media" if android_socket is not None else transport, call["state"])
-    native = call.get("android_media_socket")
+                 "android_media" if android_socket is not None else transport, old_state)
+
     if native is not None and action == "call_answer":
-        # Release any duplicate ring on the web callee. The caller's existing
-        # browser starts its offer as soon as it sees call_answered.
-        await native.send_json(event)
+        await _send(native, event)
         await _send_to_identity(call["callee_id"], {
             "type": "call_ended", "call_id": call_id, "reason": "answered_on_another_device",
         })
-        async with _state_lock:
-            if _active_calls.get(call_id, {}).get("android_media_socket") is not native:
-                return {"ok": False, "error": "call_not_found"}
         await _send_to_identity(call["caller_id"], event)
     else:
         await _send_to_identity(call["caller_id"], event)
         await _send_to_identity(call["callee_id"], event)
-        if native is not None:
-            await _send(native, event)
     return {"ok": True, **event}
 
 
@@ -2327,11 +2450,19 @@ async def signaling_ws(
     else:
         await websocket.accept(subprotocol=negotiated_protocol)
 
-    await _register(
-        identity_id,
-        websocket,
-        token_payload,
-    )
+    try:
+        await _register(
+            identity_id,
+            websocket,
+            token_payload,
+        )
+    except Exception:
+        log.exception("Trust Voice shared signaling state unavailable during websocket registration")
+        try:
+            await websocket.close(code=1013)
+        except Exception:
+            pass
+        return
 
     await _send(
         websocket,
@@ -2434,8 +2565,7 @@ async def signaling_ws(
             }:
                 pending_call_id = str(message.get("call_id") or "")
                 if pending_call_id:
-                    async with _state_lock:
-                        pending_call = dict(_active_calls.get(pending_call_id) or {})
+                    pending_call = await _get_call_state(pending_call_id)
                     if pending_call and identity_id in {
                         str(pending_call.get("caller_id") or ""),
                         str(pending_call.get("callee_id") or ""),
@@ -2533,19 +2663,18 @@ async def signaling_ws(
                     continue
 
                 now = time.time()
-
-                previous = (
-                    _last_invite_at.get(
-                        identity_id,
-                        0,
+                if _shared_state_enabled():
+                    state = await _shared_state()
+                    invite_allowed = await state.acquire_invite_cooldown(
+                        identity_id, CALL_COOLDOWN_SECONDS,
                     )
-                )
+                else:
+                    previous = _last_invite_at.get(identity_id, 0)
+                    invite_allowed = now - previous >= CALL_COOLDOWN_SECONDS
+                    if invite_allowed:
+                        _last_invite_at[identity_id] = now
 
-                if (
-                    now
-                    - previous
-                    < CALL_COOLDOWN_SECONDS
-                ):
+                if not invite_allowed:
                     await _send(
                         websocket,
                         {
@@ -2558,10 +2687,6 @@ async def signaling_ws(
                         },
                     )
                     continue
-
-                _last_invite_at[
-                    identity_id
-                ] = now
 
                 target = (
                     _identity_by_handle(
@@ -2688,10 +2813,16 @@ async def signaling_ws(
                     callee_identity_id=str(target["id"]),
                     call_type=call_type,
                 )
-                async with _state_lock:
-                    _active_calls[
-                        call_id
-                    ] = call
+                try:
+                    await _put_call_state(call)
+                except Exception:
+                    log.exception("Trust Voice shared state unavailable while creating call_id=%s", call_id)
+                    _record_call_terminal(call_id, "failed", "shared_state_unavailable")
+                    await _send(websocket, {
+                        "type": "call_failed",
+                        "reason": "temporarily_unavailable",
+                    })
+                    continue
                 _schedule_call_expiry(call_id)
 
                 delivered = (
@@ -2733,10 +2864,9 @@ async def signaling_ws(
 
                 if native_push_reachable or android_push_reachable:
                     async def still_ringing():
-                        async with _state_lock:
-                            current = _active_calls.get(call_id)
-                            return bool(current and current.get("state") == "ringing"
-                                and time.time() < current["created_at"] + INVITE_TTL_SECONDS)
+                        current = await _get_call_state(call_id)
+                        return bool(current and current.get("state") == "ringing"
+                            and time.time() < current["created_at"] + INVITE_TTL_SECONDS)
 
                 if native_push_reachable:
                     from trust_voice_native_calls import dispatch_invite
@@ -2764,8 +2894,7 @@ async def signaling_ws(
 
                 # Reconcile answers/cancellation/expiry received during delivery.
                 # A stale ringing event must not follow its terminal event.
-                async with _state_lock:
-                    live = dict(_active_calls.get(call_id) or {})
+                live = await _get_call_state(call_id)
                 if not live or live.get("state") != "ringing":
                     continue
                 if time.time() >= call["created_at"] + INVITE_TTL_SECONDS:
@@ -2775,11 +2904,10 @@ async def signaling_ws(
                 # push service accepted the pilot invitation, or the device
                 # authenticated again during the best-effort push attempt.
                 if delivered == 0 and not push_sent and not await _presence(str(target["id"])):
-                    async with _state_lock:
-                        _active_calls.pop(
-                            call_id,
-                            None,
-                        )
+                    await _update_call_state(
+                        call_id, expected_state="ringing",
+                        changes={"state": "failed"}, remove=True,
+                    )
 
                     _cancel_call_expiry(call_id)
                     _record_call_terminal(call_id, "failed", "offline")
@@ -2853,13 +2981,7 @@ async def signaling_ws(
                     )
                     continue
 
-                async with _state_lock:
-                    call = dict(
-                        _active_calls.get(
-                            call_id,
-                            {},
-                        )
-                    )
+                call = await _get_call_state(call_id)
 
                 if not call:
                     await _send(
@@ -3052,13 +3174,8 @@ async def signaling_ws(
                 if msg_type == "recording_request":
                     request_error = None
 
+                    live_call = await _get_call_state(call_id)
                     async with _state_lock:
-                        live_call = (
-                            _active_calls.get(
-                                call_id
-                            )
-                        )
-
                         if (
                             not live_call
                             or live_call.get(
@@ -3101,6 +3218,15 @@ async def signaling_ws(
                                     "recording_consent_granted"
                                 ] = False
 
+                    if not request_error:
+                        await _update_call_state(
+                            call_id, expected_state="answered",
+                            changes={
+                                "recording_requester_id": identity_id,
+                                "recording_consent_by_id": None,
+                                "recording_consent_granted": False,
+                            },
+                        )
                     if request_error:
                         await _send(
                             websocket,
@@ -3149,13 +3275,8 @@ async def signaling_ws(
                     response_error = None
                     requester_id = ""
 
+                    live_call = await _get_call_state(call_id)
                     async with _state_lock:
-                        live_call = (
-                            _active_calls.get(
-                                call_id
-                            )
-                        )
-
                         if (
                             not live_call
                             or live_call.get(
@@ -3200,6 +3321,21 @@ async def signaling_ws(
                                     "recording_consent_granted"
                                 ] = False
 
+                    if not response_error:
+                        await _update_call_state(
+                            call_id, expected_state="answered",
+                            changes=(
+                                {
+                                    "recording_consent_by_id": identity_id,
+                                    "recording_consent_granted": True,
+                                }
+                                if allowed else {
+                                    "recording_requester_id": None,
+                                    "recording_consent_by_id": None,
+                                    "recording_consent_granted": False,
+                                }
+                            ),
+                        )
                     if response_error:
                         await _send(
                             websocket,
@@ -3231,13 +3367,8 @@ async def signaling_ws(
                 if msg_type == "recording_started":
                     start_error = None
 
+                    live_call = await _get_call_state(call_id)
                     async with _state_lock:
-                        live_call = (
-                            _active_calls.get(
-                                call_id
-                            )
-                        )
-
                         if (
                             not live_call
                             or live_call.get(
@@ -3271,6 +3402,11 @@ async def signaling_ws(
                                 "recording_active_by_id"
                             ] = identity_id
 
+                    if not start_error:
+                        await _update_call_state(
+                            call_id, expected_state="answered",
+                            changes={"recording_active_by_id": identity_id},
+                        )
                     if start_error:
                         await _send(
                             websocket,
@@ -3300,13 +3436,8 @@ async def signaling_ws(
                     stop_error = None
                     active_recorder_id = ""
 
+                    live_call = await _get_call_state(call_id)
                     async with _state_lock:
-                        live_call = (
-                            _active_calls.get(
-                                call_id
-                            )
-                        )
-
                         if (
                             not live_call
                             or live_call.get(
@@ -3346,6 +3477,16 @@ async def signaling_ws(
                                     "recording_consent_granted"
                                 ] = False
 
+                    if not stop_error and active_recorder_id == identity_id:
+                        await _update_call_state(
+                            call_id, expected_state="answered",
+                            changes={
+                                "recording_active_by_id": None,
+                                "recording_requester_id": None,
+                                "recording_consent_by_id": None,
+                                "recording_consent_granted": False,
+                            },
+                        )
                     if stop_error:
                         await _send(
                             websocket,
@@ -3393,13 +3534,8 @@ async def signaling_ws(
                 if msg_type == "recording_stopped":
                     stopped_error = None
 
+                    live_call = await _get_call_state(call_id)
                     async with _state_lock:
-                        live_call = (
-                            _active_calls.get(
-                                call_id
-                            )
-                        )
-
                         if (
                             not live_call
                             or live_call.get(
@@ -3433,6 +3569,16 @@ async def signaling_ws(
                                 "recording_consent_granted"
                             ] = False
 
+                    if not stopped_error:
+                        await _update_call_state(
+                            call_id, expected_state="answered",
+                            changes={
+                                "recording_active_by_id": None,
+                                "recording_requester_id": None,
+                                "recording_consent_by_id": None,
+                                "recording_consent_granted": False,
+                            },
+                        )
                     if stopped_error:
                         await _send(
                             websocket,
