@@ -2,6 +2,13 @@
 
 **Purpose:** Complete, not merely acknowledge, a signed-in user's deletion request for Apple App Review guideline 5.1.1(v). This SOP is a release blocker until assigned to an authorized operator with a real schedule and access to all data stores.
 
+## Operational gate (disabled unless explicitly enabled)
+- `VERIFYD_ACCOUNT_DELETION_ENABLED=1` — do not enable until the operator is staffed and has a real deletion checklist.
+- `VERIFYD_ACCOUNT_DELETION_OPERATOR_IDS` — authenticated Trust Voice identity IDs (not handles or email addresses) allowed to see the queue and attest completed erasure.
+- `VERIFYD_ACCOUNT_DELETION_NOTIFY_EMAIL=support@vfvid.com` — monitored mailbox; queue is durable even if email delivery is temporarily unavailable.
+- With any setting missing, POST /trust-voice/account-deletion returns 503 and **does not create a deletion request**. The frontend must not display a successful receipt.
+- Do not enable merely to pass App Review. Apple should be given a working disposable-account deletion demonstration plus an operator fulfillment run.
+
 ## User self-service initiation
 Settings → Account & Privacy → Delete Account → type DELETE →
 POST /trust-voice/account-deletion with signed-in Trust Voice bearer.
