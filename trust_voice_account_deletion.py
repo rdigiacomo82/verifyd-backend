@@ -84,7 +84,7 @@ def _notify_operator(receipt: str):
         return
     try:
         from emailer import FROM_NAME, FROM_ADDRESS, _send
-        _send({
+        sent = _send({
             "from": f"{FROM_NAME} <{FROM_ADDRESS}>",
             "to": [address],
             "subject": "VeriFYD Circle account deletion request",
@@ -95,6 +95,8 @@ def _notify_operator(receipt: str):
                 "erasure, legal-retention review, and confirmation.</p>"
             ),
         })
+        if not sent:
+            log.warning("Account deletion operator notification was not accepted")
     except Exception:
         # Do not log customer email, identity or request body.
         log.warning("Account deletion operator notification unavailable")
