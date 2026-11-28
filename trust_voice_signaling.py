@@ -1202,8 +1202,18 @@ async def _send_incoming_call_pilot_push(
 async def _replay_pilot_ringing_calls(identity_id: str, websocket: WebSocket) -> set[str]:
     """Deliver live invitations and return the call IDs sent on this socket."""
     replayed_call_ids = set()
+    list_state_fn = globals().get("_list_call_states")
+    if callable(list_state_fn):
+        calls = await list_state_fn(identity_id)
+    else:
+        # Keeps this helper independently testable in the existing AST harness.
+        async with _state_lock:
+            calls = [
+                dict(call) for call in _active_calls.values()
+                if identity_id in {call.get("caller_id"), call.get("callee_id")}
+            ]
     pending = [
-        dict(call) for call in await _list_call_states(identity_id)
+        dict(call) for call in calls
         if call.get("state") == "ringing"
         and (call.get("pilot_incoming_push") or call.get("native_incoming_push") or call.get("android_incoming_push"))
         and str(call.get("callee_id") or "") == identity_id
@@ -1313,9 +1323,10 @@ async def _unregister(identity_id: str, ws: WebSocket) -> None:
         # Only tear down calls if this identity has no remaining live
         # Trust Voice socket on another tab/device.
         identity_still_online = bool(_connections.get(identity_id))
+        shared_mode = bool(globals().get("_shared_state_enabled", lambda: False)())
         affected = []
 
-        if not identity_still_online and not _shared_state_enabled():
+        if not identity_still_online and not shared_mode:
             for call_id, call in list(_active_calls.items()):
                 if identity_id in {
                     call.get("caller_id"),
@@ -1337,7 +1348,7 @@ async def _unregister(identity_id: str, ws: WebSocket) -> None:
                     affected.append((call_id, dict(call)))
                     _active_calls.pop(call_id, None)
 
-    if _shared_state_enabled():
+    if shared_mode:
         state = await _shared_state()
         await state.remove_connection(identity_id)
         identity_still_online = await _presence(identity_id)
