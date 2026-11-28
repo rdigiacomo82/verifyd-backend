@@ -17,7 +17,9 @@ jobs:
         with:
           python-version: '3.11'
       - name: Install isolated test dependencies
-        run: pip install --disable-pip-version-check 'fastapi>=0.109,<1' 'pydantic>=2,<3'
+        run: pip install --disable-pip-version-check 'fastapi>=0.109,<1' 'pydantic>=2,<3' 'app-store-server-library==3.1.2'
+      - name: Verify official Apple signed data adapter imports
+        run: python -c 'from appstoreserverlibrary.signed_data_verifier import SignedDataVerifier; print(SignedDataVerifier.__name__)'
       - name: Python compile
         run: python -m py_compile main.py trust_voice_circle_apple_iap.py tests/test_circle_apple_iap_contract.py
       - name: Fail-closed StoreKit contract tests
