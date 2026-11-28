@@ -1507,8 +1507,8 @@ def _recent_otp_request(
 async def signaling_health():
     _require_enabled()
     _secret()
-    ensure_persistent_session_schema()
-    ensure_call_history_schema()
+    await run_in_threadpool(ensure_persistent_session_schema)
+    await run_in_threadpool(ensure_call_history_schema)
 
     shared_available = False
     shared_error = None
