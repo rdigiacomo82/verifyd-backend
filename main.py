@@ -51,6 +51,7 @@ from trust_voice_slp_demo_login import router as trust_voice_slp_demo_login_rout
 from trust_voice_profile_media import router as trust_voice_profile_media_router
 from trust_voice_trust_circle import router as trust_voice_trust_circle_router
 from trust_voice_messages import router as trust_voice_messages_router
+from trust_voice_circle_apple_iap import router as trust_voice_circle_apple_iap_router
 from trust_voice_groups import router as trust_voice_groups_router
 from trust_voice_group_video import router as trust_voice_group_video_router
 from trust_voice_native_screen_share import router as trust_voice_native_screen_share_router
@@ -339,6 +340,8 @@ app.include_router(trust_voice_trust_circle_router)
 
 # VERIFYD_TRUST_VOICE_MESSAGES_V1
 app.include_router(trust_voice_messages_router)
+# Apple IAP routes: disabled until signed verifier, sandbox tests and notifications are configured.
+app.include_router(trust_voice_circle_apple_iap_router)
 
 # VERIFYD_TRUST_VOICE_GROUPS_V1
 app.include_router(trust_voice_groups_router)
