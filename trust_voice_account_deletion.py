@@ -25,6 +25,31 @@ log = logging.getLogger("verifyd.account_deletion")
 
 DAYS_TO_COMPLETE = 30
 
+def _intake_ready() -> bool:
+    """Fail closed until a real operator and deletion fulfillment are configured.
+
+    Enabling the button without staffing the actual erasure process is
+    misleading and creates unfulfilled privacy obligations.
+    """
+    enabled = os.getenv("VERIFYD_ACCOUNT_DELETION_ENABLED", "").strip().lower()
+    operators = [x.strip() for x in os.getenv(
+        "VERIFYD_ACCOUNT_DELETION_OPERATOR_IDS", "").split(",") if x.strip()]
+    notify = os.getenv("VERIFYD_ACCOUNT_DELETION_NOTIFY_EMAIL", "").strip()
+    return (enabled in {"1", "true", "yes", "on"}
+            and bool(operators) and bool(notify))
+
+
+def _require_intake_ready() -> None:
+    if not _intake_ready():
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "account_deletion_unavailable",
+                    "message": "Account deletion is temporarily unavailable. "
+                               "No request has been created; please retry or "
+                               "contact support@vfvid.com."},
+        )
+
+
 
 class DeleteRequest(BaseModel):
     confirm: Literal["DELETE"]
@@ -106,6 +131,7 @@ def _notify_operator(receipt: str):
 def create_deletion_request(payload: DeleteRequest,
                             authorization: Optional[str] = Header(default=None)):
     actor = _actor(authorization)
+    _require_intake_ready()
     identity_id = str(actor["id"])
     _schema()
     newly_created = False
