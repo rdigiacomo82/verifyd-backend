@@ -95,3 +95,6 @@ httpx[http2]>=0.27.0,<1
 cryptography>=43.0.0
 # Android FCM pilot OAuth (service account, never client-side)
 google-auth>=2.30.0,<3
+
+# Official Apple App Store Server signed JWS verifier (patched OCSP freshness)
+app-store-server-library==3.1.2
