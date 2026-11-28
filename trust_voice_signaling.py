@@ -1153,15 +1153,15 @@ async def _replay_pilot_ringing_calls(identity_id: str, websocket: WebSocket) ->
         if not (0 <= call_age < INVITE_TTL_SECONDS):
             continue
         try:
-            caller = _identity_by_id(str(call.get("caller_id") or ""))
-            callee = _identity_by_id(identity_id)
+            caller = await asyncio.to_thread(_identity_by_id, str(call.get("caller_id") or ""))
+            callee = await asyncio.to_thread(_identity_by_id, identity_id)
             if not caller or not callee:
                 continue
-            allowed, _reason = call_permission_decision(caller=caller, callee=callee)
+            allowed, _reason = await asyncio.to_thread(call_permission_decision, caller=caller, callee=callee)
             if not allowed:
                 continue
             from trust_voice_blocking import identities_blocked
-            if identities_blocked(str(caller["id"]), identity_id):
+            if await asyncio.to_thread(identities_blocked, str(caller["id"]), identity_id):
                 continue
             sent = await _send(websocket, {
                 "type": "incoming_call",
@@ -2441,7 +2441,8 @@ async def signaling_ws(
                         str(pending_call.get("callee_id") or ""),
                     }:
                         from trust_voice_blocking import identities_blocked
-                        if identities_blocked(
+                        if await asyncio.to_thread(
+                            identities_blocked,
                             str(pending_call.get("caller_id") or ""),
                             str(pending_call.get("callee_id") or ""),
                         ):
@@ -2563,11 +2564,7 @@ async def signaling_ws(
                     identity_id
                 ] = now
 
-                target = (
-                    _identity_by_handle(
-                        target_handle
-                    )
-                )
+                target = await asyncio.to_thread(_identity_by_handle, target_handle)
 
                 if not target:
                     await _send(
@@ -2583,14 +2580,10 @@ async def signaling_ws(
                     )
                     continue
 
-                (
-                    allowed,
-                    permission_reason,
-                ) = (
-                    call_permission_decision(
-                        caller=identity,
-                        callee=target,
-                    )
+                allowed, permission_reason = await asyncio.to_thread(
+                    call_permission_decision,
+                    caller=identity,
+                    callee=target,
                 )
 
                 if not allowed:
