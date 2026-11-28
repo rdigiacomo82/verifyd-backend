@@ -2368,6 +2368,8 @@ async def apply_call_action(call_id: str, identity_id: str, action: str, *,
     else:
         await _send_to_identity(call["caller_id"], event)
         await _send_to_identity(call["callee_id"], event)
+        if native is not None:
+            await _send(native, event)
     return {"ok": True, **event}
 
 
