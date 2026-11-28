@@ -53,8 +53,17 @@ class VoiceSharedState:
         self._reaper: Optional[asyncio.Task] = None
         self._local_identity_counts: dict[str, int] = {}
         self._lock = asyncio.Lock()
+        self._start_lock = asyncio.Lock()
 
     async def start(self) -> None:
+        async with self._start_lock:
+            if self._listener and not self._listener.done():
+                return
+            if self._listener:
+                await self.close()
+            await self._start_unlocked()
+
+    async def _start_unlocked(self) -> None:
         if self._listener and not self._listener.done():
             return
         if not self.redis_url:
@@ -98,25 +107,27 @@ class VoiceSharedState:
         self._redis = None
 
     async def _listen(self) -> None:
-        try:
-            async for message in self._pubsub.listen():
-                if message.get("type") != "message":
-                    continue
-                try:
-                    event = json.loads(message.get("data") or "{}")
-                    if event.get("source") == self.node_id:
+        while True:
+            try:
+                await self._pubsub.subscribe(EVENT_CHANNEL)
+                async for message in self._pubsub.listen():
+                    if message.get("type") != "message":
                         continue
-                    identity_id = str(event.get("identity_id") or "")
-                    payload = event.get("payload")
-                    if identity_id and isinstance(payload, dict):
-                        await self.event_handler(identity_id, payload)
-                except Exception:
-                    log.warning("Invalid Trust Voice Redis fan-out event", exc_info=True)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            log.exception("Trust Voice Redis event listener stopped")
-            # Do not silently switch to local routing when shared mode is on.
+                    try:
+                        event = json.loads(message.get("data") or "{}")
+                        if event.get("source") == self.node_id:
+                            continue
+                        identity_id = str(event.get("identity_id") or "")
+                        payload = event.get("payload")
+                        if identity_id and isinstance(payload, dict):
+                            await self.event_handler(identity_id, payload)
+                    except Exception:
+                        log.warning("Invalid Trust Voice Redis fan-out event", exc_info=True)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.warning("Trust Voice Redis event listener interrupted; retrying", exc_info=True)
+                await asyncio.sleep(2)
 
     async def _presence_key(self, identity_id: str) -> str:
         return f"verifyd:trust-voice:presence:{identity_id}"
@@ -146,8 +157,8 @@ class VoiceSharedState:
             await self._redis.zrem(key, self.node_id)
 
     async def _heartbeat_loop(self) -> None:
-        try:
-            while True:
+        while True:
+            try:
                 await asyncio.sleep(PRESENCE_HEARTBEAT_SECONDS)
                 async with self._lock:
                     identities = tuple(self._local_identity_counts)
@@ -159,10 +170,11 @@ class VoiceSharedState:
                         pipe.zadd(key, {self.node_id: expires_at})
                         pipe.expire(key, PRESENCE_TTL_SECONDS * 2)
                     await pipe.execute()
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            log.exception("Trust Voice shared presence heartbeat failed")
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.warning("Trust Voice shared presence heartbeat failed; retrying", exc_info=True)
+                await asyncio.sleep(2)
 
     async def is_online(self, identity_id: str) -> bool:
         await self.start()
@@ -279,8 +291,8 @@ class VoiceSharedState:
         raise RuntimeError("Trust Voice call state remained contended")
 
     async def _reaper_loop(self) -> None:
-        try:
-            while True:
+        while True:
+            try:
                 await asyncio.sleep(1)
                 if not self.expiry_handler:
                     continue
@@ -301,10 +313,11 @@ class VoiceSharedState:
                             log.exception("Trust Voice distributed call expiry handler failed")
                     else:
                         await self._redis.zrem("verifyd:trust-voice:ringing-expiry", call_id)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            log.exception("Trust Voice distributed call expiry reaper stopped")
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.warning("Trust Voice distributed call expiry reaper failed; retrying", exc_info=True)
+                await asyncio.sleep(2)
 
     async def acquire_invite_cooldown(self, identity_id: str, seconds: int) -> bool:
         await self.start()
